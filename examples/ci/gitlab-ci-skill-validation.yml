@@ -1,0 +1,33 @@
+validate_skills:
+  image: node:24-bookworm-slim
+  stage: test
+  variables:
+    GIT_DEPTH: "1"
+  before_script:
+    - test -n "$TEAM_SKILL_HUB_REPO"
+    - git clone --depth 1 "$TEAM_SKILL_HUB_REPO" /tmp/team-skill-hub
+    - cd /tmp/team-skill-hub
+    - npm ci
+  script:
+    - npm run validate:repo -- --path "$CI_PROJECT_DIR" --id "${SKILL_REPOSITORY_ID:-rd-skills}" --visibility "${SKILL_VISIBILITY:-internal}"
+    - |
+      if find "$CI_PROJECT_DIR" -name EVALUATION.yaml -print -quit | grep -q .; then
+        if [ -n "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-}" ]; then
+          git -C "$CI_PROJECT_DIR" fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --depth 1
+          rm -rf /tmp/skill-baseline
+          git -C "$CI_PROJECT_DIR" worktree add --detach /tmp/skill-baseline FETCH_HEAD
+          npm run evaluate:repo -- \
+            --path "$CI_PROJECT_DIR" \
+            --baseline-path /tmp/skill-baseline \
+            --id "${SKILL_REPOSITORY_ID:-rd-skills}" \
+            --revision "${CI_COMMIT_SHA:-candidate}" \
+            --baseline-revision "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        else
+          npm run evaluate:repo -- \
+            --path "$CI_PROJECT_DIR" \
+            --id "${SKILL_REPOSITORY_ID:-rd-skills}" \
+            --revision "${CI_COMMIT_SHA:-candidate}"
+        fi
+      else
+        echo "No EVALUATION.yaml found; skipping deterministic evaluation."
+      fi

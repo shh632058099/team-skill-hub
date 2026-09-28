@@ -1,0 +1,42 @@
+services:
+  team-skill-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-bookworm-slim}
+        INSTALL_GIT: ${INSTALL_GIT:-1}
+    image: team-skill-hub:local
+    container_name: team-skill-hub
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      CONFIG_PATH: /app/config/repositories.yaml
+      DATA_DIR: /var/lib/team-skill-hub
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      AUTH_MODE: ${AUTH_MODE:-development}
+      SKILL_HUB_API_KEYS_JSON: ${SKILL_HUB_API_KEYS_JSON:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ../rd-skills:/skills/rd-skills:ro
+      - ../customer-skills:/skills/customer-skills:ro
+      - skill-hub-data:/var/lib/team-skill-hub
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  skill-hub-data:

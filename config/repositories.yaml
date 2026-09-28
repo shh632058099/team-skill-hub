@@ -1,0 +1,49 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+data_dir: /var/lib/team-skill-hub
+
+default_roles:
+  - developer
+  - internal
+
+authentication:
+  mode: development
+
+repositories:
+  - id: rd-skills
+    name: R&D Skills
+    provider: local
+    path: /skills/rd-skills
+    enabled: true
+    audience:
+      - developer
+    visibility:
+      - internal
+    access:
+      read_roles:
+        - developer
+        - internal
+      sync_roles:
+        - developer
+        - admin
+    sync:
+      polling_interval: 300
+
+  - id: customer-skills
+    name: Customer Skills
+    provider: local
+    path: /skills/customer-skills
+    enabled: true
+    audience:
+      - customer
+    visibility:
+      - customer
+    access:
+      read_roles:
+        - customer
+      sync_roles:
+        - admin
+    sync:
+      polling_interval: 300

@@ -1,0 +1,21 @@
+{$SKILL_HUB_DOMAIN:skill-hub.internal} {
+  tls internal
+  encode zstd gzip
+
+  @health path /health/live /health/ready
+  handle @health {
+    reverse_proxy team-skill-hub:8080
+  }
+
+  reverse_proxy team-skill-hub:8080 {
+    transport http {
+      dial_timeout 5s
+      response_header_timeout 30s
+    }
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}

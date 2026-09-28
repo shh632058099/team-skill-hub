@@ -1,0 +1,45 @@
+services:
+  team-skill-hub:
+    image: ${SKILL_HUB_IMAGE:-ghcr.io/your-org/team-skill-hub:latest}
+    container_name: team-skill-hub
+    restart: unless-stopped
+    ports:
+      - "${SKILL_HUB_PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      CONFIG_PATH: /app/config/repositories.yaml
+      DATA_DIR: /var/lib/team-skill-hub
+      AUTH_MODE: ${AUTH_MODE:-api-key}
+      SKILL_HUB_API_KEYS_JSON: ${SKILL_HUB_API_KEYS_JSON:?set SKILL_HUB_API_KEYS_JSON}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY}
+      GITLAB_WEBHOOK_TOKEN: ${GITLAB_WEBHOOK_TOKEN:?set GITLAB_WEBHOOK_TOKEN}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+      GITLAB_USERNAME: ${GITLAB_USERNAME:-oauth2}
+    volumes:
+      - ${SKILL_HUB_CONFIG_FILE:-./config/repositories.gitlab.example.yaml}:/app/config/repositories.yaml:ro
+      - skill-hub-data:/var/lib/team-skill-hub
+    secrets:
+      - gitlab_ssh_key
+      - gitlab_known_hosts
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+secrets:
+  gitlab_ssh_key:
+    file: ${GITLAB_SSH_KEY_FILE:-./secrets/gitlab_skillhub_ed25519}
+  gitlab_known_hosts:
+    file: ${GITLAB_KNOWN_HOSTS_FILE:-./secrets/gitlab_known_hosts}
+
+volumes:
+  skill-hub-data:

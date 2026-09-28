@@ -1,0 +1,66 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+data_dir: /var/lib/team-skill-hub
+
+default_roles:
+  - developer
+  - internal
+
+authentication:
+  mode: api-key
+
+repositories:
+  - id: rd-skills
+    name: R&D Skills
+    provider: git
+    git_url: git@gitlab.company.example:ai/rd-skills.git
+    branch: main
+    enabled: true
+    webhook_aliases:
+      - ai/rd-skills
+      - rd-skills
+    git_auth:
+      type: ssh
+      ssh_key_path: /run/secrets/gitlab_ssh_key
+      known_hosts_path: /run/secrets/gitlab_known_hosts
+    audience:
+      - developer
+    visibility:
+      - internal
+    access:
+      read_roles:
+        - developer
+        - internal
+      sync_roles:
+        - developer
+        - admin
+    sync:
+      polling_interval: 300
+
+  - id: customer-skills
+    name: Customer Skills
+    provider: git
+    git_url: git@gitlab.company.example:ai/customer-skills.git
+    branch: main
+    enabled: true
+    webhook_aliases:
+      - ai/customer-skills
+      - customer-skills
+    git_auth:
+      type: ssh
+      ssh_key_path: /run/secrets/gitlab_ssh_key
+      known_hosts_path: /run/secrets/gitlab_known_hosts
+    audience:
+      - customer
+      - fae
+    visibility:
+      - customer
+    access:
+      read_roles:
+        - customer
+      sync_roles:
+        - admin
+    sync:
+      polling_interval: 300

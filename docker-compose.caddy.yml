@@ -1,0 +1,25 @@
+services:
+  team-skill-hub:
+    ports:
+      - "127.0.0.1:${SKILL_HUB_PORT:-8080}:8080"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: team-skill-hub-caddy
+    restart: unless-stopped
+    depends_on:
+      team-skill-hub:
+        condition: service_healthy
+    environment:
+      SKILL_HUB_DOMAIN: ${SKILL_HUB_DOMAIN:-skill-hub.internal}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

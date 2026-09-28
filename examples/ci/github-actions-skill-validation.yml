@@ -1,0 +1,36 @@
+name: validate-skills
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Skill repository
+        uses: actions/checkout@v4
+        with:
+          path: skill-repo
+
+      - name: Checkout Team Skill Hub validator
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_ORG/team-skill-hub
+          path: team-skill-hub
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: team-skill-hub/package-lock.json
+
+      - name: Install validator dependencies
+        working-directory: team-skill-hub
+        run: npm ci
+
+      - name: Validate Skill repository
+        working-directory: team-skill-hub
+        run: npm run validate:repo -- --path ../skill-repo --id rd-skills --visibility internal
