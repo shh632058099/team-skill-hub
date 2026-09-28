@@ -3,7 +3,7 @@ ARG INSTALL_GIT=1
 FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
