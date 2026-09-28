@@ -1,6 +1,11 @@
 services:
   team-skill-hub:
-    image: ${SKILL_HUB_IMAGE:-ghcr.io/your-org/team-skill-hub:latest}
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-bookworm-slim}
+        INSTALL_GIT: ${INSTALL_GIT:-1}
+    image: ${SKILL_HUB_IMAGE:-team-skill-hub:local}
     container_name: team-skill-hub
     restart: unless-stopped
     ports:

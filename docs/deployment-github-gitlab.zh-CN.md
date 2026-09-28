@@ -167,6 +167,7 @@ cp examples/deployment/gitlab.env.example .env
 
 ```text
 SKILL_HUB_IMAGE=ghcr.io/your-org/team-skill-hub:v0.1.0
+NODE_IMAGE=node:24-bookworm-slim
 AUTH_MODE=api-key
 SKILL_HUB_API_KEYS_JSON=...
 ADMIN_API_KEY=...
@@ -179,10 +180,34 @@ GITLAB_KNOWN_HOSTS_FILE=./secrets/gitlab_known_hosts
 
 ## 7. 使用 Docker Compose 启动
 
+GitLab Compose 文件现在支持两种模式。
+
+本地/公司内部测试时，可以直接从当前源码构建 Hub 镜像。Dockerfile 默认使用 `node:24-bookworm-slim`：
+
+```bash
+docker compose --env-file .env -f docker-compose.gitlab.yml up -d --build
+```
+
+本地构建生成的镜像默认名称为：
+
+```text
+team-skill-hub:local
+```
+
+如有需要，可以覆盖 Dockerfile 的基础镜像：
+
+```text
+NODE_IMAGE=node:24-bookworm-slim
+```
+
+正式生产环境则设置 `SKILL_HUB_IMAGE` 为已发布的不可变版本镜像，并在启动前拉取：
+
 ```bash
 docker compose --env-file .env -f docker-compose.gitlab.yml pull
-docker compose --env-file .env -f docker-compose.gitlab.yml up -d
+docker compose --env-file .env -f docker-compose.gitlab.yml up -d --no-build
 ```
+
+`--no-build` 用于明确表示生产环境直接使用配置好的预构建镜像，不在部署主机现场重新构建。
 
 检查状态：
 
