@@ -167,7 +167,7 @@ cp examples/deployment/gitlab.env.example .env
 
 ```text
 SKILL_HUB_IMAGE=ghcr.io/your-org/team-skill-hub:v0.1.0
-NODE_IMAGE=node:24-bookworm-slim
+NODE_IMAGE=docker.m.daocloud.io/library/node:24-bookworm-slim
 AUTH_MODE=api-key
 SKILL_HUB_API_KEYS_JSON=...
 ADMIN_API_KEY=...
@@ -182,7 +182,7 @@ GITLAB_KNOWN_HOSTS_FILE=./secrets/gitlab_known_hosts
 
 GitLab Compose 文件现在支持两种模式。
 
-本地/公司内部测试时，可以直接从当前源码构建 Hub 镜像。Dockerfile 默认使用 `node:24-bookworm-slim`：
+本地/公司内部测试时，可以直接从当前源码构建 Hub 镜像。Compose 默认将 `NODE_IMAGE` 设置为 `docker.m.daocloud.io/library/node:24-bookworm-slim`，用于加速 Docker Hub 访问；如果直接执行 `docker build`，Dockerfile 自身仍默认使用 `node:24-bookworm-slim`：
 
 ```bash
 docker compose --env-file .env -f docker-compose.gitlab.yml up -d --build
@@ -197,7 +197,7 @@ team-skill-hub:local
 如有需要，可以覆盖 Dockerfile 的基础镜像：
 
 ```text
-NODE_IMAGE=node:24-bookworm-slim
+NODE_IMAGE=docker.m.daocloud.io/library/node:24-bookworm-slim
 ```
 
 正式生产环境则设置 `SKILL_HUB_IMAGE` 为已发布的不可变版本镜像，并在启动前拉取：
