@@ -27,6 +27,34 @@ Developer API Key：
 
 普通开发者不需要 GitLab Deploy Key、ADMIN_API_KEY、GITLAB_WEBHOOK_TOKEN、服务器 SSH 权限或仓库写入凭据。
 
+### 管理员：在哪里配置多个用户的 Key
+
+如果使用 Docker Compose，配置文件是部署目录下的 `.env`，不是
+`config/repositories.yaml`，也不是 Codex 的模型配置：
+
+~~~bash
+cp examples/deployment/gitlab.env.example .env
+~~~
+
+在 `.env` 中设置：
+
+~~~dotenv
+AUTH_MODE=api-key
+SKILL_HUB_API_KEYS_JSON={"alice-key":{"id":"alice","roles":["developer","internal"],"tenantId":"rd"},"bob-key":{"id":"bob","roles":["customer"],"tenantId":"customer"}}
+~~~
+
+JSON 的每个顶层 Key 就是一个独立的 MCP API Key。实际部署时请替换为随机生成的长字符串，并通过安全渠道分别发给用户。`id` 是用户标识，`roles` 决定权限，`tenantId` 用于标识租户。
+
+修改后重启服务使配置生效：
+
+~~~bash
+docker compose --env-file .env -f docker-compose.gitlab.yml up -d
+~~~
+
+当前版本没有用户自助创建、查询或轮换 Key 的接口；管理员通过修改
+`SKILL_HUB_API_KEYS_JSON` 并重启服务完成创建、轮换和撤销。`ADMIN_API_KEY`、
+`GITLAB_TOKEN` 和模型 Provider 的 `experimental_bearer_token` 都不是 MCP API Key。
+
 ## 3. 配置 Codex
 
 Codex CLI 与 Codex IDE 扩展共用配置。

@@ -434,12 +434,29 @@ test("api-key principals isolate developer and customer repositories", async () 
 
   const dev = service.authenticateRequest(new Headers({ "x-skill-hub-api-key": "devkey" }));
   const customer = service.authenticateRequest(new Headers({ "x-skill-hub-api-key": "customerkey" }));
+  const bearerDev = service.authenticateRequest(new Headers({ authorization: "Bearer devkey" }));
+  assert.equal(bearerDev.id, "dev-a");
   assert.deepEqual(service.listRepositories(dev).map((item) => item.id), ["rd-skills"]);
   assert.deepEqual(service.listRepositories(customer).map((item) => item.id), ["customer-skills"]);
   assert.throws(() => service.getSkill("customer-skills", "ota-customer-troubleshooting", dev), /Skill not found/);
   assert.equal(service.getSkill("customer-skills", "ota-customer-troubleshooting", customer).name, "ota-customer-troubleshooting");
   assert.throws(() => service.authenticateRequest(new Headers({ "x-skill-hub-api-key": "bad" })), /Invalid API key/);
   search.close();
+});
+
+test("api-key authentication rejects missing and invalid MCP credentials", () => {
+  const auth = new ApiKeyAuthenticationProvider({
+    valid: { id: "speed-test", roles: ["developer"], tenantId: "rd" }
+  });
+  assert.throws(() => auth.authenticate(new Headers()), /Authentication required/);
+  assert.throws(
+    () => auth.authenticate(new Headers({ "x-skill-hub-api-key": "invalid" })),
+    /Invalid API key/
+  );
+  assert.equal(
+    auth.authenticate(new Headers({ "x-skill-hub-api-key": "valid" })).id,
+    "speed-test"
+  );
 });
 
 test("validated revision history supports rollback", async () => {

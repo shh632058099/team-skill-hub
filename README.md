@@ -120,6 +120,25 @@ AUTH_MODE=api-key
 SKILL_HUB_API_KEYS_JSON={"dev-key":{"id":"dev-a","roles":["developer","internal"],"tenantId":"rd"},"customer-key":{"id":"customer-a","roles":["customer"],"tenantId":"customer-a"}}
 ```
 
+For Docker Compose, put these variables in the `.env` file next to the Compose
+file (not in `config/repositories*.yaml`):
+
+```dotenv
+AUTH_MODE=api-key
+SKILL_HUB_API_KEYS_JSON={"alice-key":{"id":"alice","roles":["developer","internal"],"tenantId":"rd"},"bob-key":{"id":"bob","roles":["customer"],"tenantId":"customer"}}
+```
+
+Each top-level JSON key is a separate API key. Replace the examples with long
+random values and distribute each user's key privately. After changing `.env`,
+restart the Hub:
+
+```bash
+docker compose --env-file .env up -d
+```
+
+The current version has no self-service endpoint for issuing or rotating keys;
+administrators edit `SKILL_HUB_API_KEYS_JSON` and restart the service.
+
 Clients send either:
 
 ```text

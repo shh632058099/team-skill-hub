@@ -1,16 +1,19 @@
 import { performance } from "node:perf_hooks";
 
 const baseUrl = process.env.SKILL_HUB_URL ?? "http://127.0.0.1:8080/mcp";
+const apiKey = process.env.TEAM_SKILL_HUB_API_KEY ?? process.env.BENCH_API_KEY;
 const iterations = Number(process.env.BENCH_ITERATIONS ?? 100);
 const concurrency = Number(process.env.BENCH_CONCURRENCY ?? 10);
 const query = process.env.BENCH_QUERY ?? "OTA API 精简 调用链 review";
 
 async function callResolve() {
+  if (!apiKey) throw new Error("TEAM_SKILL_HUB_API_KEY or BENCH_API_KEY is required");
   const response = await fetch(baseUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      accept: "application/json, text/event-stream"
+      accept: "application/json, text/event-stream",
+      "x-skill-hub-api-key": apiKey
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -27,6 +30,29 @@ async function callResolve() {
   }
   await response.text();
 }
+
+async function assertInvalidKeyRejected() {
+  const response = await fetch(baseUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "x-skill-hub-api-key": `${apiKey}-invalid`
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: {}
+    })
+  });
+  if (response.status !== 401) {
+    throw new Error(`Invalid API key was not rejected: HTTP ${response.status}`);
+  }
+  await response.text();
+}
+
+await assertInvalidKeyRejected();
 
 const latencies = [];
 let next = 0;
@@ -62,6 +88,8 @@ console.log(
   JSON.stringify(
     {
       url: baseUrl,
+      auth: "x-skill-hub-api-key",
+      invalid_key_rejected: true,
       iterations,
       concurrency,
       total_ms: Number(elapsed.toFixed(2)),

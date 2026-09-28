@@ -31,6 +31,36 @@ You do not need GitLab Deploy Keys, ADMIN_API_KEY, GITLAB_WEBHOOK_TOKEN, server 
 
 Codex CLI and the Codex IDE extension share configuration.
 
+### Administrator: configuring keys for multiple users
+
+For Docker Compose, configure the keys in the deployment directory's `.env`
+file, not in `config/repositories.yaml` and not in Codex's model provider
+configuration:
+
+```bash
+cp examples/deployment/gitlab.env.example .env
+```
+
+Set `AUTH_MODE` and `SKILL_HUB_API_KEYS_JSON` in `.env`:
+
+```dotenv
+AUTH_MODE=api-key
+SKILL_HUB_API_KEYS_JSON={"alice-key":{"id":"alice","roles":["developer","internal"],"tenantId":"rd"},"bob-key":{"id":"bob","roles":["customer"],"tenantId":"customer"}}
+```
+
+Each top-level JSON key is a separate MCP API key. Replace the examples with
+long random values and distribute each key privately. `id` identifies the
+user, `roles` controls permissions, and `tenantId` identifies the tenant.
+
+After editing `.env`, restart the service:
+
+```bash
+docker compose --env-file .env -f docker-compose.gitlab.yml up -d
+```
+
+The current version has no self-service endpoint for issuing or rotating keys;
+administrators edit `SKILL_HUB_API_KEYS_JSON` and restart the service.
+
 Keep the API key in an environment variable.
 
 Linux/macOS:

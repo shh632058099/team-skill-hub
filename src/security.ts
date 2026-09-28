@@ -18,7 +18,7 @@ export class ApiKeyAuthenticationProvider implements AuthenticationProvider {
 
   authenticate(headers?: Headers): Principal {
     const authorization = headers?.get("authorization");
-    const bearer = authorization?.match(/^Bearer\\s+(.+)$/i)?.[1];
+    const bearer = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
     const key = headers?.get("x-skill-hub-api-key") ?? bearer;
     if (!key) throw new Error("Authentication required");
     const principal = this.principalsByKey[key];
