@@ -5,7 +5,7 @@ export interface UsageEvent {
   ts: string;
   actorId: string;
   tenantId: string;
-  kind: "skill" | "prompt" | "agent";
+  kind: "skill" | "prompt" | "agent" | "knowledge";
   action: "search" | "resolve" | "load";
   query?: string;
   selected?: string;

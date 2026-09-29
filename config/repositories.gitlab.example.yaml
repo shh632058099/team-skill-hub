@@ -38,6 +38,20 @@ repositories:
         - admin
     sync:
       polling_interval: 300
+    knowledge:
+      enabled: true
+      include:
+        - docs/**
+        - "**/*.md"
+        - "**/*.txt"
+        - "**/*.pdf"
+        - "**/*.docx"
+      exclude:
+        - archive/**
+        - generated/**
+      max_document_bytes: 2097152
+      chunk_size_chars: 1400
+      chunk_overlap_chars: 180
 
   - id: customer-skills
     name: Customer Skills
@@ -64,3 +78,17 @@ repositories:
         - admin
     sync:
       polling_interval: 300
+    knowledge:
+      enabled: true
+      include:
+        - docs/**
+        - "**/*.md"
+        - "**/*.txt"
+        - "**/*.pdf"
+        - "**/*.docx"
+      exclude:
+        - archive/**
+        - generated/**
+      max_document_bytes: 2097152
+      chunk_size_chars: 1400
+      chunk_overlap_chars: 180

@@ -27,39 +27,67 @@ Developer API key:
 
 You do not need GitLab Deploy Keys, ADMIN_API_KEY, GITLAB_WEBHOOK_TOKEN, server SSH access, or repository write credentials.
 
-## 3. Configure Codex
+## 3. Recommended: use the setup script
+
+Linux / macOS / WSL:
+
+~~~bash
+bash scripts/setup-codex-mcp.sh \
+  --url https://<skill-hub-host>/mcp
+~~~
+
+Windows PowerShell:
+
+~~~powershell
+.\scripts\setup-codex-mcp.ps1 `
+  -Url https://<skill-hub-host>/mcp
+~~~
+
+The scripts automatically:
+
+1. update the `teamSkillHub` MCP server in `~/.codex/config.toml`;
+2. create or update the global **`~/.codex/AGENTS.md`** so Codex proactively uses Team Skill Hub across projects.
+
+The Team Skill Hub section is managed with BEGIN/END markers. Re-running the script updates that section idempotently and preserves unrelated global instructions.
+
+The API key is never written into `config.toml` or the project. Codex references the `TEAM_SKILL_HUB_API_KEY` environment variable.
+
+This is the global **`~/.codex/AGENTS.md`**. Project-level `AGENTS.md` files can still add project-specific rules on top of it.
+
+After setup, export the API key and restart Codex:
+
+~~~bash
+export TEAM_SKILL_HUB_API_KEY='<developer-api-key>'
+codex mcp list
+~~~
+
+PowerShell:
+
+~~~powershell
+$env:TEAM_SKILL_HUB_API_KEY="<developer-api-key>"
+codex mcp list
+~~~
+
+## 4. Manual Codex configuration
 
 Codex CLI and the Codex IDE extension share configuration.
 
-### Administrator: configuring keys for multiple users
+### Administrator: issuing keys for multiple users
 
-For Docker Compose, configure the keys in the deployment directory's `.env`
-file, not in `config/repositories.yaml` and not in Codex's model provider
-configuration:
+Production deployments use `AUTH_MODE=api-key` and an independent
+`ADMIN_API_KEY`. After startup, administrators open:
 
-```bash
-cp examples/deployment/gitlab.env.example .env
+```text
+http://<skill-hub-host>:8080/admin
 ```
 
-Set `AUTH_MODE` and `SKILL_HUB_API_KEYS_JSON` in `.env`:
+and create user API keys in **用户 API Keys**. Each key has a User ID, Tenant and
+Roles. The generated `skh_...` plaintext is shown once; the Hub stores only a
+hash and metadata. Create, disable and delete operations take effect immediately.
 
-```dotenv
-AUTH_MODE=api-key
-SKILL_HUB_API_KEYS_JSON={"alice-key":{"id":"alice","roles":["developer","internal"],"tenantId":"rd"},"bob-key":{"id":"bob","roles":["customer"],"tenantId":"customer"}}
-```
-
-Each top-level JSON key is a separate MCP API key. Replace the examples with
-long random values and distribute each key privately. `id` identifies the
-user, `roles` controls permissions, and `tenantId` identifies the tenant.
-
-After editing `.env`, restart the service:
-
-```bash
-docker compose --env-file .env -f docker-compose.gitlab.yml up -d
-```
-
-The current version has no self-service endpoint for issuing or rotating keys;
-administrators edit `SKILL_HUB_API_KEYS_JSON` and restart the service.
+`SKILL_HUB_API_KEYS_JSON` is still accepted as an optional bootstrap /
+backward-compatibility mechanism, but normal user lifecycle management should use
+the admin UI rather than editing `.env`.
 
 Keep the API key in an environment variable.
 
@@ -91,7 +119,7 @@ codex mcp add teamSkillHub --url http://127.0.0.1:18080/mcp
 
 Do not use the unauthenticated development form for a shared production Hub.
 
-## 4. Verify the connection
+## 5. Verify the connection
 
 Check configured MCP servers:
 
@@ -113,7 +141,7 @@ Use teamSkillHub to list the repositories I can access.
 
 A normal internal developer should usually see rd-skills. Repositories outside your role are intentionally hidden.
 
-## 5. Recommended project instruction
+## 6. Recommended project instruction
 
 Add this to the project's AGENTS.md:
 
@@ -179,6 +207,22 @@ get_agent
 
 The Hub does not select or proxy a language model. Your client continues to use its own model.
 
+### Knowledge / RAG
+
+Knowledge contains current project facts and documents rather than reusable
+procedures. Supported sources include Markdown, TXT, text-based PDF and DOCX.
+
+```text
+list_knowledge_sources
+search_knowledge
+get_knowledge
+```
+
+Use `search_knowledge` for design documents, APIs, troubleshooting notes,
+postmortems, FAQ and similar repository context. Use `get_knowledge` after a
+search hit when you need the exact selected chunk or full document. Image-only
+scanned PDFs are not OCR'd.
+
 ## 7. Typical daily workflows
 
 ### OTA code review
@@ -198,6 +242,23 @@ resolve_skill
   -> get_skill
   -> optional get_skill_resource
   -> repository review
+~~~
+
+### Project documentation / RAG
+
+~~~text
+Search teamSkillHub Knowledge for the current OTA power-loss recovery design.
+Use the most relevant chunks as evidence, then load the selected document/chunk
+with get_knowledge before answering.
+~~~
+
+Expected flow:
+
+~~~text
+search_knowledge
+  -> relevant repository chunk
+  -> get_knowledge
+  -> grounded analysis
 ~~~
 
 ### Reusable Prompt

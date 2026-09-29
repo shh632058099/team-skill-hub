@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig, RepositoryConfig } from "./types.js";
+import { normalizeKnowledgeConfig } from "./knowledge.js";
 
 export interface AdminEditableConfig {
   defaultRoles: string[];
@@ -18,7 +19,8 @@ function cloneRepositories(repositories: RepositoryConfig[]): RepositoryConfig[]
     audience: [...repository.audience],
     visibility: [...repository.visibility],
     readRoles: [...repository.readRoles],
-    syncRoles: [...repository.syncRoles]
+    syncRoles: [...repository.syncRoles],
+    knowledge: normalizeKnowledgeConfig(repository.knowledge)
   }));
 }
 
@@ -47,6 +49,20 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
   }
   if (!["none", "https-token", "ssh"].includes(repository.gitAuth.type)) {
     throw new Error(`Repository ${repository.id}: unsupported git auth type`);
+  }
+  repository.knowledge = normalizeKnowledgeConfig(repository.knowledge);
+  const knowledge = repository.knowledge;
+  if (!Array.isArray(knowledge.include) || knowledge.include.some((item) => !item.trim())) {
+    throw new Error(`Repository ${repository.id}: knowledge include patterns are invalid`);
+  }
+  if (!Array.isArray(knowledge.exclude) || knowledge.exclude.some((item) => !item.trim())) {
+    throw new Error(`Repository ${repository.id}: knowledge exclude patterns are invalid`);
+  }
+  knowledge.maxDocumentBytes = Math.max(1024, Number(knowledge.maxDocumentBytes ?? 2 * 1024 * 1024));
+  knowledge.chunkSizeChars = Math.max(200, Number(knowledge.chunkSizeChars ?? 1400));
+  knowledge.chunkOverlapChars = Math.max(0, Number(knowledge.chunkOverlapChars ?? 180));
+  if (knowledge.chunkOverlapChars >= knowledge.chunkSizeChars) {
+    throw new Error(`Repository ${repository.id}: chunk overlap must be smaller than chunk size`);
   }
 }
 

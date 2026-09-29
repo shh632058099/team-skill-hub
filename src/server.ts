@@ -1,12 +1,13 @@
 import { createMcpFastifyApp } from "@modelcontextprotocol/fastify";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-import type { AppConfig } from "./types.js";
+import type { AppConfig, KnowledgeSourceConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
 import { ADMIN_HTML } from "./admin-ui.js";
 import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
 import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
 import { ApiKeyAuthenticationProvider } from "./security.js";
+import { normalizeKnowledgeConfig } from "./knowledge.js";
 
 export async function startServer(
   config: AppConfig,
@@ -93,6 +94,119 @@ export async function startServer(
       return { error: error instanceof Error ? error.message : String(error) };
     }
   });
+
+  app.get("/admin/api/knowledge", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const documents = service.listKnowledgeDocuments(adminPrincipal);
+    const grouped = new Map<
+      string,
+      { repository: string; documents: number; chunks: number; revision?: string; paths: string[] }
+    >();
+    for (const document of documents) {
+      const current = grouped.get(document.repositoryId) ?? {
+        repository: document.repositoryId,
+        documents: 0,
+        chunks: 0,
+        paths: []
+      };
+      current.documents += 1;
+      current.chunks += document.chunkCount;
+      current.revision = document.revision;
+      current.paths.push(document.relativePath);
+      grouped.set(document.repositoryId, current);
+    }
+    return {
+      sources: config.repositories.map((repository) => {
+        const indexed = grouped.get(repository.id);
+        return {
+          repository: repository.id,
+          documents: indexed?.documents ?? 0,
+          chunks: indexed?.chunks ?? 0,
+          revision: indexed?.revision,
+          paths: indexed?.paths ?? [],
+          config: normalizeKnowledgeConfig(repository.knowledge)
+        };
+      })
+    };
+  });
+
+  app.put<{ Params: { repository: string }; Body: Partial<KnowledgeSourceConfig> }>(
+    "/admin/api/knowledge/:repository/config",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      if (!adminConfigStore) {
+        reply.code(503);
+        return { error: "dynamic admin configuration is unavailable" };
+      }
+      const editable = editableConfigFromApp(config);
+      const repository = editable.repositories.find((item) => item.id === request.params.repository);
+      if (!repository) {
+        reply.code(404);
+        return { error: "repository not found" };
+      }
+      try {
+        repository.knowledge = normalizeKnowledgeConfig({
+          ...repository.knowledge,
+          ...request.body
+        });
+        const normalized = await adminConfigStore.save(editable);
+        const next: AppConfig = {
+          ...config,
+          defaultRoles: [...config.defaultRoles],
+          authentication: config.authentication,
+          repositories: config.repositories
+        };
+        applyAdminConfig(next, normalized);
+        service.applyRuntimeConfig(next);
+        const state = await service.syncRepository(request.params.repository, "manual", adminPrincipal);
+        return {
+          saved: true,
+          repository: request.params.repository,
+          config: normalizeKnowledgeConfig(
+            config.repositories.find((item) => item.id === request.params.repository)?.knowledge
+          ),
+          state
+        };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  );
+
+  app.get<{ Querystring: { q?: string; repository?: string; limit?: string } }>(
+    "/admin/api/knowledge/search",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const query = request.query.q?.trim();
+      if (!query) {
+        reply.code(400);
+        return { error: "q is required" };
+      }
+      const limit = Math.max(1, Math.min(Number(request.query.limit ?? 5) || 5, 20));
+      const repositories = request.query.repository ? [request.query.repository] : undefined;
+      return {
+        results: service.searchKnowledge(query, limit, repositories, adminPrincipal).map((result) => ({
+          repository: result.chunk.repositoryId,
+          revision: result.chunk.revision,
+          path: result.chunk.relativePath,
+          title: result.chunk.title,
+          chunkIndex: result.chunk.chunkIndex,
+          score: result.score,
+          content: result.chunk.content
+        }))
+      };
+    }
+  );
 
   const refreshManagedApiKeys = () => {
     if (apiKeyStore && apiKeyAuth instanceof ApiKeyAuthenticationProvider) {

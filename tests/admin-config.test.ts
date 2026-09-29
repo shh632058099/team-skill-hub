@@ -63,6 +63,8 @@ test("admin config persists and overlays runtime configuration", async () => {
       await readFile(path.join(dir, "config", "admin-config.json"), "utf8")
     );
     assert.equal(persisted.repositories[0].id, "rd-skills");
+    assert.equal(saved.repositories[0]?.knowledge?.enabled, true);
+    assert.deepEqual(saved.repositories[0]?.knowledge?.include, ["**/*.md", "**/*.txt", "**/*.pdf", "**/*.docx"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

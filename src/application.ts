@@ -9,6 +9,8 @@ import type {
   EventSink,
   EvaluationRunResult,
   EvaluationSuite,
+  KnowledgeDocument,
+  KnowledgeSearchResult,
   PermissionProvider,
   Principal,
   PromptArtifact,
@@ -43,6 +45,7 @@ import {
   runEvaluationSuite,
   scanEvaluationSuites
 } from "./evaluation.js";
+import { chunksForDocuments, KnowledgeIndex, normalizeKnowledgeConfig, scanKnowledge } from "./knowledge.js";
 
 export class SkillHubApplicationService {
   private readonly states = new Map<string, RepositoryState>();
@@ -53,6 +56,8 @@ export class SkillHubApplicationService {
   private readonly webhookSeen = new Map<string, number>();
   private readonly prompts = new Map<string, PromptArtifact>();
   private readonly agents = new Map<string, AgentArtifact>();
+  private readonly knowledgeDocuments = new Map<string, KnowledgeDocument>();
+  private readonly knowledgeIndex = new KnowledgeIndex();
   private readonly analytics: UsageAnalyticsStore;
   private readonly evaluations: EvaluationRunStore;
 
@@ -94,7 +99,8 @@ export class SkillHubApplicationService {
       JSON.stringify(
         {
           prompts: [...this.prompts.values()],
-          agents: [...this.agents.values()]
+          agents: [...this.agents.values()],
+          knowledgeDocuments: [...this.knowledgeDocuments.values()]
         },
         null,
         2
@@ -137,9 +143,14 @@ export class SkillHubApplicationService {
         const artifactState = JSON.parse(await readFile(this.artifactStatePath(), "utf8")) as {
           prompts?: PromptArtifact[];
           agents?: AgentArtifact[];
+          knowledgeDocuments?: KnowledgeDocument[];
         };
         for (const prompt of artifactState.prompts ?? []) this.prompts.set(prompt.key, prompt);
         for (const agent of artifactState.agents ?? []) this.agents.set(agent.key, agent);
+        for (const document of artifactState.knowledgeDocuments ?? []) {
+          this.knowledgeDocuments.set(document.key, document);
+        }
+        this.knowledgeIndex.rebuild(chunksForDocuments([...this.knowledgeDocuments.values()]));
       } catch {
         // First startup or pre-artifact state.
       }
@@ -226,6 +237,8 @@ export class SkillHubApplicationService {
       visibility: [...repository.visibility],
       readRoles: [...repository.readRoles],
       syncRoles: [...repository.syncRoles]
+,
+      knowledge: normalizeKnowledgeConfig(repository.knowledge)
     }));
     const nextIds = new Set(this.config.repositories.map((repository) => repository.id));
     for (const repository of this.config.repositories) {
@@ -401,6 +414,7 @@ export class SkillHubApplicationService {
       const skills = await scanSkills(target, repositoryId, revision);
       const prompts = await scanPrompts(target, repositoryId, revision);
       const agents = await scanAgents(target, repositoryId, revision);
+      const knowledgeDocuments = await scanKnowledge(target, repositoryId, revision, repository.knowledge);
       await scanEvaluationSuites(target, repositoryId);
       const artifactIssues = validateArtifactPolicies(
         repository,
@@ -418,7 +432,12 @@ export class SkillHubApplicationService {
       for (const prompt of prompts) this.prompts.set(prompt.key, prompt);
       for (const [key, agent] of this.agents) if (agent.repositoryId === repositoryId) this.agents.delete(key);
       for (const agent of agents) this.agents.set(agent.key, agent);
+      for (const [key, document] of this.knowledgeDocuments) {
+        if (document.repositoryId === repositoryId) this.knowledgeDocuments.delete(key);
+      }
+      for (const document of knowledgeDocuments) this.knowledgeDocuments.set(document.key, document);
       this.search.rebuild(this.registry.list());
+      this.knowledgeIndex.rebuild(chunksForDocuments([...this.knowledgeDocuments.values()]));
       await writeFile(this.statePath(), JSON.stringify(this.registry.serialize(), null, 2), "utf8");
       await this.persistArtifactState();
       const state = this.states.get(repositoryId)!;
@@ -429,6 +448,8 @@ export class SkillHubApplicationService {
       state.skillCount = skills.length;
       state.promptCount = prompts.length;
       state.agentCount = agents.length;
+      state.knowledgeDocumentCount = knowledgeDocuments.length;
+      state.knowledgeChunkCount = knowledgeDocuments.reduce((sum, item) => sum + item.chunkCount, 0);
       state.error = undefined;
       await this.appendAudit({
         ts: new Date().toISOString(),
@@ -551,6 +572,7 @@ export class SkillHubApplicationService {
       const skills = await scanSkills(snapshotRoot, repository.id, materialized.revision);
       const prompts = await scanPrompts(snapshotRoot, repository.id, materialized.revision);
       const agents = await scanAgents(snapshotRoot, repository.id, materialized.revision);
+      const knowledgeDocuments = await scanKnowledge(snapshotRoot, repository.id, materialized.revision, repository.knowledge);
       this.registry.replaceRepository(repository.id, skills);
       for (const [key, prompt] of this.prompts) {
         if (prompt.repositoryId === repository.id) this.prompts.delete(key);
@@ -560,7 +582,12 @@ export class SkillHubApplicationService {
         if (agent.repositoryId === repository.id) this.agents.delete(key);
       }
       for (const agent of agents) this.agents.set(agent.key, agent);
+      for (const [key, document] of this.knowledgeDocuments) {
+        if (document.repositoryId === repository.id) this.knowledgeDocuments.delete(key);
+      }
+      for (const document of knowledgeDocuments) this.knowledgeDocuments.set(document.key, document);
       this.search.rebuild(this.registry.list());
+      this.knowledgeIndex.rebuild(chunksForDocuments([...this.knowledgeDocuments.values()]));
       await writeFile(this.statePath(), JSON.stringify(this.registry.serialize(), null, 2), "utf8");
       await this.persistArtifactState();
 
@@ -572,6 +599,8 @@ export class SkillHubApplicationService {
       state.skillCount = skills.length;
       state.promptCount = prompts.length;
       state.agentCount = agents.length;
+      state.knowledgeDocumentCount = knowledgeDocuments.length;
+      state.knowledgeChunkCount = knowledgeDocuments.reduce((sum, item) => sum + item.chunkCount, 0);
       state.failureCount = 0;
       this.ready = true;
       this.events.emit("repository.sync.completed", {
@@ -742,6 +771,69 @@ export class SkillHubApplicationService {
       throw new Error("Resource path escapes skill directory");
     }
     return await readFile(target, "utf8");
+  }
+
+  listKnowledgeDocuments(principal?: Principal, repositories?: string[]): KnowledgeDocument[] {
+    const allowed = new Set(this.allowedRepositories(principal).map((repository) => repository.id));
+    const requested = repositories?.length ? new Set(repositories) : undefined;
+    return [...this.knowledgeDocuments.values()].filter(
+      (document) =>
+        allowed.has(document.repositoryId) &&
+        (!requested || requested.has(document.repositoryId))
+    );
+  }
+
+  searchKnowledge(
+    query: string,
+    limit = 5,
+    repositories?: string[],
+    principal?: Principal
+  ): KnowledgeSearchResult[] {
+    const resolvedPrincipal = this.principal(principal);
+    const allowedIds = this.allowedRepositories(resolvedPrincipal).map((repository) => repository.id);
+    const results = this.knowledgeIndex.search(query, allowedIds, limit, repositories);
+    void this.analytics.record({
+      ts: new Date().toISOString(),
+      actorId: resolvedPrincipal.id,
+      tenantId: resolvedPrincipal.tenantId,
+      kind: "knowledge",
+      action: "search",
+      query,
+      selected: results[0]?.chunk.key,
+      matched: results.length > 0
+    });
+    this.metrics.increment("knowledge_search_total", { matched: String(results.length > 0) });
+    return results;
+  }
+
+  getKnowledge(
+    repositoryId: string,
+    relativePath: string,
+    chunkIndex?: number,
+    principal?: Principal
+  ) {
+    const resolvedPrincipal = this.principal(principal);
+    const allowed = this.allowedRepositories(resolvedPrincipal).some(
+      (repository) => repository.id === repositoryId
+    );
+    const document = this.knowledgeDocuments.get(`${repositoryId}:${relativePath}`);
+    if (!allowed || !document) throw new Error("Knowledge document not found");
+    const chunk =
+      chunkIndex === undefined
+        ? undefined
+        : chunksForDocuments([document]).find((item) => item.chunkIndex === chunkIndex);
+    if (chunkIndex !== undefined && !chunk) throw new Error("Knowledge chunk not found");
+    void this.analytics.record({
+      ts: new Date().toISOString(),
+      actorId: resolvedPrincipal.id,
+      tenantId: resolvedPrincipal.tenantId,
+      kind: "knowledge",
+      action: "load",
+      selected: chunk?.key ?? document.key,
+      matched: true
+    });
+    this.metrics.increment("knowledge_load_total", { repository: repositoryId });
+    return { document, ...(chunk ? { chunk } : {}) };
   }
 
   listPrompts(client?: string, principal?: Principal): PromptArtifact[] {

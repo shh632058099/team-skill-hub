@@ -169,14 +169,16 @@ cp examples/deployment/gitlab.env.example .env
 SKILL_HUB_IMAGE=ghcr.io/your-org/team-skill-hub:v0.1.0
 NODE_IMAGE=docker.m.daocloud.io/library/node:24-bookworm-slim
 AUTH_MODE=api-key
-SKILL_HUB_API_KEYS_JSON=...
-ADMIN_API_KEY=...
+SKILL_HUB_API_KEYS_JSON=
+ADMIN_API_KEY=<long-random-admin-key>
 GITLAB_WEBHOOK_TOKEN=...
 GITLAB_SSH_KEY_FILE=./secrets/gitlab_skillhub_ed25519
 GITLAB_KNOWN_HOSTS_FILE=./secrets/gitlab_known_hosts
 ```
 
 使用公司认可的密钥管理机制生成足够长的随机值。
+
+`ADMIN_API_KEY` 是 bootstrap 管理员凭据。普通 MCP 用户 Key 推荐在服务启动后通过 `/admin` 创建；`SKILL_HUB_API_KEYS_JSON` 只保留为可选的 bootstrap/兼容配置，可以为空。
 
 ## 7. 使用 Docker Compose 启动
 
@@ -219,6 +221,33 @@ curl http://127.0.0.1:8080/metrics
 ```
 
 启动时，Hub 会克隆每个启用的 Skill 仓库，校验全部 Skills，创建 validated snapshot，并以原子方式激活。Docker Named Volume 会在容器替换后继续保存 Registry 状态、审计历史、Git 工作副本以及已验证 Revision。
+
+同一个 Named Volume 还会保存后台动态配置和托管用户 API Key 的哈希数据，不要把它替换成容器内的临时存储。
+
+### 7.1 配置 Knowledge / RAG 数据源
+
+每个 Repository 都可以索引 Markdown、TXT、文字型 PDF 和 DOCX。当前不做 OCR，因此纯扫描图片 PDF 不会产生可检索正文。
+
+示例：
+
+```yaml
+knowledge:
+  enabled: true
+  include:
+    - docs/**
+    - "**/*.md"
+    - "**/*.txt"
+    - "**/*.pdf"
+    - "**/*.docx"
+  exclude:
+    - archive/**
+    - generated/**
+  max_document_bytes: 2097152
+  chunk_size_chars: 1400
+  chunk_overlap_chars: 180
+```
+
+Repository YAML 用作 bootstrap 默认值。服务启动后可以在 `/admin` 动态修改；保存后会自动重新同步该 Repository 并重建 Knowledge 索引。动态值持久化到 `<data_dir>/config/admin-config.json`。
 
 ## 8. 配置 GitLab Webhook
 
@@ -314,12 +343,20 @@ curl http://127.0.0.1:8080/health/ready
 
 不需要重新构建 Skill 仓库。Skills 继续在 GitLab 中独立版本管理。
 
+已有部署升级时不需要手工迁移配置。没有 `knowledge` 字段的 Repository 会自动使用向后兼容默认值，旧版持久化后台配置也会在加载时自动补齐。升级后建议验证 `/admin`、`/health/ready`，并实际执行一次 `search_knowledge`。
+
 ## 13. 运维接口
 
 ```text
 GET  /health/live
 GET  /health/ready
 GET  /metrics
+GET  /admin
+GET  /admin/api/config
+GET  /admin/api/api-keys
+GET  /admin/api/knowledge
+GET  /admin/api/knowledge/search
+PUT  /admin/api/knowledge/<repository>/config
 GET  /audit
 POST /repositories/<id>/sync
 GET  /repositories/<id>/revisions

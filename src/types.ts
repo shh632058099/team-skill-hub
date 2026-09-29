@@ -15,6 +15,15 @@ export interface GitAuthConfig {
   knownHostsPath?: string;
 }
 
+export interface KnowledgeSourceConfig {
+  enabled: boolean;
+  include: string[];
+  exclude: string[];
+  maxDocumentBytes: number;
+  chunkSizeChars: number;
+  chunkOverlapChars: number;
+}
+
 export interface RepositoryConfig {
   id: string;
   name: string;
@@ -30,6 +39,7 @@ export interface RepositoryConfig {
   pollingIntervalSeconds: number;
   readRoles: string[];
   syncRoles: string[];
+  knowledge?: KnowledgeSourceConfig;
 }
 
 export interface AppConfig {
@@ -54,6 +64,8 @@ export interface RepositoryState {
   skillCount: number;
   promptCount?: number;
   agentCount?: number;
+  knowledgeDocumentCount?: number;
+  knowledgeChunkCount?: number;
   failureCount: number;
   error?: string;
 }
@@ -157,6 +169,35 @@ export interface AgentArtifact {
 
 export interface ArtifactSearchResult<T> {
   artifact: T;
+  score: number;
+  reason: string;
+}
+
+export interface KnowledgeDocument {
+  key: string;
+  repositoryId: string;
+  revision: string;
+  relativePath: string;
+  title: string;
+  content: string;
+  chunkCount: number;
+  chunkSizeChars: number;
+  chunkOverlapChars: number;
+}
+
+export interface KnowledgeChunk {
+  key: string;
+  documentKey: string;
+  repositoryId: string;
+  revision: string;
+  relativePath: string;
+  title: string;
+  chunkIndex: number;
+  content: string;
+}
+
+export interface KnowledgeSearchResult {
+  chunk: KnowledgeChunk;
   score: number;
   reason: string;
 }

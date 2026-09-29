@@ -45,6 +45,14 @@ interface RawConfig {
       read_roles?: string[];
       sync_roles?: string[];
     };
+    knowledge?: {
+      enabled?: boolean;
+      include?: string[];
+      exclude?: string[];
+      max_document_bytes?: number;
+      chunk_size_chars?: number;
+      chunk_overlap_chars?: number;
+    };
   }>;
 }
 
@@ -97,7 +105,15 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
           : repo.visibility?.includes("customer")
             ? ["customer"]
             : ["developer", "internal"]),
-      syncRoles: repo.access?.sync_roles ?? ["developer", "admin"]
+      syncRoles: repo.access?.sync_roles ?? ["developer", "admin"],
+      knowledge: {
+        enabled: repo.knowledge?.enabled ?? true,
+        include: repo.knowledge?.include ?? ["**/*.md", "**/*.txt", "**/*.pdf", "**/*.docx"],
+        exclude: repo.knowledge?.exclude ?? [],
+        maxDocumentBytes: Math.max(1024, Number(repo.knowledge?.max_document_bytes ?? 2 * 1024 * 1024)),
+        chunkSizeChars: Math.max(200, Number(repo.knowledge?.chunk_size_chars ?? 1400)),
+        chunkOverlapChars: Math.max(0, Number(repo.knowledge?.chunk_overlap_chars ?? 180))
+      }
     };
   });
 

@@ -15,6 +15,7 @@ For ordinary developers using the MCP service:
 
 - English: `docs/developer-mcp-guide.md`
 - 中文：`docs/developer-mcp-guide.zh-CN.md`
+- 中文用户指南：`docs/user-guide.zh-CN.md`
 
 ## Repositories
 
@@ -61,6 +62,20 @@ MCP:
 ```text
 http://localhost:8080/mcp
 ```
+
+Codex client setup:
+
+```bash
+bash scripts/setup-codex-mcp.sh --url http://localhost:8080/mcp
+```
+
+Windows PowerShell:
+
+```powershell
+.\scripts\setup-codex-mcp.ps1 -Url http://localhost:8080/mcp
+```
+
+These scripts configure the Codex MCP server and idempotently add Team Skill Hub instructions to the global `~/.codex/AGENTS.md`.
 
 Webhook:
 
@@ -113,31 +128,28 @@ Development mode keeps the current local/Codex workflow unchanged:
 AUTH_MODE=development
 ```
 
-Production can switch to request-scoped API keys without changing MCP tools:
+Production should use request-scoped API keys:
 
 ```text
 AUTH_MODE=api-key
-SKILL_HUB_API_KEYS_JSON={"dev-key":{"id":"dev-a","roles":["developer","internal"],"tenantId":"rd"},"customer-key":{"id":"customer-a","roles":["customer"],"tenantId":"customer-a"}}
+ADMIN_API_KEY=<long-random-admin-key>
 ```
 
-For Docker Compose, put these variables in the `.env` file next to the Compose
-file (not in `config/repositories*.yaml`):
+After startup, open `http://<hub-host>:8080/admin` and create user API keys from
+the **用户 API Keys** section. A generated key is shown once; the server persists
+only its SHA-256 hash, last four characters, Principal, roles, tenant and enabled
+state. Create/disable/delete operations take effect immediately without restart.
+
+`SKILL_HUB_API_KEYS_JSON` remains supported only as an optional bootstrap /
+backward-compatibility mechanism. It may be empty:
 
 ```dotenv
 AUTH_MODE=api-key
-SKILL_HUB_API_KEYS_JSON={"alice-key":{"id":"alice","roles":["developer","internal"],"tenantId":"rd"},"bob-key":{"id":"bob","roles":["customer"],"tenantId":"customer"}}
+SKILL_HUB_API_KEYS_JSON=
+ADMIN_API_KEY=<long-random-admin-key>
 ```
 
-Each top-level JSON key is a separate API key. Replace the examples with long
-random values and distribute each user's key privately. After changing `.env`,
-restart the Hub:
-
-```bash
-docker compose --env-file .env up -d
-```
-
-The current version has no self-service endpoint for issuing or rotating keys;
-administrators edit `SKILL_HUB_API_KEYS_JSON` and restart the service.
+Use the admin UI for normal key lifecycle management rather than editing `.env`.
 
 Clients send either:
 
@@ -183,6 +195,9 @@ Useful tools:
 - `run_evaluation`
 - `list_evaluation_runs`
 - `get_evaluation_run`
+- `list_knowledge_sources`
+- `search_knowledge`
+- `get_knowledge`
 
 Example request:
 
@@ -190,6 +205,44 @@ Example request:
 Use teamSkillHub to find the best skill for reviewing the current OTA implementation
 for unnecessary APIs and long call chains. Load the selected skill and follow it.
 ```
+
+## Knowledge / RAG
+
+Repository documentation can be indexed as lightweight RAG context without a
+vector database or model gateway. Supported text sources are:
+
+- Markdown (`.md`)
+- plain text (`.txt`)
+- text-based PDF (`.pdf`)
+- DOCX (`.docx`)
+
+Scanned/image-only PDFs are not OCR'd in the current version.
+
+Each Repository has an optional Knowledge Source configuration. When omitted, the
+backward-compatible default is:
+
+```yaml
+knowledge:
+  enabled: true
+  include:
+    - "**/*.md"
+    - "**/*.txt"
+    - "**/*.pdf"
+    - "**/*.docx"
+  exclude: []
+  max_document_bytes: 2097152
+  chunk_size_chars: 1400
+  chunk_overlap_chars: 180
+```
+
+Administrators can edit these settings at `/admin`. Saving immediately
+re-synchronizes that Repository and rebuilds its Knowledge index. Dynamic
+configuration is persisted under `<data_dir>/config/admin-config.json`.
+
+Knowledge retrieval uses SQLite FTS5 plus metadata/manual scoring. Repository
+read-role filtering is applied before results are exposed. Use
+`search_knowledge` to retrieve relevant chunks and `get_knowledge` for the
+selected document/chunk.
 
 ## Deterministic Evaluation
 

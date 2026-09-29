@@ -11,7 +11,7 @@ h1{margin:0 0 6px}h2{font-size:18px}label{display:block;font-size:13px;font-weig
 input,textarea{box-sizing:border-box;width:100%;border:1px solid #ccd3df;border-radius:8px;padding:10px;font:inherit}textarea{min-height:380px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.actions{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
 button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#fff;font-weight:700;cursor:pointer}.secondary{background:#edf1f8;color:#23324d}.danger{background:#b42318}.small{padding:6px 10px;font-size:12px}
-.ok{color:#117a45}.error{color:#b42318}.muted{color:#667085;font-size:13px}code{background:#eef2f7;padding:2px 5px;border-radius:4px}.key-list{display:grid;gap:10px;margin-top:14px}.key-row{border:1px solid #e4e8f0;border-radius:10px;padding:12px}.key-row-top{display:flex;justify-content:space-between;gap:12px;align-items:center}.key-meta{font-size:13px;color:#667085;margin-top:6px}.one-time{display:none;margin-top:14px;padding:14px;border:1px solid #a6c8ff;background:#f1f7ff;border-radius:10px}.one-time input{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.ok{color:#117a45}.error{color:#b42318}.muted{color:#667085;font-size:13px}code{background:#eef2f7;padding:2px 5px;border-radius:4px}.key-list{display:grid;gap:10px;margin-top:14px}.key-row{border:1px solid #e4e8f0;border-radius:10px;padding:12px}.key-row-top{display:flex;justify-content:space-between;gap:12px;align-items:center}.key-meta{font-size:13px;color:#667085;margin-top:6px}.one-time{display:none;margin-top:14px;padding:14px;border:1px solid #a6c8ff;background:#f1f7ff;border-radius:10px}.one-time input{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.knowledge-sources{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}.knowledge-source,.knowledge-result{border:1px solid #e4e8f0;border-radius:10px;padding:12px}.knowledge-result{margin-top:10px}.knowledge-content{white-space:pre-wrap;max-height:180px;overflow:auto;margin-top:8px;font-size:13px;background:#f8fafc;padding:10px;border-radius:8px}.knowledge-config-grid{display:grid;grid-template-columns:2fr 2fr 1fr 1fr 1fr;gap:10px;align-items:end;margin-top:10px}.inline-check{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}.inline-check input{width:auto}
 @media(max-width:760px){.grid{grid-template-columns:1fr}.wrap{padding:14px}}
 </style>
 </head>
@@ -48,6 +48,17 @@ button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#ff
 <div id="apiKeys" class="key-list"></div>
 </div>
 <div class="card">
+<h2>Knowledge / RAG</h2>
+<div class="muted">查看当前已索引知识源，并直接测试 FTS5 检索效果。</div>
+<div id="knowledgeSources" class="knowledge-sources"></div>
+<div class="grid">
+<div style="grid-column:span 2"><label>搜索问题</label><input id="knowledgeQuery" placeholder="例如：OTA 升级断电后如何恢复？"></div>
+<div><label>Repository（可选）</label><input id="knowledgeRepo" placeholder="rd-skills"></div>
+</div>
+<div class="actions"><button id="searchKnowledge">测试检索</button><button id="reloadKnowledge" class="secondary">刷新索引状态</button><span id="knowledgeStatus"></span></div>
+<div id="knowledgeResults"></div>
+</div>
+<div class="card">
 <h2>Repositories</h2>
 <div class="muted">编辑仓库运行配置。Git 密钥/Token 推荐继续使用环境变量或 Docker Secret；这里保存的是引用和非敏感配置。</div>
 <label>Repository JSON</label><textarea id="repos"></textarea>
@@ -63,6 +74,82 @@ key.value = sessionStorage.getItem("skillHubAdminKey") || "";
 key.addEventListener("change",()=>sessionStorage.setItem("skillHubAdminKey",key.value));
 const statusEl=document.getElementById("status");
 const apiKeyStatus=document.getElementById("apiKeyStatus");
+const knowledgeStatus=document.getElementById("knowledgeStatus");
+function renderKnowledgeSources(sources){
+ const root=document.getElementById("knowledgeSources");root.replaceChildren();
+ if(!sources.length){const empty=document.createElement("div");empty.className="muted";empty.textContent="暂无 Repository";root.appendChild(empty);return}
+ for(const source of sources){
+  const card=document.createElement("div");card.className="knowledge-source";
+  const top=document.createElement("div");top.className="key-row-top";
+  const name=document.createElement("div");const title=document.createElement("b");title.textContent=source.repository;
+  const meta=document.createElement("div");meta.className="key-meta";
+  meta.textContent=source.documents+" documents · "+source.chunks+" chunks"+(source.revision?" · "+source.revision.slice(0,12):"");
+  name.append(title,meta);
+  const enabledLabel=document.createElement("label");enabledLabel.className="inline-check";
+  const enabled=document.createElement("input");enabled.type="checkbox";enabled.checked=source.config.enabled;
+  enabledLabel.append(enabled,document.createTextNode("启用 Knowledge"));
+  top.append(name,enabledLabel);
+
+  const grid=document.createElement("div");grid.className="knowledge-config-grid";
+  function field(labelText,value,type){
+   const wrap=document.createElement("div");const label=document.createElement("label");label.textContent=labelText;
+   const input=document.createElement("input");input.type=type||"text";input.value=String(value);
+   wrap.append(label,input);grid.appendChild(wrap);return input;
+  }
+  const include=field("Include（逗号分隔）",source.config.include.join(", "));
+  const exclude=field("Exclude（逗号分隔）",source.config.exclude.join(", "));
+  const maxBytes=field("Max bytes",source.config.maxDocumentBytes,"number");
+  const chunkSize=field("Chunk size",source.config.chunkSizeChars,"number");
+  const overlap=field("Overlap",source.config.chunkOverlapChars,"number");
+
+  const actions=document.createElement("div");actions.className="actions";
+  const save=document.createElement("button");save.className="small";save.textContent="保存并重建索引";
+  save.onclick=()=>updateKnowledgeConfig(source.repository,{
+   enabled:enabled.checked,
+   include:include.value.split(",").map(x=>x.trim()).filter(Boolean),
+   exclude:exclude.value.split(",").map(x=>x.trim()).filter(Boolean),
+   maxDocumentBytes:Number(maxBytes.value),
+   chunkSizeChars:Number(chunkSize.value),
+   chunkOverlapChars:Number(overlap.value)
+  });
+  actions.appendChild(save);
+  card.append(top,grid,actions);root.appendChild(card);
+ }
+}
+async function updateKnowledgeConfig(repository,config){
+ knowledgeStatus.textContent="保存并重建中...";knowledgeStatus.className="";
+ const r=await fetch("/admin/api/knowledge/"+encodeURIComponent(repository)+"/config",{
+  method:"PUT",headers:headers(),body:JSON.stringify(config)
+ });
+ const data=await r.json();
+ if(!r.ok){knowledgeStatus.textContent=data.error||"保存失败";knowledgeStatus.className="error";return}
+ knowledgeStatus.textContent="已保存并重建 "+repository;knowledgeStatus.className="ok";
+ await loadKnowledge();
+}
+async function loadKnowledge(){
+ const r=await fetch("/admin/api/knowledge",{headers:headers()});const data=await r.json();
+ if(!r.ok){knowledgeStatus.textContent=data.error||"加载失败";knowledgeStatus.className="error";return}
+ renderKnowledgeSources(data.sources);knowledgeStatus.textContent="";knowledgeStatus.className="";
+}
+async function searchKnowledge(){
+ const q=document.getElementById("knowledgeQuery").value.trim();
+ const repo=document.getElementById("knowledgeRepo").value.trim();
+ if(!q){knowledgeStatus.textContent="请输入搜索问题";knowledgeStatus.className="error";return}
+ const params=new URLSearchParams({q,limit:"5"});if(repo)params.set("repository",repo);
+ knowledgeStatus.textContent="搜索中...";knowledgeStatus.className="";
+ const r=await fetch("/admin/api/knowledge/search?"+params.toString(),{headers:headers()});const data=await r.json();
+ if(!r.ok){knowledgeStatus.textContent=data.error||"搜索失败";knowledgeStatus.className="error";return}
+ const root=document.getElementById("knowledgeResults");root.replaceChildren();
+ for(const item of data.results){
+  const card=document.createElement("div");card.className="knowledge-result";
+  const title=document.createElement("b");title.textContent=item.title+" · "+item.repository;
+  const meta=document.createElement("div");meta.className="key-meta";meta.textContent=item.path+" · chunk "+item.chunkIndex+" · score "+Number(item.score).toFixed(2);
+  const content=document.createElement("div");content.className="knowledge-content";content.textContent=item.content;
+  card.append(title,meta,content);root.appendChild(card);
+ }
+ if(!data.results.length){const empty=document.createElement("div");empty.className="muted";empty.textContent="没有匹配结果";root.appendChild(empty)}
+ knowledgeStatus.textContent="找到 "+data.results.length+" 条结果";knowledgeStatus.className="ok";
+}
 function apiRoles(){return document.getElementById("apiRoles").value.split(",").map(x=>x.trim()).filter(Boolean)}
 function renderApiKeys(keys){
  const root=document.getElementById("apiKeys"); root.replaceChildren();
@@ -126,6 +213,7 @@ async function load(){
    "GitLab Token: <b>"+(data.bootstrap.gitlabTokenConfigured?"已配置":"未配置")+"</b>";
  statusEl.textContent="已加载";statusEl.className="ok";
  await loadApiKeys();
+ await loadKnowledge();
 }
 async function save(){
  try{
@@ -145,6 +233,8 @@ async function save(){
   await load();
  }catch(e){statusEl.textContent=e.message||String(e);statusEl.className="error"}
 }
+document.getElementById("searchKnowledge").onclick=searchKnowledge;
+document.getElementById("reloadKnowledge").onclick=loadKnowledge;
 document.getElementById("createApiKey").onclick=createApiKey;
 document.getElementById("copyApiKey").onclick=async()=>{await navigator.clipboard.writeText(document.getElementById("newApiKey").value);apiKeyStatus.textContent="已复制";apiKeyStatus.className="ok"};
 document.getElementById("save").onclick=save;

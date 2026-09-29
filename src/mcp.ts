@@ -110,7 +110,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             "usage-analytics",
             "unmatched-query-collection",
             "evaluation-framework",
-            "golden-task-regression"
+            "golden-task-regression",
+            "knowledge-registry",
+            "knowledge-fts5-rag"
           ]
         })
     );
@@ -218,6 +220,91 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           resource,
           content: await appService.getSkillResource(repository, name, resource, principal)
         })
+    );
+
+    server.registerTool(
+      "list_knowledge_sources",
+      {
+        description: "List repository knowledge documents visible to the current caller.",
+        inputSchema: z.object({
+          repositories: z.array(z.string()).optional()
+        })
+      },
+      async ({ repositories }) => {
+        const documents = appService.listKnowledgeDocuments(principal, repositories);
+        const grouped = new Map<string, { repository: string; documents: number; chunks: number; paths: string[] }>();
+        for (const document of documents) {
+          const current = grouped.get(document.repositoryId) ?? {
+            repository: document.repositoryId,
+            documents: 0,
+            chunks: 0,
+            paths: []
+          };
+          current.documents += 1;
+          current.chunks += document.chunkCount;
+          current.paths.push(document.relativePath);
+          grouped.set(document.repositoryId, current);
+        }
+        return toolResult({ sources: [...grouped.values()] });
+      }
+    );
+
+    server.registerTool(
+      "search_knowledge",
+      {
+        description: "Search internal repository documentation and text knowledge. Use this for current project facts, designs, APIs, troubleshooting notes, and other document-grounded context.",
+        inputSchema: z.object({
+          query: z.string().min(1),
+          top_k: z.number().int().min(1).max(20).optional(),
+          repositories: z.array(z.string()).optional()
+        })
+      },
+      async ({ query, top_k, repositories }) =>
+        toolResult({
+          results: appService.searchKnowledge(query, top_k ?? 5, repositories, principal).map((result) => ({
+            repository: result.chunk.repositoryId,
+            revision: result.chunk.revision,
+            path: result.chunk.relativePath,
+            title: result.chunk.title,
+            chunk_index: result.chunk.chunkIndex,
+            content: result.chunk.content,
+            score: result.score,
+            reason: result.reason
+          }))
+        })
+    );
+
+    server.registerTool(
+      "get_knowledge",
+      {
+        description: "Load a visible knowledge document or one exact chunk after search_knowledge selects it.",
+        inputSchema: z.object({
+          repository: z.string().min(1),
+          path: z.string().min(1),
+          chunk_index: z.number().int().min(0).optional()
+        })
+      },
+      async ({ repository, path, chunk_index }) => {
+        const result = appService.getKnowledge(repository, path, chunk_index, principal);
+        if (result.chunk) {
+          return toolResult({
+            repository,
+            revision: result.document.revision,
+            path,
+            title: result.document.title,
+            chunk_index: result.chunk.chunkIndex,
+            content: result.chunk.content
+          });
+        }
+        return toolResult({
+          repository,
+          revision: result.document.revision,
+          path,
+          title: result.document.title,
+          chunk_count: result.document.chunkCount,
+          content: result.document.content
+        });
+      }
     );
 
     server.registerTool(
