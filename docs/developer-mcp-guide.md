@@ -216,12 +216,16 @@ procedures. Supported sources include Markdown, TXT, text-based PDF and DOCX.
 list_knowledge_sources
 search_knowledge
 get_knowledge
+submit_feedback
+submit_knowledge_candidate
 ```
 
 Use `search_knowledge` for design documents, APIs, troubleshooting notes,
 postmortems, FAQ and similar repository context. Use `get_knowledge` after a
 search hit when you need the exact selected chunk or full document. Image-only
 scanned PDFs are not OCR'd.
+
+If a Team Skill Hub result is clearly outdated or incorrect, use `submit_feedback` with a short evidence-based reason. If the task produces durable, verified team-specific knowledge that is missing from the Hub, use `submit_knowledge_candidate`. Candidates go to the Web Review Inbox; clients cannot publish directly to Git. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.
 
 ## 7. Typical daily workflows
 

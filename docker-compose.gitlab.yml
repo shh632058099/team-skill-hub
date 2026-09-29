@@ -21,6 +21,7 @@ services:
       ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY}
       GITLAB_WEBHOOK_TOKEN: ${GITLAB_WEBHOOK_TOKEN:?set GITLAB_WEBHOOK_TOKEN}
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+      GITLAB_WRITE_TOKEN: ${GITLAB_WRITE_TOKEN:-}
       GITLAB_USERNAME: ${GITLAB_USERNAME:-oauth2}
     volumes:
       - ${SKILL_HUB_CONFIG_FILE:-./config/repositories.gitlab.example.yaml}:/app/config/repositories.yaml:ro

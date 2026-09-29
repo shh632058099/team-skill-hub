@@ -80,7 +80,9 @@ For non-trivial engineering tasks:
 5. After selecting a Knowledge result, use \`get_knowledge\` when exact document or chunk context is needed.
 6. Prefer relevant team Skill/Knowledge over generic assumptions.
 7. Respect repository visibility and role filtering.
-8. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
+8. If a retrieved Team Skill Hub asset is clearly outdated or incorrect, use \`submit_feedback\` with a concise evidence-based reason.
+9. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, use \`submit_knowledge_candidate\` with concise source-grounded content. Do not submit secrets, credentials, customer-sensitive data, or speculative conclusions.
+10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.
 $AGENTS_END

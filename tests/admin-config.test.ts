@@ -50,6 +50,16 @@ test("admin config persists and overlays runtime configuration", async () => {
           pollingIntervalSeconds: 120,
           readRoles: ["developer"],
           syncRoles: ["admin"]
+,
+          knowledgePublishing: {
+            enabled: true,
+            provider: "gitlab",
+            baseUrl: "https://gitlab.example.invalid",
+            projectPath: "ai/rd-skills",
+            tokenEnv: "GITLAB_WRITE_TOKEN",
+            targetBranch: "master",
+            branchPrefix: "skill-hub-knowledge"
+          }
         }
       ]
     });
@@ -65,6 +75,8 @@ test("admin config persists and overlays runtime configuration", async () => {
     assert.equal(persisted.repositories[0].id, "rd-skills");
     assert.equal(saved.repositories[0]?.knowledge?.enabled, true);
     assert.deepEqual(saved.repositories[0]?.knowledge?.include, ["**/*.md", "**/*.txt", "**/*.pdf", "**/*.docx"]);
+    assert.equal(saved.repositories[0]?.knowledgePublishing?.tokenEnv, "GITLAB_WRITE_TOKEN");
+    assert.equal(restarted.repositories[0]?.knowledgePublishing?.enabled, true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

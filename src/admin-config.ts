@@ -20,7 +20,8 @@ function cloneRepositories(repositories: RepositoryConfig[]): RepositoryConfig[]
     visibility: [...repository.visibility],
     readRoles: [...repository.readRoles],
     syncRoles: [...repository.syncRoles],
-    knowledge: normalizeKnowledgeConfig(repository.knowledge)
+    knowledge: normalizeKnowledgeConfig(repository.knowledge),
+    knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined
   }));
 }
 
@@ -63,6 +64,15 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
   knowledge.chunkOverlapChars = Math.max(0, Number(knowledge.chunkOverlapChars ?? 180));
   if (knowledge.chunkOverlapChars >= knowledge.chunkSizeChars) {
     throw new Error(`Repository ${repository.id}: chunk overlap must be smaller than chunk size`);
+  }
+  if (repository.knowledgePublishing) {
+    const publishing = repository.knowledgePublishing;
+    if (publishing.provider !== "gitlab") {
+      throw new Error(`Repository ${repository.id}: unsupported knowledge publisher`);
+    }
+    if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: publishing tokenEnv is required`);
+    if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: publishing targetBranch is required`);
+    if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: publishing branchPrefix is required`);
   }
 }
 

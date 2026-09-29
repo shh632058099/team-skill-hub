@@ -222,7 +222,17 @@ curl http://127.0.0.1:8080/metrics
 
 启动时，Hub 会克隆每个启用的 Skill 仓库，校验全部 Skills，创建 validated snapshot，并以原子方式激活。Docker Named Volume 会在容器替换后继续保存 Registry 状态、审计历史、Git 工作副本以及已验证 Revision。
 
-同一个 Named Volume 还会保存后台动态配置和托管用户 API Key 的哈希数据，不要把它替换成容器内的临时存储。
+同一个 Named Volume 还会保存后台动态配置、托管用户 API Key 的哈希数据、MCP Observability 日志、Feedback 和 Knowledge Candidate，不要把它替换成容器内的临时存储。
+
+其中知识回流/可观测性数据位于：
+
+```text
+<data_dir>/observability/mcp-calls.jsonl
+<data_dir>/observability/feedback.jsonl
+<data_dir>/observability/knowledge-candidates.jsonl
+```
+
+这些记录采用 append-only JSONL，便于后续迁移到集中式日志、数据库或数据仓库，而不改变 MCP API。
 
 ### 7.1 配置 Knowledge / RAG 数据源
 
@@ -248,6 +258,61 @@ knowledge:
 ```
 
 Repository YAML 用作 bootstrap 默认值。服务启动后可以在 `/admin` 动态修改；保存后会自动重新同步该 Repository 并重建 Knowledge 索引。动态值持久化到 `<data_dir>/config/admin-config.json`。
+
+### 7.2 配置 Knowledge 回流与 GitLab MR 发布
+
+Knowledge Publishing 默认关闭。推荐先保证 RAG 只读链路正常，再按 Repository 显式开启：
+
+```yaml
+knowledge_publishing:
+  enabled: true
+  provider: gitlab
+  base_url: https://gitlab.company.example
+  project_path: ai/rd-skills
+  token_env: GITLAB_WRITE_TOKEN
+  target_branch: master
+  branch_prefix: skill-hub-knowledge
+```
+
+部署环境再提供独立写 Token：
+
+```text
+GITLAB_WRITE_TOKEN=<write-token>
+```
+
+**不要复用只读同步凭据。** 推荐保持：
+
+```text
+Repository Sync:
+  SSH Deploy Key / GITLAB_TOKEN
+  -> 只读
+
+Knowledge Publishing:
+  GITLAB_WRITE_TOKEN
+  -> 仅用于创建/更新知识文件分支并创建 Merge Request
+```
+
+`base_url` 和 `project_path` 可以从常见 GitLab Git URL 推断，但生产环境建议显式配置，特别是公司内部 GitLab 使用自定义域名、反向代理或非标准路径时。
+
+管理员也可以在 `/admin -> Knowledge` 中结构化修改发布配置，不需要编辑 Repository JSON。后台会显示 `Write token ready / not configured`，但永远不会返回 Token 明文。
+
+一次完整发布流程：
+
+```text
+Knowledge Candidate
+  -> Web Review / Edit
+  -> Approve
+  -> Publish
+  -> GitLab source branch
+  -> Markdown commit
+  -> Merge Request
+  -> Human Review / Merge
+  -> GitLab Webhook / Polling
+  -> Hub validation
+  -> RAG re-index
+```
+
+Hub 不会自动 Merge。发布失败时 Candidate 进入 `publish_failed`，Web 可以修正内容/路径后重试；已有分支、文件和打开的 MR 会尽量复用。
 
 ## 8. 配置 GitLab Webhook
 
@@ -343,7 +408,7 @@ curl http://127.0.0.1:8080/health/ready
 
 不需要重新构建 Skill 仓库。Skills 继续在 GitLab 中独立版本管理。
 
-已有部署升级时不需要手工迁移配置。没有 `knowledge` 字段的 Repository 会自动使用向后兼容默认值，旧版持久化后台配置也会在加载时自动补齐。升级后建议验证 `/admin`、`/health/ready`，并实际执行一次 `search_knowledge`。
+已有部署升级时不需要手工迁移配置。没有 `knowledge` 字段的 Repository 会自动使用向后兼容默认值；没有 `knowledge_publishing` 的旧 Repository 默认保持发布关闭，不会因为升级获得写权限。升级后建议验证 `/admin`、`/health/ready`，并实际执行一次 `search_knowledge`。
 
 ## 13. 运维接口
 
@@ -357,6 +422,17 @@ GET  /admin/api/api-keys
 GET  /admin/api/knowledge
 GET  /admin/api/knowledge/search
 PUT  /admin/api/knowledge/<repository>/config
+GET  /admin/api/observability
+GET  /admin/api/traces
+GET  /admin/api/traces/<trace-id>
+GET  /admin/api/feedback
+GET  /admin/api/knowledge-candidates
+POST /admin/api/knowledge-candidates
+PUT  /admin/api/knowledge-candidates/<id>
+POST /admin/api/knowledge-candidates/<id>/review
+POST /admin/api/knowledge-candidates/<id>/publish
+PUT  /admin/api/knowledge/<repository>/publishing
+GET  /admin/api/knowledge-gaps
 GET  /audit
 POST /repositories/<id>/sync
 GET  /repositories/<id>/revisions

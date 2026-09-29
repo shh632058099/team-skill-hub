@@ -46,6 +46,8 @@ import {
   scanEvaluationSuites
 } from "./evaluation.js";
 import { chunksForDocuments, KnowledgeIndex, normalizeKnowledgeConfig, scanKnowledge } from "./knowledge.js";
+import { McpObservabilityStore, type FeedbackRecord, type KnowledgeCandidate } from "./observability.js";
+import { createKnowledgePublisher } from "./knowledge-publishing.js";
 
 export class SkillHubApplicationService {
   private readonly states = new Map<string, RepositoryState>();
@@ -60,6 +62,7 @@ export class SkillHubApplicationService {
   private readonly knowledgeIndex = new KnowledgeIndex();
   private readonly analytics: UsageAnalyticsStore;
   private readonly evaluations: EvaluationRunStore;
+  private readonly observability: McpObservabilityStore;
 
   constructor(
     private readonly config: AppConfig,
@@ -74,6 +77,7 @@ export class SkillHubApplicationService {
   ) {
     this.analytics = new UsageAnalyticsStore(config.dataDir);
     this.evaluations = new EvaluationRunStore(config.dataDir);
+    this.observability = new McpObservabilityStore(config.dataDir);
     for (const provider of providers) this.providers.set(provider.type, provider);
     for (const repo of config.repositories) {
       this.states.set(repo.id, {
@@ -236,9 +240,9 @@ export class SkillHubApplicationService {
       audience: [...repository.audience],
       visibility: [...repository.visibility],
       readRoles: [...repository.readRoles],
-      syncRoles: [...repository.syncRoles]
-,
-      knowledge: normalizeKnowledgeConfig(repository.knowledge)
+      syncRoles: [...repository.syncRoles],
+      knowledge: normalizeKnowledgeConfig(repository.knowledge),
+      knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined
     }));
     const nextIds = new Set(this.config.repositories.map((repository) => repository.id));
     for (const repository of this.config.repositories) {
@@ -1050,6 +1054,125 @@ export class SkillHubApplicationService {
 
   async getUsageSummary(limit = 10) {
     return await this.analytics.summary(limit);
+  }
+
+  newMcpTraceId(): string {
+    return this.observability.newTraceId();
+  }
+
+  async recordMcpCall(input: {
+    traceId: string;
+    sessionId?: string;
+    client?: string;
+    tool: string;
+    args?: unknown;
+    latencyMs: number;
+    success: boolean;
+    error?: string;
+    principal: Principal;
+  }) {
+    return await this.observability.recordCall({
+      traceId: input.traceId,
+      sessionId: input.sessionId,
+      client: input.client,
+      tool: input.tool,
+      args: input.args,
+      latencyMs: input.latencyMs,
+      success: input.success,
+      error: input.error,
+      actorId: input.principal.id,
+      tenantId: input.principal.tenantId
+    });
+  }
+
+  async getMcpObservabilitySummary() {
+    return await this.observability.summary();
+  }
+
+  async listMcpCalls(limit = 200) {
+    return await this.observability.listCalls(limit);
+  }
+
+  async listMcpTraces(limit = 100) {
+    return await this.observability.listTraces(limit);
+  }
+
+  async getMcpTrace(traceId: string) {
+    return await this.observability.getTrace(traceId);
+  }
+
+  async submitFeedback(
+    principal: Principal,
+    input: Omit<FeedbackRecord, "id" | "ts" | "actorId" | "tenantId">
+  ) {
+    return await this.observability.submitFeedback(principal, input);
+  }
+
+  async listFeedback(limit = 200) {
+    return await this.observability.listFeedback(limit);
+  }
+
+  async submitKnowledgeCandidate(
+    principal: Principal,
+    input: Pick<
+      KnowledgeCandidate,
+      "title" | "content" | "sourceType" | "suggestedType" | "repository" | "suggestedPath" | "traceId"
+    >
+  ) {
+    if (input.repository) {
+      const allowed = this.allowedRepositories(principal).some((repo) => repo.id === input.repository);
+      if (!allowed) throw new Error("Repository not found");
+    }
+    return await this.observability.createCandidate(principal, input);
+  }
+
+  async listKnowledgeCandidates(limit = 500) {
+    return await this.observability.listCandidates(limit);
+  }
+
+  async updateKnowledgeCandidate(
+    id: string,
+    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "repository" | "suggestedPath">>
+  ) {
+    if (input.repository !== undefined && input.repository) {
+      const repository = this.config.repositories.find((repo) => repo.id === input.repository);
+      if (!repository) throw new Error("Repository not found");
+    }
+    return await this.observability.updateCandidate(id, input);
+  }
+
+  async reviewKnowledgeCandidate(
+    id: string,
+    status: "approved" | "rejected",
+    reviewer: string,
+    reviewNote?: string
+  ) {
+    return await this.observability.reviewCandidate(id, status, reviewer, reviewNote);
+  }
+
+  async publishKnowledgeCandidate(id: string) {
+    const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
+    if (!candidate) throw new Error("Knowledge candidate not found");
+    if (!candidate.repository) throw new Error("Knowledge candidate repository is required before publishing");
+    if (!candidate.suggestedPath) throw new Error("Knowledge candidate path is required before publishing");
+
+    const repository = this.getRepository(candidate.repository);
+    if (repository.provider !== "git") throw new Error("Automatic publishing requires a git repository");
+    await this.observability.markCandidatePublishing(id);
+    try {
+      const publisher = createKnowledgePublisher(repository);
+      const publication = await publisher.publish({ ...candidate, status: "approved" }, repository);
+      return await this.observability.markCandidatePublished(id, publication);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.observability.markCandidatePublishFailed(id, message);
+      throw error;
+    }
+  }
+
+  async listKnowledgeGaps() {
+    const summary = await this.analytics.summary(50);
+    return await this.observability.knowledgeGaps(summary.topUnmatchedQueries);
   }
 
   private getRepository(id: string): RepositoryConfig {

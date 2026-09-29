@@ -52,6 +52,14 @@ repositories:
       max_document_bytes: 2097152
       chunk_size_chars: 1400
       chunk_overlap_chars: 180
+    knowledge_publishing:
+      enabled: false
+      provider: gitlab
+      base_url: https://gitlab.company.example
+      project_path: ai/rd-skills
+      token_env: GITLAB_WRITE_TOKEN
+      target_branch: master
+      branch_prefix: skill-hub-knowledge
 
   - id: customer-skills
     name: Customer Skills
@@ -92,3 +100,11 @@ repositories:
       max_document_bytes: 2097152
       chunk_size_chars: 1400
       chunk_overlap_chars: 180
+    knowledge_publishing:
+      enabled: false
+      provider: gitlab
+      base_url: https://gitlab.company.example
+      project_path: ai/customer-skills
+      token_env: GITLAB_WRITE_TOKEN
+      target_branch: master
+      branch_prefix: skill-hub-knowledge

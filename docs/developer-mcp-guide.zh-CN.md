@@ -219,11 +219,17 @@ Knowledge 用于保存“当前事实”，而不是可复用流程。当前可�
 list_knowledge_sources
 search_knowledge
 get_knowledge
+submit_feedback
+submit_knowledge_candidate
 ~~~
 
 设计文档、API 说明、故障复盘、FAQ、测试说明等内容优先使用
 `search_knowledge`。命中后需要精确原文时，再调用 `get_knowledge` 读取指定
 Chunk 或完整文档。当前不做 OCR，因此纯扫描图片 PDF 不会产生可检索正文。
+
+如果检索到的团队资产已经明显过期或错误，可以使用 `submit_feedback` 提交简短、可验证的原因。
+
+如果当前任务产生了**稳定、可复用、已经验证**的新团队知识，而 Hub 中尚不存在，可以使用 `submit_knowledge_candidate` 提交候选内容。候选只会进入 Web Review Inbox，不会由开发者客户端直接写 Git 或发布。不要提交密码、Token、客户敏感数据或未经验证的推测。
 
 ## 8. 日常典型工作流
 

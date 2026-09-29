@@ -53,6 +53,15 @@ interface RawConfig {
       chunk_size_chars?: number;
       chunk_overlap_chars?: number;
     };
+    knowledge_publishing?: {
+      enabled?: boolean;
+      provider?: "gitlab";
+      base_url?: string;
+      project_path?: string;
+      token_env?: string;
+      target_branch?: string;
+      branch_prefix?: string;
+    };
   }>;
 }
 
@@ -113,6 +122,15 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         maxDocumentBytes: Math.max(1024, Number(repo.knowledge?.max_document_bytes ?? 2 * 1024 * 1024)),
         chunkSizeChars: Math.max(200, Number(repo.knowledge?.chunk_size_chars ?? 1400)),
         chunkOverlapChars: Math.max(0, Number(repo.knowledge?.chunk_overlap_chars ?? 180))
+      },
+      knowledgePublishing: {
+        enabled: repo.knowledge_publishing?.enabled ?? false,
+        provider: repo.knowledge_publishing?.provider ?? "gitlab",
+        baseUrl: repo.knowledge_publishing?.base_url,
+        projectPath: repo.knowledge_publishing?.project_path,
+        tokenEnv: repo.knowledge_publishing?.token_env ?? "GITLAB_WRITE_TOKEN",
+        targetBranch: repo.knowledge_publishing?.target_branch ?? repo.branch ?? "main",
+        branchPrefix: repo.knowledge_publishing?.branch_prefix ?? "skill-hub-knowledge"
       }
     };
   });

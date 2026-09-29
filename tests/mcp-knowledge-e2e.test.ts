@@ -137,6 +137,11 @@ test("MCP search_knowledge then get_knowledge returns repository-grounded contex
       const getText = await getResponse.text();
       assert.match(getText, /OTA 断电恢复/);
       assert.match(getText, /回滚前会校验镜像完整性/);
+
+      const calls = await service.listMcpCalls(10);
+      assert.ok(calls.some((item) => item.tool === "search_knowledge" && item.success));
+      assert.ok(calls.some((item) => item.tool === "get_knowledge" && item.success));
+      assert.ok(calls.every((item) => item.actorId === "rag-e2e"));
     } finally {
       await app.close();
     }

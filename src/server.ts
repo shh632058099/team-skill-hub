@@ -1,6 +1,6 @@
 import { createMcpFastifyApp } from "@modelcontextprotocol/fastify";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-import type { AppConfig, KnowledgeSourceConfig } from "./types.js";
+import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
 import { ADMIN_HTML } from "./admin-ui.js";
@@ -127,7 +127,13 @@ export async function startServer(
           chunks: indexed?.chunks ?? 0,
           revision: indexed?.revision,
           paths: indexed?.paths ?? [],
-          config: normalizeKnowledgeConfig(repository.knowledge)
+          config: normalizeKnowledgeConfig(repository.knowledge),
+          publishing: repository.knowledgePublishing
+            ? {
+                config: repository.knowledgePublishing,
+                tokenConfigured: Boolean(process.env[repository.knowledgePublishing.tokenEnv])
+              }
+            : undefined
         };
       })
     };
@@ -180,6 +186,75 @@ export async function startServer(
     }
   );
 
+  app.put<{ Params: { repository: string }; Body: Partial<KnowledgePublishingConfig> }>(
+    "/admin/api/knowledge/:repository/publishing",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      if (!adminConfigStore) {
+        reply.code(503);
+        return { error: "dynamic admin configuration is unavailable" };
+      }
+      const editable = editableConfigFromApp(config);
+      const repository = editable.repositories.find((item) => item.id === request.params.repository);
+      if (!repository) {
+        reply.code(404);
+        return { error: "repository not found" };
+      }
+      try {
+        const current = repository.knowledgePublishing ?? {
+          enabled: false,
+          provider: "gitlab" as const,
+          tokenEnv: "GITLAB_WRITE_TOKEN",
+          targetBranch: repository.branch ?? "main",
+          branchPrefix: "skill-hub-knowledge"
+        };
+        repository.knowledgePublishing = {
+          enabled: request.body.enabled ?? current.enabled,
+          provider: "gitlab",
+          baseUrl:
+            request.body.baseUrl !== undefined
+              ? request.body.baseUrl.trim() || undefined
+              : current.baseUrl,
+          projectPath:
+            request.body.projectPath !== undefined
+              ? request.body.projectPath.trim() || undefined
+              : current.projectPath,
+          tokenEnv: request.body.tokenEnv?.trim() || current.tokenEnv,
+          targetBranch: request.body.targetBranch?.trim() || current.targetBranch,
+          branchPrefix: request.body.branchPrefix?.trim() || current.branchPrefix
+        };
+        const normalized = await adminConfigStore.save(editable);
+        const next: AppConfig = {
+          ...config,
+          defaultRoles: [...config.defaultRoles],
+          authentication: config.authentication,
+          repositories: config.repositories
+        };
+        applyAdminConfig(next, normalized);
+        service.applyRuntimeConfig(next);
+        const publishing = config.repositories.find(
+          (item) => item.id === request.params.repository
+        )?.knowledgePublishing;
+        return {
+          saved: true,
+          repository: request.params.repository,
+          publishing: publishing
+            ? {
+                config: publishing,
+                tokenConfigured: Boolean(process.env[publishing.tokenEnv])
+              }
+            : undefined
+        };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  );
+
   app.get<{ Querystring: { q?: string; repository?: string; limit?: string } }>(
     "/admin/api/knowledge/search",
     async (request, reply) => {
@@ -207,6 +282,156 @@ export async function startServer(
       };
     }
   );
+
+  app.get<{ Querystring: { limit?: string } }>("/admin/api/observability", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const limit = Math.max(1, Math.min(Number(request.query.limit ?? 100) || 100, 1000));
+    return {
+      summary: await service.getMcpObservabilitySummary(),
+      calls: await service.listMcpCalls(limit)
+    };
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/admin/api/traces", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const limit = Math.max(1, Math.min(Number(request.query.limit ?? 100) || 100, 1000));
+    return { traces: await service.listMcpTraces(limit) };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/traces/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    return { traceId: request.params.id, calls: await service.getMcpTrace(request.params.id) };
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/admin/api/feedback", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const limit = Math.max(1, Math.min(Number(request.query.limit ?? 200) || 200, 1000));
+    return { feedback: await service.listFeedback(limit) };
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/admin/api/knowledge-candidates", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const limit = Math.max(1, Math.min(Number(request.query.limit ?? 500) || 500, 1000));
+    return { candidates: await service.listKnowledgeCandidates(limit) };
+  });
+
+  app.post<{
+    Body: {
+      title: string;
+      content: string;
+      suggestedType?: "knowledge" | "skill";
+      repository?: string;
+      suggestedPath?: string;
+      traceId?: string;
+    };
+  }>("/admin/api/knowledge-candidates", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      reply.code(201);
+      return {
+        candidate: await service.submitKnowledgeCandidate(adminPrincipal, {
+          title: request.body.title,
+          content: request.body.content,
+          sourceType: "manual",
+          suggestedType: request.body.suggestedType ?? "knowledge",
+          repository: request.body.repository,
+          suggestedPath: request.body.suggestedPath,
+          traceId: request.body.traceId
+        })
+      };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.put<{
+    Params: { id: string };
+    Body: {
+      title?: string;
+      content?: string;
+      suggestedType?: "knowledge" | "skill";
+      repository?: string;
+      suggestedPath?: string;
+    };
+  }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { candidate: await service.updateKnowledgeCandidate(request.params.id, request.body ?? {}) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.post<{
+    Params: { id: string };
+    Body: { status: "approved" | "rejected"; reviewNote?: string };
+  }>("/admin/api/knowledge-candidates/:id/review", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!request.body || !["approved", "rejected"].includes(request.body.status)) {
+      reply.code(400);
+      return { error: "status must be approved or rejected" };
+    }
+    try {
+      return {
+        candidate: await service.reviewKnowledgeCandidate(
+          request.params.id,
+          request.body.status,
+          adminPrincipal.id,
+          request.body.reviewNote
+        )
+      };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id/publish", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { candidate: await service.publishKnowledgeCandidate(request.params.id) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get("/admin/api/knowledge-gaps", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    return { gaps: await service.listKnowledgeGaps() };
+  });
 
   const refreshManagedApiKeys = () => {
     if (apiKeyStore && apiKeyAuth instanceof ApiKeyAuthenticationProvider) {

@@ -222,7 +222,7 @@ curl http://127.0.0.1:8080/metrics
 
 At startup the Hub clones each enabled Skill repository, validates all Skills, creates a validated snapshot, and activates it atomically. The named volume preserves registry state, audit history, Git working copies, and validated revisions across container replacement.
 
-The same named volume also preserves dynamic admin configuration and managed API key hashes. Do not replace it with ephemeral container storage.
+The same named volume also preserves dynamic admin configuration, managed API key hashes, MCP observability logs, feedback and Knowledge Candidates. Do not replace it with ephemeral container storage.
 
 ### 7.1 Configure Knowledge / RAG sources
 
@@ -248,6 +248,31 @@ knowledge:
 ```
 
 Repository YAML provides bootstrap defaults. After startup these values can be edited dynamically in `/admin`; saving re-syncs the Repository and rebuilds its Knowledge index. Dynamic values persist under `<data_dir>/config/admin-config.json`.
+
+### 7.2 Configure Knowledge feedback publishing through GitLab MR
+
+Knowledge publishing is disabled by default. Enable it per Repository only after the read-only RAG path is working:
+
+```yaml
+knowledge_publishing:
+  enabled: true
+  provider: gitlab
+  base_url: https://gitlab.company.example
+  project_path: ai/rd-skills
+  token_env: GITLAB_WRITE_TOKEN
+  target_branch: master
+  branch_prefix: skill-hub-knowledge
+```
+
+Provide a separate write credential in the deployment environment:
+
+```text
+GITLAB_WRITE_TOKEN=<write-token>
+```
+
+Do not reuse the read-only sync credential. Repository sync should remain read-only; `GITLAB_WRITE_TOKEN` is used only to create/update a candidate Knowledge file on a source branch and create a Merge Request. The Hub never auto-merges the MR.
+
+Administrators can edit this configuration under `/admin -> Knowledge`. The UI reports whether the configured token environment variable is present but never exposes its value.
 
 ## 8. Configure GitLab webhooks
 
@@ -343,7 +368,7 @@ curl http://127.0.0.1:8080/health/ready
 
 No Skill repository rebuild is required. Skills remain independently versioned in GitLab.
 
-Existing deployments do not need to migrate configuration manually. Repositories without a `knowledge` block receive backward-compatible defaults, and older persisted admin configuration is normalized on load. After upgrading, verify `/admin`, `/health/ready`, and one `search_knowledge` request.
+Existing deployments do not need to migrate configuration manually. Repositories without a `knowledge` block receive backward-compatible defaults. Repositories without `knowledge_publishing` remain publishing-disabled, so upgrades never grant write capability implicitly. After upgrading, verify `/admin`, `/health/ready`, and one `search_knowledge` request.
 
 ## 13. Operational endpoints
 
@@ -357,6 +382,17 @@ GET  /admin/api/api-keys
 GET  /admin/api/knowledge
 GET  /admin/api/knowledge/search
 PUT  /admin/api/knowledge/<repository>/config
+PUT  /admin/api/knowledge/<repository>/publishing
+GET  /admin/api/observability
+GET  /admin/api/traces
+GET  /admin/api/traces/<trace-id>
+GET  /admin/api/feedback
+GET  /admin/api/knowledge-candidates
+POST /admin/api/knowledge-candidates
+PUT  /admin/api/knowledge-candidates/<id>
+POST /admin/api/knowledge-candidates/<id>/review
+POST /admin/api/knowledge-candidates/<id>/publish
+GET  /admin/api/knowledge-gaps
 GET  /audit
 POST /repositories/<id>/sync
 GET  /repositories/<id>/revisions

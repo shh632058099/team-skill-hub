@@ -20,6 +20,9 @@ http://<hub-host>:8080/admin
 - Repository 运行配置；
 - Knowledge Source / RAG 配置；
 - Knowledge 索引状态和搜索测试；
+- MCP Observability / Trace；
+- Knowledge Review Inbox 审核；
+- Knowledge Gaps 查看；
 - Revision/Webhook 等通用运行参数。
 
 动态配置保存在：
@@ -93,7 +96,7 @@ x-skill-hub-api-key: <api-key>
 
 Repository 的 `readRoles` / visibility 会在搜索结果暴露前执行权限过滤。
 
-## 5. Skill 使用
+## 6. Skill 使用
 
 常用工具：
 
@@ -114,7 +117,7 @@ Repository 的 `readRoles` / visibility 会在搜索结果暴露前执行权限�
 
 Skill 更适合表达“应该怎么做”的流程、规范和专家方法。
 
-## 6. Knowledge / RAG 使用
+## 7. Knowledge / RAG 使用
 
 Knowledge 更适合表达“当前事实是什么”，例如：
 
@@ -139,6 +142,8 @@ Knowledge 更适合表达“当前事实是什么”，例如：
 - `list_knowledge_sources`
 - `search_knowledge`
 - `get_knowledge`
+- `submit_feedback`
+- `submit_knowledge_candidate`
 
 推荐工作流：
 
@@ -150,7 +155,7 @@ Knowledge 更适合表达“当前事实是什么”，例如：
   -> 使用原文上下文回答/分析
 ```
 
-## 7. Knowledge Source 配置
+## 8. Knowledge Source 配置
 
 管理员可在 **Knowledge / RAG** 区域按 Repository 配置：
 
@@ -193,7 +198,7 @@ exclude:
 
 保存后 Hub 会立即重新同步该 Repository 并重建 Knowledge 索引。
 
-## 8. 后台测试 RAG
+## 9. 后台测试 RAG
 
 在 **Knowledge / RAG** 页面可以直接输入搜索问题，并可指定 Repository。
 
@@ -209,7 +214,57 @@ exclude:
 
 该功能适合调试 Include/Exclude 和观察 FTS5 的召回效果。
 
-## 9. Skill 与 Knowledge 的边界
+## 10. MCP Observability 与 Trace
+
+Hub 会为 MCP Tool 调用记录轻量 Trace，包括：
+
+- Tool 名称；
+- 用户 / Tenant；
+- Trace ID / Session ID（客户端提供时）；
+- 调用耗时；
+- 成功/失败；
+- 脱敏后的参数摘要。
+
+默认不会保存 API Key 明文，也不会把 Tool 的完整返回正文复制到调用日志中。
+
+管理员可以在 Web 后台的 **Observability** 页面查看调用数量、失败数、平均延迟和最近调用。
+
+## 11. 知识回流与 Web 审核
+
+知识回流遵循：
+
+```text
+MCP 使用 / 故障排查
+  -> submit_feedback / submit_knowledge_candidate
+  -> Knowledge Review Inbox
+  -> 管理员编辑标题 / 正文 / Repository / 目标路径
+  -> Approve
+  -> Publish to GitLab MR
+  -> GitLab 正常 Review / Merge
+  -> Webhook 或 Polling 触发 Repository Sync
+  -> 校验通过后重新建立 Knowledge 索引
+```
+
+Review Inbox 支持以下状态：
+
+```text
+pending
+approved
+rejected
+publishing
+published
+publish_failed
+```
+
+其中 **Approved 不等于已经进入正式知识库**。只有管理员明确点击发布后，Hub 才会使用独立的 GitLab 写凭据创建分支、提交 Markdown 并创建 Merge Request。Hub **不会自动合并 MR**；仍然使用团队正常的 GitLab Code Review / Merge 流程。
+
+发布失败会保存脱敏后的错误原因，并允许管理员修改候选内容后重试。重试是幂等的：如果候选分支和文件已经创建，Hub 会复用已有分支/打开的 MR，而不是反复制造重复提交。
+
+当前自动发布只支持 **Knowledge -> Markdown**。如果候选类型是 Skill，则继续由 Review Inbox 做人工审核，后续再通过标准 Skill 仓库流程落库。
+
+**Feedback** 页面用于查看显式正/负反馈；**Knowledge Gaps** 页面会聚合未命中查询和负反馈，帮助管理员发现高频知识缺口。
+
+## 12. Skill 与 Knowledge 的边界
 
 建议保持：
 
@@ -225,7 +280,7 @@ Knowledge = Context / 当前事实
 
 不要把全部项目文档都复制进 Skill，也不要只依赖 RAG 来表达必须遵循的工程流程。
 
-## 10. Repository 更新与一致性
+## 13. Repository 更新与一致性
 
 Repository 同步成功后，Skill/Prompt/Agent/Knowledge 会一起切换到新的 validated revision。
 
@@ -237,7 +292,7 @@ Repository 同步成功后，Skill/Prompt/Agent/Knowledge 会一起切换到新�
 
 Rollback 时 Knowledge 会跟随 Repository revision 一起回滚。
 
-## 11. 常见问题
+## 14. 常见问题
 
 ### 搜不到文档
 

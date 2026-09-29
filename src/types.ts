@@ -24,6 +24,16 @@ export interface KnowledgeSourceConfig {
   chunkOverlapChars: number;
 }
 
+export interface KnowledgePublishingConfig {
+  enabled: boolean;
+  provider: "gitlab";
+  baseUrl?: string;
+  projectPath?: string;
+  tokenEnv: string;
+  targetBranch: string;
+  branchPrefix: string;
+}
+
 export interface RepositoryConfig {
   id: string;
   name: string;
@@ -40,6 +50,7 @@ export interface RepositoryConfig {
   readRoles: string[];
   syncRoles: string[];
   knowledge?: KnowledgeSourceConfig;
+  knowledgePublishing?: KnowledgePublishingConfig;
 }
 
 export interface AppConfig {

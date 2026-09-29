@@ -74,8 +74,63 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       version: "0.1.0",
       description: "Team shared skill registry, search and routing service."
     });
+    const requestHeaders = requestInfo?.headers;
+    const traceId =
+      requestHeaders?.get("x-skill-hub-trace-id") ??
+      requestHeaders?.get("x-trace-id") ??
+      appService.newMcpTraceId();
+    const sessionId =
+      requestHeaders?.get("x-skill-hub-session-id") ??
+      requestHeaders?.get("mcp-session-id") ??
+      undefined;
+    const client =
+      requestHeaders?.get("x-skill-hub-client") ??
+      requestHeaders?.get("user-agent") ??
+      undefined;
 
-    server.registerTool(
+    const registerTool = (
+      name: string,
+      definition: any,
+      handler: (...args: any[]) => Promise<any>
+    ) =>
+      server.registerTool(name, definition as any, async (...args: any[]) => {
+        const started = performance.now();
+        try {
+          const result = await handler(...args);
+          const call = await appService.recordMcpCall({
+            traceId,
+            sessionId,
+            client,
+            tool: name,
+            args: args[0],
+            latencyMs: performance.now() - started,
+            success: true,
+            principal
+          });
+          if (result?.structuredContent && typeof result.structuredContent === "object") {
+            result.structuredContent = {
+              ...result.structuredContent,
+              _trace: { trace_id: traceId, call_id: call.id }
+            };
+          }
+          return result;
+        } catch (error) {
+          await appService.recordMcpCall({
+            traceId,
+            sessionId,
+            client,
+            tool: name,
+            args: args[0],
+            latencyMs: performance.now() - started,
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+            principal
+          });
+          throw error;
+        }
+      });
+
+    registerTool(
       "get_server_info",
       {
         description: "Return Team Skill Hub version and capabilities.",
@@ -112,12 +167,15 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             "evaluation-framework",
             "golden-task-regression",
             "knowledge-registry",
-            "knowledge-fts5-rag"
+            "knowledge-fts5-rag",
+            "mcp-observability",
+            "feedback-loop",
+            "knowledge-candidate-inbox"
           ]
         })
     );
 
-    server.registerTool(
+    registerTool(
       "list_skill_repositories",
       {
         description: "List skill repositories visible to the current caller.",
@@ -126,7 +184,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       async () => toolResult({ repositories: appService.listRepositories(principal) })
     );
 
-    server.registerTool(
+    registerTool(
       "list_skills",
       {
         description: "List visible skills with optional metadata filters.",
@@ -136,7 +194,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult({ skills: appService.listSkills(filters, principal).map(compactSkill) })
     );
 
-    server.registerTool(
+    registerTool(
       "search_skills",
       {
         description: "Search team skills by natural-language query and metadata.",
@@ -156,7 +214,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "resolve_skill",
       {
         description: "Choose the best matching team skill for a task.",
@@ -185,7 +243,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       }
     );
 
-    server.registerTool(
+    registerTool(
       "get_skill",
       {
         description: "Load the complete SKILL.md for a selected skill.",
@@ -203,7 +261,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       }
     );
 
-    server.registerTool(
+    registerTool(
       "get_skill_resource",
       {
         description: "Load a referenced text resource from a selected skill.",
@@ -222,7 +280,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "list_knowledge_sources",
       {
         description: "List repository knowledge documents visible to the current caller.",
@@ -249,7 +307,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       }
     );
 
-    server.registerTool(
+    registerTool(
       "search_knowledge",
       {
         description: "Search internal repository documentation and text knowledge. Use this for current project facts, designs, APIs, troubleshooting notes, and other document-grounded context.",
@@ -274,7 +332,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "get_knowledge",
       {
         description: "Load a visible knowledge document or one exact chunk after search_knowledge selects it.",
@@ -307,7 +365,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       }
     );
 
-    server.registerTool(
+    registerTool(
       "list_prompts",
       {
         description: "List visible reusable prompts.",
@@ -317,7 +375,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult({ prompts: appService.listPrompts(client, principal).map(compactPrompt) })
     );
 
-    server.registerTool(
+    registerTool(
       "search_prompts",
       {
         description: "Search reusable prompts by task or keywords.",
@@ -337,7 +395,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "get_prompt",
       {
         description: "Load the complete reusable PROMPT.md.",
@@ -349,7 +407,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       }
     );
 
-    server.registerTool(
+    registerTool(
       "list_agents",
       {
         description: "List visible team Agent manifests.",
@@ -359,7 +417,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult({ agents: appService.listAgents(client, principal).map(compactAgent) })
     );
 
-    server.registerTool(
+    registerTool(
       "search_agents",
       {
         description: "Search team Agents by task or keywords.",
@@ -379,7 +437,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "resolve_agent",
       {
         description: "Resolve the best matching team Agent for a task.",
@@ -403,7 +461,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       }
     );
 
-    server.registerTool(
+    registerTool(
       "get_agent",
       {
         description: "Load one team Agent manifest including its Skill/Prompt/Tool bindings.",
@@ -413,7 +471,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult(compactAgent(appService.getAgent(repository, name, principal)))
     );
 
-    server.registerTool(
+    registerTool(
       "list_evaluation_suites",
       {
         description: "List deterministic golden evaluation suites for a visible repository/revision.",
@@ -430,7 +488,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "run_evaluation",
       {
         description: "Run one deterministic golden evaluation suite against a validated revision.",
@@ -453,7 +511,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         )
     );
 
-    server.registerTool(
+    registerTool(
       "list_evaluation_runs",
       {
         description: "List persisted evaluation runs visible to the caller.",
@@ -474,7 +532,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "get_evaluation_run",
       {
         description: "Get one persisted evaluation run by id.",
@@ -484,7 +542,61 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult(await appService.getEvaluationRun(run_id, principal))
     );
 
-    server.registerTool(
+    registerTool(
+      "submit_feedback",
+      {
+        description: "Submit explicit feedback about an MCP result, Skill, Knowledge document, Prompt, or Agent.",
+        inputSchema: z.object({
+          trace_id: z.string().min(1).optional(),
+          call_id: z.string().min(1).optional(),
+          target_type: z.enum(["skill", "knowledge", "prompt", "agent", "mcp-call"]),
+          target: z.string().min(1).optional(),
+          rating: z.enum(["positive", "negative"]),
+          reason: z.string().max(2000).optional()
+        })
+      },
+      async ({ trace_id, call_id, target_type, target, rating, reason }) =>
+        toolResult({
+          feedback: await appService.submitFeedback(principal, {
+            traceId: trace_id,
+            callId: call_id,
+            targetType: target_type,
+            target,
+            rating,
+            reason
+          })
+        })
+    );
+
+    registerTool(
+      "submit_knowledge_candidate",
+      {
+        description: "Submit a candidate team Knowledge/Skill item for human review. This never publishes directly to Git.",
+        inputSchema: z.object({
+          trace_id: z.string().min(1).optional(),
+          title: z.string().min(1).max(200),
+          content: z.string().min(1).max(10000),
+          source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
+          suggested_type: z.enum(["knowledge", "skill"]).optional(),
+          repository: z.string().min(1).optional(),
+          suggested_path: z.string().min(1).optional()
+        })
+      },
+      async ({ trace_id, title, content, source_type, suggested_type, repository, suggested_path }) =>
+        toolResult({
+          candidate: await appService.submitKnowledgeCandidate(principal, {
+            traceId: trace_id,
+            title,
+            content,
+            sourceType: source_type ?? "mcp-session",
+            suggestedType: suggested_type ?? "knowledge",
+            repository,
+            suggestedPath: suggested_path
+          })
+        })
+    );
+
+    registerTool(
       "sync_skill_repository",
       {
         description: "Synchronize one configured skill repository and activate it only after validation.",
@@ -496,7 +608,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult(await appService.syncRepository(repository, "manual", principal))
     );
 
-    server.registerTool(
+    registerTool(
       "list_repository_revisions",
       {
         description: "List validated revisions available for a visible repository.",
@@ -509,7 +621,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         })
     );
 
-    server.registerTool(
+    registerTool(
       "rollback_repository_revision",
       {
         description: "Rollback a repository to a previously validated revision. Requires sync permission.",
@@ -522,7 +634,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         toolResult(await appService.rollbackRepositoryRevision(repository, revision, principal))
     );
 
-    server.registerTool(
+    registerTool(
       "list_sync_audit",
       {
         description: "List recent repository synchronization audit events.",

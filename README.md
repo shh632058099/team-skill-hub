@@ -198,6 +198,8 @@ Useful tools:
 - `list_knowledge_sources`
 - `search_knowledge`
 - `get_knowledge`
+- `submit_feedback`
+- `submit_knowledge_candidate`
 
 Example request:
 
@@ -243,6 +245,22 @@ Knowledge retrieval uses SQLite FTS5 plus metadata/manual scoring. Repository
 read-role filtering is applied before results are exposed. Use
 `search_knowledge` to retrieve relevant chunks and `get_knowledge` for the
 selected document/chunk.
+
+## MCP observability and knowledge feedback loop
+
+All MCP tools are registered through a common tracing wrapper. The Hub records
+tool name, caller identity, trace/session identifiers when available, latency,
+success/failure, and sanitized argument summaries. Secrets and API keys are
+redacted and full tool response bodies are not duplicated into call logs.
+
+Developers can submit explicit result feedback with `submit_feedback`, or send a
+new `submit_knowledge_candidate` item to the human review queue. The `/admin`
+console exposes Observability, Feedback, Review Inbox, and Knowledge Gaps views.
+Administrators can edit and approve a Knowledge candidate, then publish it through
+a GitLab branch + commit + Merge Request. The Hub never merges directly; after the
+normal GitLab review/merge, the existing repository sync path validates and reindexes
+Knowledge. A separate write token is used for publishing so repository sync can stay
+read-only.
 
 ## Deterministic Evaluation
 
