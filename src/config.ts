@@ -119,10 +119,6 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       ])
     );
   }
-  if (authMode === "api-key" && Object.keys(apiKeys).length === 0) {
-    throw new Error("AUTH_MODE=api-key requires SKILL_HUB_API_KEYS_JSON");
-  }
-
   return {
     host: process.env.HOST ?? raw.server?.host ?? "0.0.0.0",
     port: Number(process.env.PORT ?? raw.server?.port ?? 8080),

@@ -3,8 +3,18 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import type { AppConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
+import { ADMIN_HTML } from "./admin-ui.js";
+import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
+import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
+import { ApiKeyAuthenticationProvider } from "./security.js";
 
-export async function startServer(config: AppConfig, service: SkillHubApplicationService) {
+export async function startServer(
+  config: AppConfig,
+  service: SkillHubApplicationService,
+  adminConfigStore?: AdminConfigStore,
+  apiKeyStore?: ManagedApiKeyStore,
+  apiKeyAuth?: ApiKeyAuthenticationProvider
+) {
   const adminPrincipal = {
     id: "admin-http",
     roles: ["admin", "developer", "internal", "customer"],
@@ -18,6 +28,153 @@ export async function startServer(config: AppConfig, service: SkillHubApplicatio
   });
   const mcpHandler = createSkillHubMcpHandler(service);
   const nodeHandler = toNodeHandler(mcpHandler);
+
+  const hasAdminAccess = (request: { headers: Record<string, unknown> }) => {
+    const adminKey = process.env.ADMIN_API_KEY;
+    return Boolean(adminKey && request.headers["x-skill-hub-admin-key"] === adminKey);
+  };
+
+  app.get("/admin", async (_request, reply) => {
+    reply.type("text/html; charset=utf-8");
+    return ADMIN_HTML;
+  });
+
+  app.get("/admin/api/config", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    return {
+      config: editableConfigFromApp(config),
+      bootstrap: {
+        adminKeyConfigured: Boolean(process.env.ADMIN_API_KEY),
+        webhookSecretConfigured: Boolean(process.env.GITLAB_WEBHOOK_TOKEN ?? process.env.WEBHOOK_SECRET),
+        gitlabTokenConfigured: Boolean(process.env.GITLAB_TOKEN)
+      }
+    };
+  });
+
+  app.put<{ Body: AdminEditableConfig }>("/admin/api/config", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!adminConfigStore) {
+      reply.code(503);
+      return { error: "dynamic admin configuration is unavailable" };
+    }
+    try {
+      const normalized = await adminConfigStore.save(request.body);
+      const next: AppConfig = {
+        ...config,
+        defaultRoles: [...config.defaultRoles],
+        authentication: config.authentication,
+        repositories: config.repositories
+      };
+      applyAdminConfig(next, normalized);
+      service.applyRuntimeConfig(next);
+      const syncResults = await Promise.all(
+        service.repositoryIds().map(async (repositoryId) => {
+          try {
+            const state = await service.syncRepository(repositoryId, "manual", adminPrincipal);
+            return { repository: repositoryId, ok: true, state };
+          } catch (error) {
+            return {
+              repository: repositoryId,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error)
+            };
+          }
+        })
+      );
+      return { saved: true, config: editableConfigFromApp(config), syncResults };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  const refreshManagedApiKeys = () => {
+    if (apiKeyStore && apiKeyAuth instanceof ApiKeyAuthenticationProvider) {
+      apiKeyAuth.replaceManagedKeys(apiKeyStore.snapshot());
+    }
+  };
+
+  app.get("/admin/api/api-keys", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!apiKeyStore || !(apiKeyAuth instanceof ApiKeyAuthenticationProvider)) {
+      reply.code(503);
+      return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
+    }
+    return { keys: apiKeyStore.list() };
+  });
+
+  app.post<{ Body: ManagedApiKeyCreateInput }>("/admin/api/api-keys", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!apiKeyStore || !(apiKeyAuth instanceof ApiKeyAuthenticationProvider)) {
+      reply.code(503);
+      return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
+    }
+    try {
+      const created = await apiKeyStore.create(request.body);
+      refreshManagedApiKeys();
+      reply.code(201);
+      return {
+        key: created.record,
+        apiKey: created.apiKey,
+        warning: "This API key is shown only once. Copy it now."
+      };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: ManagedApiKeyUpdateInput }>(
+    "/admin/api/api-keys/:id",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      if (!apiKeyStore || !(apiKeyAuth instanceof ApiKeyAuthenticationProvider)) {
+        reply.code(503);
+        return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
+      }
+      try {
+        const key = await apiKeyStore.update(request.params.id, request.body);
+        refreshManagedApiKeys();
+        return { key };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/admin/api/api-keys/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!apiKeyStore || !(apiKeyAuth instanceof ApiKeyAuthenticationProvider)) {
+      reply.code(503);
+      return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
+    }
+    const deleted = await apiKeyStore.delete(request.params.id);
+    if (!deleted) {
+      reply.code(404);
+      return { error: "API key not found" };
+    }
+    refreshManagedApiKeys();
+    return { deleted: true };
+  });
 
   app.all("/mcp", async (request, reply) => {
     const headers = new Headers();

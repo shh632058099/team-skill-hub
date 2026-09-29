@@ -25,12 +25,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY config ./config
 COPY scripts ./scripts
+RUN chmod +x /app/scripts/docker-entrypoint.sh
 
 RUN useradd --create-home --uid 10001 skillhub \
     && mkdir -p /var/lib/team-skill-hub /skills \
     && chown -R skillhub:skillhub /app /var/lib/team-skill-hub /skills
-
-USER skillhub
 
 ENV HOST=0.0.0.0
 ENV PORT=8080
@@ -42,4 +41,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["node", "dist/src/index.js"]

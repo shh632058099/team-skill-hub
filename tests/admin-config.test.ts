@@ -1,0 +1,97 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  AdminConfigStore,
+  applyAdminConfig,
+  editableConfigFromApp,
+  validateAdminConfig
+} from "../src/admin-config.js";
+import type { AppConfig } from "../src/types.js";
+
+function baseConfig(dataDir: string): AppConfig {
+  return {
+    host: "127.0.0.1",
+    port: 8080,
+    dataDir,
+    defaultRoles: ["developer"],
+    authentication: { mode: "development", apiKeys: {} },
+    revisionRetentionMax: 20,
+    webhookDedupMaxEntries: 1000,
+    webhookDedupTtlSeconds: 604800,
+    repositories: []
+  };
+}
+
+test("admin config persists and overlays runtime configuration", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-"));
+  try {
+    const config = baseConfig(dir);
+    const store = new AdminConfigStore(dir);
+    const saved = await store.save({
+      defaultRoles: ["developer", "internal"],
+      revisionRetentionMax: 8,
+      webhookDedupMaxEntries: 500,
+      webhookDedupTtlSeconds: 7200,
+      repositories: [
+        {
+          id: "rd-skills",
+          name: "RD Skills",
+          provider: "git",
+          gitUrl: "git@example.invalid:ai/rd-skills.git",
+          branch: "master",
+          gitAuth: { type: "none" },
+          webhookAliases: ["rd-skills"],
+          enabled: true,
+          audience: ["developer"],
+          visibility: ["internal"],
+          pollingIntervalSeconds: 120,
+          readRoles: ["developer"],
+          syncRoles: ["admin"]
+        }
+      ]
+    });
+    applyAdminConfig(config, saved);
+
+    const restarted = baseConfig(dir);
+    assert.equal(await store.load(restarted), true);
+    assert.deepEqual(editableConfigFromApp(restarted), editableConfigFromApp(config));
+
+    const persisted = JSON.parse(
+      await readFile(path.join(dir, "config", "admin-config.json"), "utf8")
+    );
+    assert.equal(persisted.repositories[0].id, "rd-skills");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("admin config rejects duplicate repository ids", () => {
+  const repository = {
+    id: "same",
+    name: "Same",
+    provider: "git" as const,
+    gitUrl: "git@example.invalid:ai/same.git",
+    gitAuth: { type: "none" as const },
+    webhookAliases: [],
+    enabled: true,
+    audience: ["developer"],
+    visibility: ["internal"],
+    pollingIntervalSeconds: 60,
+    readRoles: ["developer"],
+    syncRoles: ["admin"]
+  };
+  assert.throws(
+    () =>
+      validateAdminConfig({
+        defaultRoles: [],
+        revisionRetentionMax: 20,
+        webhookDedupMaxEntries: 1000,
+        webhookDedupTtlSeconds: 604800,
+        repositories: [repository, { ...repository }]
+      }),
+    /Duplicate repository id/
+  );
+});

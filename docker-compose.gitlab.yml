@@ -8,6 +8,7 @@ services:
     image: ${SKILL_HUB_IMAGE:-team-skill-hub:local}
     container_name: team-skill-hub
     restart: unless-stopped
+    user: "0:0"
     ports:
       - "${SKILL_HUB_PORT:-8080}:8080"
     environment:
@@ -16,7 +17,7 @@ services:
       CONFIG_PATH: /app/config/repositories.yaml
       DATA_DIR: /var/lib/team-skill-hub
       AUTH_MODE: ${AUTH_MODE:-api-key}
-      SKILL_HUB_API_KEYS_JSON: ${SKILL_HUB_API_KEYS_JSON:?set SKILL_HUB_API_KEYS_JSON}
+      SKILL_HUB_API_KEYS_JSON: ${SKILL_HUB_API_KEYS_JSON:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY}
       GITLAB_WEBHOOK_TOKEN: ${GITLAB_WEBHOOK_TOKEN:?set GITLAB_WEBHOOK_TOKEN}
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
@@ -42,9 +43,9 @@ services:
 
 secrets:
   gitlab_ssh_key:
-    file: ${GITLAB_SSH_KEY_FILE:-./secrets/gitlab_skillhub_ed25519}
+    file: ${GITLAB_SSH_KEY_FILE:-/root/.ssh/id_ed25519}
   gitlab_known_hosts:
-    file: ${GITLAB_KNOWN_HOSTS_FILE:-./secrets/gitlab_known_hosts}
+    file: ${GITLAB_KNOWN_HOSTS_FILE:-/root/.ssh/known_hosts}
 
 volumes:
   skill-hub-data:

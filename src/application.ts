@@ -212,6 +212,43 @@ export class SkillHubApplicationService {
     return [...this.states.values()];
   }
 
+  applyRuntimeConfig(next: AppConfig): void {
+    const previousIds = new Set(this.config.repositories.map((repository) => repository.id));
+    this.config.defaultRoles = [...next.defaultRoles];
+    this.config.revisionRetentionMax = next.revisionRetentionMax;
+    this.config.webhookDedupMaxEntries = next.webhookDedupMaxEntries;
+    this.config.webhookDedupTtlSeconds = next.webhookDedupTtlSeconds;
+    this.config.repositories = next.repositories.map((repository) => ({
+      ...repository,
+      gitAuth: { ...repository.gitAuth },
+      webhookAliases: [...repository.webhookAliases],
+      audience: [...repository.audience],
+      visibility: [...repository.visibility],
+      readRoles: [...repository.readRoles],
+      syncRoles: [...repository.syncRoles]
+    }));
+    const nextIds = new Set(this.config.repositories.map((repository) => repository.id));
+    for (const repository of this.config.repositories) {
+      const state = this.states.get(repository.id);
+      if (!state) {
+        this.states.set(repository.id, {
+          id: repository.id,
+          status: repository.enabled ? "syncing" : "disabled",
+          skillCount: 0,
+          failureCount: 0
+        });
+      } else if (!repository.enabled) {
+        state.status = "disabled";
+      } else if (state.status === "disabled") {
+        state.status = "syncing";
+      }
+    }
+    for (const id of previousIds) {
+      if (!nextIds.has(id)) this.states.delete(id);
+    }
+    this.ready = this.registry.list().length > 0 || this.config.repositories.length === 0;
+  }
+
   repositoryIds(): string[] {
     return this.config.repositories.filter((repo) => repo.enabled).map((repo) => repo.id);
   }

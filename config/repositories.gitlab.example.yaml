@@ -16,15 +16,15 @@ repositories:
     name: R&D Skills
     provider: git
     git_url: git@gitlab.company.example:ai/rd-skills.git
-    branch: main
+    branch: master
     enabled: true
     webhook_aliases:
       - ai/rd-skills
       - rd-skills
     git_auth:
       type: ssh
-      ssh_key_path: /run/secrets/gitlab_ssh_key
-      known_hosts_path: /run/secrets/gitlab_known_hosts
+      ssh_key_path: /tmp/gitlab_ssh_key
+      known_hosts_path: /tmp/gitlab_known_hosts
     audience:
       - developer
     visibility:
@@ -43,15 +43,15 @@ repositories:
     name: Customer Skills
     provider: git
     git_url: git@gitlab.company.example:ai/customer-skills.git
-    branch: main
+    branch: master
     enabled: true
     webhook_aliases:
       - ai/customer-skills
       - customer-skills
     git_auth:
       type: ssh
-      ssh_key_path: /run/secrets/gitlab_ssh_key
-      known_hosts_path: /run/secrets/gitlab_known_hosts
+      ssh_key_path: /tmp/gitlab_ssh_key
+      known_hosts_path: /tmp/gitlab_known_hosts
     audience:
       - customer
       - fae
