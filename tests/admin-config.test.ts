@@ -21,7 +21,8 @@ function baseConfig(dataDir: string): AppConfig {
     revisionRetentionMax: 20,
     webhookDedupMaxEntries: 1000,
     webhookDedupTtlSeconds: 604800,
-    repositories: []
+    repositories: [],
+    projects: []
   };
 }
 
@@ -61,6 +62,20 @@ test("admin config persists and overlays runtime configuration", async () => {
             branchPrefix: "skill-hub-knowledge"
           }
         }
+      ],
+      projects: [
+        {
+          id: "ota-platform",
+          name: "OTA Platform",
+          repositoryPatterns: ["rd-skills"],
+          owners: ["ota-team"],
+          preferredSkillRepositories: ["rd-skills"],
+          preferredKnowledgeRepositories: ["rd-skills"],
+          tools: ["gitlab"],
+          environments: ["dev", "prod"],
+          product: "ota",
+          aliases: ["ota-runtime"]
+        }
       ]
     });
     applyAdminConfig(config, saved);
@@ -77,9 +92,38 @@ test("admin config persists and overlays runtime configuration", async () => {
     assert.deepEqual(saved.repositories[0]?.knowledge?.include, ["**/*.md", "**/*.txt", "**/*.pdf", "**/*.docx"]);
     assert.equal(saved.repositories[0]?.knowledgePublishing?.tokenEnv, "GITLAB_WRITE_TOKEN");
     assert.equal(restarted.repositories[0]?.knowledgePublishing?.enabled, true);
+    assert.equal(saved.projects[0]?.id, "ota-platform");
+    assert.deepEqual(restarted.projects?.[0]?.owners, ["ota-team"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("admin config rejects unknown project preferred repositories", () => {
+  assert.throws(
+    () =>
+      validateAdminConfig({
+        defaultRoles: [],
+        revisionRetentionMax: 20,
+        webhookDedupMaxEntries: 1000,
+        webhookDedupTtlSeconds: 604800,
+        repositories: [],
+        projects: [
+          {
+            id: "ota",
+            name: "OTA",
+            repositoryPatterns: ["ota-*"],
+            owners: [],
+            preferredSkillRepositories: ["missing-skills"],
+            preferredKnowledgeRepositories: [],
+            tools: [],
+            environments: [],
+            aliases: []
+          }
+        ]
+      }),
+    /unknown preferred repository/
+  );
 });
 
 test("admin config rejects duplicate repository ids", () => {
@@ -104,7 +148,8 @@ test("admin config rejects duplicate repository ids", () => {
         revisionRetentionMax: 20,
         webhookDedupMaxEntries: 1000,
         webhookDedupTtlSeconds: 604800,
-        repositories: [repository, { ...repository }]
+        repositories: [repository, { ...repository }],
+        projects: []
       }),
     /Duplicate repository id/
   );

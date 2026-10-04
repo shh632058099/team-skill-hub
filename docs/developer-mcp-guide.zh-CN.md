@@ -47,6 +47,11 @@ Linux / macOS / WSL：
 ~~~bash
 bash scripts/setup-codex-mcp.sh \
   --url https://<skill-hub-host>/mcp
+
+# 可选：只保留 Hooks/Observability，关闭自动知识候选
+bash scripts/setup-codex-mcp.sh \
+  --url https://<skill-hub-host>/mcp \
+  --no-auto-knowledge
 ~~~
 
 Windows PowerShell：
@@ -54,14 +59,33 @@ Windows PowerShell：
 ~~~powershell
 .\scripts\setup-codex-mcp.ps1 `
   -Url https://<skill-hub-host>/mcp
+
+# 可选：关闭自动知识候选
+.\scripts\setup-codex-mcp.ps1 `
+  -Url https://<skill-hub-host>/mcp `
+  -NoAutoKnowledge
+
+# 已安装机器升级 Hook Runtime，无需再次填写 URL
+.\scripts\setup-codex-mcp.ps1 -Upgrade
 ~~~
 
-脚本会自动完成两件事：
+脚本会自动完成四件事：
 
 1. 更新 `~/.codex/config.toml` 中的 `teamSkillHub` MCP Server 地址；
-2. 创建或更新 **全局 `~/.codex/AGENTS.md`**，告诉 Codex 在所有工程中适合的任务里主动使用 Team Skill Hub。
+2. 创建或更新 **全局 `~/.codex/AGENTS.md`**，告诉 Codex 在所有工程中适合的任务里主动使用 Team Skill Hub；
+3. 安装 Team Skill Hub Hook Runtime 到 `~/.codex/hooks/`；
+4. 幂等合并 `~/.codex/hooks.json`，保留用户已有 Hook，只维护 Team Skill Hub 自己的 handler。
 
 全局 `~/.codex/AGENTS.md` 中的 Team Skill Hub 内容使用 BEGIN/END 标记管理，因此重复执行脚本不会重复追加，也不会覆盖用户已经存在的其他全局指令。
+
+当前预注册的 Hook 入口包括：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`PreCompact`、`PostCompact`、`Stop`、`SessionEnd`。V1 真正启用 `SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop`、`SessionEnd`；`PreToolUse`、`PreCompact`、`PostCompact` 已保留配置入口，但使用 reserved matcher 暂不执行，避免普通用户每次工具调用承担额外进程开销。
+
+已启用 Hook 使用异步、fail-open 的轻量 Runtime。默认安装只上报白名单生命周期元数据，不上传用户 Prompt、transcript 正文、工具完整输入输出或文件正文；Hub 不可用也不会阻塞 Codex。`PostToolUse` 只从结构化 Tool Response 中提取 `exit_code / success / tests_passed / tests_failed / duration / status` 等小型 Evidence，不上传 stdout 或完整 Tool Response。
+
+自动知识回流 **默认开启**。Stop Hook 会读取 `last_assistant_message`，在用户机器上先做 Token/密码/API Key/邮箱脱敏，再截断到最多 4000 字符后上传；服务端还会再次脱敏。自动 Detector 只有在同一 Session 内同时看到工程动作和明确的测试通过 Evidence 时，才创建 `codex-summary` Knowledge Candidate；候选仍然进入 Web Review Inbox，不会自动发布或自动 Merge。若只希望启用 Hooks/Observability，可用 `--no-auto-knowledge`（PowerShell 为 `-NoAutoKnowledge`）关闭自动候选。
+Hook Runtime 会在每个生命周期事件中上报 `runtime_version` 和 `hook_schema_version`。Admin Web 的 Session 列表会显示 `current / outdated / unknown`，便于发现团队成员的旧 Runtime。已安装机器可以直接运行 `bash scripts/setup-codex-mcp.sh --upgrade` 或 `.\scripts\setup-codex-mcp.ps1 -Upgrade`；脚本会复用已有 Hub URL、Server Name、API Key 环境变量和自动 Knowledge 开关，除非本次命令显式覆盖。
+
+MCP Call 与 Hook Session 会合并到同一个 Codex Session Timeline。若同一用户当前只有一个活跃 Codex Session，Hub 可以自动把 MCP Call 关联到该 Session；如果并发存在多个 Session，则不猜测归属，除非客户端显式发送 `x-skill-hub-session-id`。
 
 脚本不会把 API Key 明文写进 `config.toml` 或项目仓库。Codex 配置只引用环境变量 `TEAM_SKILL_HUB_API_KEY`。
 
@@ -151,8 +175,8 @@ codex mcp list
 当任务可能受益于团队特定的工程知识时，
 在开始实质性工作前优先使用 teamSkillHub MCP。
 
-首先搜索或解析适合当前任务的 Skill 或 Agent。
-仅在需要时加载选中的 Skill/Prompt。
+优先使用 `discover` 一次发现适合当前任务的 Skill、Knowledge、Prompt 和 Agent。
+只加载真正选中的资产；需要进一步收窄某一类结果时再使用对应的 search 工具。
 按需逐步加载引用资源，不要一次性加载所有内容。
 
 当团队领域资产和通用指导同时存在时，优先使用团队领域资产。
@@ -163,6 +187,8 @@ codex mcp list
 Codex 会先加载 `~/.codex/AGENTS.md` 的全局指令，再叠加当前项目目录中的 `AGENTS.md`。因此 Team Skill Hub 这种跨项目的通用规则放在全局文件中更合适。
 
 ## 7. 开发者可以使用的主要资产
+
+普通复杂任务建议先调用 `discover`，一次获得 Skill、Knowledge、Prompt、Agent 和 Tool 候选，再只加载真正需要的资产。
 
 ### Skill
 
@@ -211,6 +237,39 @@ get_agent
 
 Hub 不负责选择或代理语言模型，模型仍由开发客户端自己使用。
 
+### Tool
+
+Tool Registry 保存的是**工具能力元数据**，不是凭据本身。Repository 中通过 `TOOL.yaml` 声明工具：
+
+~~~yaml
+schema_version: 1
+name: git
+description: Git source control repository operations.
+type: cli
+metadata:
+  audience: [developer]
+  visibility: [internal]
+  keywords: [git, repository]
+  owner: platform-team
+  compatibility:
+    codex: true
+environments: [development, ci]
+capabilities: [status, diff, commit]
+authentication:
+  type: environment
+  reference: GIT_CREDENTIAL_HELPER
+~~~
+
+常用 MCP 工具：
+
+~~~text
+list_tools
+search_tools
+get_tool
+~~~
+
+`authentication.reference` 只能保存环境变量名、Credential ID 等引用，不允许把 Token、Password、Secret 或 API Key 值写进 `TOOL.yaml`。Agent 中引用本 Repository 的 Tool 时，如果对应 `TOOL.yaml` 不存在，Repository 校验会失败。
+
 ### Knowledge / RAG
 
 Knowledge 用于保存“当前事实”，而不是可复用流程。当前可以从 Repository 中索引 Markdown、TXT、文字型 PDF 和 DOCX。
@@ -230,6 +289,8 @@ Chunk 或完整文档。当前不做 OCR，因此纯扫描图片 PDF 不会产�
 如果检索到的团队资产已经明显过期或错误，可以使用 `submit_feedback` 提交简短、可验证的原因。
 
 如果当前任务产生了**稳定、可复用、已经验证**的新团队知识，而 Hub 中尚不存在，可以使用 `submit_knowledge_candidate` 提交候选内容。候选只会进入 Web Review Inbox，不会由开发者客户端直接写 Git 或发布。不要提交密码、Token、客户敏感数据或未经验证的推测。
+
+Markdown Knowledge 可以使用可选 frontmatter 声明 `owner`、`status`、`tags`、`valid_from`、`valid_until` 和 `supersedes`。这些生命周期 metadata 会随 Knowledge 搜索/读取结果返回；`deprecated`、`superseded`、`expired`、`archived` 默认不参与正常搜索，未来未生效或已超过 `valid_until` 的内容也会被过滤，`draft` 会降权。frontmatter 本身不会进入正文检索内容。
 
 ## 8. 日常典型工作流
 
@@ -450,6 +511,22 @@ if ($env:TEAM_SKILL_HUB_API_KEY) { "configured" } else { "missing" }
 
 不要把真实 API Key 打印或粘贴到聊天、日志、工单或源码中。
 
+### Hook Runtime 显示 outdated
+
+管理员在 Web 的 Observability → Codex Sessions 中可以看到 Runtime 版本。如果状态是 `outdated`，重新执行安装脚本的升级模式：
+
+~~~bash
+bash scripts/setup-codex-mcp.sh --upgrade
+~~~
+
+Windows PowerShell：
+
+~~~powershell
+.\scripts\setup-codex-mcp.ps1 -Upgrade
+~~~
+
+升级不会要求重新输入已保存的 Hub URL，也不会默认重置现有的 Auto Knowledge 开关。升级后重新启动 Codex，让新 Hook Runtime 生效。
+
 ### MCP 已配置但不可达
 
 确认机器可以访问：
@@ -525,6 +602,7 @@ codex mcp list
 ~~~text
 get_server_info
 list_skill_repositories
+discover
 search_skills
 resolve_skill
 get_skill
@@ -534,6 +612,8 @@ get_prompt
 search_agents
 resolve_agent
 get_agent
+search_tools
+get_tool
 list_evaluation_suites
 run_evaluation
 ~~~
@@ -541,6 +621,6 @@ run_evaluation
 进入项目后的推荐首条指令：
 
 ~~~text
-在开始实质性工作之前，使用 teamSkillHub 检查当前任务是否存在相关的
-团队 Skill 或 Agent。如果存在，加载并按照它执行。
+在开始实质性工作之前，先使用 teamSkillHub 的 discover 检查当前任务是否存在相关的
+Skill、Knowledge、Prompt、Agent 或 Tool。只加载真正相关的资产并按照它执行。
 ~~~

@@ -26,7 +26,12 @@ export class UsageAnalyticsStore {
     if (!query) return undefined;
     return query
       .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
-      .replace(/(?:sk-|ghp_|glpat-)[A-Za-z0-9_-]{12,}/g, "[redacted-token]")
+      .replace(/(?:skh_|sk-|ghp_|glpat-)[A-Za-z0-9_-]{8,}/g, "[redacted-token]")
+      .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted-aws-key]")
+      .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+      .replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g, "[redacted-jwt]")
+      .replace(/\b((?:https?|ssh|git):\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@")
+      .replace(/\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s]+/gi, "[redacted-connection-string]")
       .slice(0, 500);
   }
 

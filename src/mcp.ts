@@ -59,6 +59,28 @@ function compactAgent(agent: ReturnType<SkillHubApplicationService["listAgents"]
   };
 }
 
+function compactTool(tool: ReturnType<SkillHubApplicationService["listTools"]>[number]) {
+  return {
+    name: tool.name,
+    repository: tool.repositoryId,
+    revision: tool.revision,
+    version: tool.version,
+    description: tool.description,
+    path: tool.relativePath,
+    type: tool.type,
+    owner: tool.owner,
+    audience: tool.audience,
+    visibility: tool.visibility,
+    keywords: tool.keywords,
+    environments: tool.environments,
+    capabilities: tool.capabilities,
+    permissions: tool.permissions,
+    endpoints: tool.endpoints,
+    authentication: tool.authentication,
+    compatibility: tool.compatibility
+  };
+}
+
 function toolResult(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -75,14 +97,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       description: "Team shared skill registry, search and routing service."
     });
     const requestHeaders = requestInfo?.headers;
-    const traceId =
+    const explicitTraceId =
       requestHeaders?.get("x-skill-hub-trace-id") ??
       requestHeaders?.get("x-trace-id") ??
-      appService.newMcpTraceId();
-    const sessionId =
-      requestHeaders?.get("x-skill-hub-session-id") ??
-      requestHeaders?.get("mcp-session-id") ??
       undefined;
+    const traceId = explicitTraceId ?? appService.newMcpTraceId();
+    const sessionId = requestHeaders?.get("x-skill-hub-session-id") ?? undefined;
+    const transportSessionId = requestHeaders?.get("mcp-session-id") ?? undefined;
     const client =
       requestHeaders?.get("x-skill-hub-client") ??
       requestHeaders?.get("user-agent") ??
@@ -99,7 +120,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           const result = await handler(...args);
           const call = await appService.recordMcpCall({
             traceId,
+            traceExplicit: Boolean(explicitTraceId),
             sessionId,
+            transportSessionId,
             client,
             tool: name,
             args: args[0],
@@ -110,14 +133,16 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           if (result?.structuredContent && typeof result.structuredContent === "object") {
             result.structuredContent = {
               ...result.structuredContent,
-              _trace: { trace_id: traceId, call_id: call.id }
+              _trace: { trace_id: call.traceId, session_id: call.sessionId, call_id: call.id }
             };
           }
           return result;
         } catch (error) {
           await appService.recordMcpCall({
             traceId,
+            traceExplicit: Boolean(explicitTraceId),
             sessionId,
+            transportSessionId,
             client,
             tool: name,
             args: args[0],
@@ -171,8 +196,134 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             "mcp-observability",
             "feedback-loop",
             "knowledge-candidate-inbox"
+,
+        "unified-discover"
+,
+        "tool-registry",
+        "project-context-recommendations",
+        "agent-tool-resolution"
           ]
         })
+    );
+
+    registerTool(
+      "discover",
+      {
+        description:
+          "Discover the most relevant visible team Skills, Knowledge, Prompts, and Agents for one task in a single request.",
+        inputSchema: z.object({
+          query: z.string().min(1),
+          top_k: z.number().int().min(1).max(20).optional(),
+          repositories: z.array(z.string()).optional(),
+          client: z.string().min(1).optional()
+        })
+      },
+      async ({ query, top_k, repositories, client }) => {
+        const result = appService.discover(
+          query,
+          { topK: top_k ?? 5, repositories, client },
+          principal
+        );
+        return toolResult({
+          skills: result.skills.map((item) => ({
+            ...compactSkill(item.skill),
+            score: item.score,
+            reason: item.reason
+          })),
+          knowledge: result.knowledge.map((item) => ({
+            repository: item.chunk.repositoryId,
+            revision: item.chunk.revision,
+            path: item.chunk.relativePath,
+            title: item.chunk.title,
+            metadata: item.chunk.metadata,
+            chunk_index: item.chunk.chunkIndex,
+            content: item.chunk.content,
+            score: item.score,
+            reason: item.reason
+          })),
+          prompts: result.prompts.map((item) => ({
+            ...compactPrompt(item.artifact),
+            score: item.score,
+            reason: item.reason
+          })),
+          agents: result.agents.map((item) => ({
+            ...compactAgent(item.artifact),
+            score: item.score,
+            reason: item.reason
+          }))
+,
+          tools: result.tools.map((item) => ({
+            ...compactTool(item.artifact),
+            score: item.score,
+            reason: item.reason
+          }))
+        });
+      }
+    );
+
+    registerTool(
+      "project_recommendations",
+      {
+        description:
+          "Identify the current project from cwd/git context and return a small permission-filtered set of relevant team assets.",
+        inputSchema: z.object({
+          cwd: z.string().optional(),
+          git_remote: z.string().optional(),
+          git_root: z.string().optional(),
+          git_branch: z.string().optional(),
+          task: z.string().optional(),
+          client: z.string().min(1).optional(),
+          top_k: z.number().int().min(1).max(5).optional()
+        })
+      },
+      async ({ cwd, git_remote, git_root, git_branch, task, client, top_k }) => {
+        const result = appService.recommendProjectContext(
+          {
+            cwd,
+            gitRemote: git_remote,
+            gitRoot: git_root,
+            gitBranch: git_branch,
+            task,
+            client,
+            topK: top_k
+          },
+          principal
+        );
+        return toolResult({
+          project: result.project,
+          profile: result.profile,
+          query: result.query,
+          reason: result.reason,
+          skills: result.recommendations.skills.map((item) => ({
+            ...compactSkill(item.skill),
+            score: item.score,
+            reason: item.reason
+          })),
+          knowledge: result.recommendations.knowledge.map((item) => ({
+            repository: item.chunk.repositoryId,
+            path: item.chunk.relativePath,
+            title: item.chunk.title,
+            chunk_index: item.chunk.chunkIndex,
+            score: item.score,
+            reason: item.reason
+          })),
+          prompts: result.recommendations.prompts.map((item) => ({
+            ...compactPrompt(item.artifact),
+            score: item.score,
+            reason: item.reason
+          })),
+          agents: result.recommendations.agents.map((item) => ({
+            ...compactAgent(item.artifact),
+            score: item.score,
+            reason: item.reason
+          })),
+          tools: result.recommendations.tools.map((item) => ({
+            ...compactTool(item.artifact),
+            score: item.score,
+            reason: item.reason
+          }))
+        });
+      }
     );
 
     registerTool(
@@ -182,6 +333,37 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({})
       },
       async () => toolResult({ repositories: appService.listRepositories(principal) })
+    );
+
+    registerTool(
+      "resolve_agent_tools",
+      {
+        description:
+          "Resolve an Agent's declared Tool bindings through caller permissions, client compatibility, and target environment. This returns metadata only and never invokes an external tool.",
+        inputSchema: z.object({
+          repository: z.string().min(1),
+          agent: z.string().min(1),
+          client: z.string().min(1).optional(),
+          environment: z.string().min(1).optional()
+        })
+      },
+      async ({ repository, agent, client, environment }) => {
+        const result = appService.resolveAgentTools(
+          repository,
+          agent,
+          { client, environment },
+          principal
+        );
+        return toolResult({
+          ...result,
+          bindings: result.bindings.map((binding) => ({
+            reference: binding.reference,
+            status: binding.status,
+            reason: binding.reason,
+            tool: binding.tool ? compactTool(binding.tool) : undefined
+          }))
+        });
+      }
     );
 
     registerTool(
@@ -314,16 +496,44 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          repositories: z.array(z.string()).optional()
+          repositories: z.array(z.string()).optional(),
+          applicability: z.object({
+            product: z.string().optional(),
+            branch: z.string().optional(),
+            firmware_version: z.string().optional(),
+            yocto_release: z.string().optional(),
+            kernel_version: z.string().optional(),
+            api_version: z.string().optional(),
+            hardware_revision: z.string().optional(),
+            variant: z.string().optional()
+          }).optional()
         })
       },
-      async ({ query, top_k, repositories }) =>
+      async ({ query, top_k, repositories, applicability }) =>
         toolResult({
-          results: appService.searchKnowledge(query, top_k ?? 5, repositories, principal).map((result) => ({
+          results: appService.searchKnowledge(
+            query,
+            top_k ?? 5,
+            repositories,
+            principal,
+            applicability
+              ? {
+                  product: applicability.product,
+                  branch: applicability.branch,
+                  firmwareVersion: applicability.firmware_version,
+                  yoctoRelease: applicability.yocto_release,
+                  kernelVersion: applicability.kernel_version,
+                  apiVersion: applicability.api_version,
+                  hardwareRevision: applicability.hardware_revision,
+                  variant: applicability.variant
+                }
+              : undefined
+          ).map((result) => ({
             repository: result.chunk.repositoryId,
             revision: result.chunk.revision,
             path: result.chunk.relativePath,
             title: result.chunk.title,
+            metadata: result.chunk.metadata,
             chunk_index: result.chunk.chunkIndex,
             content: result.chunk.content,
             score: result.score,
@@ -350,6 +560,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             revision: result.document.revision,
             path,
             title: result.document.title,
+            metadata: result.document.metadata,
             chunk_index: result.chunk.chunkIndex,
             content: result.chunk.content
           });
@@ -359,6 +570,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           revision: result.document.revision,
           path,
           title: result.document.title,
+          metadata: result.document.metadata,
           chunk_count: result.document.chunkCount,
           content: result.document.content
         });
@@ -435,6 +647,46 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             reason: result.reason
           }))
         })
+    );
+
+    registerTool(
+      "list_tools",
+      {
+        description: "List visible registered team tools and their non-secret metadata.",
+        inputSchema: z.object({ client: z.string().min(1).optional() })
+      },
+      async ({ client }) =>
+        toolResult({ tools: appService.listTools(client, principal).map(compactTool) })
+    );
+
+    registerTool(
+      "search_tools",
+      {
+        description: "Search registered team tools by task, capability, or keywords.",
+        inputSchema: z.object({
+          query: z.string().min(1),
+          top_k: z.number().int().min(1).max(20).optional(),
+          client: z.string().min(1).optional()
+        })
+      },
+      async ({ query, top_k, client }) =>
+        toolResult({
+          results: appService.searchTools(query, top_k ?? 5, client, principal).map((item) => ({
+            ...compactTool(item.artifact),
+            score: item.score,
+            reason: item.reason
+          }))
+        })
+    );
+
+    registerTool(
+      "get_tool",
+      {
+        description: "Load one registered team Tool manifest. Credential values are never returned.",
+        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) })
+      },
+      async ({ repository, name }) =>
+        toolResult(compactTool(appService.getTool(repository, name, principal)))
     );
 
     registerTool(

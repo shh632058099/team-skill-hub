@@ -11,10 +11,34 @@ export interface KnowledgePublicationResult {
   mergeRequestIid: number;
   mergeRequestUrl: string;
   publishedAt: string;
+  mergeRequestState: "opened" | "merged" | "closed" | "locked";
+  lastCheckedAt: string;
+  mergedAt?: string;
+  closedAt?: string;
+  mergeCommitSha?: string;
+  pipelineStatus?: string;
+  hasConflicts?: boolean;
+  detailedMergeStatus?: string;
+  sourceBranchExists?: boolean;
 }
 
 export interface KnowledgePublisher {
   publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult>;
+  reconcile(
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    repository: RepositoryConfig
+  ): Promise<Pick<
+    KnowledgePublicationResult,
+    | "mergeRequestState"
+    | "lastCheckedAt"
+    | "mergedAt"
+    | "closedAt"
+    | "mergeCommitSha"
+    | "pipelineStatus"
+    | "hasConflicts"
+    | "detailedMergeStatus"
+    | "sourceBranchExists"
+  >>;
 }
 
 type FetchLike = typeof fetch;
@@ -202,7 +226,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       }
     }
 
-    let mr: { iid?: number; web_url?: string } | undefined;
+    let mr: { iid?: number; web_url?: string; state?: string; merged_at?: string; closed_at?: string; merge_commit_sha?: string } | undefined;
     const mrResponse = await this.request(
       `${baseUrl}/api/v4/projects/${project}/merge_requests`,
       token,
@@ -226,7 +250,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       mr = await mrResponse.json() as { iid?: number; web_url?: string };
     } else if (mrResponse.status === 409) {
       const query = new URLSearchParams({
-        state: "opened",
+        state: "all",
         source_branch: branch,
         target_branch: targetBranch
       });
@@ -236,8 +260,21 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
         { method: "GET" }
       );
       if (existing.ok) {
-        const rows = await existing.json() as Array<{ iid?: number; web_url?: string }>;
-        mr = rows[0];
+        const rows = await existing.json() as Array<{
+          iid?: number;
+          web_url?: string;
+          state?: string;
+          merged_at?: string;
+          closed_at?: string;
+          merge_commit_sha?: string;
+        }>;
+        const existingMr = rows[0];
+        if (existingMr?.state === "closed") {
+          throw new Error(
+            `Existing GitLab merge request !${existingMr.iid ?? "?"} for branch ${branch} is closed; create a new candidate revision or branch before publishing again`
+          );
+        }
+        mr = existingMr;
       }
     }
     if (!mr) {
@@ -246,6 +283,9 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     }
     if (!mr.iid || !mr.web_url) throw new Error("GitLab merge request response is incomplete");
 
+    const publishedAt = new Date().toISOString();
+    const mergeRequestState =
+      mr.state === "merged" || mr.state === "closed" || mr.state === "locked" ? mr.state : "opened";
     return {
       provider: "gitlab",
       projectPath,
@@ -255,7 +295,77 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       action,
       mergeRequestIid: mr.iid,
       mergeRequestUrl: mr.web_url,
-      publishedAt: new Date().toISOString()
+      publishedAt,
+      mergeRequestState,
+      lastCheckedAt: publishedAt,
+      ...(mr.merged_at ? { mergedAt: mr.merged_at } : {}),
+      ...(mr.closed_at ? { closedAt: mr.closed_at } : {}),
+      ...(mr.merge_commit_sha ? { mergeCommitSha: mr.merge_commit_sha } : {})
+    };
+  }
+
+  async reconcile(
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    repository: RepositoryConfig
+  ): Promise<Pick<
+    KnowledgePublicationResult,
+    | "mergeRequestState"
+    | "lastCheckedAt"
+    | "mergedAt"
+    | "closedAt"
+    | "mergeCommitSha"
+    | "pipelineStatus"
+    | "hasConflicts"
+    | "detailedMergeStatus"
+    | "sourceBranchExists"
+  >> {
+    const { baseUrl, projectPath, token } = this.resolve(repository);
+    if (publication.projectPath !== projectPath) {
+      throw new Error("Knowledge publication project does not match repository publishing configuration");
+    }
+    const project = encodeURIComponent(projectPath);
+    const response = await this.request(
+      `${baseUrl}/api/v4/projects/${project}/merge_requests/${publication.mergeRequestIid}`,
+      token,
+      { method: "GET" }
+    );
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`GitLab merge request lookup failed (${response.status}): ${detail.slice(0, 1000)}`);
+    }
+    const mr = await response.json() as {
+      state?: string;
+      merged_at?: string | null;
+      closed_at?: string | null;
+      merge_commit_sha?: string | null;
+      has_conflicts?: boolean;
+      detailed_merge_status?: string | null;
+      head_pipeline?: { status?: string | null } | null;
+    };
+    const mergeRequestState =
+      mr.state === "merged" || mr.state === "closed" || mr.state === "locked" ? mr.state : "opened";
+    let sourceBranchExists: boolean | undefined;
+    try {
+      const branchResponse = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(publication.branch)}`,
+        token,
+        { method: "GET" }
+      );
+      if (branchResponse.status === 200) sourceBranchExists = true;
+      else if (branchResponse.status === 404) sourceBranchExists = false;
+    } catch {
+      sourceBranchExists = undefined;
+    }
+    return {
+      mergeRequestState,
+      lastCheckedAt: new Date().toISOString(),
+      ...(mr.merged_at ? { mergedAt: mr.merged_at } : {}),
+      ...(mr.closed_at ? { closedAt: mr.closed_at } : {}),
+      ...(mr.merge_commit_sha ? { mergeCommitSha: mr.merge_commit_sha } : {}),
+      ...(mr.head_pipeline?.status ? { pipelineStatus: mr.head_pipeline.status } : {}),
+      ...(mr.has_conflicts !== undefined ? { hasConflicts: mr.has_conflicts } : {}),
+      ...(mr.detailed_merge_status ? { detailedMergeStatus: mr.detailed_merge_status } : {}),
+      ...(sourceBranchExists !== undefined ? { sourceBranchExists } : {})
     };
   }
 }

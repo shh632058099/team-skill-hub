@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AppConfig, RepositoryConfig } from "./types.js";
+import type { AppConfig, ProjectConfig, RepositoryConfig } from "./types.js";
 import { normalizeKnowledgeConfig } from "./knowledge.js";
 
 export interface AdminEditableConfig {
@@ -9,11 +9,13 @@ export interface AdminEditableConfig {
   webhookDedupMaxEntries: number;
   webhookDedupTtlSeconds: number;
   repositories: RepositoryConfig[];
+  projects: ProjectConfig[];
 }
 
 function cloneRepositories(repositories: RepositoryConfig[]): RepositoryConfig[] {
   return repositories.map((repository) => ({
     ...repository,
+    owners: [...(repository.owners ?? [])],
     gitAuth: { ...repository.gitAuth },
     webhookAliases: [...repository.webhookAliases],
     audience: [...repository.audience],
@@ -25,13 +27,27 @@ function cloneRepositories(repositories: RepositoryConfig[]): RepositoryConfig[]
   }));
 }
 
+function cloneProjects(projects: ProjectConfig[] | undefined): ProjectConfig[] {
+  return (projects ?? []).map((project) => ({
+    ...project,
+    repositoryPatterns: [...project.repositoryPatterns],
+    owners: [...project.owners],
+    preferredSkillRepositories: [...project.preferredSkillRepositories],
+    preferredKnowledgeRepositories: [...project.preferredKnowledgeRepositories],
+    tools: [...project.tools],
+    environments: [...project.environments],
+    aliases: [...project.aliases]
+  }));
+}
+
 export function editableConfigFromApp(config: AppConfig): AdminEditableConfig {
   return {
     defaultRoles: [...config.defaultRoles],
     revisionRetentionMax: config.revisionRetentionMax ?? 20,
     webhookDedupMaxEntries: config.webhookDedupMaxEntries ?? 1000,
     webhookDedupTtlSeconds: config.webhookDedupTtlSeconds ?? 604800,
-    repositories: cloneRepositories(config.repositories)
+    repositories: cloneRepositories(config.repositories),
+    projects: cloneProjects(config.projects)
   };
 }
 
@@ -39,6 +55,7 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
   if (!repository.id.trim() || !repository.name.trim()) throw new Error("Repository id and name are required");
   if (seen.has(repository.id)) throw new Error(`Duplicate repository id: ${repository.id}`);
   seen.add(repository.id);
+  repository.owners = [...new Set((repository.owners ?? []).map((item) => item.trim()).filter(Boolean))];
   if (repository.provider === "local" && !repository.path) {
     throw new Error(`Repository ${repository.id}: local provider requires path`);
   }
@@ -76,6 +93,32 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
   }
 }
 
+function validateProjects(projects: ProjectConfig[] | undefined, repositories: RepositoryConfig[]): ProjectConfig[] {
+  const repositoryIds = new Set(repositories.map((item) => item.id));
+  const seen = new Set<string>();
+  return cloneProjects(projects).map((project) => {
+    if (!project.id.trim()) throw new Error("Project id is required");
+    if (seen.has(project.id)) throw new Error(`Duplicate project id: ${project.id}`);
+    seen.add(project.id);
+    if (!project.repositoryPatterns.length) throw new Error(`Project ${project.id}: repositoryPatterns is required`);
+    for (const repositoryId of [...project.preferredSkillRepositories, ...project.preferredKnowledgeRepositories]) {
+      if (!repositoryIds.has(repositoryId)) throw new Error(`Project ${project.id}: unknown preferred repository ${repositoryId}`);
+    }
+    return {
+      ...project,
+      id: project.id.trim(),
+      name: project.name?.trim() || project.id.trim(),
+      repositoryPatterns: [...new Set(project.repositoryPatterns.map((item) => item.trim()).filter(Boolean))],
+      owners: [...new Set(project.owners.map((item) => item.trim()).filter(Boolean))],
+      preferredSkillRepositories: [...new Set(project.preferredSkillRepositories)],
+      preferredKnowledgeRepositories: [...new Set(project.preferredKnowledgeRepositories)],
+      tools: [...new Set(project.tools.map((item) => item.trim()).filter(Boolean))],
+      environments: [...new Set(project.environments.map((item) => item.trim()).filter(Boolean))],
+      aliases: [...new Set(project.aliases.map((item) => item.trim()).filter(Boolean))]
+    };
+  });
+}
+
 export function validateAdminConfig(value: AdminEditableConfig): AdminEditableConfig {
   const seen = new Set<string>();
   const repositories = cloneRepositories(value.repositories ?? []);
@@ -85,7 +128,8 @@ export function validateAdminConfig(value: AdminEditableConfig): AdminEditableCo
     revisionRetentionMax: Math.max(2, Number(value.revisionRetentionMax ?? 20)),
     webhookDedupMaxEntries: Math.max(100, Number(value.webhookDedupMaxEntries ?? 1000)),
     webhookDedupTtlSeconds: Math.max(3600, Number(value.webhookDedupTtlSeconds ?? 604800)),
-    repositories
+    repositories,
+    projects: validateProjects(value.projects ?? [], repositories)
   };
 }
 
@@ -96,6 +140,7 @@ export function applyAdminConfig(target: AppConfig, editable: AdminEditableConfi
   target.webhookDedupMaxEntries = normalized.webhookDedupMaxEntries;
   target.webhookDedupTtlSeconds = normalized.webhookDedupTtlSeconds;
   target.repositories = normalized.repositories;
+  target.projects = normalized.projects;
 }
 
 export class AdminConfigStore {

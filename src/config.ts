@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import type { AppConfig, Principal, RepositoryConfig } from "./types.js";
+import type { AppConfig, Principal, ProjectConfig, RepositoryConfig } from "./types.js";
 
 interface RawConfig {
   server?: {
@@ -20,9 +20,22 @@ interface RawConfig {
     max_entries?: number;
     ttl_seconds?: number;
   };
+  projects?: Array<{
+    id?: string;
+    name?: string;
+    repository_patterns?: string[];
+    owners?: string[];
+    preferred_skill_repositories?: string[];
+    preferred_knowledge_repositories?: string[];
+    tools?: string[];
+    environments?: string[];
+    product?: string;
+    aliases?: string[];
+  }>;
   repositories?: Array<{
     id?: string;
     name?: string;
+    owners?: string[];
     provider?: "local" | "git";
     path?: string;
     git_url?: string;
@@ -89,6 +102,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     return {
       id: repo.id,
       name: repo.name,
+      owners: [...new Set((repo.owners ?? []).map((item) => item.trim()).filter(Boolean))],
       provider: repo.provider,
       path: repo.path
         ? path.resolve(base, repo.path)
@@ -135,6 +149,27 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     };
   });
 
+  const projects: ProjectConfig[] = (raw.projects ?? []).map((project) => {
+    if (!project.id?.trim()) throw new Error("Each project requires id");
+    return {
+      id: project.id.trim(),
+      name: project.name?.trim() || project.id.trim(),
+      repositoryPatterns: (project.repository_patterns ?? [project.id]).map((item) => item.trim()).filter(Boolean),
+      owners: [...new Set((project.owners ?? []).map((item) => item.trim()).filter(Boolean))],
+      preferredSkillRepositories: [...new Set((project.preferred_skill_repositories ?? []).map((item) => item.trim()).filter(Boolean))],
+      preferredKnowledgeRepositories: [...new Set((project.preferred_knowledge_repositories ?? []).map((item) => item.trim()).filter(Boolean))],
+      tools: [...new Set((project.tools ?? []).map((item) => item.trim()).filter(Boolean))],
+      environments: [...new Set((project.environments ?? []).map((item) => item.trim()).filter(Boolean))],
+      product: project.product?.trim() || undefined,
+      aliases: [...new Set((project.aliases ?? []).map((item) => item.trim()).filter(Boolean))]
+    };
+  });
+  const projectIds = new Set<string>();
+  for (const project of projects) {
+    if (projectIds.has(project.id)) throw new Error(`Duplicate project id: ${project.id}`);
+    projectIds.add(project.id);
+  }
+
   const authMode = (process.env.AUTH_MODE ?? raw.authentication?.mode ?? "development") as
     | "development"
     | "api-key";
@@ -171,6 +206,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       3600,
       Number(process.env.WEBHOOK_DEDUP_TTL_SECONDS ?? raw.webhook_dedup?.ttl_seconds ?? 604800)
     ),
-    repositories
+    repositories,
+    projects
   };
 }

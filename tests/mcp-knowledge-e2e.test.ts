@@ -27,6 +27,28 @@ test("MCP search_knowledge then get_knowledge returns repository-grounded contex
 
   try {
     await mkdir(path.join(root, "docs"), { recursive: true });
+    await mkdir(path.join(root, "tools", "git"), { recursive: true });
+    await writeFile(
+      path.join(root, "tools", "git", "TOOL.yaml"),
+      `schema_version: 1
+name: git
+description: Git source control repository operations.
+type: cli
+metadata:
+  audience: [developer]
+  visibility: [internal]
+  keywords: [git, repository, source-control]
+  owner: platform-team
+  compatibility:
+    codex: true
+environments: [development, ci]
+capabilities: [status, diff, commit]
+authentication:
+  type: environment
+  reference: GIT_CREDENTIAL_HELPER
+`,
+      "utf8"
+    );
     await writeFile(
       path.join(root, "docs", "ota-recovery.md"),
       "# OTA 断电恢复\n\n升级过程中突然断电后，系统读取安全检查点并恢复升级状态机。\n\n回滚前会校验镜像完整性。\n",
@@ -138,9 +160,68 @@ test("MCP search_knowledge then get_knowledge returns repository-grounded contex
       assert.match(getText, /OTA 断电恢复/);
       assert.match(getText, /回滚前会校验镜像完整性/);
 
+      const discoverResponse = await fetch(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "discover",
+            arguments: {
+              query: "OTA 断电恢复",
+              repositories: ["rd-skills"],
+              client: "codex",
+              top_k: 3
+            }
+          }
+        })
+      });
+      assert.equal(discoverResponse.status, 200);
+      const discoverText = await discoverResponse.text();
+      assert.match(discoverText, /"knowledge"/);
+      assert.match(discoverText, /ota-recovery\.md/);
+
+      const toolSearchResponse = await fetch(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: {
+            name: "search_tools",
+            arguments: { query: "git repository", client: "codex", top_k: 3 }
+          }
+        })
+      });
+      assert.equal(toolSearchResponse.status, 200);
+      const toolSearchText = await toolSearchResponse.text();
+      assert.match(toolSearchText, /GIT_CREDENTIAL_HELPER/);
+      assert.doesNotMatch(toolSearchText, /token=/i);
+
+      const getToolResponse = await fetch(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "get_tool",
+            arguments: { repository: "rd-skills", name: "git" }
+          }
+        })
+      });
+      assert.equal(getToolResponse.status, 200);
+      assert.match(await getToolResponse.text(), /"capabilities"/);
+
       const calls = await service.listMcpCalls(10);
       assert.ok(calls.some((item) => item.tool === "search_knowledge" && item.success));
       assert.ok(calls.some((item) => item.tool === "get_knowledge" && item.success));
+      assert.ok(calls.some((item) => item.tool === "search_tools" && item.success));
+      assert.ok(calls.some((item) => item.tool === "get_tool" && item.success));
       assert.ok(calls.every((item) => item.actorId === "rag-e2e"));
     } finally {
       await app.close();

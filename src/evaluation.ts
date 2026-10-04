@@ -8,12 +8,14 @@ import type {
   EvaluationCaseResult,
   EvaluationRunResult,
   EvaluationSuite,
+  KnowledgeDocument,
   PromptArtifact,
   Skill
 } from "./types.js";
 import { scanAgents, scanPrompts, searchArtifacts } from "./artifacts.js";
 import { scanSkills } from "./skills.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "./search.js";
+import { chunksForDocuments, KnowledgeIndex, scanKnowledge } from "./knowledge.js";
 
 interface EvaluationFile {
   schema_version?: number;
@@ -29,6 +31,7 @@ export interface EvaluationSnapshot {
   skills: Skill[];
   prompts: PromptArtifact[];
   agents: AgentArtifact[];
+  knowledge: KnowledgeDocument[];
   suites: EvaluationSuite[];
 }
 
@@ -66,7 +69,7 @@ export async function scanEvaluationSuites(
       }
       caseIds.add(testCase.id);
       if (
-        !["skill", "prompt", "agent"].includes(testCase.target) ||
+        !["skill", "prompt", "agent", "knowledge"].includes(testCase.target) ||
         !["search", "resolve", "get"].includes(testCase.operation)
       ) {
         throw new Error(`Evaluation suite ${raw.id}: invalid case ${testCase.id}`);
@@ -82,6 +85,12 @@ export async function scanEvaluationSuites(
       }
       if (testCase.operation === "get" && !testCase.name) {
         throw new Error(`Evaluation suite ${raw.id}: case ${testCase.id} requires name`);
+      }
+      if (testCase.target === "knowledge" && testCase.operation !== "search") {
+        throw new Error(`Evaluation suite ${raw.id}: knowledge case ${testCase.id} only supports search`);
+      }
+      if (testCase.target === "knowledge" && !testCase.expect.selected) {
+        throw new Error(`Evaluation suite ${raw.id}: knowledge case ${testCase.id} requires expect.selected path`);
       }
     }
     suites.push({
@@ -101,13 +110,14 @@ export async function loadEvaluationSnapshot(
   repositoryId: string,
   revision: string
 ): Promise<EvaluationSnapshot> {
-  const [skills, prompts, agents, suites] = await Promise.all([
+  const [skills, prompts, agents, knowledge, suites] = await Promise.all([
     scanSkills(root, repositoryId, revision),
     scanPrompts(root, repositoryId, revision),
     scanAgents(root, repositoryId, revision),
+    scanKnowledge(root, repositoryId, revision),
     scanEvaluationSuites(root, repositoryId)
   ]);
-  return { repositoryId, revision, root, skills, prompts, agents, suites };
+  return { repositoryId, revision, root, skills, prompts, agents, knowledge, suites };
 }
 
 function includesAll(actual: string[], expected?: string[]): boolean {
@@ -170,6 +180,35 @@ function evaluateCase(
         };
       } finally {
         search.close();
+      }
+    }
+
+    if (testCase.target === "knowledge") {
+      const index = new KnowledgeIndex();
+      try {
+        index.rebuild(chunksForDocuments(snapshot.knowledge));
+        const results = index.search(
+          testCase.query!,
+          [snapshot.repositoryId],
+          5,
+          [snapshot.repositoryId]
+        );
+        const expectedPath = testCase.expect.selected!;
+        const rankIndex = results.findIndex((item) => item.chunk.relativePath === expectedPath);
+        const rank = rankIndex >= 0 ? rankIndex + 1 : undefined;
+        return {
+          id: testCase.id,
+          passed: rank !== undefined && rank <= 5,
+          message: rank ? `expected ${expectedPath} ranked #${rank}` : `expected ${expectedPath} not found in top 5`,
+          rank,
+          actual: results.map((item) => ({
+            path: item.chunk.relativePath,
+            chunkIndex: item.chunk.chunkIndex,
+            score: item.score
+          }))
+        };
+      } finally {
+        index.close();
       }
     }
 
@@ -243,7 +282,10 @@ export function runEvaluationSuite(
   suite: EvaluationSuite,
   baseline?: EvaluationRunResult
 ): EvaluationRunResult {
-  const cases = suite.cases.map((testCase) => evaluateCase(testCase, snapshot));
+  const cases = suite.cases.map((testCase) => ({
+    ...evaluateCase(testCase, snapshot),
+    expected: testCase.expect
+  }));
   const passed = cases.filter((item) => item.passed).length;
   const total = cases.length;
   const result: EvaluationRunResult = {
@@ -258,6 +300,20 @@ export function runEvaluationSuite(
     passRate: total === 0 ? 0 : passed / total,
     cases
   };
+  const retrieval = suite.cases
+    .map((testCase, index) => ({ testCase, result: cases[index]! }))
+    .filter((item) => item.testCase.target === "knowledge");
+  if (retrieval.length > 0) {
+    const ranks = retrieval.map((item) => item.result.rank);
+    const count = retrieval.length;
+    result.retrievalMetrics = {
+      cases: count,
+      hitAt1: ranks.filter((rank) => rank !== undefined && rank <= 1).length / count,
+      hitAt3: ranks.filter((rank) => rank !== undefined && rank <= 3).length / count,
+      hitAt5: ranks.filter((rank) => rank !== undefined && rank <= 5).length / count,
+      mrr: ranks.reduce<number>((sum, rank) => sum + (rank === undefined ? 0 : 1 / rank), 0) / count
+    };
+  }
   if (baseline) {
     const candidateCaseIds = new Set(result.cases.map((item) => item.id));
     const removedBaselineCases = baseline.cases
@@ -265,10 +321,113 @@ export function runEvaluationSuite(
       .map((item) => item.id);
     result.baselineRevision = baseline.revision;
     result.baselinePassed = baseline.passed;
+    result.baselineRetrievalMetrics = baseline.retrievalMetrics;
     result.removedBaselineCases = removedBaselineCases;
-    result.regression = result.passed < baseline.passed || removedBaselineCases.length > 0;
+    const retrievalRegression =
+      Boolean(result.retrievalMetrics && baseline.retrievalMetrics) &&
+      (result.retrievalMetrics!.hitAt1 < baseline.retrievalMetrics!.hitAt1 ||
+        result.retrievalMetrics!.hitAt3 < baseline.retrievalMetrics!.hitAt3 ||
+        result.retrievalMetrics!.hitAt5 < baseline.retrievalMetrics!.hitAt5 ||
+        result.retrievalMetrics!.mrr < baseline.retrievalMetrics!.mrr);
+    result.regression = result.passed < baseline.passed || removedBaselineCases.length > 0 || retrievalRegression;
   }
   return result;
+}
+
+export interface EvaluationGateThresholds {
+  minPassRate?: number;
+  warnPassRate?: number;
+  minHitAt1?: number;
+  warnHitAt1?: number;
+  minHitAt3?: number;
+  warnHitAt3?: number;
+  minHitAt5?: number;
+  warnHitAt5?: number;
+  minMrr?: number;
+  warnMrr?: number;
+}
+
+export interface EvaluationGateResult {
+  ok: boolean;
+  blockingReasons: string[];
+  warnings: string[];
+  metrics: {
+    passRate: number;
+    hitAt1?: number;
+    hitAt3?: number;
+    hitAt5?: number;
+    mrr?: number;
+  };
+}
+
+export function evaluateGate(
+  runs: EvaluationRunResult[],
+  thresholds: EvaluationGateThresholds = {},
+  missingBaselineSuites: string[] = []
+): EvaluationGateResult {
+  const total = runs.reduce((sum, run) => sum + run.total, 0);
+  const passed = runs.reduce((sum, run) => sum + run.passed, 0);
+  const passRate = total ? passed / total : 0;
+  const retrievalRuns = runs.filter((run) => run.retrievalMetrics && run.retrievalMetrics.cases > 0);
+  const retrievalCases = retrievalRuns.reduce((sum, run) => sum + run.retrievalMetrics!.cases, 0);
+  const weighted = (key: "hitAt1" | "hitAt3" | "hitAt5" | "mrr"): number | undefined =>
+    retrievalCases
+      ? retrievalRuns.reduce(
+          (sum, run) => sum + run.retrievalMetrics![key] * run.retrievalMetrics!.cases,
+          0
+        ) / retrievalCases
+      : undefined;
+  const metrics = {
+    passRate,
+    hitAt1: weighted("hitAt1"),
+    hitAt3: weighted("hitAt3"),
+    hitAt5: weighted("hitAt5"),
+    mrr: weighted("mrr")
+  };
+  const blockingReasons: string[] = [];
+  const warnings: string[] = [];
+
+  const check = (
+    label: string,
+    value: number | undefined,
+    blocking: number | undefined,
+    warning: number | undefined
+  ) => {
+    if (blocking !== undefined && value === undefined) {
+      blockingReasons.push(label + " threshold configured but no metric was produced");
+      return;
+    }
+    if (blocking !== undefined && value! < blocking) {
+      blockingReasons.push(label + " " + value!.toFixed(4) + " < blocking threshold " + blocking.toFixed(4));
+      return;
+    }
+    if (warning !== undefined && value === undefined) {
+      warnings.push(label + " warning threshold configured but no metric was produced");
+      return;
+    }
+    if (warning !== undefined && value! < warning) {
+      warnings.push(label + " " + value!.toFixed(4) + " < warning threshold " + warning.toFixed(4));
+    }
+  };
+
+  check("passRate", metrics.passRate, thresholds.minPassRate ?? 1, thresholds.warnPassRate);
+  check("hitAt1", metrics.hitAt1, thresholds.minHitAt1, thresholds.warnHitAt1);
+  check("hitAt3", metrics.hitAt3, thresholds.minHitAt3, thresholds.warnHitAt3);
+  check("hitAt5", metrics.hitAt5, thresholds.minHitAt5, thresholds.warnHitAt5);
+  check("mrr", metrics.mrr, thresholds.minMrr, thresholds.warnMrr);
+
+  for (const run of runs) {
+    if (run.regression) blockingReasons.push("baseline regression: " + run.suiteId);
+  }
+  for (const suite of missingBaselineSuites) {
+    blockingReasons.push("baseline suite removed: " + suite);
+  }
+  return {
+    ok: blockingReasons.length === 0,
+    blockingReasons: [...new Set(blockingReasons)],
+    warnings: [...new Set(warnings)],
+    metrics
+  };
 }
 
 export class EvaluationRunStore {

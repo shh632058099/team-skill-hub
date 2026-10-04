@@ -54,6 +54,7 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts USING fts5(
         skill_key UNINDEXED,
+        repository_id UNINDEXED,
         name,
         description,
         keywords,
@@ -68,11 +69,12 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
     this.skills = new Map(skills.map((skill) => [skill.key, skill]));
     this.db.exec("DELETE FROM skill_fts");
     const insert = this.db.prepare(
-      "INSERT INTO skill_fts(skill_key,name,description,keywords,domain,category) VALUES(?,?,?,?,?,?)"
+      "INSERT INTO skill_fts(skill_key,repository_id,name,description,keywords,domain,category) VALUES(?,?,?,?,?,?,?)"
     );
     for (const skill of skills) {
       insert.run(
         skill.key,
+        skill.repositoryId,
         skill.name,
         skill.description,
         skill.metadata.keywords.join(" "),
@@ -83,14 +85,29 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
   }
 
   search(query: string, filters: SearchFilters, limit: number): SearchResult[] {
+    if (filters.repositories !== undefined && filters.repositories.length === 0) return [];
     const candidates = new Map<string, number>();
     const terms = tokenize(query);
     if (terms.length > 0) {
       const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
       try {
-        const rows = this.db
-          .prepare("SELECT skill_key, bm25(skill_fts) AS rank FROM skill_fts WHERE skill_fts MATCH ? LIMIT ?")
-          .all(match, Math.max(limit * 5, 20)) as Array<{ skill_key: string; rank: number }>;
+        const repositories = filters.repositories;
+        const rows = repositories
+          ? (this.db
+              .prepare(
+                `SELECT skill_key, bm25(skill_fts) AS rank
+                 FROM skill_fts
+                 WHERE skill_fts MATCH ?
+                   AND repository_id IN (${repositories.map(() => "?").join(",")})
+                 LIMIT ?`
+              )
+              .all(match, ...repositories, Math.max(limit * 5, 20)) as Array<{
+              skill_key: string;
+              rank: number;
+            }>)
+          : (this.db
+              .prepare("SELECT skill_key, bm25(skill_fts) AS rank FROM skill_fts WHERE skill_fts MATCH ? LIMIT ?")
+              .all(match, Math.max(limit * 5, 20)) as Array<{ skill_key: string; rank: number }>);
         for (const row of rows) candidates.set(row.skill_key, 1 / (1 + Math.abs(row.rank)));
       } catch {
         // Manual scoring below is the safe fallback.

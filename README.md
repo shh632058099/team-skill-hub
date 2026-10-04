@@ -67,15 +67,50 @@ Codex client setup:
 
 ```bash
 bash scripts/setup-codex-mcp.sh --url http://localhost:8080/mcp
+# Optional opt-out: keep Hooks/Observability but disable automatic Knowledge Candidate detection
+bash scripts/setup-codex-mcp.sh --url http://localhost:8080/mcp --no-auto-knowledge
+# Upgrade an existing installation without re-entering the URL
+bash scripts/setup-codex-mcp.sh --upgrade
 ```
 
 Windows PowerShell:
 
 ```powershell
 .\scripts\setup-codex-mcp.ps1 -Url http://localhost:8080/mcp
+# Optional opt-out
+.\scripts\setup-codex-mcp.ps1 -Url http://localhost:8080/mcp -NoAutoKnowledge
+# Upgrade an existing installation without re-entering the URL
+.\scripts\setup-codex-mcp.ps1 -Upgrade
 ```
 
 These scripts configure the Codex MCP server and idempotently add Team Skill Hub instructions to the global `~/.codex/AGENTS.md`.
+The installed Hook Runtime reports `runtime_version` and `hook_schema_version` on lifecycle events. The Admin Sessions view marks clients as `current`, `outdated`, or `unknown`. `--upgrade` / `-Upgrade` refreshes the managed runtime and preserves the existing Hub URL, server name, API-key environment variable, and Auto Knowledge preference unless explicitly overridden.
+They also install a fail-open Codex lifecycle hook runtime and merge Team Skill Hub handlers into the existing global `~/.codex/hooks.json` without deleting unrelated hooks. The framework reserves SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, PostCompact, Stop, and SessionEnd. V1 actively emits SessionStart, UserPromptSubmit, PostToolUse, Stop, and SessionEnd; PreToolUse, PreCompact, and PostCompact remain reserved with non-matching matchers to avoid unnecessary process overhead. Only allowlisted lifecycle metadata is sent to `/client-events`.
+Auto Knowledge is **on by default**. The Stop hook sends only a locally redacted, bounded excerpt of `last_assistant_message` (max 4000 characters). User prompts, full tool input/output, transcript contents and file contents are not uploaded. The Hub creates an automatic `codex-summary` Knowledge Candidate only when the same session contains an engineering action plus structured passing-test evidence. Candidates still require Web review and GitLab MR publication; nothing is auto-merged. Use `--no-auto-knowledge` / `-NoAutoKnowledge` to opt out while keeping Hooks and Observability.
+
+Claude Code setup uses the same MCP server and Client Event pipeline:
+
+~~~bash
+bash scripts/setup-claude-code.sh --url http://localhost:8080/mcp
+~~~
+
+~~~powershell
+.\scripts\setup-claude-code.ps1 -Url http://localhost:8080/mcp
+~~~
+
+The Claude installer merges user-level HTTP Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, and SessionEnd into ~/.claude/settings.json without removing unrelated hooks. It registers the Hub as a user-scoped HTTP MCP server when the claude CLI is available. Authentication is read dynamically from TEAM_SKILL_HUB_API_KEY (or the configured environment variable); the installer does not persist the token value. Native Claude Hook payloads are accepted at /client-events/claude-code, normalized to the same v1 Client Event model, and reuse Session, Evidence, Candidate Detector, Knowledge Gap, and Observability logic. See docs/claude-code-adapter.md.
+
+For Codex marketplace distribution, build a portable Agent Plugin for a concrete Hub URL:
+
+~~~bash
+npm run plugin:build -- --url https://skill-hub.example.com/mcp --marketplace-root ./team-plugin-marketplace
+codex plugin marketplace add ./team-plugin-marketplace
+~~~
+
+The generated package contains the remote MCP configuration, Team Skill Hub skill guidance, and cross-platform lifecycle hooks. It stores only the API-key environment-variable name, never the token value. See docs/codex-plugin-distribution.md.
+
+Observability now groups Hook Events and MCP calls into Codex Sessions. MCP calls are auto-linked only when the principal has exactly one active Codex session; concurrent sessions are left unbound unless the client supplies an explicit session ID. Skill and Knowledge FTS queries also apply allowed Repository filters before the FTS candidate LIMIT.
+For normal task discovery, clients can now call `discover` once to retrieve visible, client-compatible Skill, Knowledge, Prompt, Agent, and Tool candidates together. Existing category-specific search tools remain available for narrower follow-up searches.
 
 Webhook:
 
@@ -174,6 +209,7 @@ codex mcp list
 
 Useful tools:
 
+- `discover`
 - `list_skill_repositories`
 - `list_skills`
 - `search_skills`
@@ -191,6 +227,9 @@ Useful tools:
 - `search_agents`
 - `resolve_agent`
 - `get_agent`
+- `list_tools`
+- `search_tools`
+- `get_tool`
 - `list_evaluation_suites`
 - `run_evaluation`
 - `list_evaluation_runs`
@@ -206,7 +245,35 @@ Example request:
 ```text
 Use teamSkillHub to find the best skill for reviewing the current OTA implementation
 for unnecessary APIs and long call chains. Load the selected skill and follow it.
+For broader tasks, prefer `discover` first so Skill, Knowledge, Prompt, Agent, and Tool candidates are returned together.
 ```
+
+## Tool Registry
+
+Repositories may register non-secret tool metadata with `TOOL.yaml`. A Tool describes its type, owner, audience/visibility, compatible clients, supported environments and capabilities, plus an optional authentication **reference**. Credential values are never stored in the Tool manifest or returned by MCP.
+
+Example:
+
+```yaml
+schema_version: 1
+name: git
+description: Git source control repository operations.
+type: cli
+metadata:
+  audience: [developer]
+  visibility: [internal]
+  keywords: [git, repository]
+  owner: platform-team
+  compatibility:
+    codex: true
+environments: [development, ci]
+capabilities: [status, diff, commit]
+authentication:
+  type: environment
+  reference: GIT_CREDENTIAL_HELPER
+```
+
+Agent manifests may reference local Tool names. Repository activation fails if a local Tool binding is missing.
 
 ## Knowledge / RAG
 

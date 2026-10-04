@@ -1,15 +1,30 @@
 import path from "node:path";
-import { loadEvaluationSnapshot, runEvaluationSuite } from "../evaluation.js";
+import {
+  evaluateGate,
+  loadEvaluationSnapshot,
+  runEvaluationSuite,
+  type EvaluationGateThresholds
+} from "../evaluation.js";
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+function ratioArg(name: string): number | undefined {
+  const value = arg(name);
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error(name + " must be a number between 0 and 1");
+  }
+  return parsed;
+}
+
 const repositoryPath = arg("--path");
 if (!repositoryPath) {
   console.error(
-    "Usage: npm run evaluate:repo -- --path <repo> [--id <id>] [--suite <suite>] [--baseline-path <repo>] [--revision <label>] [--baseline-revision <label>]"
+    "Usage: npm run evaluate:repo -- --path <repo> [--id <id>] [--suite <suite>] [--baseline-path <repo>] [--revision <label>] [--baseline-revision <label>] [--min-pass-rate 0..1] [--warn-pass-rate 0..1] [--min-hit-at-1 0..1] [--warn-hit-at-1 0..1] [--min-hit-at-3 0..1] [--warn-hit-at-3 0..1] [--min-hit-at-5 0..1] [--warn-hit-at-5 0..1] [--min-mrr 0..1] [--warn-mrr 0..1]"
   );
   process.exit(2);
 }
@@ -19,6 +34,18 @@ const revision = arg("--revision") ?? "candidate";
 const baselinePath = arg("--baseline-path");
 const baselineRevision = arg("--baseline-revision") ?? "baseline";
 const suiteFilter = arg("--suite");
+const thresholds: EvaluationGateThresholds = {
+  minPassRate: ratioArg("--min-pass-rate"),
+  warnPassRate: ratioArg("--warn-pass-rate"),
+  minHitAt1: ratioArg("--min-hit-at-1"),
+  warnHitAt1: ratioArg("--warn-hit-at-1"),
+  minHitAt3: ratioArg("--min-hit-at-3"),
+  warnHitAt3: ratioArg("--warn-hit-at-3"),
+  minHitAt5: ratioArg("--min-hit-at-5"),
+  warnHitAt5: ratioArg("--warn-hit-at-5"),
+  minMrr: ratioArg("--min-mrr"),
+  warnMrr: ratioArg("--warn-mrr")
+};
 
 try {
   const candidate = await loadEvaluationSnapshot(
@@ -54,12 +81,14 @@ try {
   const passed = results.reduce((sum, result) => sum + result.passed, 0);
   const failed = results.reduce((sum, result) => sum + result.failed, 0);
   const regressions = results.filter((result) => result.regression).length;
+  const gate = evaluateGate(results, thresholds, missingBaselineSuites);
   const output = {
-    ok: failed === 0 && regressions === 0 && missingBaselineSuites.length === 0,
+    ok: gate.ok,
     repository: repositoryId,
     revision,
     baselineRevision: baseline ? baselineRevision : undefined,
     missingBaselineSuites,
+    gate,
     suites: results,
     summary: {
       suites: results.length,

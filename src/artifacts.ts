@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import type { AgentArtifact, ArtifactSearchResult, PromptArtifact, RepositoryConfig } from "./types.js";
+import type { AgentArtifact, ArtifactSearchResult, PromptArtifact, RepositoryConfig, ToolArtifact } from "./types.js";
 
 interface PromptFrontmatter {
   schema_version?: number;
@@ -33,6 +33,29 @@ interface AgentManifest {
   skills?: string[];
   prompts?: string[];
   tools?: string[];
+}
+
+interface ToolManifest {
+  schema_version?: number;
+  name?: string;
+  version?: string;
+  description?: string;
+  type?: string;
+  metadata?: {
+    audience?: string[];
+    visibility?: string[];
+    keywords?: string[];
+    owner?: string;
+    compatibility?: Record<string, boolean>;
+  };
+  environments?: string[];
+  capabilities?: string[];
+  permissions?: string[];
+  endpoints?: Record<string, string>;
+  authentication?: {
+    type?: string;
+    reference?: string;
+  };
 }
 
 function parseFrontmatter(content: string): { data: PromptFrontmatter; body: string } {
@@ -112,11 +135,51 @@ export async function scanAgents(root: string, repositoryId: string, revision: s
   return result;
 }
 
+export async function scanTools(root: string, repositoryId: string, revision: string): Promise<ToolArtifact[]> {
+  const result: ToolArtifact[] = [];
+  for (const file of await walk(root, "TOOL.yaml")) {
+    const data = YAML.parse(await readFile(file, "utf8")) as ToolManifest;
+    const metadata = data.metadata ?? {};
+    if (!data.name || !data.description || !data.type || !metadata.owner) {
+      throw new Error(`Invalid tool metadata: ${file}`);
+    }
+    const authReference = data.authentication?.reference;
+    if (authReference && /(?:token|password|secret|key)=/i.test(authReference)) {
+      throw new Error(`Tool ${data.name}: authentication.reference must name a credential reference, not contain a secret`);
+    }
+    result.push({
+      key: `${repositoryId}:${data.name}`,
+      schemaVersion: data.schema_version ?? 1,
+      name: data.name,
+      version: data.version,
+      description: data.description,
+      repositoryId,
+      revision,
+      relativePath: path.relative(root, path.dirname(file)).replaceAll("\\", "/"),
+      type: data.type,
+      owner: metadata.owner,
+      audience: metadata.audience ?? [],
+      visibility: metadata.visibility ?? [],
+      keywords: metadata.keywords ?? [],
+      environments: data.environments ?? [],
+      capabilities: data.capabilities ?? [],
+      permissions: data.permissions ?? [],
+      endpoints: data.endpoints ?? {},
+      authentication: data.authentication?.type
+        ? { type: data.authentication.type, reference: authReference }
+        : undefined,
+      compatibility: metadata.compatibility ?? {}
+    });
+  }
+  return result;
+}
+
 export function validateArtifactPolicies(
   repository: RepositoryConfig,
   prompts: PromptArtifact[],
   agents: AgentArtifact[],
-  skillNames: string[]
+  skillNames: string[],
+  tools: ToolArtifact[] = []
 ): string[] {
   const issues: string[] = [];
   const checkVisibility = (kind: string, name: string, visibility: string[]) => {
@@ -140,17 +203,26 @@ export function validateArtifactPolicies(
     agentNames.add(agent.name);
     checkVisibility("agent", agent.name, agent.visibility);
   }
-  issues.push(...validateAgentBindings(agents, prompts, skillNames));
+  const toolNames = new Set<string>();
+  for (const tool of tools) {
+    if (tool.schemaVersion !== 1) issues.push(`tool ${tool.name}: schema_version must be 1`);
+    if (toolNames.has(tool.name)) issues.push(`tool ${tool.name}: duplicate name`);
+    toolNames.add(tool.name);
+    checkVisibility("tool", tool.name, tool.visibility);
+  }
+  issues.push(...validateAgentBindings(agents, prompts, skillNames, tools));
   return issues;
 }
 
 export function validateAgentBindings(
   agents: AgentArtifact[],
   prompts: PromptArtifact[],
-  skillNames: string[]
+  skillNames: string[],
+  tools: ToolArtifact[] = []
 ): string[] {
   const promptNames = new Set(prompts.map((prompt) => prompt.name));
   const skills = new Set(skillNames);
+  const toolNames = new Set(tools.map((tool) => tool.name));
   const issues: string[] = [];
   for (const agent of agents) {
     for (const skill of agent.skills) {
@@ -161,6 +233,11 @@ export function validateAgentBindings(
     for (const prompt of agent.prompts) {
       if (!prompt.includes(":") && !promptNames.has(prompt)) {
         issues.push(`${agent.name}: missing prompt ${prompt}`);
+      }
+    }
+    for (const tool of agent.tools) {
+      if (!tool.includes(":") && !toolNames.has(tool)) {
+        issues.push(`${agent.name}: missing tool ${tool}`);
       }
     }
   }
@@ -174,7 +251,7 @@ function visible(repository: RepositoryConfig, visibility: string[], roles: stri
   return repository.readRoles.length === 0 || repository.readRoles.some((role) => roles.includes(role));
 }
 
-export function searchArtifacts<T extends PromptArtifact | AgentArtifact>(
+export function searchArtifacts<T extends PromptArtifact | AgentArtifact | ToolArtifact>(
   query: string,
   artifacts: T[],
   limit: number
@@ -204,4 +281,62 @@ export function canReadArtifact(
   roles: string[]
 ): boolean {
   return visible(repository, visibility, roles);
+}
+
+export interface AgentToolResolution {
+  reference: string;
+  status: "resolved" | "not-visible" | "environment-mismatch" | "ambiguous";
+  tool?: ToolArtifact;
+  reason: string;
+}
+
+export function resolveAgentToolBindings(
+  agent: AgentArtifact,
+  visibleTools: ToolArtifact[],
+  environment?: string
+): AgentToolResolution[] {
+  return agent.tools.map((reference) => {
+    const qualified = reference.includes(":");
+    let matches = qualified
+      ? visibleTools.filter((tool) => tool.key === reference)
+      : visibleTools.filter((tool) => tool.name === reference);
+
+    if (!qualified) {
+      const sameRepository = matches.filter((tool) => tool.repositoryId === agent.repositoryId);
+      if (sameRepository.length === 1) matches = sameRepository;
+    }
+    if (matches.length === 0) {
+      return {
+        reference,
+        status: "not-visible",
+        reason: "tool is missing or not visible to the current caller"
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        reference,
+        status: "ambiguous",
+        reason: "multiple visible tools match; qualify the binding as repository:name"
+      };
+    }
+    const tool = matches[0]!;
+    if (environment && tool.environments.length > 0 && !tool.environments.includes(environment)) {
+      return {
+        reference,
+        status: "environment-mismatch",
+        tool,
+        reason: `tool does not declare environment ${environment}`
+      };
+    }
+    return {
+      reference,
+      status: "resolved",
+      tool,
+      reason: qualified
+        ? "resolved explicit repository-qualified tool"
+        : tool.repositoryId === agent.repositoryId
+          ? "resolved same-repository tool"
+          : "resolved unique visible tool"
+    };
+  });
 }

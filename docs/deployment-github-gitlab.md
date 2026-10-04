@@ -224,6 +224,8 @@ At startup the Hub clones each enabled Skill repository, validates all Skills, c
 
 The same named volume also preserves dynamic admin configuration, managed API key hashes, MCP observability logs, feedback and Knowledge Candidates. Do not replace it with ephemeral container storage.
 
+Client lifecycle hook events are stored at `<data_dir>/observability/client-events.jsonl` alongside the other observability JSONL streams. The hook endpoint uses the normal Developer API Key / Bearer Token authentication path.
+
 ### 7.1 Configure Knowledge / RAG sources
 
 Each Repository can index Markdown, TXT, text-based PDF and DOCX content. Scanned/image-only PDFs are not OCR'd.
@@ -381,9 +383,13 @@ GET  /admin/api/config
 GET  /admin/api/api-keys
 GET  /admin/api/knowledge
 GET  /admin/api/knowledge/search
+GET  /admin/api/knowledge/lifecycle-audit
 PUT  /admin/api/knowledge/<repository>/config
 PUT  /admin/api/knowledge/<repository>/publishing
 GET  /admin/api/observability
+GET  /admin/api/client-events
+GET  /admin/api/sessions
+GET  /admin/api/sessions/<session-id>?actorId=<user>&tenantId=<tenant>
 GET  /admin/api/traces
 GET  /admin/api/traces/<trace-id>
 GET  /admin/api/feedback
@@ -393,6 +399,11 @@ PUT  /admin/api/knowledge-candidates/<id>
 POST /admin/api/knowledge-candidates/<id>/review
 POST /admin/api/knowledge-candidates/<id>/publish
 GET  /admin/api/knowledge-gaps
+POST /client-events
+
+`/client-events` receives allowlisted Hook metadata by default. Auto Knowledge must be explicitly enabled by the client setup script; when enabled, Stop summaries are redacted on the client and server and length-bounded. Roll it out to a pilot group before broad enablement.
+
+Both Skill and Knowledge FTS candidate SQL apply allowed Repository filters before their candidate LIMIT so inaccessible repositories cannot consume the recall window.
 GET  /audit
 POST /repositories/<id>/sync
 GET  /repositories/<id>/revisions
@@ -420,6 +431,43 @@ Inbound through reverse proxy:
 ```
 
 If the internal GitLab is only reachable on the corporate network, run the Skill Hub on a host/network segment that can reach it. GitHub Actions does not need access to the Skill repositories because Skill contents are not baked into the Hub image.
+
+## 14.1 GitLab sandbox acceptance
+
+Before enabling Knowledge publishing on the production Knowledge repository, run the real MR/webhook/retrieval flow against a dedicated sandbox repository.
+
+Prepare a real MR through the Hub:
+
+```bash
+export ADMIN_API_KEY='<sandbox-admin-key>'
+npm run sandbox:acceptance -- \
+  --phase prepare \
+  --hub-url https://sandbox-skill-hub.example.com \
+  --repository rd-skills
+```
+
+The command outputs a Candidate id, unique marker, branch and Merge Request URL. Review and merge that MR manually in GitLab. The CLI intentionally does not auto-merge.
+
+After the human merge, verify the full loop:
+
+```bash
+npm run sandbox:acceptance -- \
+  --phase verify \
+  --hub-url https://sandbox-skill-hub.example.com \
+  --repository rd-skills \
+  --candidate-id <candidate-id> \
+  --marker <marker>
+```
+
+The verify phase requires all of the following:
+
+- GitLab MR reconcile reports `merged`;
+- a successful `webhook` repository sync is present after the merge timestamp;
+- a manual read-only sync still succeeds;
+- Knowledge search returns the unique sandbox marker;
+- Candidate publication state remains `published` with merged MR state.
+
+This command is an acceptance harness, not a substitute for the real sandbox. Passing its local mock test only proves the harness behavior; production readiness still requires running it against the real GitLab sandbox.
 
 ## 15. Recommended production profile
 

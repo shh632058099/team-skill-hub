@@ -37,6 +37,7 @@ export interface KnowledgePublishingConfig {
 export interface RepositoryConfig {
   id: string;
   name: string;
+  owners?: string[];
   provider: "local" | "git";
   path?: string;
   gitUrl?: string;
@@ -53,6 +54,19 @@ export interface RepositoryConfig {
   knowledgePublishing?: KnowledgePublishingConfig;
 }
 
+export interface ProjectConfig {
+  id: string;
+  name: string;
+  repositoryPatterns: string[];
+  owners: string[];
+  preferredSkillRepositories: string[];
+  preferredKnowledgeRepositories: string[];
+  tools: string[];
+  environments: string[];
+  product?: string;
+  aliases: string[];
+}
+
 export interface AppConfig {
   host: string;
   port: number;
@@ -63,6 +77,7 @@ export interface AppConfig {
   webhookDedupMaxEntries?: number;
   webhookDedupTtlSeconds?: number;
   repositories: RepositoryConfig[];
+  projects?: ProjectConfig[];
 }
 
 export interface RepositoryState {
@@ -75,6 +90,7 @@ export interface RepositoryState {
   skillCount: number;
   promptCount?: number;
   agentCount?: number;
+  toolCount?: number;
   knowledgeDocumentCount?: number;
   knowledgeChunkCount?: number;
   failureCount: number;
@@ -178,10 +194,71 @@ export interface AgentArtifact {
   compatibility: Record<string, boolean>;
 }
 
+export interface ToolArtifact {
+  key: string;
+  schemaVersion: number;
+  name: string;
+  version?: string;
+  description: string;
+  repositoryId: string;
+  revision: string;
+  relativePath: string;
+  type: string;
+  owner: string;
+  audience: string[];
+  visibility: string[];
+  keywords: string[];
+  environments: string[];
+  capabilities: string[];
+  permissions?: string[];
+  endpoints?: Record<string, string>;
+  authentication?: {
+    type: string;
+    reference?: string;
+  };
+  compatibility: Record<string, boolean>;
+}
+
 export interface ArtifactSearchResult<T> {
   artifact: T;
   score: number;
   reason: string;
+}
+
+export interface KnowledgeApplicability {
+  product?: string[];
+  branch?: string[];
+  firmwareVersion?: string[];
+  yoctoRelease?: string[];
+  kernelVersion?: string[];
+  apiVersion?: string[];
+  hardwareRevision?: string[];
+  variant?: string[];
+}
+
+export interface KnowledgeApplicabilityContext {
+  product?: string;
+  branch?: string;
+  firmwareVersion?: string;
+  yoctoRelease?: string;
+  kernelVersion?: string;
+  apiVersion?: string;
+  hardwareRevision?: string;
+  variant?: string;
+}
+
+export interface KnowledgeLifecycleMetadata {
+  owner?: string;
+  status?: "draft" | "active" | "deprecated" | "superseded" | "expired" | "archived";
+  tags?: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  validFrom?: string;
+  validUntil?: string;
+  source?: string;
+  supersedes?: string;
+  reviewCycleDays?: number;
+  applicability?: KnowledgeApplicability;
 }
 
 export interface KnowledgeDocument {
@@ -191,6 +268,7 @@ export interface KnowledgeDocument {
   relativePath: string;
   title: string;
   content: string;
+  metadata?: KnowledgeLifecycleMetadata;
   chunkCount: number;
   chunkSizeChars: number;
   chunkOverlapChars: number;
@@ -205,6 +283,7 @@ export interface KnowledgeChunk {
   title: string;
   chunkIndex: number;
   content: string;
+  metadata?: KnowledgeLifecycleMetadata;
 }
 
 export interface KnowledgeSearchResult {
@@ -213,7 +292,7 @@ export interface KnowledgeSearchResult {
   reason: string;
 }
 
-export type EvaluationTarget = "skill" | "prompt" | "agent";
+export type EvaluationTarget = "skill" | "prompt" | "agent" | "knowledge";
 export type EvaluationOperation = "search" | "resolve" | "get";
 
 export interface EvaluationExpectation {
@@ -249,7 +328,9 @@ export interface EvaluationCaseResult {
   id: string;
   passed: boolean;
   message: string;
+  expected?: EvaluationExpectation;
   actual?: unknown;
+  rank?: number;
 }
 
 export interface EvaluationRunResult {
@@ -267,6 +348,20 @@ export interface EvaluationRunResult {
   baselinePassed?: number;
   regression?: boolean;
   removedBaselineCases?: string[];
+  retrievalMetrics?: {
+    cases: number;
+    hitAt1: number;
+    hitAt3: number;
+    hitAt5: number;
+    mrr: number;
+  };
+  baselineRetrievalMetrics?: {
+    cases: number;
+    hitAt1: number;
+    hitAt3: number;
+    hitAt5: number;
+    mrr: number;
+  };
 }
 
 export interface Principal {

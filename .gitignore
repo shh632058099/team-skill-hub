@@ -3,4 +3,5 @@ dist/
 .env
 data/
 secrets/
+config/repositories.gitlab.yaml
 *.log

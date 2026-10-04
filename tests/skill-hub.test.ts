@@ -143,6 +143,27 @@ tools:
   - git
 `
   );
+  await writeFile(
+    path.join(root, "ota", "TOOL.yaml"),
+    `schema_version: 1
+name: git
+version: 1.0.0
+description: Git source control operations for repository workflows.
+type: cli
+metadata:
+  audience: [developer]
+  visibility: [internal]
+  keywords: [git, source-control, repository]
+  owner: platform-team
+  compatibility:
+    codex: true
+environments: [development, ci]
+capabilities: [status, diff, commit]
+authentication:
+  type: environment
+  reference: GIT_CREDENTIAL_HELPER
+`
+  );
 }
 
 test("scan, validate and search an OTA skill", async () => {
@@ -168,6 +189,49 @@ test("scan, validate and search an OTA skill", async () => {
   assert.equal(incompatible.length, 0);
   search.close();
 });
+
+test("skill FTS candidate query filters repositories before applying its limit", async () => {
+  const root = await makeSkillRoot();
+  const [template] = await scanSkills(root, "rd-skills", "test-revision");
+  assert.ok(template);
+  const denied = Array.from({ length: 80 }, (_, index) => ({
+    ...template,
+    key: `private:checkpoint-${index}`,
+    repositoryId: "private",
+    name: `checkpoint-${index}`,
+    description: "checkpoint checkpoint checkpoint checkpoint",
+    metadata: {
+      ...template.metadata,
+      keywords: ["checkpoint", "checkpoint", "checkpoint"],
+      priority: 100
+    }
+  }));
+  const allowed = {
+    ...template,
+    key: "rd-skills:allowed-checkpoint",
+    repositoryId: "rd-skills",
+    name: "allowed-checkpoint",
+    description: "checkpoint",
+    metadata: {
+      ...template.metadata,
+      keywords: [],
+      priority: 1
+    }
+  };
+
+  const search = new SqliteFtsSearchBackend();
+  try {
+    search.rebuild([...denied, allowed]);
+    const results = search.search("checkpoint", { repositories: ["rd-skills"] }, 1);
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.skill.key, allowed.key);
+    assert.ok((results[0]?.score ?? 0) > 5, "allowed result should include candidate-stage FTS score");
+    assert.deepEqual(search.search("checkpoint", { repositories: [] }, 5), []);
+  } finally {
+    search.close();
+  }
+});
+
 
 test("registry replaces one repository atomically", async () => {
   const root = await makeSkillRoot();
@@ -533,6 +597,8 @@ test("metrics expose sync search resolve and load counters", async () => {
 test("prompt and agent registries load, search and resolve repository artifacts", async () => {
   const root = await makeSkillRoot();
   await addPromptAndAgent(root);
+  await mkdir(path.join(root, "docs"), { recursive: true });
+  await writeFile(path.join(root, "docs", "ota-review-context.md"), "# OTA Review Context\n\nReview OTA APIs, debugging, and recovery behavior.\n", "utf8");
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-artifacts-"));
   const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
   const search = new SqliteFtsSearchBackend();
@@ -562,6 +628,67 @@ test("prompt and agent registries load, search and resolve repository artifacts"
   assert.equal(service.listAgents("codex").map((item) => item.name).includes("ota-expert"), true);
   assert.equal(service.resolveAgent("OTA debugging review", 3, "codex")[0]?.artifact.name, "ota-expert");
   assert.deepEqual(service.getAgent("rd-skills", "ota-expert").skills, ["ota-code-review"]);
+  assert.equal(service.listTools("codex")[0]?.name, "git");
+  assert.equal(service.searchTools("source control", 5, "codex")[0]?.artifact.name, "git");
+  assert.deepEqual(service.getTool("rd-skills", "git").capabilities, ["status", "diff", "commit"]);
+  const discovered = service.discover(
+    "OTA review debugging recovery git repository",
+    { topK: 5, repositories: ["rd-skills"], client: "codex" }
+  );
+  assert.equal(discovered.skills[0]?.skill.name, "ota-code-review");
+  assert.equal(discovered.prompts[0]?.artifact.name, "ota-code-review-prompt");
+  assert.equal(discovered.agents[0]?.artifact.name, "ota-expert");
+  assert.equal(discovered.knowledge[0]?.chunk.relativePath, "docs/ota-review-context.md");
+  assert.equal(discovered.tools[0]?.artifact.name, "git");
+  assert.deepEqual(
+    service.discover("OTA review", { repositories: ["not-visible"] }).skills,
+    []
+  );
+  search.close();
+});
+
+test("missing local tool binding prevents repository activation", async () => {
+  const root = await makeSkillRoot();
+  await addPromptAndAgent(root);
+  await writeFile(
+    path.join(root, "ota", "AGENT.yaml"),
+    `schema_version: 1
+name: broken-tool-agent
+description: Agent with missing local tool.
+metadata:
+  audience: [developer]
+  visibility: [internal]
+  keywords: [tool]
+  owner: ota-team
+skills: [ota-code-review]
+prompts: [ota-code-review-prompt]
+tools: [missing-tool]
+`
+  );
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-tool-binding-"));
+  const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: ["developer", "internal"],
+      authentication: { mode: "development", apiKeys: {} },
+      repositories: [repository]
+    },
+    [new LocalRepositoryProvider()],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
+    new LoggingEventSink()
+  );
+  await service.initialize();
+  assert.equal(service.listRepositoryStates()[0]?.status, "error");
+  assert.match(service.listRepositoryStates()[0]?.error ?? "", /missing tool missing-tool/);
   search.close();
 });
 
@@ -683,12 +810,13 @@ test("usage analytics collect unmatched queries with basic secret redaction", as
     new LoggingEventSink()
   );
   await service.initialize();
-  service.searchSkills("no-such-skill user@example.com glpat-abcdefghijklmnop");
+  service.searchSkills("no-such-skill user@example.com glpat-abcdefghijklmnop Bearer abc.def.ghi https://user:pass@example.com mysql://db:secret@localhost/app");
   await new Promise((resolve) => setTimeout(resolve, 30));
   const unmatched = await service.listUsageAnalytics(10, true);
   assert.equal(unmatched.length >= 1, true);
   assert.match(unmatched[0]?.query ?? "", /\[redacted-email\]/);
   assert.match(unmatched[0]?.query ?? "", /\[redacted-token\]/);
+  assert.doesNotMatch(unmatched[0]?.query ?? "", /abc\.def\.ghi|user:pass|db:secret/);
   const summary = await service.getUsageSummary(5);
   assert.equal(summary.unmatched >= 1, true);
   assert.equal((summary.byKind.skill ?? 0) >= 1, true);

@@ -228,6 +228,7 @@ curl http://127.0.0.1:8080/metrics
 
 ```text
 <data_dir>/observability/mcp-calls.jsonl
+<data_dir>/observability/client-events.jsonl
 <data_dir>/observability/feedback.jsonl
 <data_dir>/observability/knowledge-candidates.jsonl
 ```
@@ -421,8 +422,12 @@ GET  /admin/api/config
 GET  /admin/api/api-keys
 GET  /admin/api/knowledge
 GET  /admin/api/knowledge/search
+GET  /admin/api/knowledge/lifecycle-audit
 PUT  /admin/api/knowledge/<repository>/config
 GET  /admin/api/observability
+GET  /admin/api/client-events
+GET  /admin/api/sessions
+GET  /admin/api/sessions/<session-id>?actorId=<user>&tenantId=<tenant>
 GET  /admin/api/traces
 GET  /admin/api/traces/<trace-id>
 GET  /admin/api/feedback
@@ -433,6 +438,11 @@ POST /admin/api/knowledge-candidates/<id>/review
 POST /admin/api/knowledge-candidates/<id>/publish
 PUT  /admin/api/knowledge/<repository>/publishing
 GET  /admin/api/knowledge-gaps
+POST /client-events  # Developer API Key / Bearer Token
+
+`/client-events` 默认只接收 Hook 白名单元数据。Auto Knowledge 需要在用户接入脚本显式开启；启用后 Stop 摘要在客户端和服务端各脱敏一次，并限制长度。建议先在测试团队启用，再观察 Review Inbox 的自动候选质量。
+
+Skill 与 Knowledge 的 FTS candidate SQL 均在 `LIMIT` 前应用允许的 Repository 过滤，避免无权限仓库候选占用召回窗口。
 GET  /audit
 POST /repositories/<id>/sync
 GET  /repositories/<id>/revisions

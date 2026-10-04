@@ -34,6 +34,11 @@ Linux / macOS / WSL:
 ~~~bash
 bash scripts/setup-codex-mcp.sh \
   --url https://<skill-hub-host>/mcp
+
+# Optional opt-out: keep Hooks/Observability but disable automatic candidates
+bash scripts/setup-codex-mcp.sh \
+  --url https://<skill-hub-host>/mcp \
+  --no-auto-knowledge
 ~~~
 
 Windows PowerShell:
@@ -41,14 +46,28 @@ Windows PowerShell:
 ~~~powershell
 .\scripts\setup-codex-mcp.ps1 `
   -Url https://<skill-hub-host>/mcp
+
+# Optional opt-out
+.\scripts\setup-codex-mcp.ps1 `
+  -Url https://<skill-hub-host>/mcp `
+  -NoAutoKnowledge
 ~~~
 
 The scripts automatically:
 
 1. update the `teamSkillHub` MCP server in `~/.codex/config.toml`;
-2. create or update the global **`~/.codex/AGENTS.md`** so Codex proactively uses Team Skill Hub across projects.
+2. create or update the global **`~/.codex/AGENTS.md`** so Codex proactively uses Team Skill Hub across projects;
+3. install Team Skill Hub hook runtimes under `~/.codex/hooks/`;
+4. merge Team Skill Hub lifecycle handlers into the existing `~/.codex/hooks.json` without deleting unrelated hooks.
 
 The Team Skill Hub section is managed with BEGIN/END markers. Re-running the script updates that section idempotently and preserves unrelated global instructions.
+
+The hook framework reserves `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `Stop`, and `SessionEnd`. V1 actively emits `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, and `SessionEnd`; `PreToolUse`, `PreCompact`, and `PostCompact` remain reserved with non-matching matchers to avoid user-visible overhead. Active hooks are asynchronous and fail-open and send only allowlisted lifecycle metadata to `/client-events`; transcript text, full tool input/output, and file contents are not sent.
+`PostToolUse` extracts only small structured evidence fields such as exit code, success, test counts, duration and status; stdout and the complete tool response are never forwarded.
+
+Auto Knowledge is **enabled by default**. The Stop hook locally redacts and caps `last_assistant_message` at 4000 characters before sending it. The server redacts it again and creates an automatic `codex-summary` candidate only when that Session contains an engineering action plus explicit passing-test evidence. It still requires Web Review and the normal GitLab MR flow. Use `--no-auto-knowledge` / `-NoAutoKnowledge` to disable automatic candidates without disabling lifecycle observability.
+
+Hook Events and MCP Calls are grouped into a Codex Session timeline. Automatic MCP-to-Codex-session linking happens only when exactly one active Session exists for that principal; concurrent sessions are not guessed.
 
 The API key is never written into `config.toml` or the project. Codex references the `TEAM_SKILL_HUB_API_KEY` environment variable.
 
@@ -226,6 +245,8 @@ search hit when you need the exact selected chunk or full document. Image-only
 scanned PDFs are not OCR'd.
 
 If a Team Skill Hub result is clearly outdated or incorrect, use `submit_feedback` with a short evidence-based reason. If the task produces durable, verified team-specific knowledge that is missing from the Hub, use `submit_knowledge_candidate`. Candidates go to the Web Review Inbox; clients cannot publish directly to Git. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.
+
+Markdown Knowledge can optionally declare lifecycle metadata in frontmatter: `owner`, `status` (`draft` / `active` / `deprecated` / `archived`), `tags`, `valid_from`, `valid_until`, and `supersedes`. These fields are returned by Knowledge search/get and are visible in the Web lifecycle audit. Frontmatter itself is removed from the indexed body. Existing documents without lifecycle metadata remain fully compatible.
 
 ## 7. Typical daily workflows
 

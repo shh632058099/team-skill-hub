@@ -61,6 +61,11 @@ Linux / macOS / WSL：
 ```bash
 bash scripts/setup-codex-mcp.sh \
   --url https://<hub-host>/mcp
+
+# 可选：只保留 Hooks/Observability，关闭自动知识候选
+bash scripts/setup-codex-mcp.sh \
+  --url https://<hub-host>/mcp \
+  --no-auto-knowledge
 ```
 
 Windows PowerShell：
@@ -68,11 +73,22 @@ Windows PowerShell：
 ```powershell
 .\scripts\setup-codex-mcp.ps1 `
   -Url https://<hub-host>/mcp
+
+# 可选：关闭自动知识候选
+.\scripts\setup-codex-mcp.ps1 `
+  -Url https://<hub-host>/mcp `
+  -NoAutoKnowledge
 ```
 
-脚本会配置 MCP Server 地址，并自动创建/更新全局 `~/.codex/AGENTS.md`。其中的 Team Skill Hub 指令会要求 Codex 在所有工程的非简单任务中主动搜索团队 Skill 和 Knowledge，而不是要求用户每次显式指定 MCP 名称。
+脚本会配置 MCP Server 地址、创建/更新全局 `~/.codex/AGENTS.md`，并安装 Team Skill Hub 生命周期 Hooks。Hook 配置会合并到现有 `~/.codex/hooks.json`，不会清空用户自己已经配置的 Hook。
 
-API Key 不写入项目文件；使用 `TEAM_SKILL_HUB_API_KEY` 环境变量提供给 Codex。
+当前会注册 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`PreCompact`、`PostCompact`、`Stop`、`SessionEnd` 八个入口。其中 V1 启用 `SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop`、`SessionEnd`；另外三个入口先保留但不执行，避免额外性能开销。已启用 Hook 只异步上报白名单生命周期元数据，用于 Trace/Observability 和后续知识回流扩展；Hub 不可用时不会影响正常 Codex 工作。
+
+API Key 不写入项目文件；Hook 与 MCP 共用 `TEAM_SKILL_HUB_API_KEY` 环境变量。
+
+自动知识候选默认开启，普通用户不需要主动说“上传知识”：任务结束时 Stop Hook 会在本地脱敏并截断最终助手总结，Hub 只有在该 Session 已观察到工程动作和测试通过 Evidence 时才生成候选。用户 Prompt、完整工具输入输出、stdout、源码正文和文件正文不会被自动上传。所有自动候选仍需管理员在 Review Inbox 审核。若组织希望先只启用 Observability，可在 Bash 安装时使用 `--no-auto-knowledge`，PowerShell 使用 `-NoAutoKnowledge` 关闭。
+
+在 `/admin -> Observability` 可以按 **Codex Sessions** 查看 Hook Event 与 MCP Call 的统一时间线；Review Inbox 会标记 `AUTO`、自动检测依据，以及完全重复的候选来源。
 
 ## 5. 连接 MCP
 
@@ -155,6 +171,34 @@ Knowledge 更适合表达“当前事实是什么”，例如：
   -> 使用原文上下文回答/分析
 ```
 
+### Knowledge 生命周期元数据
+
+Markdown Knowledge 可以通过可选 frontmatter 描述生命周期。旧文档不需要修改，没有 frontmatter 时仍按原逻辑索引。
+
+```yaml
+---
+owner: ota-team
+status: active
+tags: [ota, recovery]
+valid_from: 2026-01-01
+valid_until: 2027-01-01
+supersedes: docs/ota/legacy-recovery.md
+---
+# OTA Recovery Policy
+
+正文...
+```
+
+当前支持：
+
+- `owner`：知识责任人/团队；
+- `status`：`draft` / `active` / `deprecated` / `archived`；
+- `tags`：标签；
+- `valid_from` / `valid_until`：有效期；
+- `supersedes`：被当前文档替代的旧知识路径。
+
+这些 metadata 会随 `search_knowledge` / `get_knowledge` 返回，并在 Web Knowledge Search 和 Review Inbox 的“相关现有知识”中展示。frontmatter 本身不会作为正文参与检索。
+
 ## 8. Knowledge Source 配置
 
 管理员可在 **Knowledge / RAG** 区域按 Repository 配置：
@@ -210,6 +254,7 @@ exclude:
 - 标题；
 - Chunk Index；
 - Score；
+- Knowledge 生命周期 metadata（存在时）；
 - 命中的正文。
 
 该功能适合调试 Include/Exclude 和观察 FTS5 的召回效果。

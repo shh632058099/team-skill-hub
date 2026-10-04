@@ -14,8 +14,16 @@
     "test": "node --import tsx --test tests/**/*.test.ts",
     "check": "npm run build && npm test",
     "benchmark": "node scripts/benchmark.mjs",
+    "benchmark:capacity": "tsx src/cli/benchmark-capacity.ts",
     "validate:repo": "tsx src/cli/validate-repository.ts",
-    "evaluate:repo": "tsx src/cli/evaluate-repository.ts"
+    "evaluate:repo": "tsx src/cli/evaluate-repository.ts",
+    "ci:evaluate": "tsx src/cli/evaluate-repository.ts",
+    "backup:data": "tsx src/cli/backup-data.ts",
+    "restore:data": "tsx src/cli/restore-data.ts",
+    "release:check": "tsx src/cli/release-check.ts",
+    "plugin:build": "tsx src/cli/build-codex-plugin.ts",
+    "sandbox:acceptance": "tsx src/cli/gitlab-sandbox-acceptance.ts",
+    "release:registry-acceptance": "tsx src/cli/release-registry-acceptance.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/fastify": "^2.0.0",

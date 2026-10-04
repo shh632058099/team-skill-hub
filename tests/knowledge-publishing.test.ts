@@ -145,6 +145,36 @@ test("GitLab publisher retry skips identical branch content and reuses open MR",
     assert.equal(result.mergeRequestIid, 14);
     assert.deepEqual(calls.map((call) => call.method), ["GET", "HEAD", "GET", "POST", "GET"]);
     assert.match(calls[4]?.url ?? "", /source_branch=skill-hub-knowledge-1234567890ab/);
+    assert.match(calls[4]?.url ?? "", /state=all/);
+  } finally {
+    delete process.env.TEST_GITLAB_WRITE_TOKEN;
+  }
+});
+
+test("GitLab publisher refuses to silently reuse a closed merge request", async () => {
+  process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
+  const desired = "# OTA recovery note\n\nRecovery behavior learned during troubleshooting.\n";
+  const responses = [
+    responseJson({ name: "skill-hub-knowledge-1234567890ab" }, 200),
+    new Response(null, { status: 404 }),
+    responseJson({ content: Buffer.from(desired).toString("base64"), encoding: "base64" }, 200),
+    responseJson({ message: "merge request already exists" }, 409),
+    responseJson([{ iid: 15, web_url: "https://gitlab.example.com/mr/15", state: "closed" }], 200)
+  ];
+  const fetchMock: typeof fetch = async () => {
+    const response = responses.shift();
+    if (!response) throw new Error("unexpected request");
+    return response;
+  };
+  try {
+    await assert.rejects(
+      () =>
+        new GitLabKnowledgePublisher(fetchMock).publish(
+          candidate({ status: "publish_failed" }),
+          repository()
+        ),
+      /merge request !15.*is closed/
+    );
   } finally {
     delete process.env.TEST_GITLAB_WRITE_TOKEN;
   }
@@ -167,6 +197,56 @@ test("GitLab publisher rejects missing token and unsafe target paths", async () 
       () => publisher.publish(candidate({ suggestedPath: "../secret.md" }), repository()),
       /suggestedPath is invalid/
     );
+  } finally {
+    delete process.env.TEST_GITLAB_WRITE_TOKEN;
+  }
+});
+
+test("GitLab publisher reconciles merge request state", async () => {
+  process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
+  const fetchMock: typeof fetch = async (input, init) => {
+    assert.equal(init?.method, "GET");
+    const url = String(input);
+    if (/merge_requests\/12$/.test(url)) {
+      return responseJson({
+        state: "merged",
+        merged_at: "2026-09-30T03:30:00.000Z",
+        merge_commit_sha: "abc123",
+        has_conflicts: false,
+        detailed_merge_status: "merged",
+        head_pipeline: { status: "success" }
+      });
+    }
+    if (/repository\/branches\/skill-hub-knowledge-1234567890ab$/.test(url)) {
+      return new Response("", { status: 404 });
+    }
+    throw new Error("unexpected URL: " + url);
+  };
+  try {
+    const result = await new GitLabKnowledgePublisher(fetchMock).reconcile(
+      {
+        provider: "gitlab",
+        projectPath: "ai/rd-skills",
+        branch: "skill-hub-knowledge-1234567890ab",
+        targetBranch: "master",
+        filePath: "docs/ota/recovery-note.md",
+        action: "create",
+        mergeRequestIid: 12,
+        mergeRequestUrl: "https://gitlab.example.com/ai/rd-skills/-/merge_requests/12",
+        publishedAt: "2026-09-29T00:00:00.000Z",
+        mergeRequestState: "opened",
+        lastCheckedAt: "2026-09-29T00:00:00.000Z"
+      },
+      repository()
+    );
+    assert.equal(result.mergeRequestState, "merged");
+    assert.equal(result.mergedAt, "2026-09-30T03:30:00.000Z");
+    assert.equal(result.mergeCommitSha, "abc123");
+    assert.equal(result.pipelineStatus, "success");
+    assert.equal(result.hasConflicts, false);
+    assert.equal(result.detailedMergeStatus, "merged");
+    assert.equal(result.sourceBranchExists, false);
+    assert.ok(result.lastCheckedAt);
   } finally {
     delete process.env.TEST_GITLAB_WRITE_TOKEN;
   }

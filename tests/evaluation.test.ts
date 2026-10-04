@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   EvaluationRunStore,
+  evaluateGate,
   loadEvaluationSnapshot,
   runEvaluationSuite,
   scanEvaluationSuites
@@ -136,6 +137,141 @@ test("baseline comparison treats removed passing cases as regression", async () 
   const candidateResult = runEvaluationSuite(candidate, candidateSuite, baselineResult);
   assert.equal(candidateResult.regression, true);
   assert.deepEqual(candidateResult.removedBaselineCases, ["agent-bindings"]);
+});
+
+test("knowledge retrieval evaluation reports Hit@1/3/5 and MRR regression", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "knowledge-eval-"));
+  const docs = path.join(root, "docs");
+  await mkdir(docs, { recursive: true });
+  await writeFile(
+    path.join(docs, "doc-a.md"),
+    "# Recovery Checkpoint\n\nUnique phrase: amber checkpoint resume state machine.\n",
+    "utf8"
+  );
+  await writeFile(
+    path.join(docs, "doc-b.md"),
+    "# Watchdog Timing\n\nUnique phrase: delta capacitor watchdog timing rule.\n",
+    "utf8"
+  );
+  await writeFile(
+    path.join(docs, "doc-c.md"),
+    "# CVE Policy\n\nUnique phrase: cobalt six month CVE remediation policy.\n",
+    "utf8"
+  );
+  await writeFile(
+    path.join(root, "EVALUATION.yaml"),
+    `schema_version: 1
+id: knowledge-retrieval
+description: Knowledge retrieval regression.
+cases:
+  - id: recovery
+    target: knowledge
+    operation: search
+    query: amber checkpoint resume state machine
+    expect:
+      selected: docs/doc-a.md
+  - id: watchdog
+    target: knowledge
+    operation: search
+    query: delta capacitor watchdog timing rule
+    expect:
+      selected: docs/doc-b.md
+  - id: cve
+    target: knowledge
+    operation: search
+    query: cobalt six month CVE remediation policy
+    expect:
+      selected: docs/doc-c.md
+`,
+    "utf8"
+  );
+
+  const baseline = await loadEvaluationSnapshot(root, "rd-skills", "baseline");
+  const baselineResult = runEvaluationSuite(baseline, baseline.suites[0]!);
+  assert.deepEqual(baselineResult.retrievalMetrics, {
+    cases: 3,
+    hitAt1: 1,
+    hitAt3: 1,
+    hitAt5: 1,
+    mrr: 1
+  });
+
+  await writeFile(
+    path.join(docs, "doc-b.md"),
+    "# Unrelated Note\n\nGeneric maintenance note about storage cleanup and UI preferences.\n",
+    "utf8"
+  );
+  const candidate = await loadEvaluationSnapshot(root, "rd-skills", "candidate");
+  const candidateResult = runEvaluationSuite(candidate, candidate.suites[0]!, baselineResult);
+  assert.equal(candidateResult.retrievalMetrics?.cases, 3);
+  assert.equal(candidateResult.retrievalMetrics?.hitAt1, 2 / 3);
+  assert.equal(candidateResult.retrievalMetrics?.hitAt3, 2 / 3);
+  assert.equal(candidateResult.retrievalMetrics?.hitAt5, 2 / 3);
+  assert.equal(candidateResult.retrievalMetrics?.mrr, 2 / 3);
+  assert.equal(candidateResult.regression, true);
+  assert.deepEqual(candidateResult.baselineRetrievalMetrics, baselineResult.retrievalMetrics);
+});
+
+test("evaluation gate supports blocking and warning thresholds", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "knowledge-gate-"));
+  const docs = path.join(root, "docs");
+  await mkdir(docs, { recursive: true });
+  await writeFile(path.join(docs, "a.md"), "# A\n\nalpha unique retrieval phrase\n", "utf8");
+  await writeFile(path.join(docs, "b.md"), "# B\n\nbeta unique retrieval phrase\n", "utf8");
+  await writeFile(
+    path.join(root, "EVALUATION.yaml"),
+    `schema_version: 1
+id: gate
+description: Gate thresholds.
+cases:
+  - id: a
+    target: knowledge
+    operation: search
+    query: alpha unique retrieval phrase
+    expect:
+      selected: docs/a.md
+  - id: b
+    target: knowledge
+    operation: search
+    query: beta unique retrieval phrase
+    expect:
+      selected: docs/b.md
+`,
+    "utf8"
+  );
+  const snapshot = await loadEvaluationSnapshot(root, "rd-skills", "candidate");
+  const result = runEvaluationSuite(snapshot, snapshot.suites[0]!);
+  const passing = evaluateGate([result], {
+    minPassRate: 1,
+    minHitAt1: 0.9,
+    warnMrr: 1
+  });
+  assert.equal(passing.ok, true);
+  assert.equal(passing.blockingReasons.length, 0);
+
+  const degraded = {
+    ...result,
+    retrievalMetrics: {
+      ...result.retrievalMetrics!,
+      hitAt1: 0.8,
+      mrr: 0.85
+    }
+  };
+  const blocked = evaluateGate([degraded], {
+    minPassRate: 1,
+    minHitAt1: 0.9
+  });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.blockingReasons.join("\n"), /hitAt1/);
+
+  const warned = evaluateGate([degraded], { warnHitAt1: 0.9 });
+  assert.equal(warned.ok, true);
+  assert.match(warned.warnings.join("\n"), /hitAt1/);
+
+  const regression = { ...result, regression: true };
+  const regressed = evaluateGate([regression], { minPassRate: 0 });
+  assert.equal(regressed.ok, false);
+  assert.match(regressed.blockingReasons.join("\n"), /baseline regression/);
 });
 
 test("evaluation run store persists and filters results", async () => {
