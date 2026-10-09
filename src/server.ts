@@ -1094,13 +1094,18 @@ export async function startServer(
       reply.code(503);
       return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
     }
-    const deleted = await apiKeyStore.delete(request.params.id);
-    if (!deleted) {
-      reply.code(404);
-      return { error: "API key not found" };
+    try {
+      const deleted = await apiKeyStore.delete(request.params.id);
+      if (!deleted) {
+        reply.code(404);
+        return { error: "API key not found" };
+      }
+      refreshManagedApiKeys();
+      return { deleted: true };
+    } catch (error) {
+      reply.code(500);
+      return { error: error instanceof Error ? error.message : String(error) };
     }
-    refreshManagedApiKeys();
-    return { deleted: true };
   });
 
   app.post<{

@@ -582,7 +582,7 @@ async function updateApiKey(id,body){
 }
 async function deleteApiKey(id){
  const confirmed=await modalForm({title:"删除 API Key",message:"删除后客户端会立即失效，此操作不可撤销。",danger:true,confirmText:"删除"});if(!confirmed)return;
- const r=await fetch("/admin/api/api-keys/"+encodeURIComponent(id),{method:"DELETE",headers:headers()});const data=await r.json();
+ const r=await fetch("/admin/api/api-keys/"+encodeURIComponent(id),{method:"DELETE",headers:headers(false)});const data=await r.json();
  if(!r.ok){apiKeyStatus.textContent=data.error||"删除失败";apiKeyStatus.className="error";toast(data.error||"删除失败","error");return}
  toast("API Key 已删除");await loadApiKeys();
 }
@@ -628,7 +628,7 @@ async function runEvaluation(){
  if(!r.ok){evaluationStatus.textContent=data.error||"Evaluation 失败";evaluationStatus.className="error";return}
  renderEvaluationDetail(data);evaluationStatus.textContent=data.failed===0&&!data.regression?"PASS":"FAIL / REGRESSION";evaluationStatus.className=data.failed===0&&!data.regression?"ok":"error";await loadEvaluationRuns();
 }
-function headers(){return {"content-type":"application/json","x-skill-hub-admin-key":key.value}}
+function headers(json=true){const value={"x-skill-hub-admin-key":key.value};if(json)value["content-type"]="application/json";return value}
 async function loadDataGovernance(){
  const r=await fetch("/admin/api/data-governance",{headers:headers()});const data=await r.json();if(!r.ok)return;
  const body=document.getElementById("dataGovernanceTable");body.replaceChildren();

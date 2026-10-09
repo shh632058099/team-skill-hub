@@ -132,16 +132,16 @@ export class ManagedApiKeyStore {
   }
 
   async delete(id: string): Promise<boolean> {
-    const before = this.records.length;
-    this.records = this.records.filter((record) => record.id !== id);
-    if (this.records.length === before) return false;
-    await this.persist();
+    const nextRecords = this.records.filter((record) => record.id !== id);
+    if (nextRecords.length === this.records.length) return false;
+    await this.persist(nextRecords);
+    this.records = nextRecords;
     return true;
   }
 
-  private async persist(): Promise<void> {
+  private async persist(records: ManagedApiKeyRecord[] = this.records): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, JSON.stringify(this.records, null, 2), {
+    await writeFile(this.filePath, JSON.stringify(records, null, 2), {
       encoding: "utf8",
       mode: 0o600
     });

@@ -43,6 +43,44 @@ test("managed API key authenticates without persisting plaintext", async () => {
   }
 });
 
+test("deleted managed API key is removed from persistence and authentication immediately", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-api-keys-delete-"));
+  try {
+    const store = new ManagedApiKeyStore(dir);
+    await store.load();
+    const created = await store.create({
+      label: "Temporary Codex",
+      principal: { id: "temporary-user", roles: ["developer"], tenantId: "rd" }
+    });
+    const auth = new ApiKeyAuthenticationProvider({});
+    auth.replaceManagedKeys(store.snapshot());
+    assert.equal(
+      auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })).id,
+      "temporary-user"
+    );
+
+    assert.equal(await store.delete(created.record.id), true);
+    auth.replaceManagedKeys(store.snapshot());
+    assert.throws(
+      () => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
+      /Invalid API key/
+    );
+    assert.equal(await store.delete(created.record.id), false);
+
+    const reloaded = new ManagedApiKeyStore(dir);
+    await reloaded.load();
+    assert.equal(reloaded.list().some((item) => item.id === created.record.id), false);
+    const reloadedAuth = new ApiKeyAuthenticationProvider({});
+    reloadedAuth.replaceManagedKeys(reloaded.snapshot());
+    assert.throws(
+      () => reloadedAuth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
+      /Invalid API key/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("bootstrap API keys remain compatible with managed keys", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-api-keys-"));
   try {
