@@ -19,7 +19,7 @@ test("MCP observability redacts secrets and summarizes calls", async () => {
       client: "codex",
       tool: "search_knowledge",
       args: {
-        query: "contact user@example.com Bearer super-secret-token eyJabcde.abcdefgh.ijklmnop https://user:pass@example.com postgres://dbuser:dbpass@db.example.com/app AKIAABCDEFGHIJKLMNOP",
+        query: "contact user@example.com Bearer super-secret-token eyJabcde.abcdefgh.ijklmnop https://user:pass@example.com postgres://dbuser:dbpass@db.example.com/app AKIAABCDEFGHIJKLMNOP password=hunter2 token=plain-token secret:plain-secret api_key=plain-api-key authorization=plain-auth",
         apiKey: "skh_this_should_never_be_persisted"
       },
       latencyMs: 12,
@@ -41,6 +41,12 @@ test("MCP observability redacts secrets and summarizes calls", async () => {
     assert.doesNotMatch(persisted, /user@example\.com/);
     assert.doesNotMatch(persisted, /super-secret-token|eyJabcde|user:pass|dbuser:dbpass|AKIAABCDEFGHIJKLMNOP/);
     assert.match(persisted, /\[redacted-token\]|\[redacted\]/);
+    assert.match(persisted, /password=\[redacted\]/i);
+    assert.match(persisted, /token=\[redacted\]/i);
+    assert.match(persisted, /secret=\[redacted\]/i);
+    assert.match(persisted, /api_key=\[redacted\]/i);
+    assert.match(persisted, /authorization=\[redacted\]/i);
+    assert.doesNotMatch(persisted, /\$1=\[redacted\]/);
 
     const summary = await store.summary();
     assert.equal(summary.total, 2);

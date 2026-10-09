@@ -214,7 +214,7 @@ function redactText(value: string, max = 500): string {
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted-private-key]")
     .replace(/\b((?:https?|ssh|git):\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@")
     .replace(/\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s]+/gi, "[redacted-connection-string]")
-    .replace(/(?:password|token|secret|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/(password|token|secret|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
     .slice(0, max);
 }
 
