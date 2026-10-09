@@ -71,6 +71,22 @@ export interface McpCallRecord {
   error?: string;
 }
 
+function isMcpCallRecord(value: unknown): value is McpCallRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<McpCallRecord>;
+  return (
+    typeof record.id === "string" &&
+    typeof record.ts === "string" &&
+    typeof record.traceId === "string" &&
+    typeof record.actorId === "string" &&
+    typeof record.tenantId === "string" &&
+    typeof record.tool === "string" &&
+    typeof record.latencyMs === "number" &&
+    Number.isFinite(record.latencyMs) &&
+    typeof record.success === "boolean"
+  );
+}
+
 export interface FeedbackRecord {
   id: string;
   ts: string;
@@ -385,6 +401,11 @@ export class McpObservabilityStore {
     }
   }
 
+  private async readMcpCalls(limit = 200): Promise<McpCallRecord[]> {
+    const rows = await this.read<unknown>("mcp-calls.jsonl", limit);
+    return rows.filter(isMcpCallRecord);
+  }
+
   newTraceId(): string {
     return "tr_" + randomUUID().replaceAll("-", "");
   }
@@ -427,7 +448,7 @@ export class McpObservabilityStore {
   }
 
   listCalls(limit = 200): Promise<McpCallRecord[]> {
-    return this.read<McpCallRecord>("mcp-calls.jsonl", limit);
+    return this.readMcpCalls(limit);
   }
 
   async summary(): Promise<{
@@ -438,7 +459,7 @@ export class McpObservabilityStore {
     p95LatencyMs: number;
     byTool: Record<string, number>;
   }> {
-    const rows = await this.read<McpCallRecord>("mcp-calls.jsonl", this.maxEntries);
+    const rows = await this.readMcpCalls(this.maxEntries);
     const byTool: Record<string, number> = {};
     let latency = 0;
     let failed = 0;
@@ -474,7 +495,7 @@ export class McpObservabilityStore {
     totalLatencyMs: number;
     tools: string[];
   }>> {
-    const calls = await this.read<McpCallRecord>("mcp-calls.jsonl", this.maxEntries);
+    const calls = await this.readMcpCalls(this.maxEntries);
     const grouped = new Map<string, McpCallRecord[]>();
     for (const call of calls) {
       const current = grouped.get(call.traceId) ?? [];
@@ -505,7 +526,7 @@ export class McpObservabilityStore {
   }
 
   async getTrace(traceId: string): Promise<McpCallRecord[]> {
-    return (await this.read<McpCallRecord>("mcp-calls.jsonl", this.maxEntries))
+    return (await this.readMcpCalls(this.maxEntries))
       .filter((item) => item.traceId === traceId)
       .sort((a, b) => a.ts.localeCompare(b.ts));
   }
@@ -602,7 +623,7 @@ export class McpObservabilityStore {
     ended: boolean;
   }>> {
     const events = await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries);
-    const calls = await this.read<McpCallRecord>("mcp-calls.jsonl", this.maxEntries);
+    const calls = await this.readMcpCalls(this.maxEntries);
     const groups = new Map<string, { events: ClientEventRecord[]; calls: McpCallRecord[] }>();
     for (const event of events) {
       const key = event.actorId + "\0" + event.tenantId + "\0" + event.sessionId;
@@ -681,7 +702,7 @@ export class McpObservabilityStore {
     const events = (await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries))
       .filter((item) => item.actorId === principalId && item.tenantId === tenantId && item.sessionId === sessionId)
       .map((event) => ({ kind: "event" as const, ts: event.ts, event }));
-    const calls = (await this.read<McpCallRecord>("mcp-calls.jsonl", this.maxEntries))
+    const calls = (await this.readMcpCalls(this.maxEntries))
       .filter((item) => item.actorId === principalId && item.tenantId === tenantId && item.sessionId === sessionId)
       .map((call) => ({ kind: "mcp-call" as const, ts: call.ts, call }));
     return [...events, ...calls].sort((a, b) => a.ts.localeCompare(b.ts));

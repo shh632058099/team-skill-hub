@@ -77,10 +77,18 @@ test("observability recovers corrupted lines and rotates oversized files", async
     assert.ok(archives.length >= 1);
     assert.equal((await readdir(dir)).some((name) => name.includes(".tmp.")), false);
 
-    await appendFile(path.join(dir, "mcp-calls.jsonl"), "{broken-json", "utf8");
+    await appendFile(
+      path.join(dir, "mcp-calls.jsonl"),
+      '{broken-json\nnull\n{}\n{"id":"legacy","ts":"2026-01-01T00:00:00.000Z","tool":"legacy"}\n',
+      "utf8"
+    );
     const calls = await store.listCalls(100);
     assert.ok(calls.length >= 1);
     assert.ok(calls.every((item) => item.tool === "search_knowledge"));
+    const summary = await store.summary();
+    assert.equal(summary.total, calls.length);
+    assert.doesNotThrow(() => JSON.stringify(summary));
+    assert.ok((await store.listTraces()).length >= 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
