@@ -8,14 +8,15 @@ Team Skill Hub is open source under the [Apache License 2.0](LICENSE).
 
 For the recommended **GitHub Hub + private company GitLab Skills** deployment:
 
+- 中文管理员快速部署：`docs/admin-deployment-guide.zh-CN.md`
 - English: `docs/deployment-github-gitlab.md`
-- 中文：`docs/deployment-github-gitlab.zh-CN.md`
+- 中文完整部署：`docs/deployment-github-gitlab.zh-CN.md`
 
 For ordinary developers using the MCP service:
 
+- 中文快速使用：`docs/user-guide.zh-CN.md`
 - English: `docs/developer-mcp-guide.md`
-- 中文：`docs/developer-mcp-guide.zh-CN.md`
-- 中文用户指南：`docs/user-guide.zh-CN.md`
+- 中文开发者详细指南：`docs/developer-mcp-guide.zh-CN.md`
 
 ## Repositories
 

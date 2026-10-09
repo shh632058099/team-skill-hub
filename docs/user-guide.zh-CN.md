@@ -4,6 +4,17 @@
 
 本文面向 Team Skill Hub 的开发者、AI 客户端用户和平台管理员。Hub 不代理模型；Codex、Claude Code、ChatGPT 等客户端继续使用自己的模型，Hub 提供团队共享的 Skill、Prompt、Agent 和 Knowledge/RAG 上下文。
 
+如果你只是普通开发者，最快只需要完成下面 4 步：
+
+```text
+1. 向管理员获取 MCP URL + Developer API Key
+2. 设置 TEAM_SKILL_HUB_API_KEY
+3. 运行 Codex 或 Claude Code 接入脚本
+4. 用 get_server_info / discover 验证连接
+```
+
+管理员部署请优先阅读 `admin-deployment-guide.zh-CN.md`。
+
 ## 2. 管理后台
 
 服务启动后访问：
@@ -89,6 +100,74 @@ API Key 不写入项目文件；Hook 与 MCP 共用 `TEAM_SKILL_HUB_API_KEY` 环
 自动知识候选默认开启，普通用户不需要主动说“上传知识”：任务结束时 Stop Hook 会在本地脱敏并截断最终助手总结，Hub 只有在该 Session 已观察到工程动作和测试通过 Evidence 时才生成候选。用户 Prompt、完整工具输入输出、stdout、源码正文和文件正文不会被自动上传。所有自动候选仍需管理员在 Review Inbox 审核。若组织希望先只启用 Observability，可在 Bash 安装时使用 `--no-auto-knowledge`，PowerShell 使用 `-NoAutoKnowledge` 关闭。
 
 在 `/admin -> Observability` 可以按 **Codex Sessions** 查看 Hook Event 与 MCP Call 的统一时间线；Review Inbox 会标记 `AUTO`、自动检测依据，以及完全重复的候选来源。
+
+## 4.1 普通开发者 5 分钟快速接入
+
+先从管理员处获取：
+
+```text
+MCP URL: https://<hub-host>/mcp
+Developer API Key: skh_...
+```
+
+Linux / macOS / WSL：
+
+```bash
+export TEAM_SKILL_HUB_API_KEY='skh_...'
+bash scripts/setup-codex-mcp.sh --url https://<hub-host>/mcp
+codex mcp list
+```
+
+Windows PowerShell：
+
+```powershell
+$env:TEAM_SKILL_HUB_API_KEY = 'skh_...'
+.\scripts\setup-codex-mcp.ps1 -Url https://<hub-host>/mcp
+codex mcp list
+```
+
+然后在 Codex 中执行：
+
+```text
+使用 teamSkillHub 的 get_server_info 检查连接，
+然后用 discover 搜索适合当前项目的团队 Skill 和 Knowledge。
+```
+
+第一次验证成功后，日常使用不需要手工调用每个工具；全局 `AGENTS.md` 会指导 Codex 在适合的任务中优先发现团队资产。
+
+## 4.2 Claude Code 快速接入
+
+Linux / macOS / WSL：
+
+```bash
+export TEAM_SKILL_HUB_API_KEY='skh_...'
+bash scripts/setup-claude-code.sh --url https://<hub-host>/mcp
+claude mcp get teamSkillHub
+```
+
+Windows PowerShell：
+
+```powershell
+$env:TEAM_SKILL_HUB_API_KEY = 'skh_...'
+.\scripts\setup-claude-code.ps1 -Url https://<hub-host>/mcp
+claude mcp get teamSkillHub
+```
+
+Claude Code 使用同一套 MCP、权限、Session、Evidence 和 Knowledge Candidate 流程。安装脚本不会把 API Key 明文持久化到配置文件。详细说明见 `claude-code-adapter.md`。
+
+## 4.3 我是否需要 Codex Plugin？
+
+对于团队内部第一阶段部署，直接使用 `setup-codex-mcp.sh` / `.ps1` 最简单。
+
+如果后续希望通过统一 Marketplace 分发 MCP + Skill + Hooks，可以由管理员构建 Codex Agent Plugin：
+
+```bash
+npm run plugin:build -- \
+  --url https://<hub-host>/mcp \
+  --marketplace-root ./team-plugin-marketplace
+```
+
+普通用户不需要自己构建 Plugin。企业级分发细节见 `codex-plugin-distribution.md`。
 
 ## 5. 连接 MCP
 
@@ -336,6 +415,22 @@ Repository 同步成功后，Skill/Prompt/Agent/Knowledge 会一起切换到新�
 - Knowledge 也不会提前切到未验证版本。
 
 Rollback 时 Knowledge 会跟随 Repository revision 一起回滚。
+
+## 13.1 推荐给普通开发者的使用习惯
+
+日常任务建议保持简单：
+
+```text
+复杂工程任务
+ -> discover
+ -> 选择真正相关的 Skill / Knowledge / Prompt / Agent
+ -> 只加载需要的内容
+ -> 执行任务
+ -> 测试验证
+ -> 有稳定可复用结论时进入 Knowledge Candidate 审核流程
+```
+
+不建议为了“让 Hub 有数据”而主动上传大量上下文。Hook 默认只记录白名单元数据和结构化 Evidence；自动 Knowledge Candidate 也必须经过 Review Inbox 审核，不会直接写入正式知识库。
 
 ## 14. 常见问题
 
