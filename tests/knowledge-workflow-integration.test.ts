@@ -95,10 +95,27 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
   );
 
   const originalFetch = globalThis.fetch;
-  const assistantResult =
-    "OTA断电恢复问题已经完成修复并通过回归测试。设备在升级断电后会从最后一个安全检查点恢复，" +
-    "恢复前重新校验镜像版本与完整性，避免损坏镜像继续启动。新增回归测试覆盖断电恢复、镜像校验失败和正常升级路径，" +
-    "当前十二项相关测试全部通过。这个结论适合作为后续 OTA 项目的故障排查和恢复设计参考。";
+  const assistantResult = [
+    "# OTA 断电恢复修复",
+    "",
+    "## 问题",
+    "设备升级过程中断电后可能无法恢复。",
+    "",
+    "## 根因",
+    "恢复路径没有重新校验安全检查点和镜像完整性。",
+    "",
+    "## 解决方案",
+    "从最后一个安全检查点恢复，并在启动前校验镜像版本与完整性。",
+    "",
+    "## 验证结果",
+    "新增回归测试覆盖断电恢复、镜像校验失败和正常升级路径，当前十二项相关测试全部通过。",
+    "",
+    "## 适用范围",
+    "适用于后续 OTA 项目的故障排查和恢复设计。",
+    "",
+    "## 约束/限制",
+    "仍需在目标硬件上验证掉电时序。"
+  ].join("\n");
   let publishedMarkdown = "";
   try {
     await service.initialize();
@@ -214,7 +231,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(published.status, "published");
     assert.equal(published.publication?.mergeRequestState, "opened");
     assert.equal(published.publication?.mergeRequestIid, 12);
-    assert.match(publishedMarkdown, /^# OTA断电恢复问题已经完成修复/m);
+    assert.match(publishedMarkdown, /^# OTA 断电恢复修复/m);
 
     await mkdir(path.join(upstream, "docs", "ota"), { recursive: true });
     await writeFile(

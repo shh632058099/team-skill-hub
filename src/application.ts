@@ -61,7 +61,7 @@ import {
   resolveClientEventSchemaVersion
 } from "./client-events.js";
 import { resolveProjectContext } from "./project-context.js";
-import { listDataGovernanceRules } from "./data-governance.js";
+import { listDataGovernanceRules } from "./data-governance.js";import { parseKnowledgeSummary } from "./knowledge-summary.js";
 
 export class SkillHubApplicationService {
   private readonly states = new Map<string, RepositoryState>();
@@ -133,22 +133,31 @@ export class SkillHubApplicationService {
       });
     };
 
-    const excerpt = event.metadata.assistant_result_excerpt;
-    const normalizedExcerpt = typeof excerpt === "string"
-      ? excerpt.normalize("NFKC").toLowerCase().replace(/\b[0-9a-f]{8,}\b/g, "#").replace(/\d+/g, "#").replace(/\s+/g, " ").trim()
-      : "";
-    if (typeof excerpt !== "string" || excerpt.trim().length < 80) {
-      await decision("skipped", "assistant-summary-too-short");
-      return;
-    }
+    const rawExcerpt = event.metadata.assistant_result_excerpt;
     if (event.metadata.stop_hook_active === true) {
       await decision("skipped", "stop-hook-recursion");
       return;
     }
+    const parsedSummary = parseKnowledgeSummary(rawExcerpt);
+    if (!parsedSummary.ok) {
+      await decision("skipped", `summary-format-${parsedSummary.reason}`);
+      return;
+    }
+    const excerpt = parsedSummary.summary.markdown;
+    const normalizedExcerpt = excerpt.normalize("NFKC").toLowerCase().replace(/\b[0-9a-f]{8,}\b/g, "#").replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
 
-    const reusableSignals = /root cause|根因|原因是|verified fix|修复|解决|resolved|fixed|workaround|临时方案|绕过|constraint|约束|必须|不得|兼容|恢复|故障|安全|性能|可靠性/i;
+    const summarySignalText = [
+      parsedSummary.summary.title,
+      parsedSummary.summary.problem,
+      parsedSummary.summary.rootCause,
+      parsedSummary.summary.solution,
+      parsedSummary.summary.verification,
+      parsedSummary.summary.applicability,
+      parsedSummary.summary.constraints
+    ].join("\n");
+    const reusableSignals = /root cause|原因是|verified fix|修复|解决|resolved|fixed|workaround|临时方案|绕过|constraint|必须|不得|兼容|恢复|故障|安全|性能|可靠性/i;
     const lowValueSignals = /format(?:ting)?|prettier|lint only|typo|spelling|rename only|pure refactor|格式化|排版|拼写|仅重命名|纯重构|简单编译修复/i;
-    if (lowValueSignals.test(excerpt) && !reusableSignals.test(excerpt)) {
+    if (lowValueSignals.test(summarySignalText) && !reusableSignals.test(summarySignalText)) {
       await decision("skipped", "low-reuse-value-summary");
       return;
     }
@@ -277,14 +286,7 @@ export class SkillHubApplicationService {
       return;
     }
 
-    const firstLine = excerpt
-      .split(/\r?\n/)
-      .map((line) => line.replace(/^\s*[#>*-]+\s*/, "").trim())
-      .find(Boolean);
-    const title =
-      firstLine && firstLine.length >= 8
-        ? firstLine.slice(0, 160)
-        : `Verified Codex result from session ${event.sessionId.slice(0, 12)}`;
+    const title = parsedSummary.summary.title;
 
     if (await this.observability.findExactCandidateDuplicate(title, excerpt.trim())) {
       await decision("skipped", "exact-candidate-duplicate", evidenceCount);
@@ -326,13 +328,15 @@ export class SkillHubApplicationService {
     if (inferredRepository) reasons.push(`repository inferred: ${inferredRepository}`);
 
     const classification =
-      /root cause|根因|原因是|由于/i.test(excerpt)
-        ? "root-cause"
-        : /workaround|临时方案|绕过/i.test(excerpt)
-          ? "workaround"
-          : /constraint|约束|必须|不得/i.test(excerpt)
-            ? "reusable-constraint"
-            : "verified-fix";
+      /workaround|临时方案|绕过/i.test(excerpt)
+        ? "workaround"
+        : hasStrongEvidence
+          ? "verified-fix"
+          : /root cause|根因|原因是|由于/i.test(excerpt)
+            ? "root-cause"
+            : /constraint|约束|必须|不得/i.test(excerpt)
+              ? "reusable-constraint"
+              : "verified-fix";
     const topRelated = relatedKnowledge[0];
     const conflictSignal = /conflict|contradict|inconsistent|冲突|矛盾|不一致|与现有.*相反/i.test(excerpt);
     const supersedeSignal = /supersede|replace(?:s|d)?|no longer|instead of|替代|取代|不再|改为/i.test(excerpt);

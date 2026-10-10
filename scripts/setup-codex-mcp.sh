@@ -112,7 +112,17 @@ For non-trivial engineering tasks:
 3. Load only the selected assets with \`get_skill\`, \`get_knowledge\`, \`get_prompt\`, or \`get_agent\`; do not load every candidate.
 4. Use the category-specific search tools only when \`discover\` needs to be narrowed or a specific asset type is required.
 5. Prefer relevant team assets over generic assumptions.
-6. Respect repository visibility, role filtering, and client compatibility.
+6. Respect repository visibility, role filtering, and client compatibility.For durable knowledge, the final response must use this exact Markdown summary format:
+# Title
+
+## 问题
+## 根因
+## 解决方案
+## 验证结果
+## 适用范围
+## 约束/限制
+
+Do not submit raw transcript, speculative conclusions, credentials, or customer-sensitive data.
 7. If a retrieved Team Skill Hub asset is clearly outdated or incorrect, use \`submit_feedback\` with a concise evidence-based reason.
 8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, use \`submit_knowledge_candidate\` with concise source-grounded content. Do not submit secrets, credentials, customer-sensitive data, or speculative conclusions.
 9. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
