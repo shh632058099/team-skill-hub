@@ -64,7 +64,27 @@ try:
   elif isinstance(v,list):
    for item in v[:20]:
     if isinstance(item,(dict,list)): walk(item,d+1)
- if x.get("hook_event_name")=="PostToolUse": walk(x.get("tool_response"))
+ def response_text(v):
+  if isinstance(v,str): return v[:12000]
+  if isinstance(v,dict):
+   for key in ("aggregated_output","output","stdout","text","content"):
+    val=v.get(key)
+    if isinstance(val,str) and val: return val[:12000]
+   try:return json.dumps(v,ensure_ascii=False)[:12000]
+   except Exception:return ""
+  return ""
+ if x.get("hook_event_name")=="PostToolUse":
+  response=x.get("tool_response")
+  walk(response)
+  text=response_text(response)
+  if x.get("tool_name")=="Bash" and text:
+   unittest=re.search(r"\bRan\s+(\d+)\s+tests?\b",text,re.I)
+   if unittest and re.search(r"(?m)^\s*OK\s*$",text):
+    count=int(unittest.group(1));evidence.setdefault("tests_run",count);evidence.setdefault("tests_passed",count);evidence.setdefault("tests_failed",0);evidence.setdefault("success",True);evidence.setdefault("status","passed")
+   passed=re.search(r"\b(\d+)\s+passed\b",text,re.I)
+   failed=re.search(r"\b(\d+)\s+failed\b",text,re.I)
+   if passed:
+    passed_count=int(passed.group(1));failed_count=int(failed.group(1)) if failed else 0;evidence.setdefault("tests_passed",passed_count);evidence.setdefault("tests_failed",failed_count);evidence.setdefault("tests_run",passed_count+failed_count);evidence.setdefault("success",failed_count==0);evidence.setdefault("status","passed" if failed_count==0 else "failed")
  if "exit_code" in evidence and "success" not in evidence: evidence["success"]=evidence["exit_code"]==0
  if evidence:m["evidence"]=evidence
  if x.get("hook_event_name")=="Stop" and os.environ.get("CAPTURE_STOP_MESSAGE","").lower()=="true":

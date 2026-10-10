@@ -76,11 +76,16 @@ replace_block() {
   mv "$tmp" "$file"
 }
 
-if ! grep -Fqx "$MCP_BEGIN" "$CODEX_CONFIG"; then
-  tmp="$(mktemp)"
-  awk -v s="[mcp_servers.$SERVER_NAME]" '$0==s{skip=1;next} skip&&/^\[[^]]+\]/{skip=0} !skip{print}' "$CODEX_CONFIG" > "$tmp"
-  mv "$tmp" "$CODEX_CONFIG"
-fi
+# Remove the previously managed block first, then remove any standalone section
+# with the same server name. This avoids duplicate TOML sections when upgrading
+# from an older setup that already had [mcp_servers.<name>] outside our markers.
+tmp="$(mktemp)"
+awk -v b="$MCP_BEGIN" -v e="$MCP_END" '$0==b{skip=1;next} skip&&$0==e{skip=0;next} !skip{print}' "$CODEX_CONFIG" > "$tmp"
+mv "$tmp" "$CODEX_CONFIG"
+
+tmp="$(mktemp)"
+awk -v s="[mcp_servers.$SERVER_NAME]" '$0==s{skip=1;next} skip&&/^\[[^]]+\]/{skip=0} !skip{print}' "$CODEX_CONFIG" > "$tmp"
+mv "$tmp" "$CODEX_CONFIG"
 
 mcp_block="$(mktemp)"
 cat > "$mcp_block" <<EOF
@@ -88,6 +93,7 @@ $MCP_BEGIN
 [mcp_servers.$SERVER_NAME]
 url = "$MCP_URL"
 bearer_token_env_var = "$API_KEY_ENV"
+default_tools_approval_mode = "approve"
 $MCP_END
 EOF
 replace_block "$CODEX_CONFIG" "$MCP_BEGIN" "$MCP_END" "$mcp_block"
@@ -137,8 +143,8 @@ hooks=root.setdefault("hooks",{})
 events=["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","PreCompact","PostCompact","Stop","SessionEnd"]
 sh=os.environ["SH_HOOK"].replace("\\","/")
 ps=os.environ["PS_HOOK"]
-handler={"type":"command","command":f'bash "{sh}"',"commandWindows":f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{ps}"',"async":True,"timeout":2}
 for event in events:
+    handler={"type":"command","command":f'bash "{sh}"',"commandWindows":f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{ps}"',"async":event not in ("SessionStart","PostToolUse","Stop","SessionEnd"),"timeout":2}
     kept=[]
     for group in hooks.get(event,[]) or []:
         handlers=[h for h in (group.get("hooks",[]) or []) if "team-skill-hub-hook" not in str(h.get("command","")) and "team-skill-hub-hook" not in str(h.get("commandWindows",""))]
@@ -157,8 +163,7 @@ elif command -v node >/dev/null 2>&1; then
 const fs=require("fs");const path=process.env.HOOKS_JSON;let root={};if(fs.existsSync(path)){try{root=JSON.parse(fs.readFileSync(path,"utf8"))}catch{console.error("Existing hooks.json is invalid JSON; leaving it unchanged.");process.exit(2)}}
 root.hooks ||= {};
 const events=["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","PreCompact","PostCompact","Stop","SessionEnd"];
-const handler={type:"command",command:`bash "${process.env.SH_HOOK.replaceAll("\\","/")}"`,commandWindows:`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${process.env.PS_HOOK}"`,async:true,timeout:2};
-for(const event of events){const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-hook")&&!String(h.commandWindows||"").includes("team-skill-hub-hook"));if(hs.length)kept.push({...group,hooks:hs})}const group={hooks:[handler]};if(["PreToolUse","PreCompact","PostCompact"].includes(event))group.matcher="^__team_skill_hub_reserved__$";kept.push(group);root.hooks[event]=kept}
+for(const event of events){const handler={type:"command",command:`bash "${process.env.SH_HOOK.replaceAll("\\","/")}"`,commandWindows:`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${process.env.PS_HOOK}"`,async:!["SessionStart","PostToolUse","Stop","SessionEnd"].includes(event),timeout:2};const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-hook")&&!String(h.commandWindows||"").includes("team-skill-hub-hook"));if(hs.length)kept.push({...group,hooks:hs})}const group={hooks:[handler]};if(["PreToolUse","PreCompact","PostCompact"].includes(event))group.matcher="^__team_skill_hub_reserved__$";kept.push(group);root.hooks[event]=kept}
 root.description ||= "Codex lifecycle hooks including Team Skill Hub client events.";
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");
 NODE

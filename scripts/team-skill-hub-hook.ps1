@@ -105,6 +105,34 @@ try {
     }
     if ([string]$x.hook_event_name -eq "PostToolUse") {
         Add-Evidence -Value $x.tool_response
+        $responseText = ""
+        if ($x.tool_response -is [string]) {
+            $responseText = [string]$x.tool_response
+        } elseif ($null -ne $x.tool_response) {
+            try { $responseText = $x.tool_response | ConvertTo-Json -Depth 6 -Compress } catch { $responseText = "" }
+        }
+        if ([string]$x.tool_name -eq "Bash" -and $responseText) {
+            $unittest = [regex]::Match($responseText, '(?i)\bRan\s+(\d+)\s+tests?\b')
+            if ($unittest.Success -and [regex]::IsMatch($responseText, '(?m)^\s*OK\s*$')) {
+                $count = [int]$unittest.Groups[1].Value
+                if (-not $evidence.ContainsKey("tests_run")) { $evidence["tests_run"] = $count }
+                if (-not $evidence.ContainsKey("tests_passed")) { $evidence["tests_passed"] = $count }
+                if (-not $evidence.ContainsKey("tests_failed")) { $evidence["tests_failed"] = 0 }
+                if (-not $evidence.ContainsKey("success")) { $evidence["success"] = $true }
+                if (-not $evidence.ContainsKey("status")) { $evidence["status"] = "passed" }
+            }
+            $passed = [regex]::Match($responseText, '(?i)\b(\d+)\s+passed\b')
+            $failed = [regex]::Match($responseText, '(?i)\b(\d+)\s+failed\b')
+            if ($passed.Success) {
+                $passedCount = [int]$passed.Groups[1].Value
+                $failedCount = if ($failed.Success) { [int]$failed.Groups[1].Value } else { 0 }
+                if (-not $evidence.ContainsKey("tests_passed")) { $evidence["tests_passed"] = $passedCount }
+                if (-not $evidence.ContainsKey("tests_failed")) { $evidence["tests_failed"] = $failedCount }
+                if (-not $evidence.ContainsKey("tests_run")) { $evidence["tests_run"] = $passedCount + $failedCount }
+                if (-not $evidence.ContainsKey("success")) { $evidence["success"] = ($failedCount -eq 0) }
+                if (-not $evidence.ContainsKey("status")) { $evidence["status"] = if ($failedCount -eq 0) { "passed" } else { "failed" } }
+            }
+        }
         if ($evidence.ContainsKey("exit_code") -and -not $evidence.ContainsKey("success")) {
             $evidence["success"] = ([int]$evidence["exit_code"] -eq 0)
         }

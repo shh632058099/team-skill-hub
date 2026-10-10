@@ -100,19 +100,27 @@ async function main(): Promise<void> {
     })
   );
 
-  const handler = {
-    type: "command",
-    command: 'bash "$PLUGIN_ROOT/hooks/team-skill-hub-hook.sh"',
-    commandWindows:
-      'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& \\"$env:PLUGIN_ROOT\\\\hooks\\\\team-skill-hub-hook.ps1\\""',
-    async: true,
-    timeout: 2
-  };
   const hooks: Record<string, unknown[]> = {};
   for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
+    const handler = {
+      type: "command",
+      command: 'bash "$PLUGIN_ROOT/hooks/team-skill-hub-hook.sh"',
+      commandWindows:
+        'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& \\"$env:PLUGIN_ROOT\\\\hooks\\\\team-skill-hub-hook.ps1\\""',
+      async: !["SessionStart", "PostToolUse", "Stop", "SessionEnd"].includes(event),
+      timeout: 2
+    };
     hooks[event] = [{ hooks: [handler] }];
   }
   for (const event of ["PreToolUse", "PreCompact", "PostCompact"]) {
+    const handler = {
+      type: "command",
+      command: 'bash "$PLUGIN_ROOT/hooks/team-skill-hub-hook.sh"',
+      commandWindows:
+        'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& \\"$env:PLUGIN_ROOT\\\\hooks\\\\team-skill-hub-hook.ps1\\""',
+      async: true,
+      timeout: 2
+    };
     hooks[event] = [{ matcher: "^__team_skill_hub_reserved__$", hooks: [handler] }];
   }
   await writeFile(

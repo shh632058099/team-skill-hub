@@ -91,6 +91,7 @@ $McpBlock = @(
     "[mcp_servers.$ServerName]",
     "url = `"$Url`"",
     "bearer_token_env_var = `"$ApiKeyEnv`"",
+    "default_tools_approval_mode = `"approve`"",
     $McpEnd
 ) -join [Environment]::NewLine
 $ConfigContent = Replace-ManagedBlock $ConfigContent $McpBegin $McpEnd $McpBlock
@@ -162,7 +163,7 @@ foreach ($Event in $Events) {
         type = "command"
         command = $ShCommand
         commandWindows = $PsCommand
-        async = $true
+        async = ($Event -notin @("SessionStart","PostToolUse","Stop","SessionEnd"))
         timeout = 2
     }
     $TeamGroup = [ordered]@{ hooks = @($TeamHandler) }

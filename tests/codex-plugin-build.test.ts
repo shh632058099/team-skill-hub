@@ -47,7 +47,11 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     });
 
     const hooks = JSON.parse(await readFile(path.join(out, "hooks", "hooks.json"), "utf8"));
-    assert.equal(hooks.hooks.SessionStart[0].hooks[0].async, true);
+    assert.equal(hooks.hooks.SessionStart[0].hooks[0].async, false);
+    assert.equal(hooks.hooks.PostToolUse[0].hooks[0].async, false);
+    assert.equal(hooks.hooks.Stop[0].hooks[0].async, false);
+    assert.equal(hooks.hooks.SessionEnd[0].hooks[0].async, false);
+    assert.equal(hooks.hooks.UserPromptSubmit[0].hooks[0].async, true);
     assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /PLUGIN_ROOT/);
     assert.match(hooks.hooks.SessionStart[0].hooks[0].commandWindows, /PLUGIN_ROOT/);
     assert.equal(hooks.hooks.PreToolUse[0].matcher, "^__team_skill_hub_reserved__$");
