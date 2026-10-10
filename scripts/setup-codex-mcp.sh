@@ -124,7 +124,7 @@ For non-trivial engineering tasks:
 
 Do not submit raw transcript, speculative conclusions, credentials, or customer-sensitive data.
 7. If a retrieved Team Skill Hub asset is clearly outdated or incorrect, use \`submit_feedback\` with a concise evidence-based reason.
-8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, use \`submit_knowledge_candidate\` with concise source-grounded content. Do not submit secrets, credentials, customer-sensitive data, or speculative conclusions.
+8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, first summarize it with the exact six-section Markdown format above, then use \`submit_knowledge_candidate\`. The server validates and canonicalizes the same format. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.
 9. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.

@@ -244,7 +244,7 @@ postmortems, FAQ and similar repository context. Use `get_knowledge` after a
 search hit when you need the exact selected chunk or full document. Image-only
 scanned PDFs are not OCR'd.
 
-If a Team Skill Hub result is clearly outdated or incorrect, use `submit_feedback` with a short evidence-based reason. If the task produces durable, verified team-specific knowledge that is missing from the Hub, use `submit_knowledge_candidate`. Candidates go to the Web Review Inbox; clients cannot publish directly to Git. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.
+If a Team Skill Hub result is clearly outdated or incorrect, use `submit_feedback` with a short evidence-based reason. If the task produces durable, verified team-specific knowledge that is missing from the Hub, use `submit_knowledge_candidate`. Before a manual submission, summarize it in the same fixed format as the Stop Hook: `# Title` plus `## 问题`, `## 根因`, `## 解决方案`, `## 验证结果`, `## 适用范围`, and `## 约束/限制`; the server validates and canonicalizes the format, so raw notes or transcripts are not stored directly. Candidates go to the Web Review Inbox; clients cannot publish directly to Git. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.
 
 Markdown Knowledge can optionally declare lifecycle metadata in frontmatter: `owner`, `status` (`draft` / `active` / `deprecated` / `archived`), `tags`, `valid_from`, `valid_until`, and `supersedes`. These fields are returned by Knowledge search/get and are visible in the Web lifecycle audit. Frontmatter itself is removed from the indexed body. Existing documents without lifecycle metadata remain fully compatible.
 

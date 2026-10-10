@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { KNOWLEDGE_SUMMARY_SCHEMA_VERSION, parseKnowledgeSummary } from "../src/knowledge-summary.js";
+import {
+  KNOWLEDGE_SUMMARY_SCHEMA_VERSION,
+  normalizeKnowledgeCandidateSummary,
+  parseKnowledgeSummary
+} from "../src/knowledge-summary.js";
 
 const validSummary = [
   "# OTA 断电恢复修复",
@@ -31,6 +35,18 @@ test("parses and canonicalizes the fixed knowledge summary format", () => {
   assert.equal(result.summary.schemaVersion, KNOWLEDGE_SUMMARY_SCHEMA_VERSION);
   assert.equal(result.summary.title, "OTA 断电恢复修复");
   assert.equal(result.summary.markdown, validSummary);
+});
+
+test("manual candidate normalization rejects raw notes and returns canonical content", () => {
+  assert.deepEqual(normalizeKnowledgeCandidateSummary("raw notes from the session"), {
+    ok: false,
+    reason: "missing-title"
+  });
+  const result = normalizeKnowledgeCandidateSummary(validSummary);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.title, "OTA 断电恢复修复");
+  assert.equal(result.content, validSummary);
 });
 
 test("accepts English section aliases and emits Chinese canonical headings", () => {

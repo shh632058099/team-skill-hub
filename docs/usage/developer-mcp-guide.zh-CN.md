@@ -288,7 +288,7 @@ Chunk 或完整文档。当前不做 OCR，因此纯扫描图片 PDF 不会产�
 
 如果检索到的团队资产已经明显过期或错误，可以使用 `submit_feedback` 提交简短、可验证的原因。
 
-如果当前任务产生了**稳定、可复用、已经验证**的新团队知识，而 Hub 中尚不存在，可以使用 `submit_knowledge_candidate` 提交候选内容。候选只会进入 Web Review Inbox，不会由开发者客户端直接写 Git 或发布。不要提交密码、Token、客户敏感数据或未经验证的推测。
+如果当前任务产生了**稳定、可复用、已经验证**的新团队知识，而 Hub 中尚不存在，可以使用 `submit_knowledge_candidate` 提交候选内容。手动提交前先按 Stop Hook 同款固定格式总结：`# Title` 加上 `## 问题`、`## 根因`、`## 解决方案`、`## 验证结果`、`## 适用范围`、`## 约束/限制` 六个章节；服务端会再次校验并规范化，原始笔记或转录不会直接入库。候选只会进入 Web Review Inbox，不会由开发者客户端直接写 Git 或发布。不要提交密码、Token、客户敏感数据或未经验证的推测。
 
 Markdown Knowledge 可以使用可选 frontmatter 声明 `owner`、`status`、`tags`、`valid_from`、`valid_until` 和 `supersedes`。这些生命周期 metadata 会随 Knowledge 搜索/读取结果返回；`deprecated`、`superseded`、`expired`、`archived` 默认不参与正常搜索，未来未生效或已超过 `valid_until` 的内容也会被过滤，`draft` 会降权。frontmatter 本身不会进入正文检索内容。
 

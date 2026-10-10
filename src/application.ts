@@ -61,7 +61,7 @@ import {
   resolveClientEventSchemaVersion
 } from "./client-events.js";
 import { resolveProjectContext } from "./project-context.js";
-import { listDataGovernanceRules } from "./data-governance.js";import { parseKnowledgeSummary } from "./knowledge-summary.js";
+import { listDataGovernanceRules } from "./data-governance.js";import { normalizeKnowledgeCandidateSummary, parseKnowledgeSummary } from "./knowledge-summary.js";
 
 export class SkillHubApplicationService {
   private readonly states = new Map<string, RepositoryState>();
@@ -2876,11 +2876,25 @@ export class SkillHubApplicationService {
       "title" | "content" | "sourceType" | "suggestedType" | "repository" | "suggestedPath" | "traceId"
     >
   ) {
-    if (input.repository) {
-      const allowed = this.allowedRepositories(principal).some((repo) => repo.id === input.repository);
+    let candidateInput = input;
+    if (input.sourceType === "manual" || input.sourceType === "mcp-session") {
+      const normalizedSummary = normalizeKnowledgeCandidateSummary(input.content);
+      if (!normalizedSummary.ok) {
+        throw new Error(
+          `Knowledge candidate content must use the fixed summary format (${normalizedSummary.reason})`
+        );
+      }
+      candidateInput = {
+        ...input,
+        title: normalizedSummary.title,
+        content: normalizedSummary.content
+      };
+    }
+    if (candidateInput.repository) {
+      const allowed = this.allowedRepositories(principal).some((repo) => repo.id === candidateInput.repository);
       if (!allowed) throw new Error("Repository not found");
     }
-    return await this.observability.createCandidate(principal, input);
+    return await this.observability.createCandidate(principal, candidateInput);
   }
 
   async listKnowledgeCandidates(

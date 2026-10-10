@@ -128,3 +128,15 @@ export function parseKnowledgeSummary(input: unknown): KnowledgeSummaryParseResu
     }
   };
 }
+
+export function normalizeKnowledgeCandidateSummary(input: string):
+  | { ok: true; title: string; content: string }
+  | { ok: false; reason: string } {
+  const parsed = parseKnowledgeSummary(input);
+  if (!parsed.ok) return parsed;
+  return {
+    ok: true,
+    title: parsed.summary.title,
+    content: parsed.summary.markdown
+  };
+}

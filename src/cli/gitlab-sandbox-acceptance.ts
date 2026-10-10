@@ -109,10 +109,25 @@ async function main(): Promise<void> {
     const suggestedPath = opts.suggestedPath ?? "knowledge/sandbox-acceptance-" + safeSlug(marker) + ".md";
     const title = "Team Skill Hub Sandbox Acceptance " + marker;
     const content = [
-      "Sandbox acceptance marker: " + marker,
+      "# Team Skill Hub Sandbox Acceptance " + marker,
       "",
-      "This Knowledge entry is intentionally created by the Team Skill Hub GitLab sandbox acceptance flow.",
-      "It proves candidate review, GitLab MR publishing, webhook sync, and retrieval after human merge."
+      "## 问题",
+      "需要验证候选知识从 Review 到 GitLab MR、合并、同步和检索的完整链路。验收标记：" + marker,
+      "",
+      "## 根因",
+      "沙盒验收需要一个可追踪且不会与真实团队知识混淆的候选条目。",
+      "",
+      "## 解决方案",
+      "通过 Team Skill Hub GitLab sandbox acceptance flow 创建并发布此候选。",
+      "",
+      "## 验证结果",
+      "候选审核、GitLab MR 发布、Webhook 同步和人工合并后的检索结果均应可验证。",
+      "",
+      "## 适用范围",
+      "仅适用于 Team Skill Hub GitLab 沙盒验收。",
+      "",
+      "## 约束/限制",
+      "不得将此沙盒条目当作生产知识；验收标记必须保持可检索。"
     ].join("\n");
 
     const submitted = await request<{ candidate: CandidateView }>("/admin/api/knowledge-candidates", {

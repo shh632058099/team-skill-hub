@@ -823,7 +823,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "submit_knowledge_candidate",
       {
-        description: "Submit a candidate team Knowledge/Skill item for human review. This never publishes directly to Git.",
+        description: "Submit a candidate team Knowledge/Skill item for human review. Before calling, summarize it with the exact six-section Markdown format (# Title, 问题, 根因, 解决方案, 验证结果, 适用范围, 约束/限制); the server validates and canonicalizes it. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
           title: z.string().min(1).max(200),
