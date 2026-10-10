@@ -30,8 +30,16 @@ export async function startServer(
     roles: ["admin", "developer", "internal", "customer"],
     tenantId: "default"
   };
+  const configuredAllowedHosts = (process.env.SKILL_HUB_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
   const allowedHosts =
-    config.host === "0.0.0.0" ? ["localhost", "127.0.0.1", "[::1]"] : undefined;
+    config.host === "0.0.0.0"
+      ? [...new Set(["localhost", "127.0.0.1", "[::1]", ...configuredAllowedHosts])]
+      : configuredAllowedHosts.length > 0
+        ? configuredAllowedHosts
+        : undefined;
   const app = createMcpFastifyApp({
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {})
@@ -610,7 +618,7 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    return await service.getPlatformKpis();
+    return await service.getPlatformKpis(adminPrincipal);
   });
 
   app.get<{ Querystring: { days?: string } }>("/admin/api/dashboard-trends", async (request, reply) => {
@@ -1236,7 +1244,7 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    return await service.getOperationalHealth();
+    return await service.getOperationalHealth(adminPrincipal);
   });
 
   app.get("/admin/api/content-quality", async (request, reply) => {
@@ -1556,7 +1564,7 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    return await service.getOperationalHealth();
+    return await service.getOperationalHealth(adminPrincipal);
   });
 
   app.get("/api/v1/admin/content-quality", async (request, reply) => {
@@ -1601,7 +1609,7 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    return await service.getPlatformKpis();
+    return await service.getPlatformKpis(adminPrincipal);
   });
 
   app.get<{ Querystring: { days?: string } }>("/api/v1/admin/dashboard-trends", async (request, reply) => {

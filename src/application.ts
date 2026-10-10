@@ -506,7 +506,7 @@ export class SkillHubApplicationService {
         });
       }
     }
-    this.ready = this.registry.list().length > 0 || this.config.repositories.length === 0;
+    this.recomputeReadyState();
   }
 
   private async loadWebhookDedup(): Promise<void> {
@@ -550,6 +550,13 @@ export class SkillHubApplicationService {
     this.webhookSeen.set(normalized, Date.now());
     await this.persistWebhookDedup();
     return true;
+  }
+
+  private recomputeReadyState(): void {
+    const enabledRepositories = this.config.repositories.filter((repository) => repository.enabled);
+    this.ready =
+      enabledRepositories.length === 0 ||
+      enabledRepositories.every((repository) => this.states.get(repository.id)?.status === "healthy");
   }
 
   isReady(): boolean {
@@ -606,7 +613,7 @@ export class SkillHubApplicationService {
     for (const id of previousIds) {
       if (!nextIds.has(id)) this.states.delete(id);
     }
-    this.ready = this.registry.list().length > 0 || this.config.repositories.length === 0;
+    this.recomputeReadyState();
   }
 
   repositoryIds(): string[] {
@@ -966,7 +973,7 @@ export class SkillHubApplicationService {
       state.knowledgeDocumentCount = knowledgeDocuments.length;
       state.knowledgeChunkCount = knowledgeDocuments.reduce((sum, item) => sum + item.chunkCount, 0);
       state.failureCount = 0;
-      this.ready = true;
+      this.recomputeReadyState();
       this.events.emit("repository.sync.completed", {
         repository: repository.id,
         revision: materialized.revision,
@@ -990,6 +997,7 @@ export class SkillHubApplicationService {
       state.error = error instanceof Error ? error.message : String(error);
       state.lastSyncAt = new Date().toISOString();
       state.failureCount += 1;
+      this.recomputeReadyState();
       await this.appendAudit({
         ts: new Date().toISOString(),
         action: "repository.sync.failed",
@@ -2255,7 +2263,7 @@ export class SkillHubApplicationService {
     };
   }
 
-  async getOperationalHealth() {
+  async getOperationalHealth(principal?: Principal) {
     const states = this.listRepositoryStates();
     const now = Date.now();
     const staleRepositories = states.filter((state) => {
@@ -2268,7 +2276,7 @@ export class SkillHubApplicationService {
       return now - lastSuccess > thresholdMs;
     });
     const candidates = await this.observability.listCandidates(5000);
-    const lifecycle = this.getKnowledgeLifecycleAudit();
+    const lifecycle = this.getKnowledgeLifecycleAudit(principal);
     let disk:
       | { totalBytes: number; freeBytes: number; usedBytes: number; usedRatio: number }
       | undefined;
@@ -2420,7 +2428,7 @@ export class SkillHubApplicationService {
     };
   }
 
-  async getPlatformKpis() {
+  async getPlatformKpis(principal?: Principal) {
     const [sessions, candidates, detections, usage, feedback, callSummary] = await Promise.all([
       this.observability.listClientSessions(1000),
       this.observability.listCandidates(5000),
@@ -2466,7 +2474,7 @@ export class SkillHubApplicationService {
     const publishedWithMr = candidates.filter((item) => Boolean(item.publication));
     const mergedMrs = publishedWithMr.filter((item) => item.publication?.mergeRequestState === "merged").length;
     const negativeFeedback = feedback.filter((item) => item.rating === "negative").length;
-    const lifecycle = this.getKnowledgeLifecycleAudit();
+    const lifecycle = this.getKnowledgeLifecycleAudit(principal);
     const sessionCallCount = sessions.reduce((sum, item) => sum + item.callCount, 0);
     const sessionEvidenceCount = sessions.reduce((sum, item) => sum + item.evidenceCount, 0);
     const autoCandidateCount = candidates.filter((item) => Boolean(item.automation)).length;
@@ -2518,8 +2526,8 @@ export class SkillHubApplicationService {
 
   async getActiveAlerts(principal?: Principal) {
     const [health, kpis, evaluationRuns] = await Promise.all([
-      this.getOperationalHealth(),
-      this.getPlatformKpis(),
+      this.getOperationalHealth(principal),
+      this.getPlatformKpis(principal),
       this.listEvaluationRuns(20, undefined, undefined, principal)
     ]);
     type AlertSeverity = "warning" | "critical";

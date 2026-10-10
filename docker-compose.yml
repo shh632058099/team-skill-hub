@@ -20,6 +20,7 @@ services:
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       AUTH_MODE: ${AUTH_MODE:-development}
       SKILL_HUB_API_KEYS_JSON: ${SKILL_HUB_API_KEYS_JSON:-}
+      SKILL_HUB_ALLOWED_HOSTS:
     volumes:
       - ./config:/app/config:ro
       - ../rd-skills:/skills/rd-skills:ro

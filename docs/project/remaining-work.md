@@ -654,10 +654,10 @@ ClientEvent API
 8. 检查 `git status --short`。
 9. 提交时继续排除以下本地/设计文件：
    - `config/repositories.gitlab.yaml
-   - `docs/implementation-plan.md
-   - `docs/internal-ai-platform.md
-   - `docs/roadmap-v2.md
-   - `docs/team-skill-hub-design.md
+   - `docs/project/implementation-plan.md
+   - `docs/architecture/internal-ai-platform.md
+   - `docs/project/roadmap-v2.md
+   - `docs/architecture/team-skill-hub-design.md
 
 ---
 
@@ -1315,7 +1315,7 @@ sync + explicit allow / deny
 
 ## 47. 其他 Agent / IDE Adapter
 
-> 2026-10-04 状态：通用 Adapter Contract 第一版已完成。`GET /client-events/schema` 现在公开 Agent Adapter contract v1（通用 endpoint、认证策略、稳定 client id 规则、支持事件、metadata policy、Evidence field）；VS Code / JetBrains / CI / internal coding agent 只要能生成共享 Client Event v1 envelope，就直接 POST `/client-events`，不再为每个产品复制后端。新增 `ci_agent` E2E，验证非 Codex / Claude 客户端可复用 Project Context、Evidence、server-side secret redaction 与 Session pipeline。正式契约见 `docs/agent-adapter-contract.md`。
+> 2026-10-04 状态：通用 Adapter Contract 第一版已完成。`GET /client-events/schema` 现在公开 Agent Adapter contract v1（通用 endpoint、认证策略、稳定 client id 规则、支持事件、metadata policy、Evidence field）；VS Code / JetBrains / CI / internal coding agent 只要能生成共享 Client Event v1 envelope，就直接 POST `/client-events`，不再为每个产品复制后端。新增 `ci_agent` E2E，验证非 Codex / Claude 客户端可复用 Project Context、Evidence、server-side secret redaction 与 Session pipeline。正式契约见 `docs/development/agent-adapter-contract.md`。
 
 后续产品接入：
 

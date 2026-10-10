@@ -158,7 +158,7 @@ Engineer identifies repeated task
 
 A deterministic Evaluation Framework is now part of the platform. Golden cases are stored as `EVALUATION.yaml` in the same GitLab repository as the assets they protect. It supports Skill/Prompt/Agent search/resolve/get expectations, content contracts, Agent binding contracts, baseline-vs-candidate comparison, persisted evaluation runs, MCP/HTTP querying, and CI failure on regression.
 
-For details, see `docs/evaluation-framework.md`.
+For details, see `docs/evaluation/evaluation-framework.md`.
 
 ## What to build next
 

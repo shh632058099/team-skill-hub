@@ -100,6 +100,17 @@ metadata:
   return root;
 }
 
+async function makeKnowledgeOnlyRoot() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "knowledge-only-skill-hub-"));
+  const docsDir = path.join(root, "docs");
+  await mkdir(docsDir, { recursive: true });
+  await writeFile(
+    path.join(docsDir, "knowledge.md"),
+    "# Knowledge only\n\nRepository contains Knowledge but no Skill manifests.\n"
+  );
+  return root;
+}
+
 async function addPromptAndAgent(root: string) {
   const promptDir = path.join(root, "ota", "review");
   await writeFile(
@@ -242,6 +253,39 @@ test("registry replaces one repository atomically", async () => {
   registry.replaceRepository("rd-skills", [{ ...skills[0]!, revision: "r2" }]);
   assert.equal(registry.list().length, 1);
   assert.equal(registry.get("rd-skills", "ota-code-review")?.revision, "r2");
+});
+
+test("knowledge-only repository becomes ready after successful startup sync", async () => {
+  const root = await makeKnowledgeOnlyRoot();
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-knowledge-ready-"));
+  const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: ["developer", "internal"],
+      authentication: { mode: "development", apiKeys: {} },
+      repositories: [repository]
+    },
+    [new LocalRepositoryProvider()],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
+    new LoggingEventSink()
+  );
+
+  await service.initialize();
+  const state = service.listRepositoryStates()[0];
+  assert.equal(state?.status, "healthy");
+  assert.equal(state?.skillCount, 0);
+  assert.equal(state?.knowledgeDocumentCount, 1);
+  assert.equal(service.isReady(), true);
+  search.close();
 });
 
 test("invalid repository update preserves last known good skill", async () => {
