@@ -1097,7 +1097,7 @@ export async function startServer(
       return {
         key: created.record,
         apiKey: created.apiKey,
-        warning: "This API key is shown only once. Copy it now."
+        warning: "Administrators can reveal this API key again from the admin console."
       };
     } catch (error) {
       reply.code(400);
@@ -1126,6 +1126,47 @@ export async function startServer(
       }
     }
   );
+
+  app.get<{ Params: { id: string } }>("/admin/api/api-keys/:id/reveal", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!apiKeyStore || !(apiKeyAuth instanceof ApiKeyAuthenticationProvider)) {
+      reply.code(503);
+      return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
+    }
+    try {
+      return { apiKey: apiKeyStore.reveal(request.params.id) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reply.code(message === "API key not found" ? 404 : message.includes("legacy API key") ? 409 : 400);
+      return { error: message };
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/api-keys/:id/rotate", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!apiKeyStore || !(apiKeyAuth instanceof ApiKeyAuthenticationProvider)) {
+      reply.code(503);
+      return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
+    }
+    try {
+      const rotated = await apiKeyStore.rotate(request.params.id);
+      refreshManagedApiKeys();
+      return {
+        key: rotated.record,
+        apiKey: rotated.apiKey,
+        warning: "The previous API key is now invalid. Administrators can reveal the new key again from the admin console."
+      };
+    } catch (error) {
+      reply.code(error instanceof Error && error.message === "API key not found" ? 404 : 400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
 
   app.delete<{ Params: { id: string } }>("/admin/api/api-keys/:id", async (request, reply) => {
     if (!hasAdminAccess(request)) {

@@ -55,7 +55,7 @@ button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#ff
 <label>角色（Roles，逗号分隔）</label><input id="apiRoles" value="developer, internal">
 <div class="actions"><button id="createApiKey">创建 API Key</button><span id="apiKeyStatus"></span></div>
 <div id="oneTimeKey" class="one-time">
-<div><b>请立即复制这个 Key，关闭或刷新后将无法再次查看：</b></div>
+<div><b>API Key 明文（管理员之后也可以再次查看）：</b></div>
 <div class="actions"><input id="newApiKey" readonly><button id="copyApiKey" class="secondary">复制</button></div>
 </div>
 <div id="apiKeys" class="key-list"></div>
@@ -122,8 +122,8 @@ function setupTooltips(){
   apiUserId:"该 API Key 代表的用户 ID，会记录到审计、反馈和会话数据中。",
   apiTenant:"租户标识；单团队部署通常保持 default 即可。",
   apiRoles:"该 API Key 拥有的角色权限，影响可读取仓库及可执行操作。",
-  createApiKey:"创建一个新的客户端 API Key。明文只显示一次，请创建后立即复制保存。",
-  copyApiKey:"复制刚创建的 API Key；刷新页面后明文将无法再次查看。",
+  createApiKey:"创建一个新的客户端 API Key。管理员之后可以在此页面再次查看明文。",
+  copyApiKey:"复制当前显示的 API Key 明文。",
   toolQuery:"按工具名称、能力等关键词筛选 Tool Registry。",
   toolClient:"可按客户端类型筛选工具，例如 codex；留空表示不过滤客户端。",
   searchTools:"按当前条件查询工具注册表；只读取数据。",
@@ -641,9 +641,11 @@ function renderApiKeys(keys){
   const actions=document.createElement("div");
   const toggle=document.createElement("button");toggle.className="secondary small";toggle.textContent=item.enabled?"禁用":"启用";toggle.title=item.enabled?"禁用后使用该 API Key 的客户端将无法继续访问 MCP；Key 记录仍保留。":"重新启用该 API Key，使对应客户端恢复访问。";
   toggle.onclick=()=>updateApiKey(item.id,{enabled:!item.enabled});
+  const reveal=document.createElement("button");reveal.className="secondary small";reveal.textContent="查看";reveal.disabled=!item.revealable;reveal.title=item.revealable?"解密并显示该 API Key 明文；仅管理员可执行。":"这是旧版本创建的 Key，当时未保存可解密密文；请先重新生成一次。";reveal.onclick=()=>revealApiKey(item.id,item.label);
+  const rotate=document.createElement("button");rotate.className="secondary small";rotate.textContent="重新生成";rotate.title="生成新的 API Key 并立即使旧 Key 失效；新 Key 之后仍可由管理员查看。";rotate.onclick=()=>rotateApiKey(item.id,item.label);
   const remove=document.createElement("button");remove.className="danger small";remove.textContent="删除";
   remove.title="永久删除该 API Key；对应客户端会立即失效且无法恢复。";remove.onclick=()=>deleteApiKey(item.id);
-  actions.append(toggle,remove);top.append(title,actions);
+  actions.append(toggle,reveal,rotate,remove);top.append(title,actions);
   const meta=document.createElement("div");meta.className="key-meta";
   meta.textContent="User: "+item.principal.id+" · Tenant: "+item.principal.tenantId+" · Roles: "+item.principal.roles.join(", ")+" · "+(item.enabled?"Enabled":"Disabled");
   row.append(top,meta);root.appendChild(row);
@@ -666,7 +668,20 @@ async function createApiKey(){
 async function updateApiKey(id,body){
  const r=await fetch("/admin/api/api-keys/"+encodeURIComponent(id),{method:"PUT",headers:headers(),body:JSON.stringify(body)});const data=await r.json();
  if(!r.ok){apiKeyStatus.textContent=data.error||"更新失败";apiKeyStatus.className="error";return}
- await loadApiKeys();
+  await loadApiKeys();
+}
+async function revealApiKey(id,label){
+ const r=await fetch("/admin/api/api-keys/"+encodeURIComponent(id)+"/reveal",{headers:headers(false)});const data=await r.json();
+ if(!r.ok){apiKeyStatus.textContent=data.error||"查看失败";apiKeyStatus.className="error";toast(data.error||"查看失败","error");return}
+ document.getElementById("newApiKey").value=data.apiKey;document.getElementById("oneTimeKey").style.display="block";
+ apiKeyStatus.textContent="正在查看："+label;apiKeyStatus.className="ok";
+}
+async function rotateApiKey(id,label){
+ const confirmed=await modalForm({title:"重新生成 API Key",message:"将为「"+label+"」生成新 Key，并立即使旧 Key 失效。新 Key 之后管理员仍可再次查看。",danger:true,confirmText:"重新生成"});if(!confirmed)return;
+ const r=await fetch("/admin/api/api-keys/"+encodeURIComponent(id)+"/rotate",{method:"POST",headers:headers(false)});const data=await r.json();
+ if(!r.ok){apiKeyStatus.textContent=data.error||"重新生成失败";apiKeyStatus.className="error";toast(data.error||"重新生成失败","error");return}
+ document.getElementById("newApiKey").value=data.apiKey;document.getElementById("oneTimeKey").style.display="block";
+ apiKeyStatus.textContent="已重新生成，旧 Key 已失效";apiKeyStatus.className="ok";toast("API Key 已重新生成");await loadApiKeys();
 }
 async function deleteApiKey(id){
  const confirmed=await modalForm({title:"删除 API Key",message:"删除后客户端会立即失效，此操作不可撤销。",danger:true,confirmText:"删除"});if(!confirmed)return;

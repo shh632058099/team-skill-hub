@@ -20,6 +20,7 @@ test("managed API key authenticates without persisting plaintext", async () => {
     const persisted = await readFile(path.join(dir, "config", "api-keys.json"), "utf8");
     assert.equal(persisted.includes(created.apiKey), false);
     assert.equal(persisted.includes(created.apiKey.slice(-4)), true);
+    assert.equal(store.reveal(created.record.id), created.apiKey);
 
     const auth = new ApiKeyAuthenticationProvider({});
     auth.replaceManagedKeys(store.snapshot());
@@ -76,6 +77,64 @@ test("deleted managed API key is removed from persistence and authentication imm
       () => reloadedAuth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
       /Invalid API key/
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("rotated managed API key invalidates the previous key without persisting plaintext", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-api-keys-rotate-"));
+  try {
+    const store = new ManagedApiKeyStore(dir);
+    await store.load();
+    const created = await store.create({
+      label: "Rotating Codex",
+      principal: { id: "rotating-user", roles: ["developer"], tenantId: "rd" }
+    });
+    const rotated = await store.rotate(created.record.id);
+
+    assert.notEqual(rotated.apiKey, created.apiKey);
+    assert.equal(rotated.record.id, created.record.id);
+    assert.equal(rotated.record.keyLast4, rotated.apiKey.slice(-4));
+    assert.equal(rotated.record.enabled, true);
+    assert.equal(rotated.record.revealable, true);
+    assert.equal(store.reveal(rotated.record.id), rotated.apiKey);
+
+    const persisted = await readFile(path.join(dir, "config", "api-keys.json"), "utf8");
+    assert.equal(persisted.includes(created.apiKey), false);
+    assert.equal(persisted.includes(rotated.apiKey), false);
+
+    const auth = new ApiKeyAuthenticationProvider({});
+    auth.replaceManagedKeys(store.snapshot());
+    assert.throws(
+      () => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
+      /Invalid API key/
+    );
+    assert.equal(
+      auth.authenticate(new Headers({ "x-skill-hub-api-key": rotated.apiKey })).id,
+      "rotating-user"
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("revealed API key survives store reload while remaining encrypted at rest", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-api-keys-reveal-"));
+  try {
+    const store = new ManagedApiKeyStore(dir);
+    await store.load();
+    const created = await store.create({
+      label: "Revealable Codex",
+      principal: { id: "reveal-user", roles: ["developer"], tenantId: "rd" }
+    });
+
+    const reloaded = new ManagedApiKeyStore(dir);
+    await reloaded.load();
+    assert.equal(reloaded.reveal(created.record.id), created.apiKey);
+    const persisted = await readFile(path.join(dir, "config", "api-keys.json"), "utf8");
+    assert.equal(persisted.includes(created.apiKey), false);
+    assert.equal((await readFile(path.join(dir, "config", "api-key-encryption.key"))).length, 32);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
