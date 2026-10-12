@@ -1,8 +1,15 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import type { KnowledgePublishingConfig, RepositoryConfig } from "./types.js";
 import type { KnowledgeCandidate } from "./observability.js";
 
+const execFileAsync = promisify(execFile);
+
 export interface KnowledgePublicationResult {
-  provider: "gitlab";
+  provider: "gitlab" | "github";
   projectPath: string;
   branch: string;
   targetBranch: string;
@@ -42,6 +49,22 @@ export interface KnowledgePublisher {
 }
 
 type FetchLike = typeof fetch;
+type GitRun = (args: string[], cwd?: string) => Promise<string>;
+
+async function runGit(args: string[], cwd?: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      ...(cwd ? { cwd } : {}),
+      windowsHide: true,
+      timeout: 60_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    });
+    return stdout.trim();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`git ${args[0] ?? "command"} failed: ${detail}`);
+  }
+}
 
 function slugify(value: string): string {
   const ascii = value
@@ -99,6 +122,17 @@ function inferGitLabLocation(gitUrl?: string): { baseUrl?: string; projectPath?:
     };
   }
   return {};
+}
+
+function githubApiBase(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, "");
+  const url = new URL(normalized);
+  return url.hostname.toLowerCase() === "github.com" ? "https://api.github.com" : `${url.origin}/api/v3`;
+}
+
+function githubSshUrl(baseUrl: string, projectPath: string): string {
+  const host = new URL(baseUrl).hostname;
+  return `git@${host}:${projectPath.replace(/^\/+/, "").replace(/\.git$/i, "")}.git`;
 }
 
 function markdownForCandidate(candidate: KnowledgeCandidate): string {
@@ -370,8 +404,225 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
   }
 }
 
+export class GitHubKnowledgePublisher implements KnowledgePublisher {
+  constructor(
+    private readonly fetchImpl: FetchLike = fetch,
+    private readonly gitRun: GitRun = runGit
+  ) {}
+
+  private resolve(repository: RepositoryConfig): {
+    config: KnowledgePublishingConfig;
+    apiBase: string;
+    projectPath: string;
+    token: string;
+    sshUrl: string;
+  } {
+    const config = repository.knowledgePublishing;
+    if (!config?.enabled) throw new Error("Knowledge publishing is disabled for this repository");
+    if (config.provider !== "github") throw new Error("Unsupported knowledge publisher");
+    const baseUrl = (config.baseUrl ?? "https://github.com").replace(/\/+$/, "");
+    const projectPath = config.projectPath?.replace(/^\/+/, "").replace(/\.git$/i, "");
+    if (!projectPath) throw new Error("GitHub publishing projectPath is required");
+    const token = process.env[config.tokenEnv];
+    if (!token) throw new Error(`Missing GitHub publishing token environment variable ${config.tokenEnv}`);
+    return {
+      config,
+      apiBase: githubApiBase(baseUrl),
+      projectPath,
+      token,
+      sshUrl: githubSshUrl(baseUrl, projectPath)
+    };
+  }
+
+  private async request(url: string, token: string, init: RequestInit): Promise<Response> {
+    return await this.fetchImpl(url, {
+      ...init,
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-github-api-version": "2022-11-28",
+        ...(init.headers ?? {})
+      }
+    });
+  }
+
+  async publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult> {
+    if (candidate.status !== "approved" && candidate.status !== "publish_failed") {
+      throw new Error("Knowledge candidate must be approved before publishing");
+    }
+    if (candidate.suggestedType !== "knowledge") {
+      throw new Error("Automatic publishing currently supports Knowledge candidates only");
+    }
+
+    const { config, apiBase, projectPath, token, sshUrl } = this.resolve(repository);
+    const filePath = assertSafePath(candidate.suggestedPath ?? `knowledge/${slugify(candidate.title)}.md`);
+    const targetBranch = config.targetBranch || "main";
+    const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
+    const branch = `${prefix}-${candidate.id.replace(/^kc_/, "").slice(0, 12)}`;
+    const desiredContent = markdownForCandidate(candidate);
+    const worktree = await mkdtemp(path.join(os.tmpdir(), "skill-hub-github-publish-"));
+    let action: "create" | "update" = "create";
+
+    try {
+      await this.gitRun(["clone", "--depth", "1", "--no-tags", "--branch", targetBranch, sshUrl, worktree]);
+      const targetFile = path.join(worktree, ...filePath.split("/"));
+      try {
+        await stat(targetFile);
+        action = "update";
+      } catch {
+        action = "create";
+      }
+
+      const remoteBranch = await this.gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], worktree);
+      if (remoteBranch) {
+        await this.gitRun(["fetch", "--depth", "1", "origin", branch], worktree);
+        await this.gitRun(["checkout", "-B", branch, "FETCH_HEAD"], worktree);
+      } else {
+        await this.gitRun(["checkout", "-B", branch], worktree);
+      }
+
+      let currentContent: string | undefined;
+      try {
+        currentContent = await readFile(targetFile, "utf8");
+      } catch {
+        currentContent = undefined;
+      }
+      if (currentContent !== desiredContent) {
+        await mkdir(path.dirname(targetFile), { recursive: true });
+        await writeFile(targetFile, desiredContent, "utf8");
+        await this.gitRun(["add", "--", filePath], worktree);
+        await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
+        await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
+        await this.gitRun(["commit", "-m", `docs: add knowledge from ${candidate.id}`], worktree);
+        await this.gitRun(["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], worktree);
+      }
+
+      const pullsUrl = `${apiBase}/repos/${projectPath}/pulls`;
+      let response = await this.request(pullsUrl, token, {
+        method: "POST",
+        body: JSON.stringify({
+          title: `Knowledge: ${candidate.title}`,
+          head: branch,
+          base: targetBranch,
+          body: [
+            "Created by Team Skill Hub knowledge review workflow.",
+            "",
+            `Candidate: ${candidate.id}`,
+            candidate.traceId ? `Trace: ${candidate.traceId}` : undefined,
+            candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined
+          ].filter(Boolean).join("\n")
+        })
+      });
+      let pr: {
+        number?: number;
+        html_url?: string;
+        state?: string;
+        merged_at?: string | null;
+        closed_at?: string | null;
+        merge_commit_sha?: string | null;
+        mergeable?: boolean | null;
+        mergeable_state?: string;
+      } | undefined;
+      if (response.ok) {
+        pr = await response.json() as typeof pr;
+      } else if (response.status === 422) {
+        const owner = projectPath.split("/")[0];
+        const query = new URLSearchParams({ state: "all", head: `${owner}:${branch}`, base: targetBranch });
+        response = await this.request(`${pullsUrl}?${query.toString()}`, token, { method: "GET" });
+        if (response.ok) {
+          const rows = await response.json() as Array<NonNullable<typeof pr>>;
+          pr = rows[0];
+          if (pr?.state === "closed" && !pr.merged_at) {
+            throw new Error(`Existing GitHub pull request #${pr.number ?? "?"} for branch ${branch} is closed`);
+          }
+        }
+      }
+      if (!pr?.number || !pr.html_url) {
+        const detail = response.ok ? "" : await response.text().catch(() => "");
+        throw new Error(`GitHub pull request creation failed (${response.status}): ${detail.slice(0, 1000)}`);
+      }
+
+      const publishedAt = new Date().toISOString();
+      return {
+        provider: "github",
+        projectPath,
+        branch,
+        targetBranch,
+        filePath,
+        action,
+        mergeRequestIid: pr.number,
+        mergeRequestUrl: pr.html_url,
+        publishedAt,
+        mergeRequestState: pr.merged_at ? "merged" : pr.state === "closed" ? "closed" : "opened",
+        lastCheckedAt: publishedAt,
+        ...(pr.merged_at ? { mergedAt: pr.merged_at } : {}),
+        ...(pr.closed_at ? { closedAt: pr.closed_at } : {}),
+        ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
+        ...(pr.mergeable !== undefined && pr.mergeable !== null ? { hasConflicts: !pr.mergeable } : {}),
+        ...(pr.mergeable_state ? { detailedMergeStatus: pr.mergeable_state } : {})
+      };
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+    }
+  }
+
+  async reconcile(
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    repository: RepositoryConfig
+  ): Promise<Pick<
+    KnowledgePublicationResult,
+    | "mergeRequestState"
+    | "lastCheckedAt"
+    | "mergedAt"
+    | "closedAt"
+    | "mergeCommitSha"
+    | "pipelineStatus"
+    | "hasConflicts"
+    | "detailedMergeStatus"
+    | "sourceBranchExists"
+  >> {
+    const { apiBase, projectPath, token } = this.resolve(repository);
+    if (publication.projectPath !== projectPath) {
+      throw new Error("Knowledge publication project does not match repository publishing configuration");
+    }
+    const response = await this.request(`${apiBase}/repos/${projectPath}/pulls/${publication.mergeRequestIid}`, token, {
+      method: "GET"
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`GitHub pull request lookup failed (${response.status}): ${detail.slice(0, 1000)}`);
+    }
+    const pr = await response.json() as {
+      state?: string;
+      merged_at?: string | null;
+      closed_at?: string | null;
+      merge_commit_sha?: string | null;
+      mergeable?: boolean | null;
+      mergeable_state?: string;
+    };
+    const refResponse = await this.request(
+      `${apiBase}/repos/${projectPath}/git/ref/heads/${encodeURIComponent(publication.branch)}`,
+      token,
+      { method: "GET" }
+    );
+    const sourceBranchExists = refResponse.status === 200 ? true : refResponse.status === 404 ? false : undefined;
+    return {
+      mergeRequestState: pr.merged_at ? "merged" : pr.state === "closed" ? "closed" : "opened",
+      lastCheckedAt: new Date().toISOString(),
+      ...(pr.merged_at ? { mergedAt: pr.merged_at } : {}),
+      ...(pr.closed_at ? { closedAt: pr.closed_at } : {}),
+      ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
+      ...(pr.mergeable !== undefined && pr.mergeable !== null ? { hasConflicts: !pr.mergeable } : {}),
+      ...(pr.mergeable_state ? { detailedMergeStatus: pr.mergeable_state } : {}),
+      ...(sourceBranchExists !== undefined ? { sourceBranchExists } : {})
+    };
+  }
+}
+
 export function createKnowledgePublisher(repository: RepositoryConfig): KnowledgePublisher {
   const provider = repository.knowledgePublishing?.provider ?? "gitlab";
   if (provider === "gitlab") return new GitLabKnowledgePublisher();
+  if (provider === "github") return new GitHubKnowledgePublisher();
   throw new Error(`Unsupported knowledge publisher: ${provider}`);
 }

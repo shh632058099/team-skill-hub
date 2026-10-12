@@ -75,7 +75,11 @@ const pollScheduler = setInterval(() => {
   for (const repositoryId of activeIds) {
     const intervalSeconds = service.pollingIntervalSeconds(repositoryId);
     if (intervalSeconds <= 0) continue;
-    const previous = lastPolledAt.get(repositoryId) ?? now;
+    const previous = lastPolledAt.get(repositoryId);
+    if (previous === undefined) {
+      lastPolledAt.set(repositoryId, now);
+      continue;
+    }
     if (now - previous < intervalSeconds * 1000) continue;
     lastPolledAt.set(repositoryId, now);
     void service.pollRepository(repositoryId).catch((error) => {

@@ -84,8 +84,11 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
   }
   if (repository.knowledgePublishing) {
     const publishing = repository.knowledgePublishing;
-    if (publishing.provider !== "gitlab") {
+    if (publishing.provider !== "gitlab" && publishing.provider !== "github") {
       throw new Error(`Repository ${repository.id}: unsupported knowledge publisher`);
+    }
+    if (publishing.provider === "github" && !publishing.projectPath?.trim()) {
+      throw new Error(`Repository ${repository.id}: GitHub publishing projectPath is required`);
     }
     if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: publishing tokenEnv is required`);
     if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: publishing targetBranch is required`);

@@ -14,13 +14,64 @@ authentication:
 repositories:
   - id: rd-skills
     name: R&D Skills
-    provider: local
-    path: /skills/rd-skills
+    provider: git
+    git_url: git@github.com:shh632058099/rd-skills.git
+    branch: master
+    git_auth:
+      type: none
     enabled: true
+    webhook_aliases:
+      - shh632058099/rd-skills
+      - rd-skills
     audience:
       - developer
     visibility:
       - internal
+    knowledge:
+      enabled: true
+    knowledge_publishing:
+      enabled: true
+      provider: github
+      base_url: https://github.com
+      project_path: shh632058099/rd-knowledges
+      token_env: GITHUB_TOKEN
+      target_branch: main
+      branch_prefix: skill-hub-knowledge
+    access:
+      read_roles:
+        - developer
+        - internal
+      sync_roles:
+        - developer
+        - admin
+    sync:
+      polling_interval: 300
+
+  - id: rd-knowledges
+    name: R&D Knowledges
+    provider: git
+    git_url: git@github.com:shh632058099/rd-knowledges.git
+    branch: main
+    git_auth:
+      type: none
+    enabled: true
+    webhook_aliases:
+      - shh632058099/rd-knowledges
+      - rd-knowledges
+    audience:
+      - developer
+    visibility:
+      - internal
+    knowledge:
+      enabled: true
+    knowledge_publishing:
+      enabled: true
+      provider: github
+      base_url: https://github.com
+      project_path: shh632058099/rd-knowledges
+      token_env: GITHUB_TOKEN
+      target_branch: main
+      branch_prefix: skill-hub-knowledge
     access:
       read_roles:
         - developer

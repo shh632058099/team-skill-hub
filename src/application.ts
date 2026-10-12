@@ -3046,6 +3046,10 @@ export class SkillHubApplicationService {
     return await this.observability.getCandidateHistory(id, limit);
   }
 
+  async deleteKnowledgeCandidate(id: string) {
+    return await this.observability.deleteCandidate(id);
+  }
+
   async getKnowledgeCandidatePreview(id: string) {
     const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
     if (!candidate) throw new Error("Knowledge candidate not found");

@@ -49,6 +49,7 @@ export async function startServer(
 
   const hasAdminAccess = (request: { headers: Record<string, unknown> }) => {
     const adminKey = process.env.ADMIN_API_KEY;
+    if (process.env.AUTH_MODE === "development") return true;
     return Boolean(adminKey && request.headers["x-skill-hub-admin-key"] === adminKey);
   };
 
@@ -472,9 +473,10 @@ export async function startServer(
           targetBranch: repository.branch ?? "main",
           branchPrefix: "skill-hub-knowledge"
         };
+        const provider = request.body.provider ?? current.provider;
         repository.knowledgePublishing = {
           enabled: request.body.enabled ?? current.enabled,
-          provider: "gitlab",
+          provider,
           baseUrl:
             request.body.baseUrl !== undefined
               ? request.body.baseUrl.trim() || undefined
@@ -483,7 +485,10 @@ export async function startServer(
             request.body.projectPath !== undefined
               ? request.body.projectPath.trim() || undefined
               : current.projectPath,
-          tokenEnv: request.body.tokenEnv?.trim() || current.tokenEnv,
+          tokenEnv:
+            request.body.tokenEnv?.trim() ||
+            current.tokenEnv ||
+            (provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
           targetBranch: request.body.targetBranch?.trim() || current.targetBranch,
           branchPrefix: request.body.branchPrefix?.trim() || current.branchPrefix
         };
@@ -825,6 +830,19 @@ export async function startServer(
       return { candidateId: request.params.id, history };
     }
   );
+
+  app.delete<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const deleted = await service.deleteKnowledgeCandidate(request.params.id);
+    if (!deleted) {
+      reply.code(404);
+      return { error: "knowledge candidate not found" };
+    }
+    return { deleted: true };
+  });
 
   app.post<{
     Body: {
@@ -1297,7 +1315,7 @@ export async function startServer(
 
   app.post<{ Params: { id: string } }>("/repositories/:id/sync", async (request, reply) => {
     const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1379,7 +1397,7 @@ export async function startServer(
     "/audit",
     async (request, reply) => {
       const adminKey = process.env.ADMIN_API_KEY;
-      if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1397,7 +1415,7 @@ export async function startServer(
     "/analytics/usage",
     async (request, reply) => {
       const adminKey = process.env.ADMIN_API_KEY;
-      if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1414,7 +1432,7 @@ export async function startServer(
     "/analytics/summary",
     async (request, reply) => {
       const adminKey = process.env.ADMIN_API_KEY;
-      if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1426,7 +1444,7 @@ export async function startServer(
     "/repositories/:id/evaluations/suites",
     async (request, reply) => {
       const adminKey = process.env.ADMIN_API_KEY;
-      if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1451,7 +1469,7 @@ export async function startServer(
     Body: { suite?: string; revision?: string; baseline_revision?: string };
   }>("/repositories/:id/evaluations/run", async (request, reply) => {
     const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1477,7 +1495,7 @@ export async function startServer(
     Querystring: { repository?: string; suite?: string; limit?: string };
   }>("/evaluations/runs", async (request, reply) => {
     const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1493,7 +1511,7 @@ export async function startServer(
 
   app.get<{ Params: { runId: string } }>("/evaluations/runs/:runId", async (request, reply) => {
     const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1512,7 +1530,7 @@ export async function startServer(
 
   app.get<{ Params: { id: string } }>("/repositories/:id/revisions", async (request, reply) => {
     const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1531,7 +1549,7 @@ export async function startServer(
     "/repositories/:id/rollback",
     async (request, reply) => {
       const adminKey = process.env.ADMIN_API_KEY;
-      if (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey) {
+      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }

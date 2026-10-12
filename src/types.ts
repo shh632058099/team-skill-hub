@@ -26,7 +26,7 @@ export interface KnowledgeSourceConfig {
 
 export interface KnowledgePublishingConfig {
   enabled: boolean;
-  provider: "gitlab";
+  provider: "gitlab" | "github";
   baseUrl?: string;
   projectPath?: string;
   tokenEnv: string;

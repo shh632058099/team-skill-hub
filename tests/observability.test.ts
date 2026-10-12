@@ -433,6 +433,28 @@ test("knowledge candidate review is append-only and preserves latest state", asy
   }
 });
 
+test("knowledge candidate delete removes all persisted history", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-candidate-delete-"));
+  try {
+    const store = new McpObservabilityStore(root);
+    const candidate = await store.createCandidate(principal, {
+      title: "Temporary candidate",
+      content: "Temporary content",
+      sourceType: "manual",
+      suggestedType: "knowledge",
+      repository: "rd-skills"
+    });
+    await store.reviewCandidate(candidate.id, "approved", "admin-http", "ok", "useful");
+    assert.ok((await store.getCandidateHistory(candidate.id)).length >= 2);
+    assert.equal(await store.deleteCandidate(candidate.id), true);
+    assert.equal((await store.listCandidates()).some((item) => item.id === candidate.id), false);
+    assert.deepEqual(await store.getCandidateHistory(candidate.id), []);
+    assert.equal(await store.deleteCandidate(candidate.id), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("knowledge candidate supports edit review publish failure and retry lifecycle", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-candidate-lifecycle-"));
   try {

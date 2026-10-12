@@ -118,7 +118,7 @@ export interface KnowledgeCandidate {
   reviewNote?: string;
   reviewReason?: CandidateReviewReason;
   publication?: {
-    provider: "gitlab";
+    provider: "gitlab" | "github";
     projectPath: string;
     branch: string;
     targetBranch: string;
@@ -848,6 +848,31 @@ export class McpObservabilityStore {
       .filter((item) => item.id === id)
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
       .slice(-Math.max(1, Math.min(limit, 1000)));
+  }
+
+  async deleteCandidate(id: string): Promise<boolean> {
+    const operation = this.writeQueue.then(async () => {
+      const file = this.file("knowledge-candidates.jsonl");
+      let text: string;
+      try {
+        text = await readFile(file, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+      const rows = this.parseValidRows(text);
+      const kept = rows.filter((row) => row.value.id !== id);
+      if (kept.length === rows.length) return false;
+      const temporary = file + ".delete-" + randomUUID();
+      await writeFile(temporary, kept.length ? kept.map((row) => row.raw).join("\n") + "\n" : "", {
+        encoding: "utf8",
+        mode: 0o600
+      });
+      await rename(temporary, file);
+      return true;
+    });
+    this.writeQueue = operation.then(() => undefined, () => undefined);
+    return await operation;
   }
 
   async updateCandidate(

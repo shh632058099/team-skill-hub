@@ -71,7 +71,7 @@ interface RawConfig {
     };
     knowledge_publishing?: {
       enabled?: boolean;
-      provider?: "gitlab";
+      provider?: "gitlab" | "github";
       base_url?: string;
       project_path?: string;
       token_env?: string;
@@ -145,7 +145,9 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         provider: repo.knowledge_publishing?.provider ?? "gitlab",
         baseUrl: repo.knowledge_publishing?.base_url,
         projectPath: repo.knowledge_publishing?.project_path,
-        tokenEnv: repo.knowledge_publishing?.token_env ?? "GITLAB_WRITE_TOKEN",
+        tokenEnv:
+          repo.knowledge_publishing?.token_env ??
+          (repo.knowledge_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
         targetBranch: repo.knowledge_publishing?.target_branch ?? repo.branch ?? "main",
         branchPrefix: repo.knowledge_publishing?.branch_prefix ?? "skill-hub-knowledge"
       }

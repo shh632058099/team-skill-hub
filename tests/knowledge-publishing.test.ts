@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitLabKnowledgePublisher } from "../src/knowledge-publishing.js";
+import { GitHubKnowledgePublisher, GitLabKnowledgePublisher } from "../src/knowledge-publishing.js";
 import type { RepositoryConfig } from "../src/types.js";
 import type { KnowledgeCandidate } from "../src/observability.js";
 
@@ -24,6 +24,22 @@ function repository(): RepositoryConfig {
       provider: "gitlab",
       tokenEnv: "TEST_GITLAB_WRITE_TOKEN",
       targetBranch: "master",
+      branchPrefix: "skill-hub-knowledge"
+    }
+  };
+}
+
+function githubRepository(): RepositoryConfig {
+  return {
+    ...repository(),
+    gitUrl: "https://github.com/shh632058099/rd-skills.git",
+    knowledgePublishing: {
+      enabled: true,
+      provider: "github",
+      baseUrl: "https://github.com",
+      projectPath: "shh632058099/rd-knowledges",
+      tokenEnv: "TEST_GITHUB_TOKEN",
+      targetBranch: "main",
       branchPrefix: "skill-hub-knowledge"
     }
   };
@@ -249,5 +265,86 @@ test("GitLab publisher reconciles merge request state", async () => {
     assert.ok(result.lastCheckedAt);
   } finally {
     delete process.env.TEST_GITLAB_WRITE_TOKEN;
+  }
+});
+
+test("GitHub publisher pushes candidate content over SSH and creates a pull request", async () => {
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const gitCalls: string[][] = [];
+  const gitRun = async (args: string[]) => {
+    gitCalls.push(args);
+    if (args[0] === "ls-remote") return "";
+    return "";
+  };
+  const fetchMock: typeof fetch = async (input, init) => {
+    assert.equal(String(input), "https://api.github.com/repos/shh632058099/rd-knowledges/pulls");
+    assert.equal(init?.method, "POST");
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    assert.equal(body.head, "skill-hub-knowledge-1234567890ab");
+    assert.equal(body.base, "main");
+    return responseJson({
+      number: 21,
+      html_url: "https://github.com/shh632058099/rd-knowledges/pull/21",
+      state: "open"
+    }, 201);
+  };
+
+  try {
+    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).publish(candidate(), githubRepository());
+    assert.equal(result.provider, "github");
+    assert.equal(result.projectPath, "shh632058099/rd-knowledges");
+    assert.equal(result.mergeRequestIid, 21);
+    const clone = gitCalls.find((call) => call[0] === "clone");
+    assert.ok(clone);
+    assert.ok(clone.includes("git@github.com:shh632058099/rd-knowledges.git"));
+    const push = gitCalls.find((call) => call[0] === "push");
+    assert.ok(push);
+    assert.ok(push.includes("HEAD:refs/heads/skill-hub-knowledge-1234567890ab"));
+  } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
+  }
+});
+
+test("GitHub publisher reconciles pull request state", async () => {
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const responses = [
+    responseJson({
+      state: "closed",
+      merged_at: "2026-10-12T08:00:00.000Z",
+      closed_at: "2026-10-12T08:00:00.000Z",
+      merge_commit_sha: "def456",
+      mergeable: true,
+      mergeable_state: "clean"
+    }),
+    new Response("", { status: 404 })
+  ];
+  const fetchMock: typeof fetch = async () => {
+    const response = responses.shift();
+    if (!response) throw new Error("unexpected request");
+    return response;
+  };
+  try {
+    const result = await new GitHubKnowledgePublisher(fetchMock, async () => "").reconcile(
+      {
+        provider: "github",
+        projectPath: "shh632058099/rd-knowledges",
+        branch: "skill-hub-knowledge-1234567890ab",
+        targetBranch: "main",
+        filePath: "docs/ota/recovery-note.md",
+        action: "create",
+        mergeRequestIid: 21,
+        mergeRequestUrl: "https://github.com/shh632058099/rd-knowledges/pull/21",
+        publishedAt: "2026-10-12T07:00:00.000Z",
+        mergeRequestState: "opened",
+        lastCheckedAt: "2026-10-12T07:00:00.000Z"
+      },
+      githubRepository()
+    );
+    assert.equal(result.mergeRequestState, "merged");
+    assert.equal(result.mergeCommitSha, "def456");
+    assert.equal(result.hasConflicts, false);
+    assert.equal(result.sourceBranchExists, false);
+  } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
   }
 });
