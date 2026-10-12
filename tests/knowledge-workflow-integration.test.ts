@@ -56,7 +56,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     enabled: true,
     audience: ["developer"],
     visibility: ["internal"],
-    pollingIntervalSeconds: 0,
+    pollingIntervalSeconds: 60,
     readRoles: ["developer", "internal"],
     syncRoles: ["developer", "admin"],
     knowledgePublishing: {
@@ -242,13 +242,15 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     await git(upstream, "add", "docs/ota/recovery-note.md");
     await git(upstream, "commit", "-m", "merge knowledge candidate");
 
-    const reconciled = await service.reconcileKnowledgeCandidatePublication(generated.id);
+    const synced = await service.pollRepository("rd-skills");
+    assert.equal(synced.status, "healthy");
+    const reconciled = (await service.listKnowledgeCandidates(100)).find(
+      (item) => item.id === generated.id
+    );
+    assert.ok(reconciled);
     assert.equal(reconciled.publication?.mergeRequestState, "merged");
     assert.equal(reconciled.publication?.pipelineStatus, "success");
     assert.equal(reconciled.publication?.hasConflicts, false);
-
-    const synced = await service.syncRepository("rd-skills");
-    assert.equal(synced.status, "healthy");
     const results = service.searchKnowledge("OTA 断电 恢复 安全 检查点", 5, ["rd-skills"], principal);
     assert.ok(
       results.some((item) => item.chunk.relativePath === "docs/ota/recovery-note.md"),

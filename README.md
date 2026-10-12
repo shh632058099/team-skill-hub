@@ -123,6 +123,7 @@ X-Gitlab-Token: <GITLAB_WEBHOOK_TOKEN>
 ```
 
 GitLab project payloads are mapped through `project.path_with_namespace`, `project.web_url`, repository name, repository ID, or configured `webhook_aliases`. The older `x-skill-hub-repository` + `x-skill-hub-secret` form remains supported. The webhook is fail-closed if neither `GITLAB_WEBHOOK_TOKEN` nor `WEBHOOK_SECRET` is configured.
+The webhook is fail-closed if neither `GITLAB_WEBHOOK_TOKEN` nor `WEBHOOK_SECRET` is configured. Webhooks remain the low-latency trigger; the service also polls each enabled repository as a fallback using `sync.polling_interval` (default `300` seconds). A poll reconciles published Knowledge merge requests and then runs the same validated, last-known-good repository sync for Skills and Knowledge, so a GitLab merge is indexed even when no webhook is available. Set the interval to `0` only to disable fallback polling for that repository.
 
 Operational HTTP endpoints use a separate admin key:
 

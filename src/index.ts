@@ -78,7 +78,7 @@ const pollScheduler = setInterval(() => {
     const previous = lastPolledAt.get(repositoryId) ?? now;
     if (now - previous < intervalSeconds * 1000) continue;
     lastPolledAt.set(repositoryId, now);
-    void service.syncRepository(repositoryId, "poll").catch((error) => {
+    void service.pollRepository(repositoryId).catch((error) => {
       console.error(
         JSON.stringify({
           event: "repository.poll.failed",

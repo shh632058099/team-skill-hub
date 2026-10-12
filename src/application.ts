@@ -68,6 +68,7 @@ export class SkillHubApplicationService {
   private readonly providers = new Map<string, SkillRepositoryProvider>();
   private ready = false;
   private readonly syncInFlight = new Map<string, Promise<RepositoryState>>();
+  private readonly knowledgeReconcileInFlight = new Map<string, Promise<KnowledgeCandidate>>();
   private readonly metrics = new MetricsRegistry();
   private readonly webhookSeen = new Map<string, number>();
   private readonly prompts = new Map<string, PromptArtifact>();
@@ -853,6 +854,54 @@ export class SkillHubApplicationService {
     });
     this.syncInFlight.set(repositoryId, work);
     return work;
+  }
+
+  /**
+   * Fallback poll for GitLab installations without webhooks. Reconcile published
+   * Knowledge MRs first, then run the normal validated repository sync so a newly
+   * merged document is indexed in the same cycle.
+   */
+  async pollRepository(repositoryId: string): Promise<RepositoryState> {
+    await this.pollKnowledgeCandidatePublications(repositoryId);
+    return await this.syncRepository(repositoryId, "poll");
+  }
+
+  private async pollKnowledgeCandidatePublications(repositoryId: string): Promise<void> {
+    const repository = this.getRepository(repositoryId);
+    if (!repository.knowledgePublishing?.enabled) return;
+
+    const candidates = (await this.observability.listCandidates(2000)).filter(
+      (candidate) =>
+        candidate.status === "published" &&
+        candidate.repository === repositoryId &&
+        Boolean(candidate.publication)
+    );
+    for (const candidate of candidates) {
+      const existing = this.knowledgeReconcileInFlight.get(candidate.id);
+      const work = existing ?? this.reconcileKnowledgeCandidatePublication(candidate.id);
+      if (!existing) this.knowledgeReconcileInFlight.set(candidate.id, work);
+      try {
+        await work;
+        this.metrics.increment("knowledge_publication_poll_total", {
+          repository: repositoryId,
+          result: "success"
+        });
+      } catch (error) {
+        this.metrics.increment("knowledge_publication_poll_total", {
+          repository: repositoryId,
+          result: "failed"
+        });
+        this.events.emit("knowledge.publication.poll.failed", {
+          repository: repositoryId,
+          candidate: candidate.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        if (!existing && this.knowledgeReconcileInFlight.get(candidate.id) === work) {
+          this.knowledgeReconcileInFlight.delete(candidate.id);
+        }
+      }
+    }
   }
 
   private async performSync(
