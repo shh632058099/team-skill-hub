@@ -172,10 +172,15 @@ codex mcp list
 如果使用第 3 节脚本，不需要每个项目重复维护 Team Skill Hub 指令。脚本会把下面的规则写入 `~/.codex/AGENTS.md`：
 
 ~~~text
-当任务可能受益于团队特定的工程知识时，
-在开始实质性工作前优先使用 teamSkillHub MCP。
+对于团队代码、项目实现、内部流程、技术方案和故障处理问题，
+包括只包含少量项目或技术关键词的简短问题，
+在开始回答、诊断、评审或修改代码前必须使用 teamSkillHub MCP。
 
-优先使用 `discover` 一次发现适合当前任务的 Skill、Knowledge、Prompt 和 Agent。
+明确的问题先从用户问题中提取关键词，调用 `search_knowledge`；
+复杂或范围不明确的任务先调用 `discover`，必要时再用 `search_knowledge` 收窄 Knowledge。
+命中 Knowledge 后必须调用 `get_knowledge` 读取最佳结果，再回答或开始修改。
+如果没有相关 Knowledge，继续任务但不要臆造团队特定结论。
+
 只加载真正选中的资产；需要进一步收窄某一类结果时再使用对应的 search 工具。
 按需逐步加载引用资源，不要一次性加载所有内容。
 

@@ -133,7 +133,7 @@ codex mcp list
 然后用 discover 搜索适合当前项目的团队 Skill 和 Knowledge。
 ```
 
-第一次验证成功后，日常使用不需要手工调用每个工具；全局 `AGENTS.md` 会指导 Codex 在适合的任务中优先发现团队资产。
+第一次验证成功后，日常使用不需要手工调用每个工具；Codex 的 `~/.codex/AGENTS.md` 和 Claude Code 的 `~/.claude/CLAUDE.md` 都会指导客户端在团队工程问题中按关键词先搜索 Knowledge，命中后读取 `get_knowledge`。
 
 ## 4.2 Claude Code 快速接入
 
@@ -421,11 +421,11 @@ Rollback 时 Knowledge 会跟随 Repository revision 一起回滚。
 日常任务建议保持简单：
 
 ```text
-复杂工程任务
- -> discover
- -> 选择真正相关的 Skill / Knowledge / Prompt / Agent
- -> 只加载需要的内容
- -> 执行任务
+团队工程问题或项目关键词问题
+ -> 提取问题关键词
+ -> search_knowledge（复杂任务先 discover）
+ -> get_knowledge
+ -> 使用回流的 Knowledge 回答或实施
  -> 测试验证
  -> 有稳定可复用结论时进入 Knowledge Candidate 审核流程
 ```
