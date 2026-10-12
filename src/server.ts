@@ -993,6 +993,22 @@ export async function startServer(
     return { gaps: await service.listKnowledgeGaps() };
   });
 
+  app.patch<{
+    Params: { key: string };
+    Body: { status?: "active" | "ignored" | "resolved"; keywords?: string[] };
+  }>("/admin/api/knowledge-gaps/:key", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { management: await service.updateKnowledgeGap(request.params.key, request.body ?? {}) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   app.post("/admin/api/knowledge-gaps/curate", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);

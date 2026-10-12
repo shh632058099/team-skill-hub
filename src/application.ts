@@ -849,9 +849,14 @@ export class SkillHubApplicationService {
   ): Promise<RepositoryState> {
     const existing = this.syncInFlight.get(repositoryId);
     if (existing) return existing;
-    const work = this.performSync(repositoryId, trigger, principal).finally(() => {
-      this.syncInFlight.delete(repositoryId);
-    });
+    const work = this.performSync(repositoryId, trigger, principal)
+      .then(async (state) => {
+        await this.linkPublishedKnowledgeGaps(repositoryId);
+        return state;
+      })
+      .finally(() => {
+        this.syncInFlight.delete(repositoryId);
+      });
     this.syncInFlight.set(repositoryId, work);
     return work;
   }
@@ -864,6 +869,44 @@ export class SkillHubApplicationService {
   async pollRepository(repositoryId: string): Promise<RepositoryState> {
     await this.pollKnowledgeCandidatePublications(repositoryId);
     return await this.syncRepository(repositoryId, "poll");
+  }
+
+  private async linkPublishedKnowledgeGaps(repositoryId: string): Promise<void> {
+    const management = await this.observability.listKnowledgeGapManagement();
+    const candidates = (await this.observability.listCandidates(2000)).filter(
+      (candidate) =>
+        candidate.repository === repositoryId &&
+        Boolean(candidate.sourceGapKey) &&
+        candidate.publication?.mergeRequestState === "merged"
+    );
+    for (const candidate of candidates) {
+      const publication = candidate.publication!;
+      const document = [...this.knowledgeDocuments.values()].find(
+        (item) => item.repositoryId === repositoryId && item.relativePath === publication.filePath
+      );
+      if (!document || !publication.mergeCommitSha) continue;
+      const current = management.get(candidate.sourceGapKey!);
+      if (
+        current?.status === "resolved" &&
+        current.candidateId === candidate.id &&
+        current.knowledge?.key === document.key &&
+        current.commit?.sha === publication.mergeCommitSha
+      ) continue;
+      await this.observability.updateKnowledgeGapManagement(candidate.sourceGapKey!, {
+        status: "resolved",
+        candidateId: candidate.id,
+        knowledge: {
+          key: document.key,
+          repositoryId: document.repositoryId,
+          path: document.relativePath,
+          title: document.title
+        },
+        commit: {
+          repositoryId,
+          sha: publication.mergeCommitSha
+        }
+      });
+    }
   }
 
   private async pollKnowledgeCandidatePublications(repositoryId: string): Promise<void> {
@@ -3150,7 +3193,9 @@ export class SkillHubApplicationService {
   }
 
   async curateKnowledgeGaps() {
-    const gaps = await this.listKnowledgeGaps();
+    const gaps = (await this.listKnowledgeGaps()).filter(
+      (gap) => (gap.management?.status ?? "active") === "active"
+    );
     const clusters = await new HttpKnowledgeCurator().clusterGaps(
       gaps.map((gap) => ({
         key: gap.key,
@@ -3176,6 +3221,22 @@ export class SkillHubApplicationService {
     return await this.observability.knowledgeGaps(summary.topUnmatchedQueries);
   }
 
+  async updateKnowledgeGap(
+    gapKey: string,
+    input: { status?: "active" | "ignored" | "resolved"; keywords?: string[] }
+  ) {
+    const gaps = await this.listKnowledgeGaps();
+    const gap = gaps.find((item) => item.key === gapKey);
+    if (!gap) throw new Error("Knowledge gap not found");
+    if (input.status !== undefined && !["active", "ignored", "resolved"].includes(input.status)) {
+      throw new Error("Knowledge gap status is invalid");
+    }
+    if (input.keywords && input.keywords.some((item) => typeof item !== "string")) {
+      throw new Error("Knowledge gap keywords must be strings");
+    }
+    return await this.observability.updateKnowledgeGapManagement(gapKey, input);
+  }
+
   async createKnowledgeCandidateFromGap(
     gapKey: string,
     principal: Principal,
@@ -3184,6 +3245,8 @@ export class SkillHubApplicationService {
     const gaps = await this.listKnowledgeGaps();
     const gap = gaps.find((item) => item.key === gapKey);
     if (!gap) throw new Error("Knowledge gap not found");
+    if (gap.management?.status === "ignored") throw new Error("Ignored Knowledge gap cannot create a Candidate");
+    if (gap.management?.status === "resolved") throw new Error("Resolved Knowledge gap cannot create another Candidate");
     if (input?.repository) {
       const allowed = this.allowedRepositories(principal).some((repo) => repo.id === input.repository);
       if (!allowed) throw new Error("Repository not found");
@@ -3208,14 +3271,20 @@ export class SkillHubApplicationService {
       "",
       "TODO: Reviewer/owner should replace this section with the verified reusable engineering knowledge before approval."
     ].join("\n");
-    return await this.observability.createCandidate(principal, {
+    const candidate = await this.observability.createCandidate(principal, {
       title: "Knowledge gap: " + gap.query.slice(0, 120),
       content,
       sourceType: "review",
       suggestedType: "knowledge",
       repository: input?.repository,
-      suggestedPath: input?.suggestedPath
+      suggestedPath: input?.suggestedPath,
+      sourceGapKey: gap.key
     });
+    await this.observability.updateKnowledgeGapManagement(gap.key, {
+      status: "active",
+      candidateId: candidate.id
+    });
+    return candidate;
   }
 
   private getRepository(id: string): RepositoryConfig {

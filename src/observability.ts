@@ -164,6 +164,7 @@ export interface KnowledgeCandidate {
   };
   sourceSessionId?: string;
   sourceTurnId?: string;
+  sourceGapKey?: string;
   automation?: {
     detector: string;
     classification: "root-cause" | "verified-fix" | "workaround" | "reusable-constraint";
@@ -202,6 +203,27 @@ export interface KnowledgeGap {
   source: "unmatched-query" | "negative-feedback";
   members?: string[];
   clusterKey?: string;
+  management?: KnowledgeGapManagement;
+}
+
+export interface KnowledgeGapManagement {
+  gapKey: string;
+  status: "active" | "ignored" | "resolved";
+  keywords: string[];
+  candidateId?: string;
+  knowledge?: {
+    key: string;
+    repositoryId: string;
+    path: string;
+    title: string;
+  };
+  commit?: {
+    repositoryId: string;
+    sha: string;
+  };
+  updatedAt: string;
+  ignoredAt?: string;
+  resolvedAt?: string;
 }
 
 function redactText(value: string, max = 500): string {
@@ -778,7 +800,7 @@ export class McpObservabilityStore {
   async createCandidate(
     principal: Principal,
     input: Pick<KnowledgeCandidate, "title" | "content" | "sourceType" | "suggestedType" | "repository" | "suggestedPath" | "traceId"> &
-      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "automation" | "relatedKnowledge" | "relationHint">>
+      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "automation" | "relatedKnowledge" | "relationHint">>
   ): Promise<KnowledgeCandidate> {
     const ts = new Date().toISOString();
     const title = redactText(input.title, 200);
@@ -1049,6 +1071,43 @@ export class McpObservabilityStore {
         });
       }
     }
-    return clusters.map((item) => item.gap).sort((a, b) => b.occurrences - a.occurrences || b.lastSeenAt.localeCompare(a.lastSeenAt));
+    const management = await this.listKnowledgeGapManagement();
+    return clusters
+      .map((item) => ({ ...item.gap, management: management.get(item.gap.key) }))
+      .sort((a, b) => b.occurrences - a.occurrences || b.lastSeenAt.localeCompare(a.lastSeenAt));
+  }
+
+  async listKnowledgeGapManagement(): Promise<Map<string, KnowledgeGapManagement>> {
+    const rows = await this.read<KnowledgeGapManagement>("knowledge-gap-management.jsonl", this.maxEntries);
+    const latest = new Map<string, KnowledgeGapManagement>();
+    for (const row of rows) {
+      if (row.gapKey && !latest.has(row.gapKey)) latest.set(row.gapKey, row);
+    }
+    return latest;
+  }
+
+  async updateKnowledgeGapManagement(
+    gapKey: string,
+    input: Partial<Pick<KnowledgeGapManagement, "status" | "keywords" | "candidateId" | "knowledge" | "commit">>
+  ): Promise<KnowledgeGapManagement> {
+    const current = (await this.listKnowledgeGapManagement()).get(gapKey);
+    const now = new Date().toISOString();
+    const status = input.status ?? current?.status ?? "active";
+    const keywords = input.keywords === undefined
+      ? current?.keywords ?? []
+      : [...new Set(input.keywords.map((item) => redactText(item.trim(), 100)).filter(Boolean))].slice(0, 50);
+    const next: KnowledgeGapManagement = {
+      gapKey,
+      status,
+      keywords,
+      candidateId: input.candidateId ?? current?.candidateId,
+      knowledge: input.knowledge ?? current?.knowledge,
+      commit: input.commit ?? current?.commit,
+      updatedAt: now,
+      ignoredAt: status === "ignored" ? current?.ignoredAt ?? now : undefined,
+      resolvedAt: status === "resolved" ? current?.resolvedAt ?? now : undefined
+    };
+    await this.append("knowledge-gap-management.jsonl", next);
+    return next;
   }
 }

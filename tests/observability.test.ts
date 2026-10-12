@@ -514,3 +514,43 @@ test("knowledge gaps combine unmatched queries and negative feedback", async () 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("knowledge gap management persists ignore, keywords and resolved publication links", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-gap-management-"));
+  try {
+    const store = new McpObservabilityStore(root);
+    const [gap] = await store.knowledgeGaps([{ query: "OTA rollback recovery", count: 3 }]);
+    assert.ok(gap);
+
+    const ignored = await store.updateKnowledgeGapManagement(gap.key, {
+      status: "ignored",
+      keywords: ["ota", "rollback", "ota"]
+    });
+    assert.equal(ignored.status, "ignored");
+    assert.deepEqual(ignored.keywords, ["ota", "rollback"]);
+    assert.ok(ignored.ignoredAt);
+
+    const resolved = await store.updateKnowledgeGapManagement(gap.key, {
+      status: "resolved",
+      candidateId: "kc_gap",
+      knowledge: {
+        key: "rd-skills:docs/ota/recovery.md",
+        repositoryId: "rd-skills",
+        path: "docs/ota/recovery.md",
+        title: "OTA recovery"
+      },
+      commit: { repositoryId: "rd-skills", sha: "abc123" }
+    });
+    assert.equal(resolved.status, "resolved");
+    assert.equal(resolved.candidateId, "kc_gap");
+    assert.equal(resolved.commit?.sha, "abc123");
+    assert.ok(resolved.resolvedAt);
+
+    const refreshed = await store.knowledgeGaps([{ query: "OTA rollback recovery", count: 3 }]);
+    assert.equal(refreshed[0]?.management?.status, "resolved");
+    assert.equal(refreshed[0]?.management?.knowledge?.path, "docs/ota/recovery.md");
+    assert.deepEqual(refreshed[0]?.management?.keywords, ["ota", "rollback"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
