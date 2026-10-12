@@ -76,6 +76,7 @@ export interface AppConfig {
   revisionRetentionMax?: number;
   webhookDedupMaxEntries?: number;
   webhookDedupTtlSeconds?: number;
+  knowledgeMatchMinScore?: number;
   repositories: RepositoryConfig[];
   projects?: ProjectConfig[];
 }

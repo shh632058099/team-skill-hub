@@ -19,7 +19,7 @@ import {
   RepositoryVisibilityRule,
   UniqueNameRule
 } from "../src/skills.js";
-import type { Principal, RepositoryConfig } from "../src/types.js";
+import type { AppConfig, Principal, RepositoryConfig } from "../src/types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -75,15 +75,16 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     roles: ["developer", "internal"]
   };
   const search = new SqliteFtsSearchBackend();
+  const appConfig: AppConfig = {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    defaultRoles: ["developer", "internal"],
+    authentication: { mode: "development", apiKeys: {} },
+    repositories: [repository]
+  };
   const service = new SkillHubApplicationService(
-    {
-      host: "127.0.0.1",
-      port: 0,
-      dataDir,
-      defaultRoles: ["developer", "internal"],
-      authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
-    },
+    appConfig,
     [new GitRepositoryProvider()],
     new MemoryRegistryStore(),
     search,
@@ -256,6 +257,45 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       results.some((item) => item.chunk.relativePath === "docs/ota/recovery-note.md"),
       "merged Knowledge should be searchable after Repository Sync"
     );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const usage = await service.listUsageAnalytics(20);
+    const searchUsage = usage.find(
+      (item) => item.kind === "knowledge" && item.action === "search" && item.query === "OTA 断电 恢复 安全 检查点"
+    );
+    assert.ok(searchUsage);
+    assert.equal(searchUsage.matched, true);
+    assert.equal(searchUsage.topScore, results[0]?.score);
+    const thresholdQuery = "OTA 断电 恢复 安全 检查点 threshold probe";
+    appConfig.knowledgeMatchMinScore = (results[0]?.score ?? 0) + 1;
+    const thresholdResults = service.searchKnowledge(thresholdQuery, 5, ["rd-skills"], principal);
+    assert.ok(thresholdResults.length > 0, "threshold must not hide retrieval results");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const thresholdUsage = (await service.listUsageAnalytics(20)).find(
+      (item) => item.kind === "knowledge" && item.action === "search" && item.query === thresholdQuery
+    );
+    assert.ok(thresholdUsage);
+    assert.equal(thresholdUsage.matched, false);
+    assert.equal(thresholdUsage.topScore, thresholdResults[0]?.score);
+    const thresholdSummary = await service.getUsageSummary(20);
+    assert.equal(thresholdSummary.knowledgeMatchMinScore, appConfig.knowledgeMatchMinScore);
+    appConfig.knowledgeMatchMinScore = undefined;
+    const noHitQuery = "zzzz-no-such-knowledge-4f6f8c2a";
+    const noHitResults = service.searchKnowledge(noHitQuery, 5, ["rd-skills"], principal);
+    assert.equal(noHitResults.length, 0);
+    let noHitUsage;
+    for (let attempt = 0; attempt < 20 && !noHitUsage; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      noHitUsage = (await service.listUsageAnalytics(20)).find(
+        (item) => item.kind === "knowledge" && item.action === "search" && item.query === noHitQuery
+      );
+    }
+    assert.ok(noHitUsage);
+    assert.equal(noHitUsage.matched, false);
+    assert.equal(noHitUsage.topScore, undefined);
+    const usageSummary = await service.getUsageSummary(20);
+    assert.equal(usageSummary.knowledgeTopScore.count >= 1, true);
+    assert.equal(usageSummary.knowledgeTopScore.max, results[0]?.score);
+    assert.equal(usageSummary.knowledgeMatchMinScore, undefined);
     const loaded = service.getKnowledge(
       "rd-skills",
       "docs/ota/recovery-note.md",

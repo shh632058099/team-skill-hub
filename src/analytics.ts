@@ -9,6 +9,7 @@ export interface UsageEvent {
   action: "search" | "resolve" | "load";
   query?: string;
   selected?: string;
+  topScore?: number;
   matched: boolean;
 }
 
@@ -65,12 +66,22 @@ export class UsageAnalyticsStore {
     byAction: Record<string, number>;
     topSelected: Array<{ key: string; count: number }>;
     topUnmatchedQueries: Array<{ query: string; count: number }>;
+    knowledgeTopScore: {
+      count: number;
+      min?: number;
+      p25?: number;
+      p50?: number;
+      p75?: number;
+      p90?: number;
+      max?: number;
+    };
   }> {
     const rows = await this.list(this.maxEntries, false);
     const byKind: Record<string, number> = {};
     const byAction: Record<string, number> = {};
     const selected = new Map<string, number>();
     const unmatchedQueries = new Map<string, number>();
+    const knowledgeTopScores: number[] = [];
     let matched = 0;
     for (const row of rows) {
       byKind[row.kind] = (byKind[row.kind] ?? 0) + 1;
@@ -80,12 +91,26 @@ export class UsageAnalyticsStore {
       if (!row.matched && row.query) {
         unmatchedQueries.set(row.query, (unmatchedQueries.get(row.query) ?? 0) + 1);
       }
+      if (
+        row.kind === "knowledge" &&
+        row.action === "search" &&
+        typeof row.topScore === "number" &&
+        Number.isFinite(row.topScore)
+      ) {
+        knowledgeTopScores.push(row.topScore);
+      }
     }
     const top = (values: Map<string, number>, keyName: "key" | "query") =>
       [...values.entries()]
         .sort((a, b) => b[1] - a[1])
         .slice(0, Math.max(1, Math.min(limit, 50)))
         .map(([value, count]) => ({ [keyName]: value, count }));
+    knowledgeTopScores.sort((a, b) => a - b);
+    const percentile = (quantile: number): number | undefined => {
+      if (knowledgeTopScores.length === 0) return undefined;
+      const index = Math.floor((knowledgeTopScores.length - 1) * quantile);
+      return knowledgeTopScores[index];
+    };
     return {
       total: rows.length,
       matched,
@@ -93,7 +118,16 @@ export class UsageAnalyticsStore {
       byKind,
       byAction,
       topSelected: top(selected, "key") as Array<{ key: string; count: number }>,
-      topUnmatchedQueries: top(unmatchedQueries, "query") as Array<{ query: string; count: number }>
+      topUnmatchedQueries: top(unmatchedQueries, "query") as Array<{ query: string; count: number }>,
+      knowledgeTopScore: {
+        count: knowledgeTopScores.length,
+        min: knowledgeTopScores[0],
+        p25: percentile(0.25),
+        p50: percentile(0.5),
+        p75: percentile(0.75),
+        p90: percentile(0.9),
+        max: knowledgeTopScores.at(-1)
+      }
     };
   }
 

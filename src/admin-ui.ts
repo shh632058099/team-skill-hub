@@ -64,6 +64,7 @@ button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#ff
 <div class="card">
 <h2>Knowledge / RAG</h2>
 <div class="muted">查看当前已索引知识源，并直接测试 FTS5 检索效果。</div>
+<div id="knowledgeScoreSummary" class="key-meta">Top1 Score 观测加载中...</div>
 <div id="knowledgeSources" class="knowledge-sources"></div>
 <div class="grid">
 <div style="grid-column:span 2"><label>搜索问题</label><input id="knowledgeQuery" placeholder="例如：OTA 升级断电后如何恢复？"></div>
@@ -516,9 +517,11 @@ async function updatePublishingConfig(repository,config){
  knowledgeStatus.textContent="发布配置已保存 "+repository;knowledgeStatus.className="ok";await loadKnowledge();
 }
 async function loadKnowledge(){
- const [r,ar]=await Promise.all([fetch("/admin/api/knowledge",{headers:headers()}),fetch("/admin/api/knowledge/lifecycle-audit",{headers:headers()})]);const data=await r.json();const audit=await ar.json();
+ const [r,ar,sr]=await Promise.all([fetch("/admin/api/knowledge",{headers:headers()}),fetch("/admin/api/knowledge/lifecycle-audit",{headers:headers()}),fetch("/analytics/summary?limit=50",{headers:headers()})]);const data=await r.json();const audit=await ar.json();const scoreSummary=await sr.json();
  if(!r.ok){knowledgeStatus.textContent=data.error||"加载失败";knowledgeStatus.className="error";return}
  renderKnowledgeSources(data.sources);knowledgeStatus.textContent="";knowledgeStatus.className="";
+ const scoreEl=document.getElementById("knowledgeScoreSummary");
+ if(sr.ok){const s=scoreSummary.knowledgeTopScore||{};const threshold=scoreSummary.knowledgeMatchMinScore;const fmt=value=>typeof value==="number"?value.toFixed(2):"-";scoreEl.textContent="Matched 阈值："+(typeof threshold==="number"?fmt(threshold):"关闭（仅观测）")+" · Top1 samples "+(s.count||0)+" · min "+fmt(s.min)+" · p25 "+fmt(s.p25)+" · p50 "+fmt(s.p50)+" · p75 "+fmt(s.p75)+" · p90 "+fmt(s.p90)+" · max "+fmt(s.max)}else{scoreEl.textContent="Top1 Score 观测加载失败"}
  const summary=document.getElementById("knowledgeAuditSummary");const body=document.getElementById("knowledgeAuditTable");body.replaceChildren();
  if(ar.ok){summary.textContent=audit.documents+" documents · "+audit.issues.length+" lifecycle issues"+(Object.keys(audit.byKind||{}).length?" · "+Object.entries(audit.byKind).map(([k,v])=>k+":"+v).join(" · "):"");for(const item of audit.issues){const row=document.createElement("tr");[item.kind,item.repositoryId,item.path,item.owner||"-",item.status||"-",item.lastReviewedAt||"-",item.reviewCycleDays?item.reviewCycleDays+"d":"-",item.reviewDueAt||"-",item.validUntil||"-"].forEach((value,index)=>{const td=document.createElement("td");td.textContent=String(value);if(index===0&&["expired","deprecated","superseded","archived","invalid-valid-until","invalid-updated-at","review-overdue"].includes(item.kind))td.className="badge error";row.appendChild(td)});const action=document.createElement("td");const button=document.createElement("button");button.className="secondary small";button.textContent="Create Review Candidate";button.onclick=()=>withBusy(button,()=>createLifecycleReviewCandidate(item),"创建中...");action.appendChild(button);row.appendChild(action);body.appendChild(row)}}else{summary.textContent=audit.error||"Lifecycle audit 加载失败"}
 }

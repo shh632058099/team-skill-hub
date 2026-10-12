@@ -20,6 +20,9 @@ interface RawConfig {
     max_entries?: number;
     ttl_seconds?: number;
   };
+  knowledge_search?: {
+    match_min_score?: number;
+  };
   projects?: Array<{
     id?: string;
     name?: string;
@@ -206,6 +209,15 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       3600,
       Number(process.env.WEBHOOK_DEDUP_TTL_SECONDS ?? raw.webhook_dedup?.ttl_seconds ?? 604800)
     ),
+    knowledgeMatchMinScore: (() => {
+      const rawValue = process.env.KNOWLEDGE_MATCH_MIN_SCORE ?? raw.knowledge_search?.match_min_score;
+      if (rawValue === undefined || rawValue === "") return undefined;
+      const value = Number(rawValue);
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error("KNOWLEDGE_MATCH_MIN_SCORE must be a non-negative number");
+      }
+      return value;
+    })(),
     repositories,
     projects
   };

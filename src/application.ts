@@ -1341,6 +1341,11 @@ export class SkillHubApplicationService {
     const resolvedPrincipal = this.principal(principal);
     const allowedIds = this.allowedRepositories(resolvedPrincipal).map((repository) => repository.id);
     const results = this.knowledgeIndex.search(query, allowedIds, limit, repositories, applicability);
+    const topScore = results[0]?.score;
+    const matchThreshold = this.config.knowledgeMatchMinScore;
+    const matched =
+      results.length > 0 &&
+      (matchThreshold === undefined || (topScore ?? Number.NEGATIVE_INFINITY) >= matchThreshold);
     void this.analytics.record({
       ts: new Date().toISOString(),
       actorId: resolvedPrincipal.id,
@@ -1349,9 +1354,10 @@ export class SkillHubApplicationService {
       action: "search",
       query,
       selected: results[0]?.chunk.key,
-      matched: results.length > 0
+      topScore,
+      matched
     });
-    this.metrics.increment("knowledge_search_total", { matched: String(results.length > 0) });
+    this.metrics.increment("knowledge_search_total", { matched: String(matched) });
     return results;
   }
 
@@ -1810,7 +1816,10 @@ export class SkillHubApplicationService {
   }
 
   async getUsageSummary(limit = 10) {
-    return await this.analytics.summary(limit);
+    return {
+      ...(await this.analytics.summary(limit)),
+      knowledgeMatchMinScore: this.config.knowledgeMatchMinScore
+    };
   }
 
   newMcpTraceId(): string {
