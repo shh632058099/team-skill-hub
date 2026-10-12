@@ -549,12 +549,19 @@ export function auditKnowledgeLifecycle(
 function queryTerms(query: string): string[] {
   const raw = query.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
   const terms = new Set<string>();
-  for (const token of raw) {
+  const addToken = (token: string) => {
     terms.add(token);
     if (/^[\p{Script=Han}]+$/u.test(token) && token.length >= 2) {
       for (let index = 0; index < token.length - 1; index += 1) {
         terms.add(token.slice(index, index + 2));
       }
+    }
+  };
+  for (const token of raw) {
+    addToken(token);
+    const segments = token.match(/[\p{Script=Han}]+|[^\p{Script=Han}]+/gu) ?? [];
+    if (segments.length > 1) {
+      for (const segment of segments) addToken(segment);
     }
   }
   return [...terms].filter(Boolean);

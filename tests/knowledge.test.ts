@@ -537,6 +537,31 @@ test("knowledge FTS candidate query filters repositories before applying its lim
   }
 });
 
+test("knowledge search splits mixed Latin and Han query tokens", () => {
+  const index = new KnowledgeIndex();
+  try {
+    index.rebuild([
+      {
+        key: "rd-skills:docs/ota-failure.md#0",
+        documentKey: "rd-skills:docs/ota-failure.md",
+        repositoryId: "rd-skills",
+        revision: "r1",
+        relativePath: "docs/ota-failure.md",
+        title: "OTA failure recovery",
+        content: "OTA 升级失败 后执行恢复流程",
+        chunkIndex: 0,
+        metadata: { status: "active" }
+      }
+    ]);
+
+    const results = index.search("OTA升级失败", ["rd-skills"], 5);
+    assert.equal(results[0]?.chunk.relativePath, "docs/ota-failure.md");
+    assert.ok((results[0]?.score ?? 0) > 0);
+  } finally {
+    index.close();
+  }
+});
+
 test("knowledge FTS search supports Chinese context and repository filtering", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-knowledge-"));
   try {
