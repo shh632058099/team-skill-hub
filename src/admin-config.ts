@@ -23,7 +23,8 @@ function cloneRepositories(repositories: RepositoryConfig[]): RepositoryConfig[]
     readRoles: [...repository.readRoles],
     syncRoles: [...repository.syncRoles],
     knowledge: normalizeKnowledgeConfig(repository.knowledge),
-    knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined
+    knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined,
+    skillPublishing: repository.skillPublishing ? { ...repository.skillPublishing } : undefined
   }));
 }
 
@@ -93,6 +94,18 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
     if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: publishing tokenEnv is required`);
     if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: publishing targetBranch is required`);
     if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: publishing branchPrefix is required`);
+  }
+  if (repository.skillPublishing) {
+    const publishing = repository.skillPublishing;
+    if (publishing.provider !== "gitlab" && publishing.provider !== "github") {
+      throw new Error(`Repository ${repository.id}: unsupported skill publisher`);
+    }
+    if (publishing.provider === "github" && !publishing.projectPath?.trim()) {
+      throw new Error(`Repository ${repository.id}: GitHub skill publishing projectPath is required`);
+    }
+    if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: skill publishing tokenEnv is required`);
+    if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: skill publishing targetBranch is required`);
+    if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: skill publishing branchPrefix is required`);
   }
 }
 

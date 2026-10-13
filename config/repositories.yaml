@@ -37,6 +37,14 @@ repositories:
       token_env: GITHUB_TOKEN
       target_branch: main
       branch_prefix: skill-hub-knowledge
+    skill_publishing:
+      enabled: true
+      provider: github
+      base_url: https://github.com
+      project_path: shh632058099/rd-skills
+      token_env: GITHUB_TOKEN
+      target_branch: master
+      branch_prefix: skill-hub-skill
     access:
       read_roles:
         - developer

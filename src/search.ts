@@ -8,8 +8,32 @@ import type {
   SkillSearchBackend
 } from "./types.js";
 
-function tokenize(query: string): string[] {
-  return [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [])].filter(Boolean);
+const SEARCH_STOP_WORDS = new Set([
+  "a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with",
+  "使用", "实现", "问题", "相关", "如何", "怎么", "帮我", "当前", "项目", "配置", "规则", "的", "和", "与"
+]);
+
+function tokenize(text: string): string[] {
+  const raw = text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  const terms = new Set<string>();
+  const add = (value: string) => {
+    const token = value.trim();
+    if (!token || SEARCH_STOP_WORDS.has(token)) return;
+    if (token.includes("-") || token.includes("_")) {
+      for (const part of token.split(/[-_]+/)) add(part);
+    }
+    if (/^[\p{Script=Han}]+$/u.test(token) && token.length >= 2) {
+      terms.add(token);
+      for (let i = 0; i < token.length - 1; i += 1) {
+        const bigram = token.slice(i, i + 2);
+        if (!SEARCH_STOP_WORDS.has(bigram)) terms.add(bigram);
+      }
+      return;
+    }
+    if (token.length >= 2) terms.add(token);
+  };
+  for (const token of raw) add(token);
+  return [...terms];
 }
 
 function matchesFilters(skill: Skill, filters: SearchFilters): boolean {
@@ -22,28 +46,40 @@ function matchesFilters(skill: Skill, filters: SearchFilters): boolean {
   return true;
 }
 
-function manualScore(skill: Skill, query: string): number {
+function manualScore(skill: Skill, query: string): { score: number; coverage: number } {
   const q = query.toLowerCase();
   const terms = tokenize(q);
-  const haystacks = {
-    name: skill.name.toLowerCase(),
-    description: skill.description.toLowerCase(),
-    keywords: skill.metadata.keywords.join(" ").toLowerCase(),
-    domain: skill.metadata.domain.join(" ").toLowerCase(),
-    category: skill.metadata.category.join(" ").toLowerCase()
+  if (terms.length === 0) return { score: 0, coverage: 0 };
+  const tokenSets = {
+    name: new Set(tokenize(skill.name)),
+    description: new Set(tokenize(skill.description)),
+    keywords: new Set(tokenize(skill.metadata.keywords.join(" "))),
+    domain: new Set(tokenize(skill.metadata.domain.join(" "))),
+    category: new Set(tokenize(skill.metadata.category.join(" ")))
   };
   let score = 0;
+  const matched = new Set<string>();
   for (const term of terms) {
-    if (haystacks.name.includes(term)) score += 4;
-    if (haystacks.keywords.includes(term)) score += 3;
-    if (haystacks.domain.includes(term)) score += 2;
-    if (haystacks.category.includes(term)) score += 2;
-    if (haystacks.description.includes(term)) score += 1;
+    let hit = false;
+    if (tokenSets.name.has(term)) { score += 4; hit = true; }
+    if (tokenSets.keywords.has(term)) { score += 3; hit = true; }
+    if (tokenSets.domain.has(term)) { score += 2; hit = true; }
+    if (tokenSets.category.has(term)) { score += 2; hit = true; }
+    if (tokenSets.description.has(term)) { score += 1; hit = true; }
+    if (hit) matched.add(term);
   }
-  if (score <= 0) return 0;
+  const normalizedName = skill.name.toLowerCase().replace(/[-_]+/g, " ");
+  if (normalizedName.length >= 4 && q.includes(normalizedName)) score += 8;
+  for (const keyword of skill.metadata.keywords) {
+    const normalized = keyword.toLowerCase().trim().replace(/[-_]+/g, " ");
+    if (normalized.length >= 3 && !SEARCH_STOP_WORDS.has(normalized) && q.includes(normalized)) score += 6;
+  }
+  if (score <= 0) return { score: 0, coverage: 0 };
+  const coverage = matched.size / terms.length;
+  score *= 0.4 + coverage * 0.6;
   score += skill.metadata.priority / 100;
   if (skill.metadata.maturity === "stable") score += 0.5;
-  return score;
+  return { score, coverage };
 }
 
 export class SqliteFtsSearchBackend implements SkillSearchBackend {
@@ -119,12 +155,13 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
       if (!matchesFilters(skill, filters)) continue;
       const manual = manualScore(skill, query);
       const fts = candidates.get(skill.key) ?? 0;
-      const score = manual + fts * 2;
-      if (score <= 0) continue;
+      const score = manual.score + (manual.coverage > 0 ? fts * 2 : 0);
+      if (score <= 0 || manual.coverage <= 0) continue;
       results.push({
         skill,
         score,
-        reason: `matched name/metadata/description; score=${score.toFixed(2)}`
+        coverage: manual.coverage,
+        reason: `matched exact tokens/phrases; coverage=${manual.coverage.toFixed(2)}; score=${score.toFixed(2)}`
       });
     }
     return results.sort((a, b) => b.score - a.score).slice(0, limit);

@@ -547,9 +547,14 @@ export function auditKnowledgeLifecycle(
 }
 
 function queryTerms(query: string): string[] {
+  const stopWords = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with", "使用", "实现", "问题", "相关", "如何", "怎么", "帮我", "当前", "项目", "配置", "规则", "的", "和", "与"]);
   const raw = query.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
   const terms = new Set<string>();
   const addToken = (token: string) => {
+    if (!token || stopWords.has(token)) return;
+    if (token.includes("-") || token.includes("_")) {
+      for (const part of token.split(/[-_]+/)) addToken(part);
+    }
     terms.add(token);
     if (/^[\p{Script=Han}]+$/u.test(token) && token.length >= 2) {
       for (let index = 0; index < token.length - 1; index += 1) {
@@ -564,7 +569,7 @@ function queryTerms(query: string): string[] {
       for (const segment of segments) addToken(segment);
     }
   }
-  return [...terms].filter(Boolean);
+  return [...terms].filter((term) => term.length >= 2 && !stopWords.has(term));
 }
 
 function applicabilityPatternMatches(pattern: string, value: string): boolean {
@@ -720,6 +725,10 @@ export class KnowledgeIndex {
       const filePath = chunk.relativePath.toLowerCase();
       const content = chunk.content.toLowerCase();
       const tags = (lifecycle?.tags ?? []).join(" ").toLowerCase();
+      const titleTerms = new Set(queryTerms(title));
+      const pathTerms = new Set(queryTerms(filePath));
+      const contentTerms = new Set(queryTerms(content));
+      const tagTerms = new Set(queryTerms(tags));
       const normalizedQuery = query.toLowerCase().trim().replace(/\s+/g, " ");
       let score = 0;
       const reasons: string[] = [];
@@ -727,11 +736,14 @@ export class KnowledgeIndex {
       let pathScore = 0;
       let contentScore = 0;
       let tagScore = 0;
+      const matchedTerms = new Set<string>();
       for (const term of terms) {
-        if (title.includes(term)) titleScore += 4;
-        if (filePath.includes(term)) pathScore += 2;
-        if (content.includes(term)) contentScore += term.length >= 2 ? 1.5 : 0.25;
-        if (tags.includes(term)) tagScore += 3;
+        let hit = false;
+        if (titleTerms.has(term)) { titleScore += 4; hit = true; }
+        if (pathTerms.has(term)) { pathScore += 2; hit = true; }
+        if (contentTerms.has(term)) { contentScore += 1.5; hit = true; }
+        if (tagTerms.has(term)) { tagScore += 3; hit = true; }
+        if (hit) matchedTerms.add(term);
       }
       score += titleScore + pathScore + contentScore + tagScore;
       if (titleScore > 0) reasons.push(`title+${titleScore.toFixed(2)}`);
@@ -748,7 +760,9 @@ export class KnowledgeIndex {
         }
       }
       const ftsScore = (ftsCandidates.get(chunk.key) ?? 0) * 2;
-      score += ftsScore;
+      const coverage = terms.length ? matchedTerms.size / terms.length : 0;
+      score *= 0.35 + coverage * 0.65;
+      score += coverage > 0 ? ftsScore : 0;
       if (ftsScore > 0) reasons.push(`fts+${ftsScore.toFixed(2)}`);
       if (lifecycle?.status === "draft") {
         score *= 0.5;
@@ -758,7 +772,8 @@ export class KnowledgeIndex {
       results.push({
         chunk,
         score,
-        reason: `${reasons.join("; ")}${lifecycle?.applicability && applicabilityContext ? "; applicability matched" : ""}; score=${score.toFixed(2)}`
+        coverage,
+        reason: `${reasons.join("; ")}${lifecycle?.applicability && applicabilityContext ? "; applicability matched" : ""}; coverage=${coverage.toFixed(2)}; score=${score.toFixed(2)}`
       });
     }
     return results.sort((a, b) => b.score - a.score).slice(0, limit);

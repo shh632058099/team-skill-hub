@@ -225,9 +225,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           principal
         );
         return toolResult({
+          selected: result.selected,
+          ambiguous: result.ambiguous,
           skills: result.skills.map((item) => ({
             ...compactSkill(item.skill),
             score: item.score,
+            confidence: item.confidence,
+            coverage: item.coverage,
             reason: item.reason
           })),
           knowledge: result.knowledge.map((item) => ({
@@ -239,22 +243,29 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             chunk_index: item.chunk.chunkIndex,
             content: item.chunk.content,
             score: item.score,
+            confidence: item.confidence,
+            coverage: item.coverage,
             reason: item.reason
           })),
           prompts: result.prompts.map((item) => ({
             ...compactPrompt(item.artifact),
             score: item.score,
+            confidence: item.confidence,
+            coverage: item.coverage,
             reason: item.reason
           })),
           agents: result.agents.map((item) => ({
             ...compactAgent(item.artifact),
             score: item.score,
+            confidence: item.confidence,
+            coverage: item.coverage,
             reason: item.reason
-          }))
-,
+          })),
           tools: result.tools.map((item) => ({
             ...compactTool(item.artifact),
             score: item.score,
+            confidence: item.confidence,
+            coverage: item.coverage,
             reason: item.reason
           }))
         });
@@ -823,18 +834,19 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "submit_knowledge_candidate",
       {
-        description: "Submit a candidate team Knowledge/Skill item for human review. Before calling, summarize it with the exact six-section Markdown format (# Title, 问题, 根因, 解决方案, 验证结果, 适用范围, 约束/限制); the server validates and canonicalizes it. This never publishes directly to Git.",
+        description: "Submit a candidate team Knowledge/Skill item for human review. Knowledge candidates use the fixed summary format; Skill candidates contain a complete SKILL.md. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
           title: z.string().min(1).max(200),
           content: z.string().min(1).max(10000),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
           suggested_type: z.enum(["knowledge", "skill"]).optional(),
+          skill_collection: z.enum(["rd-skills", "custom-skills"]).optional(),
           repository: z.string().min(1).optional(),
           suggested_path: z.string().min(1).optional()
         })
       },
-      async ({ trace_id, title, content, source_type, suggested_type, repository, suggested_path }) =>
+      async ({ trace_id, title, content, source_type, suggested_type, skill_collection, repository, suggested_path }) =>
         toolResult({
           candidate: await appService.submitKnowledgeCandidate(principal, {
             traceId: trace_id,
@@ -842,7 +854,36 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             content,
             sourceType: source_type ?? "mcp-session",
             suggestedType: suggested_type ?? "knowledge",
+            skillCollection: skill_collection,
             repository,
+            suggestedPath: suggested_path
+          })
+        })
+    );
+
+    registerTool(
+      "submit_skill_candidate",
+      {
+        description: "Submit a complete generated SKILL.md to Team Skill Hub for administrator review. The Skill is not pushed directly; approval is required before a PR/MR can be created.",
+        inputSchema: z.object({
+          trace_id: z.string().min(1).optional(),
+          title: z.string().min(1).max(200),
+          content: z.string().min(1).max(10000),
+          skill_collection: z.enum(["rd-skills", "custom-skills"]),
+          repository: z.string().min(1).optional(),
+          suggested_path: z.string().min(1)
+        })
+      },
+      async ({ trace_id, title, content, skill_collection, repository, suggested_path }) =>
+        toolResult({
+          candidate: await appService.submitKnowledgeCandidate(principal, {
+            traceId: trace_id,
+            title,
+            content,
+            sourceType: "mcp-session",
+            suggestedType: "skill",
+            skillCollection: skill_collection,
+            repository: repository ?? "rd-skills",
             suggestedPath: suggested_path
           })
         })

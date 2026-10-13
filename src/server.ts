@@ -747,6 +747,8 @@ export async function startServer(
       sourceType?: string;
       reviewer?: string;
       automatic?: string;
+      suggestedType?: "knowledge" | "skill";
+      skillCollection?: "rd-skills" | "custom-skills";
     };
   }>("/admin/api/knowledge-candidates", async (request, reply) => {
     if (!hasAdminAccess(request)) {
@@ -765,10 +767,12 @@ export async function startServer(
       repository: request.query.repository,
       sourceType: request.query.sourceType,
       reviewer: request.query.reviewer,
-      automatic
+      automatic,
+      suggestedType: request.query.suggestedType,
+      skillCollection: request.query.skillCollection
     });
     const result = paginateAdminRows(rows, request.query, (item) =>
-      [item.id, item.title, item.content, item.repository, item.status, item.sourceType, item.reviewer, item.reviewReason]
+      [item.id, item.title, item.content, item.repository, item.status, item.sourceType, item.suggestedType, item.skillCollection, item.reviewer, item.reviewReason]
         .filter(Boolean)
         .join(" ")
     );
@@ -849,6 +853,7 @@ export async function startServer(
       title: string;
       content: string;
       suggestedType?: "knowledge" | "skill";
+      skillCollection?: "rd-skills" | "custom-skills";
       repository?: string;
       suggestedPath?: string;
       traceId?: string;
@@ -866,6 +871,7 @@ export async function startServer(
           content: request.body.content,
           sourceType: "manual",
           suggestedType: request.body.suggestedType ?? "knowledge",
+          skillCollection: request.body.skillCollection,
           repository: request.body.repository,
           suggestedPath: request.body.suggestedPath,
           traceId: request.body.traceId
@@ -917,6 +923,7 @@ export async function startServer(
       title?: string;
       content?: string;
       suggestedType?: "knowledge" | "skill";
+      skillCollection?: "rd-skills" | "custom-skills";
       repository?: string;
       suggestedPath?: string;
       knowledgeRelation?: {

@@ -137,8 +137,21 @@ function githubSshUrl(baseUrl: string, projectPath: string): string {
 
 function markdownForCandidate(candidate: KnowledgeCandidate): string {
   const body = candidate.content.trim();
+  if (candidate.suggestedType === "skill") return body + "\n";
   if (/^#\s+/m.test(body)) return body + "\n";
   return "# " + candidate.title.trim() + "\n\n" + body + "\n";
+}
+
+function candidateLabel(candidate: KnowledgeCandidate): string {
+  return candidate.suggestedType === "skill" ? "Skill" : "Knowledge";
+}
+
+function defaultCandidatePath(candidate: KnowledgeCandidate): string {
+  if (candidate.suggestedType === "skill") {
+    const root = candidate.skillCollection === "custom-skills" ? "custom" : "skills";
+    return `${root}/${slugify(candidate.title)}/SKILL.md`;
+  }
+  return `knowledge/${slugify(candidate.title)}.md`;
 }
 
 export class GitLabKnowledgePublisher implements KnowledgePublisher {
@@ -182,16 +195,13 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
 
   async publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult> {
     if (candidate.status !== "approved" && candidate.status !== "publish_failed") {
-      throw new Error("Knowledge candidate must be approved before publishing");
-    }
-    if (candidate.suggestedType !== "knowledge") {
-      throw new Error("Automatic publishing currently supports Knowledge candidates only");
+      throw new Error("Candidate must be approved before publishing");
     }
 
     const { config, baseUrl, projectPath, token } = this.resolve(repository);
     const project = encodeURIComponent(projectPath);
     const filePath = assertSafePath(
-      candidate.suggestedPath ?? `knowledge/${slugify(candidate.title)}.md`
+      candidate.suggestedPath ?? defaultCandidatePath(candidate)
     );
     const encodedFile = encodeURIComponent(filePath);
     const targetBranch = config.targetBranch || repository.branch || "main";
@@ -244,7 +254,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       const payload: Record<string, unknown> = {
         branch,
         content: desiredContent,
-        commit_message: `docs: add knowledge from ${candidate.id}`
+        commit_message: `${candidate.suggestedType === "skill" ? "feat" : "docs"}: add ${candidate.suggestedType} from ${candidate.id}`
       };
       if (!branchExists) payload.start_branch = targetBranch;
 
@@ -269,11 +279,12 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
         body: JSON.stringify({
           source_branch: branch,
           target_branch: targetBranch,
-          title: `Knowledge: ${candidate.title}`,
+          title: `${candidateLabel(candidate)}: ${candidate.title}`,
           description: [
-            "Created by Team Skill Hub knowledge review workflow.",
+            `Created by Team Skill Hub ${candidate.suggestedType} review workflow.`,
             "",
             `Candidate: ${candidate.id}`,
+            candidate.suggestedType === "skill" ? `Collection: ${candidate.skillCollection ?? "custom-skills"}` : undefined,
             candidate.traceId ? `Trace: ${candidate.traceId}` : undefined,
             candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined
           ].filter(Boolean).join("\n")
@@ -449,14 +460,11 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
 
   async publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult> {
     if (candidate.status !== "approved" && candidate.status !== "publish_failed") {
-      throw new Error("Knowledge candidate must be approved before publishing");
-    }
-    if (candidate.suggestedType !== "knowledge") {
-      throw new Error("Automatic publishing currently supports Knowledge candidates only");
+      throw new Error("Candidate must be approved before publishing");
     }
 
     const { config, apiBase, projectPath, token, sshUrl } = this.resolve(repository);
-    const filePath = assertSafePath(candidate.suggestedPath ?? `knowledge/${slugify(candidate.title)}.md`);
+    const filePath = assertSafePath(candidate.suggestedPath ?? defaultCandidatePath(candidate));
     const targetBranch = config.targetBranch || "main";
     const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
     const branch = `${prefix}-${candidate.id.replace(/^kc_/, "").slice(0, 12)}`;
@@ -494,7 +502,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         await this.gitRun(["add", "--", filePath], worktree);
         await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
         await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
-        await this.gitRun(["commit", "-m", `docs: add knowledge from ${candidate.id}`], worktree);
+        await this.gitRun(["commit", "-m", `${candidate.suggestedType === "skill" ? "feat" : "docs"}: add ${candidate.suggestedType} from ${candidate.id}`], worktree);
         await this.gitRun(["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], worktree);
       }
 
@@ -502,13 +510,14 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
       let response = await this.request(pullsUrl, token, {
         method: "POST",
         body: JSON.stringify({
-          title: `Knowledge: ${candidate.title}`,
+          title: `${candidateLabel(candidate)}: ${candidate.title}`,
           head: branch,
           base: targetBranch,
           body: [
-            "Created by Team Skill Hub knowledge review workflow.",
+            `Created by Team Skill Hub ${candidate.suggestedType} review workflow.`,
             "",
             `Candidate: ${candidate.id}`,
+            candidate.suggestedType === "skill" ? `Collection: ${candidate.skillCollection ?? "custom-skills"}` : undefined,
             candidate.traceId ? `Trace: ${candidate.traceId}` : undefined,
             candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined
           ].filter(Boolean).join("\n")

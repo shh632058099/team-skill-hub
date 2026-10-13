@@ -63,6 +63,16 @@ import {
 import { resolveProjectContext } from "./project-context.js";
 import { listDataGovernanceRules } from "./data-governance.js";import { normalizeKnowledgeCandidateSummary, parseKnowledgeSummary } from "./knowledge-summary.js";
 
+function discoveryConfidence(score: number, coverage: number | undefined, scale: number): number {
+  const normalizedScore = 1 - Math.exp(-Math.max(0, score) / scale);
+  const normalizedCoverage = Math.max(0, Math.min(1, coverage ?? 0));
+  return Math.max(0, Math.min(1, 0.15 + normalizedCoverage * 0.55 + normalizedScore * 0.3));
+}
+
+function isDiscoveryRelevant(confidence: number, coverage: number | undefined): boolean {
+  return confidence >= 0.2 && ((coverage ?? 0) >= 0.2 || confidence >= 0.65);
+}
+
 export class SkillHubApplicationService {
   private readonly states = new Map<string, RepositoryState>();
   private readonly providers = new Map<string, SkillRepositoryProvider>();
@@ -597,7 +607,8 @@ export class SkillHubApplicationService {
       readRoles: [...repository.readRoles],
       syncRoles: [...repository.syncRoles],
       knowledge: normalizeKnowledgeConfig(repository.knowledge),
-      knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined
+      knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined,
+      skillPublishing: repository.skillPublishing ? { ...repository.skillPublishing } : undefined
     }));
     const nextIds = new Set(this.config.repositories.map((repository) => repository.id));
     for (const repository of this.config.repositories) {
@@ -911,7 +922,7 @@ export class SkillHubApplicationService {
 
   private async pollKnowledgeCandidatePublications(repositoryId: string): Promise<void> {
     const repository = this.getRepository(repositoryId);
-    if (!repository.knowledgePublishing?.enabled) return;
+    if (!repository.knowledgePublishing?.enabled && !repository.skillPublishing?.enabled) return;
 
     const candidates = (await this.observability.listCandidates(2000)).filter(
       (candidate) =>
@@ -1533,7 +1544,7 @@ export class SkillHubApplicationService {
       ? options.repositories.filter((id) => allowedIds.includes(id))
       : allowedIds;
     if (repositories.length === 0) {
-      return { skills: [], knowledge: [], prompts: [], agents: [], tools: [] };
+      return { selected: null, ambiguous: false, skills: [], knowledge: [], prompts: [], agents: [], tools: [] };
     }
 
     const skills = this.searchSkills(
@@ -1541,8 +1552,11 @@ export class SkillHubApplicationService {
       { repositories, client: options.client },
       topK,
       resolvedPrincipal
-    );
-    const knowledge = this.searchKnowledge(query, topK, repositories, resolvedPrincipal);
+    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 12) }))
+      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
+    const knowledge = this.searchKnowledge(query, topK, repositories, resolvedPrincipal)
+      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 24) }))
+      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const repositorySet = new Set(repositories);
     const prompts = searchArtifacts(
       query,
@@ -1550,25 +1564,51 @@ export class SkillHubApplicationService {
         repositorySet.has(item.repositoryId)
       ),
       topK
-    );
+    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const agents = searchArtifacts(
       query,
       this.listAgents(options.client, resolvedPrincipal).filter((item) =>
         repositorySet.has(item.repositoryId)
       ),
       topK
-    );
+    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const tools = searchArtifacts(
       query,
       this.listTools(options.client, resolvedPrincipal).filter((item) =>
         repositorySet.has(item.repositoryId)
       ),
       topK
+    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
+    const knowledgeForSelection = knowledge.filter(
+      (item, index, items) => items.findIndex(
+        (candidate) =>
+          candidate.chunk.repositoryId === item.chunk.repositoryId &&
+          candidate.chunk.relativePath === item.chunk.relativePath
+      ) === index
     );
+    const candidates = [
+      ...skills.map((item) => ({ type: "skill" as const, repository: item.skill.repositoryId, name: item.skill.name, score: item.score, confidence: item.confidence })),
+      ...knowledgeForSelection.map((item) => ({ type: "knowledge" as const, repository: item.chunk.repositoryId, path: item.chunk.relativePath, chunkIndex: item.chunk.chunkIndex, score: item.score, confidence: item.confidence })),
+      ...prompts.map((item) => ({ type: "prompt" as const, repository: item.artifact.repositoryId, name: item.artifact.name, score: item.score, confidence: item.confidence })),
+      ...agents.map((item) => ({ type: "agent" as const, repository: item.artifact.repositoryId, name: item.artifact.name, score: item.score, confidence: item.confidence })),
+      ...tools.map((item) => ({ type: "tool" as const, repository: item.artifact.repositoryId, name: item.artifact.name, score: item.score, confidence: item.confidence }))
+    ].sort((a, b) => b.confidence - a.confidence || b.score - a.score);
+    const top = candidates[0];
+    const second = candidates[1];
+    const selected = top && (
+      (!second && top.confidence >= 0.5) ||
+      (Boolean(second) && top.confidence >= 0.55 && top.confidence - second!.confidence >= 0.12)
+    )
+      ? top
+      : null;
+    const ambiguous = Boolean(top && !selected && top.confidence >= 0.4);
     this.metrics.increment("discover_total", {
       matched: String(skills.length + knowledge.length + prompts.length + agents.length + tools.length > 0)
     });
-    return { skills, knowledge, prompts, agents, tools };
+    return { selected, ambiguous, skills, knowledge, prompts, agents, tools };
   }
 
   recommendProjectContext(
@@ -2974,11 +3014,21 @@ export class SkillHubApplicationService {
     principal: Principal,
     input: Pick<
       KnowledgeCandidate,
-      "title" | "content" | "sourceType" | "suggestedType" | "repository" | "suggestedPath" | "traceId"
+      "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"
     >
   ) {
     let candidateInput = input;
-    if (input.sourceType === "manual" || input.sourceType === "mcp-session") {
+    if (input.suggestedType === "skill") {
+      const body = input.content.trim();
+      if (!body.startsWith("---") || !/\bschema_version:\s*1\b/.test(body) || !/\bname:\s*[^\s]+/.test(body) || !/\bmetadata:\s*$/m.test(body)) {
+        throw new Error("Skill candidate content must be a complete SKILL.md with schema_version: 1, name, and metadata front matter");
+      }
+      candidateInput = {
+        ...input,
+        skillCollection: input.skillCollection ?? "custom-skills",
+        repository: input.repository ?? "rd-skills"
+      };
+    } else if (input.sourceType === "manual" || input.sourceType === "mcp-session") {
       const normalizedSummary = normalizeKnowledgeCandidateSummary(input.content);
       if (!normalizedSummary.ok) {
         throw new Error(
@@ -3007,6 +3057,8 @@ export class SkillHubApplicationService {
       sourceType?: string;
       reviewer?: string;
       automatic?: boolean;
+      suggestedType?: "knowledge" | "skill";
+      skillCollection?: "rd-skills" | "custom-skills";
     }
   ) {
     const candidates = await this.observability.listCandidates(Math.max(limit * 4, limit));
@@ -3016,6 +3068,8 @@ export class SkillHubApplicationService {
       .filter((item) => !filters?.repository || item.repository === filters.repository)
       .filter((item) => !filters?.sourceType || item.sourceType === filters.sourceType)
       .filter((item) => !filters?.reviewer || item.reviewer === filters.reviewer)
+      .filter((item) => !filters?.suggestedType || item.suggestedType === filters.suggestedType)
+      .filter((item) => !filters?.skillCollection || item.skillCollection === filters.skillCollection)
       .filter((item) =>
         filters?.automatic === undefined ? true : filters.automatic ? Boolean(item.automation) : !item.automation
       )
@@ -3097,7 +3151,7 @@ export class SkillHubApplicationService {
 
   async updateKnowledgeCandidate(
     id: string,
-    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "repository" | "suggestedPath" | "knowledgeRelation">>
+    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation">>
   ) {
     if (input.repository !== undefined && input.repository) {
       const repository = this.config.repositories.find((repo) => repo.id === input.repository);
@@ -3157,10 +3211,15 @@ export class SkillHubApplicationService {
 
     const repository = this.getRepository(candidate.repository);
     if (repository.provider !== "git") throw new Error("Automatic publishing requires a git repository");
+    const publishing = candidate.suggestedType === "skill" ? repository.skillPublishing : repository.knowledgePublishing;
+    if (!publishing?.enabled) {
+      throw new Error(`${candidate.suggestedType === "skill" ? "Skill" : "Knowledge"} publishing is disabled for this repository`);
+    }
+    const publishingRepository = { ...repository, knowledgePublishing: publishing };
     await this.observability.markCandidatePublishing(id);
     try {
-      const publisher = createKnowledgePublisher(repository);
-      const publication = await publisher.publish({ ...candidate, suggestedPath: publishPath, status: "approved" }, repository);
+      const publisher = createKnowledgePublisher(publishingRepository);
+      const publication = await publisher.publish({ ...candidate, suggestedPath: publishPath, status: "approved" }, publishingRepository);
       return await this.observability.markCandidatePublished(id, publication);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3176,8 +3235,11 @@ export class SkillHubApplicationService {
     if (!candidate.publication) throw new Error("Knowledge candidate has not been published");
     const repository = this.getRepository(candidate.repository);
     if (repository.provider !== "git") throw new Error("Publication reconcile requires a git repository");
-    const publisher = createKnowledgePublisher(repository);
-    const status = await publisher.reconcile(candidate.publication, repository);
+    const publishing = candidate.suggestedType === "skill" ? repository.skillPublishing : repository.knowledgePublishing;
+    if (!publishing?.enabled) throw new Error("Candidate publishing is disabled for this repository");
+    const publishingRepository = { ...repository, knowledgePublishing: publishing };
+    const publisher = createKnowledgePublisher(publishingRepository);
+    const status = await publisher.reconcile(candidate.publication, publishingRepository);
     return await this.observability.updateCandidatePublication(id, {
       ...candidate.publication,
       ...status

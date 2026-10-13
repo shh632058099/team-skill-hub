@@ -305,6 +305,55 @@ test("GitHub publisher pushes candidate content over SSH and creates a pull requ
   }
 });
 
+test("GitHub publisher publishes a Skill candidate to the skill repository", async () => {
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const gitCalls: string[][] = [];
+  const repo: RepositoryConfig = {
+    ...githubRepository(),
+    branch: "master",
+    knowledgePublishing: {
+      enabled: true,
+      provider: "github",
+      baseUrl: "https://github.com",
+      projectPath: "shh632058099/rd-skills",
+      tokenEnv: "TEST_GITHUB_TOKEN",
+      targetBranch: "master",
+      branchPrefix: "skill-hub-skill"
+    }
+  };
+  const skill = candidate({
+    suggestedType: "skill",
+    skillCollection: "rd-skills",
+    title: "OTA deployment helper",
+    suggestedPath: "ota/deployment-helper/SKILL.md",
+    content: "---\nschema_version: 1\nname: ota-deployment-helper\ndescription: deploy OTA\nmetadata:\n  audience: [developer]\n---\n\n# OTA deployment helper\n"
+  });
+  const fetchMock: typeof fetch = async (input, init) => {
+    assert.equal(String(input), "https://api.github.com/repos/shh632058099/rd-skills/pulls");
+    assert.equal(init?.method, "POST");
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    assert.equal(body.head, "skill-hub-skill-1234567890ab");
+    assert.equal(body.base, "master");
+    assert.equal(body.title, "Skill: OTA deployment helper");
+    assert.match(body.body, /Collection: rd-skills/);
+    return responseJson({ number: 22, html_url: "https://github.com/shh632058099/rd-skills/pull/22", state: "open" }, 201);
+  };
+  const gitRun = async (args: string[]) => {
+    gitCalls.push(args);
+    if (args[0] === "ls-remote") return "";
+    return "";
+  };
+  try {
+    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).publish(skill, repo);
+    assert.equal(result.projectPath, "shh632058099/rd-skills");
+    assert.equal(result.filePath, "ota/deployment-helper/SKILL.md");
+    assert.equal(result.branch, "skill-hub-skill-1234567890ab");
+    assert.ok(gitCalls.find((call) => call[0] === "clone")?.includes("git@github.com:shh632058099/rd-skills.git"));
+  } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
+  }
+});
+
 test("GitHub publisher reconciles pull request state", async () => {
   process.env.TEST_GITHUB_TOKEN = "github-token";
   const responses = [

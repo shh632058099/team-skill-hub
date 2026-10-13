@@ -691,6 +691,89 @@ test("prompt and agent registries load, search and resolve repository artifacts"
   search.close();
 });
 
+test("discover normalizes cross-asset relevance and avoids substring false positives", async () => {
+  const root = await makeSkillRoot();
+  const clashDir = path.join(root, "networking", "clash-rules");
+  await mkdir(clashDir, { recursive: true });
+  await writeFile(
+    path.join(clashDir, "SKILL.md"),
+    `---
+schema_version: 1
+name: clash-rules
+description: 维护和集成 Clash Verge Rev 的广告拦截、代理分流与规则集配置。
+metadata:
+  audience: [developer]
+  domain: [networking, clash]
+  category: [configuration, ruleset]
+  keywords: [Clash Verge Rev, Clash, rule-providers, rule-set, proxy routing, 分流, 广告拦截]
+  visibility: [internal]
+  maturity: experimental
+  owner: networking
+  priority: 50
+  depends_on: []
+  compatibility:
+    codex: true
+---
+# Clash Rules
+`
+  );
+  await mkdir(path.join(root, "docs"), { recursive: true });
+  await writeFile(
+    path.join(root, "docs", "codex-custom-models.md"),
+    "# Codex 与 Claude Code 自定义模型配置\n\nCodex model_catalog_json、自定义模型、模型 provider 和 model picker 配置说明。\n",
+    "utf8"
+  );
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-discover-ranking-"));
+  const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: ["developer", "internal"],
+      authentication: { mode: "development", apiKeys: {} },
+      repositories: [repository]
+    },
+    [new LocalRepositoryProvider()],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
+    new LoggingEventSink()
+  );
+
+  await service.initialize();
+
+  const clash = service.discover("Clash Verge Rev 分流规则 配置 GEOIP GEOSITE 自定义规则", {
+    topK: 5,
+    repositories: ["rd-skills"],
+    client: "codex"
+  });
+  assert.equal(clash.selected?.type, "skill");
+  assert.equal(clash.selected && "name" in clash.selected ? clash.selected.name : undefined, "clash-rules");
+  assert.equal(clash.ambiguous, false);
+  assert.equal(clash.skills[0]?.skill.name, "clash-rules");
+  assert.ok((clash.skills[0]?.confidence ?? 0) > 0.55);
+  assert.equal(clash.skills.some((item) => item.skill.name === "ota-code-review"), false);
+  assert.equal(clash.knowledge.some((item) => item.chunk.relativePath === "docs/codex-custom-models.md"), false);
+
+  const codex = service.discover("Codex 自定义模型配置 config.toml model provider base_url API key", {
+    topK: 5,
+    repositories: ["rd-skills"],
+    client: "codex"
+  });
+  assert.equal(codex.selected?.type, "knowledge");
+  assert.equal(codex.selected && "path" in codex.selected ? codex.selected.path : undefined, "docs/codex-custom-models.md");
+  assert.equal(codex.ambiguous, false);
+  assert.equal(codex.knowledge[0]?.chunk.relativePath, "docs/codex-custom-models.md");
+  assert.ok((codex.knowledge[0]?.confidence ?? 0) > 0.55);
+
+  search.close();
+});
+
 test("missing local tool binding prevents repository activation", async () => {
   const root = await makeSkillRoot();
   await addPromptAndAgent(root);

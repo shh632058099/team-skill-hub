@@ -111,6 +111,7 @@ export interface KnowledgeCandidate {
   content: string;
   sourceType: "mcp-session" | "manual" | "codex-summary" | "troubleshooting" | "review";
   suggestedType: "knowledge" | "skill";
+  skillCollection?: "rd-skills" | "custom-skills";
   repository?: string;
   suggestedPath?: string;
   status: CandidateStatus;
@@ -799,7 +800,7 @@ export class McpObservabilityStore {
 
   async createCandidate(
     principal: Principal,
-    input: Pick<KnowledgeCandidate, "title" | "content" | "sourceType" | "suggestedType" | "repository" | "suggestedPath" | "traceId"> &
+    input: Pick<KnowledgeCandidate, "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"> &
       Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "automation" | "relatedKnowledge" | "relationHint">>
   ): Promise<KnowledgeCandidate> {
     const ts = new Date().toISOString();
@@ -877,7 +878,7 @@ export class McpObservabilityStore {
 
   async updateCandidate(
     id: string,
-    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "repository" | "suggestedPath" | "knowledgeRelation">>
+    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation">>
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -912,6 +913,7 @@ export class McpObservabilityStore {
       duplicateSimilarity: nearDuplicate ? Number(nearDuplicate.score.toFixed(3)) : undefined,
       ...(input.knowledgeRelation !== undefined ? { knowledgeRelation: input.knowledgeRelation } : {}),
       ...(input.suggestedType !== undefined ? { suggestedType: input.suggestedType } : {}),
+      ...(input.skillCollection !== undefined ? { skillCollection: input.skillCollection } : {}),
       ...(input.repository !== undefined ? { repository: input.repository || undefined } : {}),
       ...(input.suggestedPath !== undefined ? { suggestedPath: input.suggestedPath || undefined } : {}),
       status: current.status === "pending" ? "pending" : "approved",

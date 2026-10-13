@@ -78,6 +78,15 @@ interface RawConfig {
       target_branch?: string;
       branch_prefix?: string;
     };
+    skill_publishing?: {
+      enabled?: boolean;
+      provider?: "gitlab" | "github";
+      base_url?: string;
+      project_path?: string;
+      token_env?: string;
+      target_branch?: string;
+      branch_prefix?: string;
+    };
   }>;
 }
 
@@ -150,6 +159,17 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
           (repo.knowledge_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
         targetBranch: repo.knowledge_publishing?.target_branch ?? repo.branch ?? "main",
         branchPrefix: repo.knowledge_publishing?.branch_prefix ?? "skill-hub-knowledge"
+      },
+      skillPublishing: {
+        enabled: repo.skill_publishing?.enabled ?? false,
+        provider: repo.skill_publishing?.provider ?? "gitlab",
+        baseUrl: repo.skill_publishing?.base_url,
+        projectPath: repo.skill_publishing?.project_path,
+        tokenEnv:
+          repo.skill_publishing?.token_env ??
+          (repo.skill_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
+        targetBranch: repo.skill_publishing?.target_branch ?? repo.branch ?? "main",
+        branchPrefix: repo.skill_publishing?.branch_prefix ?? "skill-hub-skill"
       }
     };
   });

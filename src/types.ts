@@ -52,6 +52,7 @@ export interface RepositoryConfig {
   syncRoles: string[];
   knowledge?: KnowledgeSourceConfig;
   knowledgePublishing?: KnowledgePublishingConfig;
+  skillPublishing?: KnowledgePublishingConfig;
 }
 
 export interface ProjectConfig {
@@ -224,6 +225,7 @@ export interface ArtifactSearchResult<T> {
   artifact: T;
   score: number;
   reason: string;
+  coverage?: number;
 }
 
 export interface KnowledgeApplicability {
@@ -291,6 +293,7 @@ export interface KnowledgeSearchResult {
   chunk: KnowledgeChunk;
   score: number;
   reason: string;
+  coverage?: number;
 }
 
 export type EvaluationTarget = "skill" | "prompt" | "agent" | "knowledge";
@@ -384,6 +387,7 @@ export interface SearchResult {
   skill: Skill;
   score: number;
   reason: string;
+  coverage?: number;
 }
 
 export interface MaterializedRepository {

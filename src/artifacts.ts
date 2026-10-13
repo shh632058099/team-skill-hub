@@ -256,19 +256,43 @@ export function searchArtifacts<T extends PromptArtifact | AgentArtifact | ToolA
   artifacts: T[],
   limit: number
 ): ArtifactSearchResult<T>[] {
-  const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [])];
+  const stopWords = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with", "使用", "实现", "问题", "相关", "如何", "怎么", "帮我", "当前", "项目", "配置", "规则", "的", "和", "与"]);
+  const tokens = (text: string) => {
+    const result = new Set<string>();
+    const raw = text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
+    const add = (value: string) => {
+      const token = value.trim();
+      if (!token || stopWords.has(token)) return;
+      if (token.includes("-") || token.includes("_")) for (const part of token.split(/[-_]+/)) add(part);
+      if (/^[\p{Script=Han}]+$/u.test(token) && token.length >= 2) {
+        result.add(token);
+        for (let i = 0; i < token.length - 1; i += 1) {
+          const bigram = token.slice(i, i + 2);
+          if (!stopWords.has(bigram)) result.add(bigram);
+        }
+      } else if (token.length >= 2) result.add(token);
+    };
+    for (const token of raw) add(token);
+    return result;
+  };
+  const terms = [...tokens(query)];
   return artifacts
     .map((artifact) => {
-      const name = artifact.name.toLowerCase();
-      const description = artifact.description.toLowerCase();
-      const keywords = artifact.keywords.join(" ").toLowerCase();
+      const name = tokens(artifact.name);
+      const description = tokens(artifact.description);
+      const keywords = tokens(artifact.keywords.join(" "));
       let score = 0;
+      const matched = new Set<string>();
       for (const term of terms) {
-        if (name.includes(term)) score += 4;
-        if (keywords.includes(term)) score += 3;
-        if (description.includes(term)) score += 1;
+        let hit = false;
+        if (name.has(term)) { score += 4; hit = true; }
+        if (keywords.has(term)) { score += 3; hit = true; }
+        if (description.has(term)) { score += 1; hit = true; }
+        if (hit) matched.add(term);
       }
-      return { artifact, score, reason: `lexical score=${score.toFixed(2)}` };
+      const coverage = terms.length ? matched.size / terms.length : 0;
+      if (score > 0) score *= 0.4 + coverage * 0.6;
+      return { artifact, score, coverage, reason: `exact lexical coverage=${coverage.toFixed(2)}; score=${score.toFixed(2)}` };
     })
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
