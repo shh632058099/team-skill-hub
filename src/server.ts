@@ -247,7 +247,11 @@ export async function startServer(
   });
 
   app.get("/admin", async (_request, reply) => {
-    reply.type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_HTML;
   });
 
