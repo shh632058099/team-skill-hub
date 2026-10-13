@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:24-bookworm-slim}
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-bullseye-slim}
         INSTALL_GIT: ${INSTALL_GIT:-1}
     image: team-skill-hub:local
     container_name: team-skill-hub

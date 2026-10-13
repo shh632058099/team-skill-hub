@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=node:24-bookworm-slim
+ARG NODE_IMAGE=node:24-bullseye-slim
 ARG INSTALL_GIT=1
 FROM ${NODE_IMAGE} AS build
 WORKDIR /app
@@ -15,6 +15,10 @@ WORKDIR /app
 
 ARG INSTALL_GIT
 RUN if [ "$INSTALL_GIT" = "1" ]; then \
+      if grep -q '^VERSION_CODENAME=bullseye$' /etc/os-release; then \
+        printf 'deb http://archive.debian.org/debian bullseye main\ndeb http://archive.debian.org/debian bullseye-updates main\ndeb http://archive.debian.org/debian-security bullseye-security main\n' > /etc/apt/sources.list; \
+        printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99bullseye-archive; \
+      fi; \
       apt-get update \
       && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
       && rm -rf /var/lib/apt/lists/*; \
