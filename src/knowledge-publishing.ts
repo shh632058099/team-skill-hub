@@ -535,8 +535,9 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         mergeable_state?: string;
       } | undefined;
       if (response.ok) {
-        pr = await response.json() as typeof pr;
-      } else if (response.status === 422) {
+        pr = await response.json().catch(() => undefined) as typeof pr;
+      }
+      if (response.status === 422 || !pr?.number || !pr.html_url) {
         const owner = projectPath.split("/")[0];
         const query = new URLSearchParams({ state: "all", head: `${owner}:${branch}`, base: targetBranch });
         response = await this.request(`${pullsUrl}?${query.toString()}`, token, { method: "GET" });

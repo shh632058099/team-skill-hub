@@ -173,9 +173,10 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
 
     const autoPath = generated.suggestedPath!;
     const edited = await service.updateKnowledgeCandidate(generated.id, {
-      repository: "rd-skills",
+      repository: "",
       suggestedPath: ""
     });
+    assert.equal(edited.repository, undefined);
     assert.equal(edited.suggestedPath, undefined);
     const approved = await service.reviewKnowledgeCandidate(
       generated.id,
@@ -234,6 +235,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(published.status, "published");
     assert.equal(published.publication?.mergeRequestState, "opened");
     assert.equal(published.publication?.mergeRequestIid, 12);
+    assert.equal(published.repository, "rd-skills");
     assert.equal(published.suggestedPath, autoPath);
     assert.equal(published.publication?.filePath, autoPath);
     assert.match(publishedMarkdown, /^# OTA 断电恢复修复/m);

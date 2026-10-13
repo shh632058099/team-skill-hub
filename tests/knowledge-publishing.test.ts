@@ -316,6 +316,40 @@ test("GitHub publisher pushes candidate content over SSH and creates a pull requ
   }
 });
 
+test("GitHub publisher recovers when PR creation returns 200 without PR details", async () => {
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const calls: Array<{ url: string; method: string }> = [];
+  const responses = [
+    responseJson({}, 200),
+    responseJson([{
+      number: 22,
+      html_url: "https://github.com/shh632058099/rd-knowledges/pull/22",
+      state: "open",
+      merged_at: null
+    }], 200)
+  ];
+  const fetchMock: typeof fetch = async (input, init) => {
+    calls.push({ url: String(input), method: init?.method ?? "GET" });
+    const response = responses.shift();
+    if (!response) throw new Error("unexpected request");
+    return response;
+  };
+  const gitRun = async (args: string[]) => {
+    if (args[0] === "ls-remote") return "";
+    return "";
+  };
+  try {
+    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).publish(candidate(), githubRepository());
+    assert.equal(result.mergeRequestIid, 22);
+    assert.equal(result.mergeRequestState, "opened");
+    assert.equal(calls[0]?.method, "POST");
+    assert.equal(calls[1]?.method, "GET");
+    assert.match(calls[1]?.url ?? "", /state=all/);
+  } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
+  }
+});
+
 test("GitHub publisher reopens an existing closed pull request when retrying a candidate", async () => {
   process.env.TEST_GITHUB_TOKEN = "github-token";
   const calls: Array<{ url: string; method: string; body?: string }> = [];

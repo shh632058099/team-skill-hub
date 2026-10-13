@@ -3044,6 +3044,10 @@ export class SkillHubApplicationService {
         content: normalizedSummary.content
       };
     }
+    if (candidateInput.suggestedType !== "skill" && !candidateInput.repository) {
+      const repository = this.defaultPublishingRepository("knowledge", this.allowedRepositories(principal));
+      if (repository) candidateInput = { ...candidateInput, repository };
+    }
     if (candidateInput.repository) {
       const allowed = this.allowedRepositories(principal).some((repo) => repo.id === candidateInput.repository);
       if (!allowed) throw new Error("Repository not found");
@@ -3201,7 +3205,6 @@ export class SkillHubApplicationService {
   async publishKnowledgeCandidate(id: string) {
     const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
     if (!candidate) throw new Error("Knowledge candidate not found");
-    if (!candidate.repository) throw new Error("Knowledge candidate repository is required before publishing");
     if (candidate.knowledgeRelation?.type === "conflicts_with") {
       throw new Error("Conflicting Knowledge candidate must be resolved before publishing");
     }
@@ -3212,16 +3215,28 @@ export class SkillHubApplicationService {
       candidate.knowledgeRelation?.type === "updates" || candidate.knowledgeRelation?.type === "supersedes"
         ? candidate.knowledgeRelation.target
         : undefined;
-    if (relationTarget && relationTarget.repositoryId !== candidate.repository) {
+    const repositoryId =
+      candidate.repository ??
+      relationTarget?.repositoryId ??
+      this.defaultPublishingRepository(candidate.suggestedType === "skill" ? "skill" : "knowledge");
+    if (!repositoryId) {
+      throw new Error(
+        `Unable to determine ${candidate.suggestedType === "skill" ? "Skill" : "Knowledge"} publishing repository; select a repository before publishing`
+      );
+    }
+    if (relationTarget && relationTarget.repositoryId !== repositoryId) {
       throw new Error("Knowledge update target must be in the candidate repository");
     }
     const publishPath = candidate.suggestedPath || relationTarget?.path || defaultCandidatePath(candidate);
 
-    const candidateForPublish = !candidate.suggestedPath && candidate.suggestedType === "knowledge"
-      ? await this.observability.updateCandidate(id, { suggestedPath: publishPath })
+    const candidatePatch: Partial<KnowledgeCandidate> = {};
+    if (!candidate.repository) candidatePatch.repository = repositoryId;
+    if (!candidate.suggestedPath && candidate.suggestedType === "knowledge") candidatePatch.suggestedPath = publishPath;
+    const candidateForPublish = Object.keys(candidatePatch).length
+      ? await this.observability.updateCandidate(id, candidatePatch)
       : candidate;
 
-    const repository = this.getRepository(candidate.repository);
+    const repository = this.getRepository(repositoryId);
     if (repository.provider !== "git") throw new Error("Automatic publishing requires a git repository");
     const publishing = candidate.suggestedType === "skill" ? repository.skillPublishing : repository.knowledgePublishing;
     if (!publishing?.enabled) {
@@ -3363,7 +3378,7 @@ export class SkillHubApplicationService {
       content,
       sourceType: "review",
       suggestedType: "knowledge",
-      repository: input?.repository,
+      repository: input?.repository ?? this.defaultPublishingRepository("knowledge", this.allowedRepositories(principal)),
       suggestedPath: input?.suggestedPath,
       sourceGapKey: gap.key
     });
@@ -3381,5 +3396,21 @@ export class SkillHubApplicationService {
     const repository = this.config.repositories.find((repo) => repo.id === id);
     if (!repository) throw new Error(`Unknown repository: ${id}`);
     return repository;
+  }
+
+  private defaultPublishingRepository(
+    type: "knowledge" | "skill",
+    repositories: RepositoryConfig[] = this.config.repositories
+  ): string | undefined {
+    const candidates = repositories.filter((repository) => {
+      if (!repository.enabled || repository.provider !== "git") return false;
+      return type === "skill"
+        ? repository.skillPublishing?.enabled === true
+        : repository.knowledgePublishing?.enabled === true;
+    });
+    const conventionalId = type === "skill" ? "rd-skills" : "rd-knowledges";
+    const conventional = candidates.find((repository) => repository.id === conventionalId);
+    if (conventional) return conventional.id;
+    return candidates.length === 1 ? candidates[0]?.id : undefined;
   }
 }
