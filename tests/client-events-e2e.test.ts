@@ -56,6 +56,157 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.ok(address && typeof address !== "string");
     const base = `http://127.0.0.1:${address.port}`;
 
+    for (const route of [
+      "/admin/observability",
+      "/admin/observability/sessions",
+      "/admin/observability/hooks",
+      "/admin/observability/candidate-detections",
+      "/admin/observability/mcp-calls",
+      "/admin/observability/reuse",
+      "/admin/observability/failures",
+      "/admin/observability/mcp-calls/not-found"
+    ]) {
+      const page = await fetch(base + route);
+      assert.equal(page.status, 200);
+      assert.match(page.headers.get("cache-control") ?? "", /no-store/);
+      const html = await page.text();
+      assert.match(html, /sessionStorage/);
+      if (route === "/admin/observability") {
+        assert.match(html, /data-admin-module-index/);
+        for (const href of [
+          "/admin/observability/sessions",
+          "/admin/observability/hooks",
+          "/admin/observability/candidate-detections",
+          "/admin/observability/mcp-calls",
+          "/admin/observability/reuse",
+          "/admin/observability/failures"
+        ]) assert.match(html, new RegExp(href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        assert.doesNotMatch(html, /sessionsTable|candidateDetectionsTable|callsTable|operationalHealth|sessionAnalytics/);
+      } else if (route === "/admin/observability/sessions") {
+        for (const marker of ["关键字", "用户 / Actor ID", "仓库", "会话状态", "运行时状态", "包含 MCP 调用", "包含证据", "发生知识复用", "每页数量", "筛选", "清除", "上一页", "下一页"]) assert.match(html, new RegExp(marker));
+        assert.match(html, /\['hasMcp','包含 MCP 调用'[^\n]*'boolean'\]/);
+        assert.match(html, /type==='boolean'/);
+        assert.match(html, /<option value='true'/);
+        assert.match(html, /<option value='false'/);
+        assert.match(html, /requestJson/);
+        assert.match(html, /readResponse/);
+        assert.match(html, /\[redacted\]/);
+      } else if (route === "/admin/observability/reuse" || route === "/admin/observability/failures") {
+        assert.match(html, /用户 \/ Actor ID/);
+        assert.match(html, /会话 ID/);
+        assert.match(html, /requestJson/);
+      }
+    }
+    for (const [route, requiredLinks] of [
+      ["/admin/review", ["/admin/review/candidates?status=pending", "/admin/review/candidates?status=published"]],
+      ["/admin/gaps", ["/admin/gaps/items?status=active", "/admin/gaps/items?status=resolved"]]
+    ] as const) {
+      const page = await fetch(base + route);
+      assert.equal(page.status, 200);
+      assert.match(page.headers.get("cache-control") ?? "", /no-store/);
+      const html = await page.text();
+      assert.match(html, /module-index/);
+      for (const link of requiredLinks) assert.match(html, new RegExp(link.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.doesNotMatch(html, /<pre[^>]*class="raw"/);
+    }
+    const governancePage = await fetch(base + "/admin/governance");
+    assert.equal(governancePage.status, 200);
+    assert.match(governancePage.headers.get("cache-control") ?? "", /no-store/);
+    const governanceHtml = await governancePage.text();
+    for (const marker of ["仓库治理", "同步全部仓库", "/admin/api/repository-governance", "立即同步"]) assert.match(governanceHtml, new RegExp(marker));
+    assert.doesNotMatch(governanceHtml, /<div class="module-index"/);
+    const legacyGovernance = await fetch(base + "/admin/governance/repositories", { redirect: "manual" });
+    assert.equal(legacyGovernance.status, 302);
+    assert.equal(legacyGovernance.headers.get("location"), "/admin/governance");
+    for (const [route, markers] of [
+      ["/admin/review/candidates?status=pending&limit=50", ["关键字", "状态", "仓库", "来源类型", "审核人", "自动候选", "每页数量", "筛选", "上一页", "下一页", "requestJson"]],
+      ["/admin/gaps/items?status=active&limit=20", ["关键字", "状态", "每页数量", "筛选", "上一页", "下一页", "最近出现"]]
+    ] as const) {
+      const page = await fetch(base + route);
+      assert.equal(page.status, 200);
+      const html = await page.text();
+      for (const marker of markers) assert.match(html, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.doesNotMatch(html, /<pre[^>]*class="raw"[^>]*>加载中/);
+    }
+
+    const adminHeaders = { "x-skill-hub-admin-key": "client-events-admin" };
+    for (const endpoint of [
+      "/admin/api/sessions",
+      "/admin/api/hooks",
+      "/admin/api/candidate-detections",
+      "/admin/api/mcp-calls",
+      "/admin/api/reuse",
+      "/admin/api/failures",
+      "/admin/api/knowledge-candidates",
+      "/admin/api/knowledge-gaps",
+      "/admin/api/repository-governance"
+    ]) {
+      const defaultPage = await fetch(base + endpoint, { headers: adminHeaders });
+      assert.equal(defaultPage.status, 200, endpoint);
+      const defaultBody = await defaultPage.json() as { page?: { limit?: number; cursor?: string } };
+      assert.equal(defaultBody.page?.limit, 20, `${endpoint} should default to 20 rows`);
+      assert.equal(defaultBody.page?.cursor, "0", `${endpoint} should start at cursor 0`);
+
+      const cappedPage = await fetch(base + endpoint + "?limit=999&q=__admin_smoke_no_match__", { headers: adminHeaders });
+      assert.equal(cappedPage.status, 200, endpoint);
+      const cappedBody = await cappedPage.json() as { page?: { limit?: number; total?: number } };
+      assert.equal(cappedBody.page?.limit, 100, `${endpoint} should cap page size at 100`);
+      assert.equal(cappedBody.page?.total, 0, `${endpoint} should apply q filtering`);
+    }
+
+    for (const detailRoute of [
+      "/admin/api/sessions/not-found",
+      "/admin/api/hooks/not-found",
+      "/admin/api/candidate-detections/not-found",
+      "/admin/api/mcp-calls/not-found",
+      "/admin/api/reuse/not-found",
+      "/admin/api/failures/not-found",
+      "/admin/api/knowledge-candidates/not-found",
+      "/admin/api/knowledge-gaps/not-found",
+      "/admin/api/repository-governance/not-found"
+    ]) assert.equal((await fetch(base + detailRoute, { headers: adminHeaders })).status, 404, detailRoute);
+    const protectedAdminRequests: Array<{ path: string; method?: string; body?: string }> = [
+      ...[
+        "/admin/api/sessions",
+        "/admin/api/hooks",
+        "/admin/api/candidate-detections",
+        "/admin/api/mcp-calls",
+        "/admin/api/reuse",
+        "/admin/api/failures",
+        "/admin/api/knowledge-candidates",
+        "/admin/api/knowledge-gaps",
+        "/admin/api/repository-governance",
+        "/admin/api/sessions/not-found",
+        "/admin/api/hooks/not-found",
+        "/admin/api/candidate-detections/not-found",
+        "/admin/api/mcp-calls/not-found",
+        "/admin/api/reuse/not-found",
+        "/admin/api/failures/not-found",
+        "/admin/api/knowledge-candidates/not-found",
+        "/admin/api/knowledge-gaps/not-found",
+        "/admin/api/repository-governance/not-found"
+      ].map((path) => ({ path })),
+      { path: "/admin/api/knowledge-gaps/not-found", method: "PATCH", body: "{}" },
+      { path: "/admin/api/knowledge-gaps/not-found/candidate", method: "POST", body: "{}" },
+      { path: "/admin/api/knowledge-candidates/not-found/review", method: "POST", body: JSON.stringify({ status: "approved" }) },
+      { path: "/admin/api/knowledge-candidates/not-found/publish", method: "POST", body: "{}" },
+      { path: "/admin/api/knowledge-candidates/not-found/reconcile", method: "POST", body: "{}" }
+    ];
+    for (const request of protectedAdminRequests) {
+      const init = request.method
+        ? { method: request.method, headers: { "content-type": "application/json" }, body: request.body }
+        : undefined;
+      assert.equal((await fetch(base + request.path, init)).status, 403, `missing admin key: ${request.method ?? "GET"} ${request.path}`);
+      assert.equal(
+        (await fetch(base + request.path, {
+          ...init,
+          headers: { ...(init?.headers ?? {}), "x-skill-hub-admin-key": "wrong" }
+        })).status,
+        403,
+        `wrong admin key: ${request.method ?? "GET"} ${request.path}`
+      );
+    }
+
     const openApi = await fetch(base + "/openapi.json");
     assert.equal(openApi.status, 200);
     assert.equal(openApi.headers.get("x-skill-hub-api-version"), "1");
@@ -407,6 +558,15 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
       source: "cwd-basename"
     });
 
+    const hookList = await fetch(base + "/admin/api/hooks?limit=20&q=session-e2e&event=SessionStart", { headers: { "x-skill-hub-admin-key": "client-events-admin" } });
+    assert.equal(hookList.status, 200);
+    const hookPage = (await hookList.json()) as { events: Array<{ id: string; sessionId: string }>; page: { limit: number } };
+    assert.equal(hookPage.page.limit, 20);
+    assert.ok(hookPage.events.some((item) => item.sessionId === "session-e2e"));
+    const hookId = hookPage.events[0]!.id;
+    assert.equal((await fetch(base + "/admin/api/hooks/" + encodeURIComponent(hookId), { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 200);
+    assert.equal((await fetch(base + "/admin/api/hooks/missing-hook", { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 404);
+
     const firstPageResponse = await fetch(base + "/admin/api/client-events?limit=1", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" }
     });
@@ -479,6 +639,25 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(genericAgentEnded.status, 202);
 
     const principal = service.authenticateRequest(new Headers());
+    const ambiguousA = { ...principal, id: "ambiguous-a", tenantId: "tenant-a" };
+    const ambiguousB = { ...principal, id: "ambiguous-b", tenantId: "tenant-b" };
+    await service.recordClientEvent(ambiguousA, { event: "SessionStart", sessionId: "ambiguous-session", client: "codex", metadata: {} });
+    await service.recordClientEvent(ambiguousB, { event: "SessionStart", sessionId: "ambiguous-session", client: "codex", metadata: {} });
+    assert.equal(
+      (await fetch(base + "/admin/api/sessions/ambiguous-session", { headers: adminHeaders })).status,
+      409
+    );
+    assert.equal(
+      (await fetch(base + "/admin/api/sessions/ambiguous-session?actorId=ambiguous-a", { headers: adminHeaders })).status,
+      400
+    );
+    assert.equal(
+      (await fetch(
+        base + "/admin/api/sessions/ambiguous-session?actorId=ambiguous-a&tenantId=tenant-a",
+        { headers: adminHeaders }
+      )).status,
+      200
+    );
     const call = await service.recordMcpCall({
       traceId: service.newMcpTraceId(),
       traceExplicit: false,
@@ -493,6 +672,15 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(call.sessionId, "session-e2e");
     assert.match(call.traceId, /^sess_[a-f0-9]{24}$/);
     assert.equal(call.transportSessionId, "mcp-transport-1");
+
+    const callList = await fetch(base + "/admin/api/mcp-calls?limit=20&q=search_knowledge&success=true", { headers: { "x-skill-hub-admin-key": "client-events-admin" } });
+    assert.equal(callList.status, 200);
+    const callPage = (await callList.json()) as { calls: Array<{ id: string; tool: string }>; page: { limit: number } };
+    assert.equal(callPage.page.limit, 20);
+    assert.ok(callPage.calls.some((item) => item.tool === "search_knowledge"));
+    const callId = callPage.calls[0]!.id;
+    assert.equal((await fetch(base + "/admin/api/mcp-calls/" + encodeURIComponent(callId), { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 200);
+    assert.equal((await fetch(base + "/admin/api/mcp-calls/missing-call", { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 404);
 
     const sessionsResponse = await fetch(base + "/admin/api/sessions", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" }
@@ -509,6 +697,12 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(session?.hookSchemaVersion, 1);
     assert.equal(session?.runtimeStatus, "outdated");
     assert.equal(session?.expectedRuntimeVersion, "1.1.0");
+
+    const filteredSessions = await fetch(base + "/admin/api/sessions?q=session-e2e&status=active&hasMcp=true&runtimeStatus=outdated", { headers: { "x-skill-hub-admin-key": "client-events-admin" } });
+    assert.equal(filteredSessions.status, 200);
+    const filteredSessionBody = (await filteredSessions.json()) as { sessions: Array<{ sessionId: string }> };
+    assert.ok(filteredSessionBody.sessions.some((item) => item.sessionId === "session-e2e"));
+    assert.equal((await fetch(base + "/admin/api/sessions/not-found", { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 404);
 
     const timelineResponse = await fetch(
       base +
@@ -645,7 +839,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     });
     assert.equal(detectionsResponse.status, 200);
     const detectionsBody = (await detectionsResponse.json()) as {
-      detections: Array<{ outcome: string; reason: string; candidateId?: string }>;
+      detections: Array<{ id: string; outcome: string; reason: string; candidateId?: string }>;
     };
     assert.ok(
       detectionsBody.detections.some(
@@ -655,6 +849,12 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
           Boolean(item.candidateId)
       )
     );
+    const detection = detectionsBody.detections.find((item) => item.outcome === "created")!;
+    assert.equal((await fetch(base + "/admin/api/candidate-detections/" + encodeURIComponent(detection.id), { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 200);
+    const filteredDetections = await fetch(base + "/admin/api/candidate-detections?q=verified&outcome=created&from=2000-01-01T00:00:00.000Z", { headers: { "x-skill-hub-admin-key": "client-events-admin" } });
+    assert.equal(filteredDetections.status, 200);
+    assert.ok(((await filteredDetections.json()) as { detections: unknown[] }).detections.length >= 1);
+    assert.equal((await fetch(base + "/admin/api/candidate-detections/missing-detection", { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 404);
 
     const sessionDetailResponse = await fetch(
       base +
@@ -734,14 +934,19 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
       headers: { "x-skill-hub-admin-key": "client-events-admin" }
     });
     const afterDuplicateBody = (await afterDuplicate.json()) as {
-      candidates: Array<{ content: string; sourceType: string }>;
+      candidates: Array<{ id: string; sourceType: string }>;
     };
-    assert.equal(
-      afterDuplicateBody.candidates.filter(
-        (item) => item.sourceType === "codex-summary" && item.content === assistantResult
-      ).length,
-      1
+    const summaryCandidates = afterDuplicateBody.candidates.filter(
+      (item) => item.sourceType === "codex-summary"
     );
+    assert.equal(summaryCandidates.length, 1);
+    const duplicateDetailResponse = await fetch(
+      base + "/admin/api/knowledge-candidates/" + encodeURIComponent(summaryCandidates[0]!.id),
+      { headers: { "x-skill-hub-admin-key": "client-events-admin" } }
+    );
+    assert.equal(duplicateDetailResponse.status, 200);
+    const duplicateDetail = (await duplicateDetailResponse.json()) as { candidate: { content: string } };
+    assert.equal(duplicateDetail.candidate.content, assistantResult);
     const lowValueStop = await fetch(base + "/client-events", {
       method: "POST",
       headers: { "content-type": "application/json" },

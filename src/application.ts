@@ -51,7 +51,7 @@ import {
   scanEvaluationSuites
 } from "./evaluation.js";
 import { auditKnowledgeLifecycle, chunksForDocuments, KnowledgeIndex, normalizeKnowledgeConfig, scanKnowledge } from "./knowledge.js";
-import { McpObservabilityStore, type CandidateReviewReason, type ClientEventRecord, type FeedbackRecord, type KnowledgeCandidate } from "./observability.js";
+import { isReuseMcpTool, McpObservabilityStore, type CandidateReviewReason, type ClientEventRecord, type FeedbackRecord, type KnowledgeCandidate } from "./observability.js";
 import { createKnowledgePublisher, defaultCandidatePath } from "./knowledge-publishing.js";
 import {
   ClientEventPipeline,
@@ -1975,8 +1975,20 @@ export class SkillHubApplicationService {
     return await this.observability.listClientEvents(limit);
   }
 
+  async getClientEvent(id: string) {
+    return await this.observability.getClientEvent(id);
+  }
+
   async listCandidateDetections(limit = 500) {
     return await this.observability.listCandidateDetections(limit);
+  }
+
+  async getCandidateDetection(id: string) {
+    return await this.observability.getCandidateDetection(id);
+  }
+
+  async getMcpCall(id: string) {
+    return await this.observability.getCall(id);
   }
 
   async getDashboardTrends(days = 14) {
@@ -2892,6 +2904,11 @@ export class SkillHubApplicationService {
       repositoryId?: string;
       event?: string;
       runtimeStatus?: "current" | "outdated" | "unknown";
+      status?: "active" | "ended" | "failed";
+      q?: string;
+      hasMcp?: boolean;
+      hasEvidence?: boolean;
+      hasReuse?: boolean;
       from?: string;
       to?: string;
     }
@@ -2916,6 +2933,11 @@ export class SkillHubApplicationService {
           !filters?.repositoryId || session.repositoryId === filters.repositoryId
       )
       .filter((session) => !filters?.event || session.events.includes(filters.event))
+      .filter((session) => !filters?.status || (filters.status === "ended" ? session.ended : filters.status === "active" ? !session.ended : session.failedCallCount > 0))
+      .filter((session) => !filters?.q || [session.sessionId, session.actorId, session.tenantId, session.client, session.repositoryId, ...session.events, ...session.tools].filter(Boolean).join(" ").toLowerCase().includes(filters.q.toLowerCase()))
+      .filter((session) => filters?.hasMcp === undefined || (session.callCount > 0) === filters.hasMcp)
+      .filter((session) => filters?.hasEvidence === undefined || (session.evidenceCount > 0) === filters.hasEvidence)
+      .filter((session) => filters?.hasReuse === undefined || session.tools.some(isReuseMcpTool) === filters.hasReuse)
       .filter(
         (session) =>
           !filters?.runtimeStatus || session.runtimeStatus === filters.runtimeStatus
@@ -3113,6 +3135,10 @@ export class SkillHubApplicationService {
     return await this.observability.getCandidateHistory(id, limit);
   }
 
+  async getKnowledgeCandidate(id: string) {
+    return await this.observability.getCandidate(id);
+  }
+
   async deleteKnowledgeCandidate(id: string) {
     return await this.observability.deleteCandidate(id);
   }
@@ -3258,6 +3284,7 @@ export class SkillHubApplicationService {
   async reconcileKnowledgeCandidatePublication(id: string) {
     const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
     if (!candidate) throw new Error("Knowledge candidate not found");
+    if (candidate.status !== "published") throw new Error("Knowledge candidate must be published before reconciliation");
     if (!candidate.repository) throw new Error("Knowledge candidate repository is required");
     if (!candidate.publication) throw new Error("Knowledge candidate has not been published");
     const repository = this.getRepository(candidate.repository);
@@ -3323,6 +3350,14 @@ export class SkillHubApplicationService {
     return await this.observability.knowledgeGaps(summary.topUnmatchedQueries);
   }
 
+  async getKnowledgeGap(key: string) {
+    return (await this.listKnowledgeGaps()).find((item) => item.key === key);
+  }
+
+  async getRepositoryGovernanceById(id: string, principal?: Principal) {
+    return (await this.getRepositoryGovernance(principal)).repositories.find((item) => item.id === id);
+  }
+
   async updateKnowledgeGap(
     gapKey: string,
     input: { status?: "active" | "ignored" | "resolved"; keywords?: string[] }
@@ -3349,6 +3384,7 @@ export class SkillHubApplicationService {
     if (!gap) throw new Error("Knowledge gap not found");
     if (gap.management?.status === "ignored") throw new Error("Ignored Knowledge gap cannot create a Candidate");
     if (gap.management?.status === "resolved") throw new Error("Resolved Knowledge gap cannot create another Candidate");
+    if (gap.management?.candidateId) throw new Error("Knowledge gap already has a Candidate");
     if (input?.repository) {
       const allowed = this.allowedRepositories(principal).some((repo) => repo.id === input.repository);
       if (!allowed) throw new Error("Repository not found");

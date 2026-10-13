@@ -3,7 +3,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
-import { ADMIN_HTML } from "./admin-ui.js";
+import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML } from "./admin-ui.js";
 import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
 import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
 import { ApiKeyAuthenticationProvider } from "./security.js";
@@ -16,6 +16,8 @@ import {
   MIN_SUPPORTED_HOOK_SCHEMA_VERSION
 } from "./client-events.js";
 import { translateClaudeCodeHook } from "./claude-code-adapter.js";
+import { normalizeAdminLimit, paginateAdminRows } from "./admin-routes.js";
+import { isCandidateReviewReasonValid, isReuseMcpTool } from "./observability.js";
 
 export async function startServer(
   config: AppConfig,
@@ -51,30 +53,6 @@ export async function startServer(
     const adminKey = process.env.ADMIN_API_KEY;
     if (process.env.AUTH_MODE === "development") return true;
     return Boolean(adminKey && request.headers["x-skill-hub-admin-key"] === adminKey);
-  };
-
-  const paginateAdminRows = <T>(
-    rows: T[],
-    query: { limit?: string; cursor?: string; q?: string },
-    searchableText: (row: T) => string
-  ) => {
-    const limit = Math.max(1, Math.min(Number(query.limit ?? 50) || 50, 200));
-    const q = query.q?.trim().toLowerCase();
-    const filtered = q
-      ? rows.filter((row) => searchableText(row).toLowerCase().includes(q))
-      : rows;
-    const offset = Math.max(0, Number(query.cursor ?? 0) || 0);
-    const items = filtered.slice(offset, offset + limit);
-    return {
-      items,
-      page: {
-        total: filtered.length,
-        limit,
-        cursor: String(offset),
-        nextCursor: offset + limit < filtered.length ? String(offset + limit) : undefined,
-        previousCursor: offset > 0 ? String(Math.max(0, offset - limit)) : undefined
-      }
-    };
   };
 
   const openApiDocument = {
@@ -253,6 +231,62 @@ export async function startServer(
       .header("expires", "0")
       .type("text/html; charset=utf-8");
     return ADMIN_HTML;
+  });
+
+  app.get("/admin/observability", async (_request, reply) => {
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_OBSERVABILITY_INDEX_HTML;
+  });
+
+  app.get("/admin/observability/*", async (_request, reply) => {
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_OBSERVABILITY_HTML;
+  });
+
+  const moduleShell = (request: { url: string }, reply: any) => {
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    const pathname = new URL(request.url, "http://admin.local").pathname.replace(/\/+$/, "") || "/";
+    return /^\/admin\/(review|gaps)$/.test(pathname)
+      ? ADMIN_MODULE_INDEX_HTML
+      : ADMIN_MODULE_HTML;
+  };
+  app.get("/admin/review", moduleShell);
+  app.get("/admin/review/*", moduleShell);
+  app.get("/admin/gaps", moduleShell);
+  app.get("/admin/gaps/*", moduleShell);
+  app.get("/admin/governance", async (_request, reply) => {
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_GOVERNANCE_HTML;
+  });
+  app.get("/admin/governance/*", async (_request, reply) => {
+    reply.code(302).header("location", "/admin/governance");
+    return "";
+  });
+
+  app.get("/admin/*", async (_request, reply) => {
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
+    return ADMIN_HTML;
+  });
+
+  // Stable resource aliases keep the History API surface readable while the
+  // legacy event endpoint remains available for existing clients.
+  app.get("/admin/api/hooks", async (request, reply) => {
+    const query = request.query as { limit?: string; cursor?: string; q?: string; event?: string; user?: string; session?: string; from?: string; until?: string };
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const rows = (await service.listClientEvents(1000)).filter((item) => (!query.event || item.event === query.event) && (!query.user || item.actorId === query.user) && (!query.session || item.sessionId === query.session) && (!query.from || item.ts >= query.from) && (!query.until || item.ts <= query.until));
+    const result = paginateAdminRows(rows, query, (item) => [item.event, item.actorId, item.sessionId, item.turnId, item.client, JSON.stringify(item.metadata ?? {})].filter(Boolean).join(" "));
+    return { events: result.items, page: result.page };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/hooks/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const event = await service.getClientEvent(request.params.id);
+    if (!event) { reply.code(404); return { error: "hook event not found" }; }
+    return { event };
   });
 
   app.post<{ Body: PreToolPolicyInput }>("/admin/api/policy/pre-tool/evaluate", async (request, reply) => {
@@ -578,7 +612,7 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    const limit = Math.max(1, Math.min(Number(request.query.limit ?? 100) || 100, 1000));
+    const limit = normalizeAdminLimit(request.query.limit);
     return {
       summary: await service.getMcpObservabilitySummary(),
       calls: await service.listMcpCalls(limit)
@@ -594,12 +628,18 @@ export async function startServer(
     return { traces: await service.listMcpTraces(limit) };
   });
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>("/admin/api/client-events", async (request, reply) => {
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; event?: string; user?: string; session?: string; from?: string; until?: string } }>("/admin/api/client-events", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    const rows = await service.listClientEvents(5000);
+    const rows = (await service.listClientEvents(1000)).filter((item) =>
+      (!request.query.event || item.event === request.query.event) &&
+      (!request.query.user || item.actorId === request.query.user) &&
+      (!request.query.session || item.sessionId === request.query.session) &&
+      (!request.query.from || item.ts >= request.query.from) &&
+      (!request.query.until || item.ts <= request.query.until)
+    );
     const result = paginateAdminRows(rows, request.query, (item) =>
       [item.event, item.actorId, item.sessionId, item.turnId, item.client, JSON.stringify(item.metadata ?? {})]
         .filter(Boolean)
@@ -608,12 +648,18 @@ export async function startServer(
     return { events: result.items, page: result.page };
   });
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>("/admin/api/candidate-detections", async (request, reply) => {
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; outcome?: string; user?: string; session?: string; from?: string; until?: string } }>("/admin/api/candidate-detections", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    const rows = await service.listCandidateDetections(5000);
+    const rows = (await service.listCandidateDetections(1000)).filter((item) =>
+      (!request.query.outcome || item.outcome === request.query.outcome) &&
+      (!request.query.user || item.actorId === request.query.user) &&
+      (!request.query.session || item.sessionId === request.query.session) &&
+      (!request.query.from || item.ts >= request.query.from) &&
+      (!request.query.until || item.ts <= request.query.until)
+    );
     const result = paginateAdminRows(rows, request.query, (item) =>
       [item.outcome, item.reason, item.actorId, item.sessionId, item.turnId, item.detector, item.candidateId]
         .filter(Boolean)
@@ -665,10 +711,16 @@ export async function startServer(
   app.get<{
     Querystring: {
       limit?: string;
+      cursor?: string;
       actorId?: string;
       repositoryId?: string;
       event?: string;
       runtimeStatus?: "current" | "outdated" | "unknown";
+      status?: "active" | "ended" | "failed";
+      hasMcp?: string;
+      hasEvidence?: string;
+      hasReuse?: string;
+      q?: string;
       from?: string;
       to?: string;
     };
@@ -677,17 +729,23 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    const limit = Math.max(1, Math.min(Number(request.query.limit ?? 100) || 100, 1000));
-    return {
-      sessions: await service.listClientSessions(limit, {
+    const rows = await service.listClientSessions(1000, {
         actorId: request.query.actorId,
         repositoryId: request.query.repositoryId,
         event: request.query.event,
         runtimeStatus: request.query.runtimeStatus,
+        status: request.query.status,
+        q: request.query.q,
+        hasMcp: request.query.hasMcp === undefined ? undefined : request.query.hasMcp === "true",
+        hasEvidence: request.query.hasEvidence === undefined ? undefined : request.query.hasEvidence === "true",
+        hasReuse: request.query.hasReuse === undefined ? undefined : request.query.hasReuse === "true",
         from: request.query.from,
         to: request.query.to
-      })
-    };
+      });
+    const result = paginateAdminRows(rows, request.query, (item) =>
+      [item.sessionId, item.actorId, item.tenantId, item.repositoryId, item.client, item.events.join(" "), item.tools.join(" ")].filter(Boolean).join(" ")
+    );
+    return { sessions: result.items, page: result.page };
   });
 
   app.get<{ Querystring: { limit?: string } }>("/admin/api/session-analytics", async (request, reply) => {
@@ -707,15 +765,24 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    if (!request.query.actorId || !request.query.tenantId) {
+    let actorId = request.query.actorId;
+    let tenantId = request.query.tenantId;
+    if (Boolean(actorId) !== Boolean(tenantId)) {
       reply.code(400);
-      return { error: "actorId and tenantId are required" };
+      return { error: "actorId and tenantId must be provided together" };
     }
-    return await service.getClientSessionDetail(
-      request.query.actorId,
-      request.query.tenantId,
-      request.params.sessionId
-    );
+    if (!actorId && !tenantId) {
+      const matches = (await service.listClientSessions(1000)).filter((item) => item.sessionId === request.params.sessionId);
+      if (!matches.length) { reply.code(404); return { error: "session not found" }; }
+      if (matches.length > 1) { reply.code(409); return { error: "session id is ambiguous; actorId and tenantId are required" }; }
+      actorId = matches[0]!.actorId;
+      tenantId = matches[0]!.tenantId;
+    }
+    const resolvedActorId = actorId!;
+    const resolvedTenantId = tenantId!;
+    const detail = await service.getClientSessionDetail(resolvedActorId, resolvedTenantId, request.params.sessionId);
+    if (!detail.timeline.length) { reply.code(404); return { error: "session not found" }; }
+    return { ...detail, session: detail };
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/traces/:id", async (request, reply) => {
@@ -724,6 +791,82 @@ export async function startServer(
       return { error: "admin API access denied" };
     }
     return { traceId: request.params.id, calls: await service.getMcpTrace(request.params.id) };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/mcp-calls/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const call = await service.getMcpCall(request.params.id);
+    if (!call) { reply.code(404); return { error: "MCP call not found" }; }
+    return { call };
+  });
+
+  const derivedMcpRows = async (request: { query: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }, failures: boolean) => {
+    const rows = (await service.listMcpCalls(1000)).filter((item) =>
+      (failures ? !item.success : isReuseMcpTool(item.tool)) &&
+      (!request.query.tool || item.tool === request.query.tool) &&
+      (!request.query.actorId || item.actorId === request.query.actorId) &&
+      (!request.query.sessionId || item.sessionId === request.query.sessionId) &&
+      (!request.query.from || item.ts >= request.query.from) &&
+      (!request.query.to || item.ts <= request.query.to)
+    );
+    const result = paginateAdminRows(rows, request.query, (item) => [item.id, item.tool, item.actorId, item.sessionId, item.client, item.error, JSON.stringify(item.args ?? {})].filter(Boolean).join(" "));
+    return { rows: result.items, page: result.page };
+  };
+
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/reuse", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    return derivedMcpRows(request, false);
+  });
+  app.get<{ Params: { id: string } }>("/admin/api/reuse/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const call = await service.getMcpCall(request.params.id);
+    if (!call || !isReuseMcpTool(call.tool)) { reply.code(404); return { error: "reuse record not found" }; }
+    return { call };
+  });
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/failures", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    return derivedMcpRows(request, true);
+  });
+  app.get<{ Params: { id: string } }>("/admin/api/failures/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const call = await service.getMcpCall(request.params.id);
+    if (!call || call.success) { reply.code(404); return { error: "failure record not found" }; }
+    return { call };
+  });
+
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; success?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/mcp-calls", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const rows = (await service.listMcpCalls(1000)).filter((item) =>
+      (!request.query.tool || item.tool === request.query.tool) &&
+      (!request.query.success || String(item.success) === request.query.success) &&
+      (!request.query.actorId || item.actorId === request.query.actorId) &&
+      (!request.query.sessionId || item.sessionId === request.query.sessionId) &&
+      (!request.query.from || item.ts >= request.query.from) &&
+      (!request.query.to || item.ts <= request.query.to)
+    );
+    const result = paginateAdminRows(rows, request.query, (item) => [item.id, item.tool, item.traceId, item.actorId, item.sessionId, item.client, item.error].filter(Boolean).join(" "));
+    return { calls: result.items, page: result.page };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/client-events/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const event = await service.getClientEvent(request.params.id);
+    if (!event) { reply.code(404); return { error: "client event not found" }; }
+    return { event };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/candidate-detections/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const detection = await service.getCandidateDetection(request.params.id);
+    if (!detection) { reply.code(404); return { error: "candidate detection not found" }; }
+    return { detection };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const candidate = await service.getKnowledgeCandidate(request.params.id);
+    if (!candidate) { reply.code(404); return { error: "knowledge candidate not found" }; }
+    return { candidate };
   });
 
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>("/admin/api/feedback", async (request, reply) => {
@@ -780,7 +923,8 @@ export async function startServer(
         .filter(Boolean)
         .join(" ")
     );
-    return { candidates: result.items, page: result.page };
+    // Keep list responses compact: full candidate content is only available from the detail API.
+    return { candidates: result.items.map(({ content: _content, ...item }) => item), page: result.page };
   });
 
   app.post<{
@@ -803,11 +947,7 @@ export async function startServer(
       reply.code(400);
       return { error: "status must be approved or rejected" };
     }
-    const allowedReasons =
-      request.body.status === "approved"
-        ? ["useful", "needs_edit"]
-        : ["false_positive", "duplicate", "low_reuse_value", "outdated"];
-    if (!allowedReasons.includes(request.body.reviewReason)) {
+    if (!isCandidateReviewReasonValid(request.body.status, request.body.reviewReason)) {
       reply.code(400);
       return { error: "reviewReason is not valid for the selected review status" };
     }
@@ -964,11 +1104,7 @@ export async function startServer(
       reply.code(400);
       return { error: "status must be approved or rejected" };
     }
-    const allowedReasons =
-      request.body.status === "approved"
-        ? ["useful", "needs_edit"]
-        : ["false_positive", "duplicate", "low_reuse_value", "outdated"];
-    if (request.body.reviewReason && !allowedReasons.includes(request.body.reviewReason)) {
+    if (request.body.reviewReason && !isCandidateReviewReasonValid(request.body.status, request.body.reviewReason)) {
       reply.code(400);
       return { error: "reviewReason is not valid for the selected review status" };
     }
@@ -1019,7 +1155,20 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    return { gaps: await service.listKnowledgeGaps() };
+    const query = request.query as { limit?: string; cursor?: string; q?: string; status?: string };
+    const status = ["active", "resolved", "ignored"].includes(query.status ?? "") ? query.status : undefined;
+    const rows = (await service.listKnowledgeGaps())
+      .filter((item) => !status || (item.management?.status ?? "active") === status)
+      .filter((item) => !query.q || [item.key, item.query, item.source, ...(item.members ?? [])].join(" ").toLowerCase().includes(query.q.toLowerCase()));
+    const result = paginateAdminRows(rows, query, (item) => [item.key, item.query, item.source, ...(item.members ?? [])].join(" "));
+    return { gaps: result.items, page: result.page };
+  });
+
+  app.get<{ Params: { key: string } }>("/admin/api/knowledge-gaps/:key", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const gap = await service.getKnowledgeGap(request.params.key);
+    if (!gap) { reply.code(404); return { error: "knowledge gap not found" }; }
+    return { gap };
   });
 
   app.patch<{
@@ -1354,7 +1503,21 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    return await service.getRepositoryGovernance(adminPrincipal);
+    const query = request.query as { limit?: string; cursor?: string; q?: string; status?: string };
+    const governance = await service.getRepositoryGovernance(adminPrincipal);
+    const result = paginateAdminRows(
+      governance.repositories.filter((item) => !query.status || item.status === query.status),
+      query,
+      (item) => [item.id, item.name, item.provider, item.status, ...item.owners, ...item.issues].join(" ")
+    );
+    return { ...governance, repositories: result.items, page: result.page };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/repository-governance/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const repository = await service.getRepositoryGovernanceById(request.params.id, adminPrincipal);
+    if (!repository) { reply.code(404); return { error: "repository governance record not found" }; }
+    return { repository };
   });
 
   app.get("/admin/api/alerts", async (request, reply) => {

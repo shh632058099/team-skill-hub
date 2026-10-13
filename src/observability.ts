@@ -6,6 +6,10 @@ import { governanceRuleForObservabilityFile } from "./data-governance.js";
 
 export type FeedbackRating = "positive" | "negative";
 export type CandidateStatus = "pending" | "approved" | "rejected" | "publishing" | "published" | "publish_failed";
+export const REUSE_MCP_TOOLS = new Set(["discover", "search_knowledge", "get_knowledge", "search_skills", "get_skill", "knowledge_search", "skill_search"]);
+export function isReuseMcpTool(tool: string): boolean {
+  return REUSE_MCP_TOOLS.has(tool);
+}
 export type CandidateKnowledgeRelationType = "new" | "duplicate_of" | "updates" | "supersedes" | "conflicts_with" | "related_to";
 export type CandidateReviewReason =
   | "useful"
@@ -14,6 +18,14 @@ export type CandidateReviewReason =
   | "duplicate"
   | "low_reuse_value"
   | "outdated";
+export function isCandidateReviewReasonValid(
+  status: "approved" | "rejected",
+  reason: CandidateReviewReason
+): boolean {
+  return status === "approved"
+    ? reason === "useful" || reason === "needs_edit"
+    : reason === "false_positive" || reason === "duplicate" || reason === "low_reuse_value" || reason === "outdated";
+}
 export type ClientHookEventName =
   | "SessionStart"
   | "UserPromptSubmit"
@@ -474,6 +486,10 @@ export class McpObservabilityStore {
     return this.readMcpCalls(limit);
   }
 
+  async getCall(id: string): Promise<McpCallRecord | undefined> {
+    return (await this.readMcpCalls(this.maxEntries)).find((item) => item.id === id);
+  }
+
   async summary(): Promise<{
     total: number;
     failed: number;
@@ -628,6 +644,10 @@ export class McpObservabilityStore {
     return this.read<ClientEventRecord>("client-events.jsonl", limit);
   }
 
+  async getClientEvent(id: string): Promise<ClientEventRecord | undefined> {
+    return (await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries)).find((item) => item.id === id);
+  }
+
   async listClientSessions(limit = 100): Promise<Array<{
     sessionId: string;
     actorId: string;
@@ -637,6 +657,7 @@ export class McpObservabilityStore {
     endedAt: string;
     eventCount: number;
     callCount: number;
+    failedCallCount: number;
     evidenceCount: number;
     tools: string[];
     events: string[];
@@ -698,6 +719,7 @@ export class McpObservabilityStore {
           endedAt: timeline[timeline.length - 1]!,
           eventCount: group.events.length,
           callCount: group.calls.length,
+          failedCallCount: group.calls.filter((item) => !item.success).length,
           evidenceCount: group.events.filter((item) => {
             const evidence = item.metadata?.evidence;
             return evidence && typeof evidence === "object" && Object.keys(evidence as object).length > 0;
@@ -746,6 +768,10 @@ export class McpObservabilityStore {
 
   listCandidateDetections(limit = 500): Promise<CandidateDetectionRecord[]> {
     return this.read<CandidateDetectionRecord>("candidate-detections.jsonl", limit);
+  }
+
+  async getCandidateDetection(id: string): Promise<CandidateDetectionRecord | undefined> {
+    return (await this.read<CandidateDetectionRecord>("candidate-detections.jsonl", this.maxEntries)).find((item) => item.id === id);
   }
 
   async submitFeedback(
@@ -841,6 +867,10 @@ export class McpObservabilityStore {
     return [...latest.values()]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(0, Math.max(1, Math.min(limit, 1000)));
+  }
+
+  async getCandidate(id: string): Promise<KnowledgeCandidate | undefined> {
+    return (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
   }
 
   async getCandidateHistory(id: string, limit = 200): Promise<KnowledgeCandidate[]> {
@@ -946,6 +976,9 @@ export class McpObservabilityStore {
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
+    if (current.status !== "publishing") {
+      throw new Error("Knowledge candidate must be publishing before it can be marked published");
+    }
     const next: KnowledgeCandidate = {
       ...current,
       status: "published",
@@ -963,6 +996,9 @@ export class McpObservabilityStore {
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
+    if (current.status !== "published") {
+      throw new Error("Knowledge candidate must be published before publication can be reconciled");
+    }
     if (!current.publication) throw new Error("Knowledge candidate has no publication to reconcile");
     const next: KnowledgeCandidate = {
       ...current,
@@ -976,6 +1012,9 @@ export class McpObservabilityStore {
   async markCandidatePublishFailed(id: string, error: string): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
+    if (current.status !== "publishing") {
+      throw new Error("Knowledge candidate must be publishing before it can be marked publish_failed");
+    }
     const next: KnowledgeCandidate = {
       ...current,
       status: "publish_failed",
@@ -997,6 +1036,9 @@ export class McpObservabilityStore {
     if (!current) throw new Error("Knowledge candidate not found");
     if (!["pending", "approved", "rejected", "publish_failed"].includes(current.status)) {
       throw new Error("Knowledge candidate cannot be reviewed in its current state");
+    }
+    if (reviewReason && !isCandidateReviewReasonValid(status, reviewReason)) {
+      throw new Error("Knowledge candidate review reason is not valid for the selected review status");
     }
     const next: KnowledgeCandidate = {
       ...current,

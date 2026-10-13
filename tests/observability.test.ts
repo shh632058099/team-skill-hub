@@ -67,8 +67,9 @@ test("observability recovers corrupted lines and rotates oversized files", async
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-observability-rotation-"));
   try {
     const store = new McpObservabilityStore(root, 100, { retentionDays: 30, maxFileBytes: 1024 });
+    let firstCallId = "";
     for (let index = 0; index < 20; index += 1) {
-      await store.recordCall({
+      const recorded = await store.recordCall({
         traceId: "trace-" + index,
         actorId: principal.id,
         tenantId: principal.tenantId,
@@ -77,10 +78,14 @@ test("observability recovers corrupted lines and rotates oversized files", async
         latencyMs: index,
         success: true
       });
+      if (index === 0) firstCallId = recorded.id;
     }
     const dir = path.join(root, "observability");
     const archives = (await readdir(dir)).filter((name) => name.startsWith("mcp-calls.jsonl.archive."));
     assert.ok(archives.length >= 1);
+    const archivedText = (await Promise.all(archives.map((name) => readFile(path.join(dir, name), "utf8")))).join("\n");
+    assert.match(archivedText, new RegExp(firstCallId));
+    assert.equal(await store.getCall(firstCallId), undefined);
     assert.equal((await readdir(dir)).some((name) => name.includes(".tmp.")), false);
 
     await appendFile(
@@ -95,6 +100,35 @@ test("observability recovers corrupted lines and rotates oversized files", async
     assert.equal(summary.total, calls.length);
     assert.doesNotThrow(() => JSON.stringify(summary));
     assert.ok((await store.listTraces()).length >= 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("observability reads are bounded to the newest 2000 current-file rows", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-observability-read-bound-"));
+  try {
+    const dir = path.join(root, "observability");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    const rows = Array.from({ length: 2105 }, (_, index) => JSON.stringify({
+      id: "call-" + index,
+      ts: new Date(1_700_000_000_000 + index).toISOString(),
+      traceId: "trace-" + index,
+      actorId: principal.id,
+      tenantId: principal.tenantId,
+      tool: "search_knowledge",
+      latencyMs: index,
+      success: true
+    })).join("\n") + "\n";
+    await appendFile(path.join(dir, "mcp-calls.jsonl"), rows, "utf8");
+    const store = new McpObservabilityStore(root, 10000);
+    const calls = await store.listCalls(5000);
+    assert.equal(calls.length, 2000);
+    assert.equal(calls[0]?.id, "call-2104");
+    assert.equal(calls.at(-1)?.id, "call-105");
+    assert.equal(await store.getCall("call-104"), undefined);
+    assert.equal((await store.summary()).total, 2000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -23,6 +23,8 @@
 http://<hub-host>:8080/admin
 ```
 
+Admin 支持 History API 深链接，例如 `/admin/observability` 以及会话、Hook、自动候选判定、MCP 调用的列表/详情路径。运行观测一级页只显示稳定的模块入口；进入二级列表后可使用服务端筛选、分页（默认 20 条）和 URL 查询参数，详情页返回时可恢复列表状态。旧的 `/admin` 入口和现有管理 API 保持兼容。
+
 输入部署时配置的 `ADMIN_API_KEY`。该 Key 是平台管理员凭据，不应作为普通 MCP 用户 Key 分发。
 
 后台当前支持：
