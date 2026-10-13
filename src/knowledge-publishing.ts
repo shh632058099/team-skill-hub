@@ -146,12 +146,13 @@ function candidateLabel(candidate: KnowledgeCandidate): string {
   return candidate.suggestedType === "skill" ? "Skill" : "Knowledge";
 }
 
-function defaultCandidatePath(candidate: KnowledgeCandidate): string {
+export function defaultCandidatePath(candidate: KnowledgeCandidate): string {
   if (candidate.suggestedType === "skill") {
     const root = candidate.skillCollection === "custom-skills" ? "custom" : "skills";
     return `${root}/${slugify(candidate.title)}/SKILL.md`;
   }
-  return `knowledge/${slugify(candidate.title)}.md`;
+  const idSuffix = candidate.id.replace(/^kc_/, "").replace(/[^A-Za-z0-9]+/g, "").slice(0, 12).toLowerCase() || "candidate";
+  return `knowledge/${slugify(candidate.title)}-${idSuffix}.md`;
 }
 
 export class GitLabKnowledgePublisher implements KnowledgePublisher {
@@ -543,7 +544,18 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
           const rows = await response.json() as Array<NonNullable<typeof pr>>;
           pr = rows[0];
           if (pr?.state === "closed" && !pr.merged_at) {
-            throw new Error(`Existing GitHub pull request #${pr.number ?? "?"} for branch ${branch} is closed`);
+            if (!pr.number) {
+              throw new Error(`Existing GitHub pull request for branch ${branch} is closed but has no pull request number`);
+            }
+            const reopenResponse = await this.request(`${pullsUrl}/${pr.number}`, token, {
+              method: "PATCH",
+              body: JSON.stringify({ state: "open" })
+            });
+            if (!reopenResponse.ok) {
+              const detail = await reopenResponse.text().catch(() => "");
+              throw new Error(`GitHub pull request reopen failed (${reopenResponse.status}): ${detail.slice(0, 1000)}`);
+            }
+            pr = await reopenResponse.json() as typeof pr;
           }
         }
       }

@@ -52,7 +52,7 @@ import {
 } from "./evaluation.js";
 import { auditKnowledgeLifecycle, chunksForDocuments, KnowledgeIndex, normalizeKnowledgeConfig, scanKnowledge } from "./knowledge.js";
 import { McpObservabilityStore, type CandidateReviewReason, type ClientEventRecord, type FeedbackRecord, type KnowledgeCandidate } from "./observability.js";
-import { createKnowledgePublisher } from "./knowledge-publishing.js";
+import { createKnowledgePublisher, defaultCandidatePath } from "./knowledge-publishing.js";
 import {
   ClientEventPipeline,
   CURRENT_HOOK_RUNTIME_VERSION,
@@ -431,7 +431,10 @@ export class SkillHubApplicationService {
         relationHint
       }
     );
-    await decision("created", "verified-engineering-result", evidenceCount, candidate.id);
+    const candidateWithPath = candidate.suggestedPath
+      ? candidate
+      : await this.observability.updateCandidate(candidate.id, { suggestedPath: defaultCandidatePath(candidate) });
+    await decision("created", "verified-engineering-result", evidenceCount, candidateWithPath.id);
   }
 
   private statePath(): string {
@@ -3045,7 +3048,13 @@ export class SkillHubApplicationService {
       const allowed = this.allowedRepositories(principal).some((repo) => repo.id === candidateInput.repository);
       if (!allowed) throw new Error("Repository not found");
     }
-    return await this.observability.createCandidate(principal, candidateInput);
+    const created = await this.observability.createCandidate(principal, candidateInput);
+    if (created.suggestedType === "knowledge" && !created.suggestedPath) {
+      return await this.observability.updateCandidate(created.id, {
+        suggestedPath: defaultCandidatePath(created)
+      });
+    }
+    return created;
   }
 
   async listKnowledgeCandidates(
@@ -3206,8 +3215,11 @@ export class SkillHubApplicationService {
     if (relationTarget && relationTarget.repositoryId !== candidate.repository) {
       throw new Error("Knowledge update target must be in the candidate repository");
     }
-    const publishPath = candidate.suggestedPath || relationTarget?.path;
-    if (!publishPath) throw new Error("Knowledge candidate path is required before publishing");
+    const publishPath = candidate.suggestedPath || relationTarget?.path || defaultCandidatePath(candidate);
+
+    const candidateForPublish = !candidate.suggestedPath && candidate.suggestedType === "knowledge"
+      ? await this.observability.updateCandidate(id, { suggestedPath: publishPath })
+      : candidate;
 
     const repository = this.getRepository(candidate.repository);
     if (repository.provider !== "git") throw new Error("Automatic publishing requires a git repository");
@@ -3219,7 +3231,7 @@ export class SkillHubApplicationService {
     await this.observability.markCandidatePublishing(id);
     try {
       const publisher = createKnowledgePublisher(publishingRepository);
-      const publication = await publisher.publish({ ...candidate, suggestedPath: publishPath, status: "approved" }, publishingRepository);
+      const publication = await publisher.publish({ ...candidateForPublish, suggestedPath: publishPath, status: "approved" }, publishingRepository);
       return await this.observability.markCandidatePublished(id, publication);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3355,11 +3367,14 @@ export class SkillHubApplicationService {
       suggestedPath: input?.suggestedPath,
       sourceGapKey: gap.key
     });
+    const candidateWithPath = candidate.suggestedPath
+      ? candidate
+      : await this.observability.updateCandidate(candidate.id, { suggestedPath: defaultCandidatePath(candidate) });
     await this.observability.updateKnowledgeGapManagement(gap.key, {
       status: "active",
-      candidateId: candidate.id
+      candidateId: candidateWithPath.id
     });
-    return candidate;
+    return candidateWithPath;
   }
 
   private getRepository(id: string): RepositoryConfig {

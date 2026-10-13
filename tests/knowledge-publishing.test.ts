@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GitHubKnowledgePublisher, GitLabKnowledgePublisher } from "../src/knowledge-publishing.js";
+import { defaultCandidatePath, GitHubKnowledgePublisher, GitLabKnowledgePublisher } from "../src/knowledge-publishing.js";
 import type { RepositoryConfig } from "../src/types.js";
 import type { KnowledgeCandidate } from "../src/observability.js";
 
@@ -65,6 +65,17 @@ function candidate(overrides: Partial<KnowledgeCandidate> = {}): KnowledgeCandid
     ...overrides
   };
 }
+
+test("default Knowledge path is stable and unique per candidate", () => {
+  assert.equal(
+    defaultCandidatePath(candidate({ suggestedPath: undefined, title: "OTA 断电恢复修复" })),
+    "knowledge/ota-1234567890ab.md"
+  );
+  assert.equal(
+    defaultCandidatePath(candidate({ id: "kc_abcdef1234567890", suggestedPath: undefined, title: "纯中文知识" })),
+    "knowledge/knowledge-abcdef123456.md"
+  );
+});
 
 function responseJson(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -300,6 +311,56 @@ test("GitHub publisher pushes candidate content over SSH and creates a pull requ
     const push = gitCalls.find((call) => call[0] === "push");
     assert.ok(push);
     assert.ok(push.includes("HEAD:refs/heads/skill-hub-knowledge-1234567890ab"));
+  } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
+  }
+});
+
+test("GitHub publisher reopens an existing closed pull request when retrying a candidate", async () => {
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const calls: Array<{ url: string; method: string; body?: string }> = [];
+  const responses = [
+    responseJson({ message: "A pull request already exists" }, 422),
+    responseJson([{
+      number: 2,
+      html_url: "https://github.com/shh632058099/rd-knowledges/pull/2",
+      state: "closed",
+      merged_at: null
+    }]),
+    responseJson({
+      number: 2,
+      html_url: "https://github.com/shh632058099/rd-knowledges/pull/2",
+      state: "open",
+      merged_at: null
+    })
+  ];
+  const fetchMock: typeof fetch = async (input, init) => {
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : undefined
+    });
+    const response = responses.shift();
+    if (!response) throw new Error("unexpected request");
+    return response;
+  };
+  const gitRun = async (args: string[]) => {
+    if (args[0] === "ls-remote") return "existing-branch";
+    return "";
+  };
+  try {
+    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).publish(
+      candidate({ status: "publish_failed" }),
+      githubRepository()
+    );
+    assert.equal(result.mergeRequestIid, 2);
+    assert.equal(result.mergeRequestState, "opened");
+    assert.equal(calls[0]?.method, "POST");
+    assert.equal(calls[1]?.method, "GET");
+    assert.match(calls[1]?.url ?? "", /state=all/);
+    assert.equal(calls[2]?.method, "PATCH");
+    assert.equal(calls[2]?.url, "https://api.github.com/repos/shh632058099/rd-knowledges/pulls/2");
+    assert.deepEqual(JSON.parse(calls[2]?.body ?? "{}"), { state: "open" });
   } finally {
     delete process.env.TEST_GITHUB_TOKEN;
   }

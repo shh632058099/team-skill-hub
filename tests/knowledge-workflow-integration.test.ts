@@ -169,12 +169,14 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.ok(generated, "automatic Candidate should be generated");
     assert.equal(generated.repository, "rd-skills");
     assert.equal(generated.status, "pending");
+    assert.match(generated.suggestedPath ?? "", /^knowledge\/ota-[a-z0-9]+\.md$/);
 
+    const autoPath = generated.suggestedPath!;
     const edited = await service.updateKnowledgeCandidate(generated.id, {
       repository: "rd-skills",
-      suggestedPath: "docs/ota/recovery-note.md"
+      suggestedPath: ""
     });
-    assert.equal(edited.suggestedPath, "docs/ota/recovery-note.md");
+    assert.equal(edited.suggestedPath, undefined);
     const approved = await service.reviewKnowledgeCandidate(
       generated.id,
       "approved",
@@ -197,7 +199,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       if (/\/repository\/files\//.test(url) && method === "POST") {
         const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
         publishedMarkdown = body.content ?? "";
-        return new Response(JSON.stringify({ file_path: "docs/ota/recovery-note.md" }), {
+        return new Response(JSON.stringify({ file_path: autoPath }), {
           status: 201,
           headers: { "content-type": "application/json" }
         });
@@ -232,15 +234,17 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(published.status, "published");
     assert.equal(published.publication?.mergeRequestState, "opened");
     assert.equal(published.publication?.mergeRequestIid, 12);
+    assert.equal(published.suggestedPath, autoPath);
+    assert.equal(published.publication?.filePath, autoPath);
     assert.match(publishedMarkdown, /^# OTA 断电恢复修复/m);
 
-    await mkdir(path.join(upstream, "docs", "ota"), { recursive: true });
+    await mkdir(path.dirname(path.join(upstream, autoPath)), { recursive: true });
     await writeFile(
-      path.join(upstream, "docs", "ota", "recovery-note.md"),
+      path.join(upstream, autoPath),
       publishedMarkdown,
       "utf8"
     );
-    await git(upstream, "add", "docs/ota/recovery-note.md");
+    await git(upstream, "add", autoPath);
     await git(upstream, "commit", "-m", "merge knowledge candidate");
 
     const synced = await service.pollRepository("rd-skills");
@@ -254,7 +258,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(reconciled.publication?.hasConflicts, false);
     const results = service.searchKnowledge("OTA 断电 恢复 安全 检查点", 5, ["rd-skills"], principal);
     assert.ok(
-      results.some((item) => item.chunk.relativePath === "docs/ota/recovery-note.md"),
+      results.some((item) => item.chunk.relativePath === autoPath),
       "merged Knowledge should be searchable after Repository Sync"
     );
     await new Promise((resolve) => setTimeout(resolve, 30));
