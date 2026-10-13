@@ -27,7 +27,7 @@ const configPath = path.resolve(
   process.env.CONFIG_PATH ??
     (process.env.NODE_ENV === "production"
       ? "./config/repositories.yaml"
-      : "./config/repositories.local.yaml")
+      : "./config/repositories.example.yaml")
 );
 const config = await loadConfig(configPath);
 const adminConfigStore = new AdminConfigStore(config.dataDir);

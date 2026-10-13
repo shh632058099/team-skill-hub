@@ -144,6 +144,19 @@ The default Compose configuration mounts both sibling Skill repositories read-on
 
 ## Local development
 
+Repository configuration is deployment/user specific. The repository only tracks
+example files. To create a private local configuration, copy the example first:
+
+```bash
+cp config/repositories.example.yaml config/repositories.local.yaml
+cp config/repositories.example.yaml config/repositories.yaml
+```
+
+`config/repositories.yaml`, `config/repositories.local.yaml`, and
+`config/repositories.gitlab.yaml` are intentionally ignored by Git.
+Docker Compose uses `config/repositories.yaml` by default; set
+`SKILL_HUB_CONFIG_FILE` only when you want to mount a different instance config.
+
 ```bash
 npm install
 CONFIG_PATH=./config/repositories.local.yaml npm run dev
@@ -158,6 +171,10 @@ npm run dev
 
 The local development config listens on `http://127.0.0.1:18080` to avoid
 conflicting with the Docker endpoint on port `8080`.
+
+For Docker Compose, create `config/repositories.yaml` from the example before first
+startup. `SKILL_HUB_CONFIG_FILE` can override that path for another instance-specific
+configuration.
 
 ## Authentication modes
 
