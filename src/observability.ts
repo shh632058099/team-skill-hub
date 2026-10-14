@@ -1113,10 +1113,9 @@ export class McpObservabilityStore {
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
-    if (current.status !== "published") {
-      throw new Error("Knowledge candidate must be published before publication can be reconciled");
+    if (!["publishing", "published"].includes(current.status)) {
+      throw new Error("Knowledge candidate must be publishing or published before publication can be updated");
     }
-    if (!current.publication) throw new Error("Knowledge candidate has no publication to reconcile");
     const next: KnowledgeCandidate = {
       ...current,
       publication,
