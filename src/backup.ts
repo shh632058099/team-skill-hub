@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
 import {
   copyFile,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -46,6 +48,11 @@ async function sha256File(filePath: string): Promise<string> {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function isSqliteDatabase(filePath:string):Promise<boolean>{
+  const handle=await open(filePath,"r");
+  try{const header=Buffer.alloc(16);const {bytesRead}=await handle.read(header,0,16,0);return bytesRead===16&&header.toString("binary")==="SQLite format 3\u0000"}finally{await handle.close()}
+}
+
 async function walkFiles(root: string, current = root): Promise<string[]> {
   const result: string[] = [];
   let entries;
@@ -88,9 +95,11 @@ async function directoryHasEntries(target: string): Promise<boolean> {
   }
 }
 
-export async function createDataBackup(dataDir: string, destination: string): Promise<DataBackupManifest> {
+export async function createDataBackup(dataDir: string, destination: string, options?:{sqlitePath?:string}): Promise<DataBackupManifest> {
   const source = path.resolve(dataDir);
   const output = path.resolve(destination);
+  const configuredSqlite=options?.sqlitePath?path.resolve(options.sqlitePath):undefined;
+  if(configuredSqlite&&!isPathInside(source,configuredSqlite))throw new Error("SQLite database must be inside DATA_DIR to be included in backup");
   if (isPathInside(source, output)) {
     throw new Error("Backup destination must be outside DATA_DIR");
   }
@@ -103,13 +112,27 @@ export async function createDataBackup(dataDir: string, destination: string): Pr
   await mkdir(path.join(temp, "data"), { recursive: true });
   try {
     const files = await walkFiles(source);
+    const sqliteDatabases = new Set<string>();
+    for (const absolute of files) {
+      if (absolute.endsWith("-wal") || absolute.endsWith("-shm")) continue;
+      if (absolute === configuredSqlite || await isSqliteDatabase(absolute)) sqliteDatabases.add(absolute);
+    }
+    const sqliteSidecars = new Set(
+      [...sqliteDatabases].flatMap((database) => [database + "-wal", database + "-shm"])
+    );
     const manifestFiles: DataBackupFile[] = [];
     for (const absolute of files) {
       const relative = portablePath(path.relative(source, absolute));
+      if (sqliteSidecars.has(absolute)) continue;
       const destinationFile = path.join(temp, "data", nativePath(relative));
       await mkdir(path.dirname(destinationFile), { recursive: true });
-      await copyFile(absolute, destinationFile);
-      const info = await stat(absolute);
+      if (sqliteDatabases.has(absolute)) {
+        const database = new DatabaseSync(absolute, { readOnly: true });
+        try { await sqliteBackup(database, destinationFile); } finally { database.close(); }
+      } else {
+        await copyFile(absolute, destinationFile);
+      }
+      const info = await stat(destinationFile);
       manifestFiles.push({
         path: relative,
         size: info.size,

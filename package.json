@@ -11,7 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "check": "npm run build && npm test",
     "benchmark": "node scripts/benchmark.mjs",
     "benchmark:capacity": "tsx src/cli/benchmark-capacity.ts",
@@ -23,7 +23,10 @@
     "release:check": "tsx src/cli/release-check.ts",
     "plugin:build": "tsx src/cli/build-codex-plugin.ts",
     "sandbox:acceptance": "tsx src/cli/gitlab-sandbox-acceptance.ts",
-    "release:registry-acceptance": "tsx src/cli/release-registry-acceptance.ts"
+    "release:registry-acceptance": "tsx src/cli/release-registry-acceptance.ts",
+    "migrate:observability": "tsx src/cli/migrate-observability.ts",
+    "export:observability": "tsx src/cli/export-observability.ts",
+    "benchmark:sqlite-observability": "tsx src/cli/benchmark-sqlite-observability.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/fastify": "^2.0.0",

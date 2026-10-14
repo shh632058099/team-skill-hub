@@ -3,13 +3,14 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { KnowledgeLifecycleMetadata, Principal } from "./types.js";
 import { governanceRuleForObservabilityFile } from "./data-governance.js";
+import { openSkillHubDatabase, type SkillHubDatabase } from "./storage/database.js";
+import { SqliteObservabilityRepository } from "./storage/sqlite-observability-repository.js";
+import { REUSE_MCP_TOOLS, isReuseMcpTool } from "./observability-tools.js";
+import { cleanupObservabilityRetention, observabilityStorageMetrics } from "./storage/maintenance.js";
 
 export type FeedbackRating = "positive" | "negative";
 export type CandidateStatus = "pending" | "approved" | "rejected" | "publishing" | "published" | "publish_failed";
-export const REUSE_MCP_TOOLS = new Set(["discover", "search_knowledge", "get_knowledge", "search_skills", "get_skill", "knowledge_search", "skill_search"]);
-export function isReuseMcpTool(tool: string): boolean {
-  return REUSE_MCP_TOOLS.has(tool);
-}
+export { REUSE_MCP_TOOLS, isReuseMcpTool };
 export type CandidateKnowledgeRelationType = "new" | "duplicate_of" | "updates" | "supersedes" | "conflicts_with" | "related_to";
 export type CandidateReviewReason =
   | "useful"
@@ -306,19 +307,88 @@ function candidateSimilarity(
   return (2 * intersection) / (left.size + right.size);
 }
 
+function writeBackend(value:string|undefined):"jsonl"|"dual"|"sqlite"{
+  if(value===undefined||value==="")return"jsonl";
+  if(value==="jsonl"||value==="dual"||value==="sqlite")return value;
+  throw new Error("Invalid OBSERVABILITY_WRITE_BACKEND: "+value);
+}
+
+function readBackend(value:string|undefined):"jsonl"|"sqlite"{
+  if(value===undefined||value==="")return"jsonl";
+  if(value==="jsonl"||value==="sqlite")return value;
+  throw new Error("Invalid OBSERVABILITY_READ_BACKEND: "+value);
+}
+
 export class McpObservabilityStore {
   private readonly retentionDaysOverride?: number;
   private readonly maxFileBytes: number;
+  private readonly writeBackend: "jsonl" | "dual" | "sqlite";
+  private readonly readBackend: "jsonl" | "sqlite";
+  private readonly sqliteDatabase?: SkillHubDatabase;
+  private readonly sqlite?: SqliteObservabilityRepository;
+  private maintenanceTimer?: NodeJS.Timeout;
+  private sqliteWriteFailures = 0;
+  private jsonlWriteFailures = 0;
+  private shadowReadMismatches = 0;
+  private readonly shadowSqlite: boolean;
+  private maintenanceFailureCount = 0;
+  private lastMaintenanceAt?: string;
+  private lastMaintenanceError?: string;
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly dataDir: string,
     private readonly maxEntries = 10000,
-    options?: { retentionDays?: number; maxFileBytes?: number }
+    options?: { retentionDays?: number; maxFileBytes?: number; writeBackend?: "jsonl" | "dual" | "sqlite"; readBackend?: "jsonl" | "sqlite"; sqlitePath?: string; shadowSqlite?: boolean }
   ) {
-    this.retentionDaysOverride =
-      options?.retentionDays === undefined ? undefined : Math.max(1, Math.floor(options.retentionDays));
+    this.retentionDaysOverride = options?.retentionDays === undefined ? undefined : Math.max(1, Math.floor(options.retentionDays));
     this.maxFileBytes = Math.max(1024, Math.floor(options?.maxFileBytes ?? 5 * 1024 * 1024));
+    this.writeBackend = writeBackend(options?.writeBackend ?? process.env.OBSERVABILITY_WRITE_BACKEND);
+    this.readBackend = readBackend(options?.readBackend ?? process.env.OBSERVABILITY_READ_BACKEND);
+    this.shadowSqlite = options?.shadowSqlite ?? process.env.OBSERVABILITY_SHADOW_SQLITE === "true";
+    if (this.writeBackend !== "jsonl" || this.readBackend === "sqlite" || this.shadowSqlite) {
+      this.sqliteDatabase = openSkillHubDatabase(options?.sqlitePath ?? process.env.OBSERVABILITY_SQLITE_PATH ?? path.join(this.dataDir, "db", "team-skill-hub.sqlite3"));
+      this.sqlite = new SqliteObservabilityRepository(this.sqliteDatabase);
+      const interval = Math.max(60_000, Number(process.env.OBSERVABILITY_MAINTENANCE_INTERVAL_MS ?? 600_000) || 600_000);
+      this.maintenanceTimer = setInterval(() => { void this.runRetentionMaintenance().catch(() => undefined); }, interval);
+      this.maintenanceTimer.unref();
+    }
+  }
+
+  async runRetentionMaintenance() {
+    if (!this.sqliteDatabase || !this.sqlite) return undefined;
+    const envRetention=process.env.OBSERVABILITY_RETENTION_DAYS;
+    const retentionDays=envRetention===undefined||envRetention===""?this.retentionDaysOverride:Math.max(1,Number(envRetention)||30);
+    try{
+      const result=await cleanupObservabilityRetention(this.sqliteDatabase,this.sqlite,{retentionDays,batchSize:5000});
+      this.lastMaintenanceAt=new Date().toISOString();this.lastMaintenanceError=undefined;return result;
+    }catch(error){this.maintenanceFailureCount+=1;this.lastMaintenanceAt=new Date().toISOString();this.lastMaintenanceError=error instanceof Error?error.message:String(error);throw error}
+  }
+
+  isStorageReady():boolean { return !this.sqliteDatabase||this.sqliteDatabase.writableCheck(); }
+
+  async getStorageStatus() {
+    return {
+      writeBackend: this.writeBackend,
+      readBackend: this.readBackend,
+      writeFailures: { jsonl: this.jsonlWriteFailures, sqlite: this.sqliteWriteFailures },
+      shadowReadMismatches: this.shadowReadMismatches,
+      storageReady:this.isStorageReady(),
+      maintenance:{lastAt:this.lastMaintenanceAt,lastError:this.lastMaintenanceError,failureCount:this.maintenanceFailureCount},
+      sqlite: this.sqliteDatabase ? await observabilityStorageMetrics(this.sqliteDatabase) : undefined
+    };
+  }
+
+  adminFeedbackPage(query: Parameters<SqliteObservabilityRepository["adminFeedback"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminFeedback(query) : undefined; }
+  adminCandidatesPage(query: Parameters<SqliteObservabilityRepository["adminCandidates"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidates(query) : undefined; }
+  adminClientEventsPage(query: Parameters<SqliteObservabilityRepository["adminClientEvents"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminClientEvents(query) : undefined; }
+  adminCandidateDetectionsPage(query: Parameters<SqliteObservabilityRepository["adminCandidateDetections"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateDetections(query) : undefined; }
+  adminMcpCallsPage(query: Parameters<SqliteObservabilityRepository["adminMcpCalls"]>[0], mode: "all" | "reuse" | "failures" = "all") { return this.readBackend === "sqlite" ? this.sqlite!.adminMcpCalls(query, mode) : undefined; }
+  adminSessionsPage(query: Parameters<SqliteObservabilityRepository["adminSessions"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminSessions(query) : undefined; }
+
+  close(): void {
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+    this.sqliteDatabase?.close();
   }
 
   private retentionDaysFor(file: string): number {
@@ -339,6 +409,20 @@ export class McpObservabilityStore {
       await unlink(temporary).catch(() => undefined);
       throw error;
     }
+  }
+
+  private async persistRecord(name: string, value: unknown, sqliteWrite: () => Promise<void>): Promise<void> {
+    let jsonlError: unknown;
+    let sqliteError: unknown;
+    if (this.writeBackend !== "sqlite") {
+      try { await this.append(name, value); } catch (error) { this.jsonlWriteFailures += 1; jsonlError = error; }
+    }
+    if (this.writeBackend !== "jsonl") {
+      try { await sqliteWrite(); } catch (error) { this.sqliteWriteFailures += 1; sqliteError = error; }
+    }
+    if (this.writeBackend === "jsonl" && jsonlError) throw jsonlError;
+    if (this.writeBackend === "sqlite" && sqliteError) throw sqliteError;
+    if (this.writeBackend === "dual" && jsonlError && sqliteError) throw new AggregateError([jsonlError, sqliteError], "all observability write backends failed");
   }
 
   private async append(name: string, value: unknown): Promise<void> {
@@ -457,7 +541,7 @@ export class McpObservabilityStore {
     principal: Principal,
     maxAgeMs = 12 * 60 * 60 * 1000
   ): Promise<string | undefined> {
-    const events = await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries);
+    const events = await this.listClientEvents(this.maxEntries);
     const cutoff = Date.now() - maxAgeMs;
     const latest = new Map<string, ClientEventRecord>();
     for (const event of events) {
@@ -478,16 +562,23 @@ export class McpObservabilityStore {
       error: input.error ? redactText(input.error, 1000) : undefined,
       args: sanitizeValue(input.args) as Record<string, unknown> | undefined
     };
-    await this.append("mcp-calls.jsonl", record);
+    await this.persistRecord("mcp-calls.jsonl", record, () => this.sqlite!.recordMcpCall(record));
     return record;
   }
 
-  listCalls(limit = 200): Promise<McpCallRecord[]> {
-    return this.readMcpCalls(limit);
+  async listCalls(limit = 200): Promise<McpCallRecord[]> {
+    if (this.readBackend === "sqlite") return (await this.sqlite!.listMcpCalls({ limit })).items;
+    const primary = await this.readMcpCalls(limit);
+    if (this.shadowSqlite && this.sqlite) {
+      const shadow = (await this.sqlite.listMcpCalls({ limit })).items;
+      if (primary.map((item) => item.id).join("\0") !== shadow.map((item) => item.id).join("\0")) this.shadowReadMismatches += 1;
+    }
+    return primary;
   }
 
   async getCall(id: string): Promise<McpCallRecord | undefined> {
-    return (await this.readMcpCalls(this.maxEntries)).find((item) => item.id === id);
+    if (this.readBackend === "sqlite") return await this.sqlite!.getMcpCall(id);
+    return (await this.listCalls(this.maxEntries)).find((item) => item.id === id);
   }
 
   async summary(): Promise<{
@@ -498,7 +589,7 @@ export class McpObservabilityStore {
     p95LatencyMs: number;
     byTool: Record<string, number>;
   }> {
-    const rows = await this.readMcpCalls(this.maxEntries);
+    const rows = await this.listCalls(this.maxEntries);
     const byTool: Record<string, number> = {};
     let latency = 0;
     let failed = 0;
@@ -534,7 +625,7 @@ export class McpObservabilityStore {
     totalLatencyMs: number;
     tools: string[];
   }>> {
-    const calls = await this.readMcpCalls(this.maxEntries);
+    const calls = await this.listCalls(this.maxEntries);
     const grouped = new Map<string, McpCallRecord[]>();
     for (const call of calls) {
       const current = grouped.get(call.traceId) ?? [];
@@ -565,7 +656,7 @@ export class McpObservabilityStore {
   }
 
   async getTrace(traceId: string): Promise<McpCallRecord[]> {
-    return (await this.readMcpCalls(this.maxEntries))
+    return (await this.listCalls(this.maxEntries))
       .filter((item) => item.traceId === traceId)
       .sort((a, b) => a.ts.localeCompare(b.ts));
   }
@@ -589,7 +680,7 @@ export class McpObservabilityStore {
     const sessionScoped = input.event === "SessionStart" || input.event === "SessionEnd";
     if (!toolUseId && !turnScoped && !sessionScoped) return undefined;
 
-    const rows = await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries);
+    const rows = await this.listClientEvents(this.maxEntries);
     return [...rows].reverse().find((item) => {
       if (
         item.actorId !== principal.id ||
@@ -636,16 +727,23 @@ export class McpObservabilityStore {
       permissionMode: input.permissionMode ? redactText(input.permissionMode, 80) : undefined,
       metadata
     };
-    await this.append("client-events.jsonl", record);
+    await this.persistRecord("client-events.jsonl", record, () => this.sqlite!.recordClientEvent(record));
     return record;
   }
 
-  listClientEvents(limit = 500): Promise<ClientEventRecord[]> {
-    return this.read<ClientEventRecord>("client-events.jsonl", limit);
+  async listClientEvents(limit = 500): Promise<ClientEventRecord[]> {
+    if (this.readBackend === "sqlite") return (await this.sqlite!.listClientEvents({ limit })).items;
+    const primary = await this.read<ClientEventRecord>("client-events.jsonl", limit);
+    if (this.shadowSqlite && this.sqlite) {
+      const shadow = (await this.sqlite.listClientEvents({ limit })).items;
+      if (primary.map((item) => item.id).join("\0") !== shadow.map((item) => item.id).join("\0")) this.shadowReadMismatches += 1;
+    }
+    return primary;
   }
 
   async getClientEvent(id: string): Promise<ClientEventRecord | undefined> {
-    return (await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries)).find((item) => item.id === id);
+    if (this.readBackend === "sqlite") return await this.sqlite!.getClientEvent(id);
+    return (await this.listClientEvents(this.maxEntries)).find((item) => item.id === id);
   }
 
   async listClientSessions(limit = 100): Promise<Array<{
@@ -666,8 +764,9 @@ export class McpObservabilityStore {
     hookSchemaVersion?: number;
     ended: boolean;
   }>> {
-    const events = await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries);
-    const calls = await this.readMcpCalls(this.maxEntries);
+    if (this.readBackend === "sqlite") return (await this.sqlite!.listSessions({ limit })).items;
+    const events = await this.listClientEvents(this.maxEntries);
+    const calls = await this.listCalls(this.maxEntries);
     const groups = new Map<string, { events: ClientEventRecord[]; calls: McpCallRecord[] }>();
     for (const event of events) {
       const key = event.actorId + "\0" + event.tenantId + "\0" + event.sessionId;
@@ -744,10 +843,11 @@ export class McpObservabilityStore {
     | { kind: "event"; ts: string; event: ClientEventRecord }
     | { kind: "mcp-call"; ts: string; call: McpCallRecord }
   >> {
-    const events = (await this.read<ClientEventRecord>("client-events.jsonl", this.maxEntries))
+    if (this.readBackend === "sqlite") return await this.sqlite!.getSessionTimeline({ actorId: principalId, tenantId, sessionId });
+    const events = (await this.listClientEvents(this.maxEntries))
       .filter((item) => item.actorId === principalId && item.tenantId === tenantId && item.sessionId === sessionId)
       .map((event) => ({ kind: "event" as const, ts: event.ts, event }));
-    const calls = (await this.readMcpCalls(this.maxEntries))
+    const calls = (await this.listCalls(this.maxEntries))
       .filter((item) => item.actorId === principalId && item.tenantId === tenantId && item.sessionId === sessionId)
       .map((call) => ({ kind: "mcp-call" as const, ts: call.ts, call }));
     return [...events, ...calls].sort((a, b) => a.ts.localeCompare(b.ts));
@@ -762,15 +862,17 @@ export class McpObservabilityStore {
       ts: new Date().toISOString(),
       reason: redactText(input.reason, 500)
     };
-    await this.append("candidate-detections.jsonl", record);
+    await this.persistRecord("candidate-detections.jsonl", record, () => this.sqlite!.recordCandidateDetection(record));
     return record;
   }
 
   listCandidateDetections(limit = 500): Promise<CandidateDetectionRecord[]> {
+    if (this.readBackend === "sqlite") return this.sqlite!.listCandidateDetections(limit);
     return this.read<CandidateDetectionRecord>("candidate-detections.jsonl", limit);
   }
 
   async getCandidateDetection(id: string): Promise<CandidateDetectionRecord | undefined> {
+    if (this.readBackend === "sqlite") return await this.sqlite!.getCandidateDetection(id);
     return (await this.read<CandidateDetectionRecord>("candidate-detections.jsonl", this.maxEntries)).find((item) => item.id === id);
   }
 
@@ -786,11 +888,12 @@ export class McpObservabilityStore {
       tenantId: principal.tenantId,
       reason: input.reason ? redactText(input.reason, 1000) : undefined
     };
-    await this.append("feedback.jsonl", record);
+    await this.persistRecord("feedback.jsonl", record, () => this.sqlite!.recordFeedback(record));
     return record;
   }
 
   listFeedback(limit = 200): Promise<FeedbackRecord[]> {
+    if (this.readBackend === "sqlite") return this.sqlite!.listFeedback(limit);
     return this.read<FeedbackRecord>("feedback.jsonl", limit);
   }
 
@@ -856,11 +959,12 @@ export class McpObservabilityStore {
       possibleDuplicateOf: nearDuplicate?.candidate.id,
       duplicateSimilarity: nearDuplicate ? Number(nearDuplicate.score.toFixed(3)) : undefined
     };
-    await this.append("knowledge-candidates.jsonl", record);
+    await this.persistRecord("knowledge-candidates.jsonl", record, () => this.sqlite!.recordKnowledgeCandidate(record));
     return record;
   }
 
   async listCandidates(limit = 500): Promise<KnowledgeCandidate[]> {
+    if (this.readBackend === "sqlite") return await this.sqlite!.listCandidates(limit);
     const rows = await this.read<KnowledgeCandidate>("knowledge-candidates.jsonl", this.maxEntries);
     const latest = new Map<string, KnowledgeCandidate>();
     for (const row of [...rows].reverse()) latest.set(row.id, row);
@@ -870,10 +974,12 @@ export class McpObservabilityStore {
   }
 
   async getCandidate(id: string): Promise<KnowledgeCandidate | undefined> {
+    if (this.readBackend === "sqlite") return await this.sqlite!.getCandidate(id);
     return (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
   }
 
   async getCandidateHistory(id: string, limit = 200): Promise<KnowledgeCandidate[]> {
+    if (this.readBackend === "sqlite") return await this.sqlite!.getCandidateHistory(id, limit);
     const rows = await this.read<KnowledgeCandidate>("knowledge-candidates.jsonl", this.maxEntries);
     return rows
       .filter((item) => item.id === id)
@@ -882,6 +988,7 @@ export class McpObservabilityStore {
   }
 
   async deleteCandidate(id: string): Promise<boolean> {
+    if (this.writeBackend === "sqlite") return await this.sqlite!.deleteCandidate(id);
     const operation = this.writeQueue.then(async () => {
       const file = this.file("knowledge-candidates.jsonl");
       let text: string;
@@ -903,7 +1010,9 @@ export class McpObservabilityStore {
       return true;
     });
     this.writeQueue = operation.then(() => undefined, () => undefined);
-    return await operation;
+    const jsonlDeleted = await operation;
+    if (this.writeBackend !== "dual") return jsonlDeleted;
+    try { return (await this.sqlite!.deleteCandidate(id)) || jsonlDeleted; } catch (error) { this.sqliteWriteFailures += 1; if (!jsonlDeleted) throw error; return jsonlDeleted; }
   }
 
   async updateCandidate(
@@ -950,7 +1059,7 @@ export class McpObservabilityStore {
       publishError: undefined,
       updatedAt: new Date().toISOString()
     };
-    await this.append("knowledge-candidates.jsonl", next);
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
@@ -966,7 +1075,7 @@ export class McpObservabilityStore {
       publishError: undefined,
       updatedAt: new Date().toISOString()
     };
-    await this.append("knowledge-candidates.jsonl", next);
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
@@ -986,7 +1095,7 @@ export class McpObservabilityStore {
       publishError: undefined,
       updatedAt: new Date().toISOString()
     };
-    await this.append("knowledge-candidates.jsonl", next);
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
@@ -1005,7 +1114,7 @@ export class McpObservabilityStore {
       publication,
       updatedAt: new Date().toISOString()
     };
-    await this.append("knowledge-candidates.jsonl", next);
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
@@ -1021,7 +1130,7 @@ export class McpObservabilityStore {
       publishError: redactText(error, 2000),
       updatedAt: new Date().toISOString()
     };
-    await this.append("knowledge-candidates.jsonl", next);
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
@@ -1048,7 +1157,7 @@ export class McpObservabilityStore {
       reviewReason,
       updatedAt: new Date().toISOString()
     };
-    await this.append("knowledge-candidates.jsonl", next);
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
@@ -1147,6 +1256,7 @@ export class McpObservabilityStore {
   }
 
   async listKnowledgeGapManagement(): Promise<Map<string, KnowledgeGapManagement>> {
+    if (this.readBackend === "sqlite") return await this.sqlite!.listKnowledgeGapManagement();
     const rows = await this.read<KnowledgeGapManagement>("knowledge-gap-management.jsonl", this.maxEntries);
     const latest = new Map<string, KnowledgeGapManagement>();
     for (const row of rows) {
@@ -1176,7 +1286,7 @@ export class McpObservabilityStore {
       ignoredAt: status === "ignored" ? current?.ignoredAt ?? now : undefined,
       resolvedAt: status === "resolved" ? current?.resolvedAt ?? now : undefined
     };
-    await this.append("knowledge-gap-management.jsonl", next);
+    await this.persistRecord("knowledge-gap-management.jsonl", next, () => this.sqlite!.recordKnowledgeGapManagement(next));
     return next;
   }
 }

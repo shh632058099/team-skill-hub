@@ -1908,6 +1908,10 @@ export class SkillHubApplicationService {
     return await this.observability.summary();
   }
 
+  async isObservabilityStorageReady() {
+    return this.observability.isStorageReady();
+  }
+
   async listMcpCalls(limit = 200) {
     return await this.observability.listCalls(limit);
   }
@@ -1977,6 +1981,27 @@ export class SkillHubApplicationService {
 
   async getClientEvent(id: string) {
     return await this.observability.getClientEvent(id);
+  }
+
+  adminFeedbackPage(query: Parameters<McpObservabilityStore["adminFeedbackPage"]>[0]) { return this.observability.adminFeedbackPage(query); }
+  adminKnowledgeCandidatesPage(query: Parameters<McpObservabilityStore["adminCandidatesPage"]>[0]) { return this.observability.adminCandidatesPage(query); }
+
+  adminClientEventsPage(query: Parameters<McpObservabilityStore["adminClientEventsPage"]>[0]) {
+    return this.observability.adminClientEventsPage(query);
+  }
+
+  adminCandidateDetectionsPage(query: Parameters<McpObservabilityStore["adminCandidateDetectionsPage"]>[0]) {
+    return this.observability.adminCandidateDetectionsPage(query);
+  }
+
+  adminMcpCallsPage(query: Parameters<McpObservabilityStore["adminMcpCallsPage"]>[0], mode: "all" | "reuse" | "failures" = "all") {
+    return this.observability.adminMcpCallsPage(query, mode);
+  }
+
+  adminSessionsPage(query: Parameters<McpObservabilityStore["adminSessionsPage"]>[0]) {
+    const result = this.observability.adminSessionsPage({ ...query, expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION, expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION });
+    if (!result) return undefined;
+    return { ...result, items: result.items.map((session) => ({ ...session, runtimeStatus: !session.runtimeVersion || !session.hookSchemaVersion ? "unknown" as const : session.runtimeVersion === CURRENT_HOOK_RUNTIME_VERSION && session.hookSchemaVersion === CURRENT_HOOK_SCHEMA_VERSION ? "current" as const : "outdated" as const, expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION, expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION })) };
   }
 
   async listCandidateDetections(limit = 500) {
@@ -2454,8 +2479,9 @@ export class SkillHubApplicationService {
     } catch {
       disk = undefined;
     }
+    const observabilityStorage = await this.observability.getStorageStatus();
     return {
-      ready: this.isReady(),
+      ready: this.isReady() && observabilityStorage.storageReady,
       repositories: {
         total: states.length,
         healthy: states.filter((state) => state.status === "healthy").length,
@@ -2483,7 +2509,8 @@ export class SkillHubApplicationService {
         expired: lifecycle.byKind.expired ?? 0,
         missingOwner: lifecycle.byKind["missing-owner"] ?? 0
       },
-      storage: disk
+      storage: disk,
+      observabilityStorage
     };
   }
 
@@ -2776,6 +2803,24 @@ export class SkillHubApplicationService {
         "storage",
         "DATA_DIR disk usage is high",
         (health.storage.usedRatio * 100).toFixed(1) + "% used"
+      );
+    }
+    if (!health.observabilityStorage.storageReady || health.observabilityStorage.sqlite?.quickCheck === false) {
+      add(
+        "observability-storage-health",
+        "critical",
+        "storage",
+        "Observability SQLite storage is unhealthy",
+        !health.observabilityStorage.storageReady ? "SQLite is not writable" : "SQLite quick_check failed"
+      );
+    }
+    if (health.observabilityStorage.maintenance.lastError) {
+      add(
+        "observability-maintenance",
+        "warning",
+        "storage",
+        "Observability retention maintenance is failing",
+        health.observabilityStorage.maintenance.lastError
       );
     }
     const latestRunBySuite = new Map<string, EvaluationRunResult>();

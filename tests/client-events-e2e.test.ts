@@ -165,6 +165,18 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
       "/admin/api/knowledge-gaps/not-found",
       "/admin/api/repository-governance/not-found"
     ]) assert.equal((await fetch(base + detailRoute, { headers: adminHeaders })).status, 404, detailRoute);
+    for (const route of [
+      "/admin/api/hooks?from=not-a-date",
+      "/admin/api/client-events?until=not-a-date",
+      "/admin/api/candidate-detections?from=not-a-date",
+      "/admin/api/sessions?to=not-a-date",
+      "/admin/api/mcp-calls?from=not-a-date",
+      "/admin/api/reuse?to=not-a-date",
+      "/admin/api/failures?from=not-a-date"
+    ]) {
+      const response = await fetch(base + route, { headers: adminHeaders });
+      assert.equal(response.status, 400, route);
+    }
     const protectedAdminRequests: Array<{ path: string; method?: string; body?: string }> = [
       ...[
         "/admin/api/sessions",

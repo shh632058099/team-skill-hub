@@ -35,7 +35,8 @@ const OBSERVABILITY_FILE_CLASSIFICATION: Record<string, DataClassification> = {
   "mcp-calls.jsonl": "metadata",
   "candidate-detections.jsonl": "engineering-evidence",
   "feedback.jsonl": "audit",
-  "knowledge-candidates.jsonl": "knowledge-candidate"
+  "knowledge-candidates.jsonl": "knowledge-candidate",
+  "knowledge-gap-management.jsonl": "knowledge-candidate"
 };
 
 export function governanceRuleForObservabilityFile(fileName: string): DataGovernanceRule {

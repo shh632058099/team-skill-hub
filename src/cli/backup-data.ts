@@ -13,7 +13,7 @@ if (!out) {
   process.exitCode = 2;
 } else {
   try {
-    const manifest = await createDataBackup(dataDir, out);
+    const manifest = await createDataBackup(dataDir, out, { sqlitePath: process.env.OBSERVABILITY_SQLITE_PATH });
     console.log(JSON.stringify({
       backup: path.resolve(out),
       dataDir,
