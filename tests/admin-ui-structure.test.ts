@@ -102,10 +102,15 @@ test("candidate detail uses a separate history page and Chinese user-facing labe
     "批准",
     "拒绝",
     "发布",
-    "刷新发布状态",
+    "刷新 PR/MR 状态",
+    "等待合并",
     "待审核",
     "故障排查",
     "/history",
+    'id="actionState"',
+    "runCandidateAction",
+    "发布中...",
+    "['publishing','published'].includes(status)",
   ]);
   assert.ok(!ADMIN_MODULE_HTML.includes(">Approve<"));
   assert.ok(!ADMIN_MODULE_HTML.includes(">Reject<"));
@@ -118,6 +123,8 @@ test("candidate detail uses a separate history page and Chinese user-facing labe
 test("module index pages remain summary-only entry pages", () => {
   assertContainsAll(ADMIN_MODULE_INDEX_HTML, [
     "/admin/review/candidates?status=pending",
+    "/admin/review/candidates?status=publishing",
+    "等待合并",
     "/admin/review/history",
     "历史记录",
     "所有候选的状态变更流水",

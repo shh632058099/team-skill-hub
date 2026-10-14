@@ -231,13 +231,13 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       throw new Error("unexpected mocked GitLab request: " + method + " " + url);
     };
 
-    const published = await service.publishKnowledgeCandidate(generated.id);
-    assert.equal(published.status, "published");
-    assert.equal(published.publication?.mergeRequestState, "opened");
-    assert.equal(published.publication?.mergeRequestIid, 12);
-    assert.equal(published.repository, "rd-skills");
-    assert.equal(published.suggestedPath, autoPath);
-    assert.equal(published.publication?.filePath, autoPath);
+    const publishing = await service.publishKnowledgeCandidate(generated.id);
+    assert.equal(publishing.status, "publishing");
+    assert.equal(publishing.publication?.mergeRequestState, "opened");
+    assert.equal(publishing.publication?.mergeRequestIid, 12);
+    assert.equal(publishing.repository, "rd-skills");
+    assert.equal(publishing.suggestedPath, autoPath);
+    assert.equal(publishing.publication?.filePath, autoPath);
     assert.match(publishedMarkdown, /^# OTA 断电恢复修复/m);
 
     await mkdir(path.dirname(path.join(upstream, autoPath)), { recursive: true });
@@ -255,6 +255,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       (item) => item.id === generated.id
     );
     assert.ok(reconciled);
+    assert.equal(reconciled.status, "published");
     assert.equal(reconciled.publication?.mergeRequestState, "merged");
     assert.equal(reconciled.publication?.pipelineStatus, "success");
     assert.equal(reconciled.publication?.hasConflicts, false);

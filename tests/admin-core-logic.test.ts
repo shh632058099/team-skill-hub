@@ -292,7 +292,7 @@ test("candidate review reasons are constrained by review outcome", async () => {
   }
 });
 
-test("publication reconciliation only updates published candidates", async () => {
+test("publication state can be updated while waiting for merge", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-core-reconcile-state-"));
   try {
     const store = new McpObservabilityStore(root);
@@ -313,11 +313,19 @@ test("publication reconciliation only updates published candidates", async () =>
       mergeRequestUrl: "https://gitlab.example.test/mr/11",
       publishedAt: new Date().toISOString()
     };
-    await (store as any).append("knowledge-candidates.jsonl", { ...candidate, status: "approved", publication, updatedAt: new Date().toISOString() });
     await assert.rejects(
       () => store.updateCandidatePublication(candidate.id, { ...publication, mergeRequestState: "merged" }),
-      /must be published/
+      /must be publishing or published/
     );
+    await store.reviewCandidate(candidate.id, "approved", "reviewer", "verified", "useful");
+    await store.markCandidatePublishing(candidate.id);
+    const waiting = await store.updateCandidatePublication(candidate.id, { ...publication, mergeRequestState: "opened" });
+    assert.equal(waiting.status, "publishing");
+    assert.equal(waiting.publication?.mergeRequestState, "opened");
+    const published = await store.markCandidatePublished(candidate.id, { ...publication, mergeRequestState: "merged" });
+    assert.equal(published.status, "published");
+    const refreshed = await store.updateCandidatePublication(candidate.id, { ...publication, mergeRequestState: "merged", pipelineStatus: "success" });
+    assert.equal(refreshed.publication?.pipelineStatus, "success");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
