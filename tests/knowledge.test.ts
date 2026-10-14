@@ -562,6 +562,34 @@ test("knowledge search splits mixed Latin and Han query tokens", () => {
   }
 });
 
+test("knowledge search keeps weak hyphen-token matches but a truly unknown token has no results", () => {
+  const index = new KnowledgeIndex();
+  try {
+    index.rebuild([
+      {
+        key: "rd-skills:knowledge/ota-recovery.md#0",
+        documentKey: "rd-skills:knowledge/ota-recovery.md",
+        repositoryId: "rd-skills",
+        revision: "r1",
+        relativePath: "knowledge/ota-recovery.md",
+        title: "OTA recovery",
+        content: "checkpoint recovery procedure",
+        chunkIndex: 0,
+        metadata: { status: "active" }
+      }
+    ]);
+
+    const weak = index.search("foo-knowledge-bar", ["rd-skills"], 5);
+    assert.equal(weak.length, 1);
+    assert.ok((weak[0]?.coverage ?? 0) > 0 && (weak[0]?.coverage ?? 0) < 1);
+
+    const noHit = index.search("zzzznosuchentry4f6f8c2a", ["rd-skills"], 5);
+    assert.equal(noHit.length, 0);
+  } finally {
+    index.close();
+  }
+});
+
 test("knowledge FTS search supports Chinese context and repository filtering", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-knowledge-"));
   try {

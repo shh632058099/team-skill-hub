@@ -285,7 +285,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     const thresholdSummary = await service.getUsageSummary(20);
     assert.equal(thresholdSummary.knowledgeMatchMinScore, appConfig.knowledgeMatchMinScore);
     appConfig.knowledgeMatchMinScore = undefined;
-    const noHitQuery = "zzzz-no-such-knowledge-4f6f8c2a";
+    const noHitQuery = "zzzznosuchentry4f6f8c2a";
     const noHitResults = service.searchKnowledge(noHitQuery, 5, ["rd-skills"], principal);
     assert.equal(noHitResults.length, 0);
     let noHitUsage;
@@ -304,7 +304,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(usageSummary.knowledgeMatchMinScore, undefined);
     const loaded = service.getKnowledge(
       "rd-skills",
-      "docs/ota/recovery-note.md",
+      autoPath,
       undefined,
       principal
     );
