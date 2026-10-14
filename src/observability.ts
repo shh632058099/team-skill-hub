@@ -9,7 +9,7 @@ import { REUSE_MCP_TOOLS, isReuseMcpTool } from "./observability-tools.js";
 import { cleanupObservabilityRetention, observabilityStorageMetrics } from "./storage/maintenance.js";
 
 export type FeedbackRating = "positive" | "negative";
-export type CandidateStatus = "pending" | "approved" | "rejected" | "publishing" | "published" | "publish_failed";
+export type CandidateStatus = "pending" | "approved" | "rejected" | "publishing" | "published" | "publish_failed" | "deleting" | "deleted" | "delete_failed";
 export { REUSE_MCP_TOOLS, isReuseMcpTool };
 export type CandidateKnowledgeRelationType = "new" | "duplicate_of" | "updates" | "supersedes" | "conflicts_with" | "related_to";
 export type CandidateReviewReason =
@@ -137,7 +137,7 @@ export interface KnowledgeCandidate {
     branch: string;
     targetBranch: string;
     filePath: string;
-    action: "create" | "update";
+    action: "create" | "update" | "delete";
     mergeRequestIid: number;
     mergeRequestUrl: string;
     publishedAt: string;
@@ -151,6 +151,8 @@ export interface KnowledgeCandidate {
     detailedMergeStatus?: string;
     sourceBranchExists?: boolean;
   };
+  deletionPublication?: KnowledgeCandidate["publication"];
+  deletionError?: string;
   publishError?: string;
   fingerprint?: string;
   duplicateOf?: string;
@@ -1119,6 +1121,88 @@ export class McpObservabilityStore {
     const next: KnowledgeCandidate = {
       ...current,
       publication,
+      updatedAt: new Date().toISOString()
+    };
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
+    return next;
+  }
+
+  async correctCandidatePublishedState(
+    id: string,
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    status: "publishing" | "publish_failed",
+    error?: string
+  ): Promise<KnowledgeCandidate> {
+    const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
+    if (!current) throw new Error("Knowledge candidate not found");
+    if (current.status !== "published") throw new Error("Only published candidates can be corrected");
+    const next: KnowledgeCandidate = {
+      ...current,
+      status,
+      publication,
+      publishError: status === "publish_failed" ? redactText(error ?? "Publication was not merged", 2000) : undefined,
+      updatedAt: new Date().toISOString()
+    };
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
+    return next;
+  }
+
+  async markCandidateDeleting(id: string): Promise<KnowledgeCandidate> {
+    const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
+    if (!current) throw new Error("Knowledge candidate not found");
+    if (!["published", "delete_failed"].includes(current.status)) {
+      throw new Error("Knowledge candidate must be published before deletion");
+    }
+    const next: KnowledgeCandidate = {
+      ...current,
+      status: "deleting",
+      deletionError: undefined,
+      updatedAt: new Date().toISOString()
+    };
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
+    return next;
+  }
+
+  async updateCandidateDeletionPublication(
+    id: string,
+    publication: NonNullable<KnowledgeCandidate["publication"]>
+  ): Promise<KnowledgeCandidate> {
+    const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
+    if (!current) throw new Error("Knowledge candidate not found");
+    if (!["deleting", "deleted"].includes(current.status)) {
+      throw new Error("Knowledge candidate must be deleting or deleted before deletion publication can be updated");
+    }
+    const next: KnowledgeCandidate = { ...current, deletionPublication: publication, updatedAt: new Date().toISOString() };
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
+    return next;
+  }
+
+  async markCandidateDeleted(
+    id: string,
+    publication: NonNullable<KnowledgeCandidate["publication"]>
+  ): Promise<KnowledgeCandidate> {
+    const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
+    if (!current) throw new Error("Knowledge candidate not found");
+    if (current.status !== "deleting") throw new Error("Knowledge candidate must be deleting before it can be marked deleted");
+    const next: KnowledgeCandidate = {
+      ...current,
+      status: "deleted",
+      deletionPublication: publication,
+      deletionError: undefined,
+      updatedAt: new Date().toISOString()
+    };
+    await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
+    return next;
+  }
+
+  async markCandidateDeleteFailed(id: string, error: string): Promise<KnowledgeCandidate> {
+    const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
+    if (!current) throw new Error("Knowledge candidate not found");
+    if (current.status !== "deleting") throw new Error("Knowledge candidate must be deleting before deletion can fail");
+    const next: KnowledgeCandidate = {
+      ...current,
+      status: "delete_failed",
+      deletionError: redactText(error, 2000),
       updatedAt: new Date().toISOString()
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));

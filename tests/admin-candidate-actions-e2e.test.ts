@@ -158,3 +158,54 @@ test("admin candidate actions support reject, reapprove, and delete over HTTP", 
     delete process.env.ADMIN_API_KEY;
   }
 });
+
+test("admin can request deletion of a published asset over HTTP", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-published-delete-"));
+  const search = new SqliteFtsSearchBackend();
+  process.env.ADMIN_API_KEY = "candidate-delete-published-admin";
+  const config: AppConfig = {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    defaultRoles: ["developer", "internal"],
+    authentication: { mode: "development", apiKeys: {} },
+    repositories: []
+  };
+  const service = new SkillHubApplicationService(
+    config,
+    [],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [],
+    new LoggingEventSink()
+  );
+  await service.initialize();
+  let requestedId = "";
+  const originalDeletePublished = service.deletePublishedKnowledgeCandidate.bind(service);
+  (service as any).deletePublishedKnowledgeCandidate = async (id: string) => {
+    requestedId = id;
+    return { id, status: "deleting" as const };
+  };
+  const app = await startServer(config, service);
+  try {
+    const address = app.server.address();
+    assert.ok(address && typeof address !== "string");
+    const id = "kc_published_delete_http";
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/admin/api/knowledge-candidates/${encodeURIComponent(id)}/delete-published`,
+      { method: "POST", headers: { "x-skill-hub-admin-key": "candidate-delete-published-admin" } }
+    );
+    assert.equal(response.status, 200);
+    assert.equal(((await response.json()) as { candidate: { status: string } }).candidate.status, "deleting");
+    assert.equal(requestedId, id);
+  } finally {
+    (service as any).deletePublishedKnowledgeCandidate = originalDeletePublished;
+    await app.close();
+    search.close();
+    await rm(dataDir, { recursive: true, force: true });
+    delete process.env.ADMIN_API_KEY;
+  }
+});

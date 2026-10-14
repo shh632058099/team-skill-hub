@@ -934,9 +934,11 @@ export class SkillHubApplicationService {
     const candidates = (await this.observability.listCandidates(2000)).filter(
       (candidate) =>
         (candidate.status === "publishing" ||
-          (candidate.status === "published" && candidate.publication?.mergeRequestState !== "merged")) &&
+          candidate.status === "deleting" ||
+          (candidate.status === "published" && candidate.publication?.mergeRequestState !== "merged") ||
+          (candidate.status === "deleted" && candidate.deletionPublication?.mergeRequestState !== "merged")) &&
         candidate.repository === repositoryId &&
-        Boolean(candidate.publication)
+        Boolean(candidate.status === "deleting" || candidate.status === "deleted" ? candidate.deletionPublication : candidate.publication)
     );
     for (const candidate of candidates) {
       const existing = this.knowledgeReconcileInFlight.get(candidate.id);
@@ -3337,23 +3339,87 @@ export class SkillHubApplicationService {
     }
   }
 
-  async reconcileKnowledgeCandidatePublication(id: string) {
+  async deletePublishedKnowledgeCandidate(id: string) {
     const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
     if (!candidate) throw new Error("Knowledge candidate not found");
-    if (!["publishing", "published"].includes(candidate.status)) {
-      throw new Error("Knowledge candidate must be waiting for merge before reconciliation");
+    if (!["published", "delete_failed"].includes(candidate.status)) {
+      throw new Error("Knowledge candidate must be published before deleting its remote asset");
     }
     if (!candidate.repository) throw new Error("Knowledge candidate repository is required");
-    if (!candidate.publication) throw new Error("Knowledge candidate has not been published");
+    if (!candidate.publication) throw new Error("Knowledge candidate has no publication record");
+
     const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
     const route = this.requirePublishingRoute(publishingType, candidate.repository);
     const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
     const publisher = createKnowledgePublisher(publishingRepository);
+
+    const remoteStatus = await publisher.reconcile(candidate.publication, publishingRepository);
+    const verifiedPublication = { ...candidate.publication, ...remoteStatus };
+    if (verifiedPublication.mergeRequestState !== "merged") {
+      if (candidate.status !== "published") {
+        throw new Error("Original publication is no longer merged; deletion cannot proceed");
+      }
+      const correctedStatus = verifiedPublication.mergeRequestState === "closed" ? "publish_failed" : "publishing";
+      return await this.observability.correctCandidatePublishedState(
+        id,
+        verifiedPublication,
+        correctedStatus,
+        verifiedPublication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined
+      );
+    }
+
+    if (candidate.status === "published") {
+      await this.observability.updateCandidatePublication(id, verifiedPublication);
+    }
+    await this.observability.markCandidateDeleting(id);
+    try {
+      const deletionPublication = await publisher.deletePublished(
+        { ...candidate, status: "published", publication: verifiedPublication },
+        verifiedPublication,
+        publishingRepository
+      );
+      return await this.observability.updateCandidateDeletionPublication(id, deletionPublication);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.observability.markCandidateDeleteFailed(id, message);
+      throw error;
+    }
+  }
+
+  async reconcileKnowledgeCandidatePublication(id: string) {
+    const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
+    if (!candidate) throw new Error("Knowledge candidate not found");
+    if (!["publishing", "published", "deleting", "deleted"].includes(candidate.status)) {
+      throw new Error("Knowledge candidate must be waiting for merge before reconciliation");
+    }
+    if (!candidate.repository) throw new Error("Knowledge candidate repository is required");
+    const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
+    const route = this.requirePublishingRoute(publishingType, candidate.repository);
+    const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
+    const publisher = createKnowledgePublisher(publishingRepository);
+    if (["deleting", "deleted"].includes(candidate.status)) {
+      if (!candidate.deletionPublication) throw new Error("Knowledge candidate deletion has not created a PR/MR");
+      const status = await publisher.reconcile(candidate.deletionPublication, publishingRepository);
+      const deletionPublication = { ...candidate.deletionPublication, ...status };
+      if (candidate.status === "deleting" && deletionPublication.mergeRequestState === "merged") {
+        return await this.observability.markCandidateDeleted(id, deletionPublication);
+      }
+      return await this.observability.updateCandidateDeletionPublication(id, deletionPublication);
+    }
+    if (!candidate.publication) throw new Error("Knowledge candidate has not been published");
     const status = await publisher.reconcile(candidate.publication, publishingRepository);
     const publication = {
       ...candidate.publication,
       ...status
     };
+    if (candidate.status === "published" && publication.mergeRequestState !== "merged") {
+      return await this.observability.correctCandidatePublishedState(
+        id,
+        publication,
+        publication.mergeRequestState === "closed" ? "publish_failed" : "publishing",
+        publication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined
+      );
+    }
     if (candidate.status === "publishing" && publication.mergeRequestState === "merged") {
       return await this.observability.markCandidatePublished(id, publication);
     }

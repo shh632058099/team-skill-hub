@@ -14,7 +14,7 @@ export interface KnowledgePublicationResult {
   branch: string;
   targetBranch: string;
   filePath: string;
-  action: "create" | "update";
+  action: "create" | "update" | "delete";
   mergeRequestIid: number;
   mergeRequestUrl: string;
   publishedAt: string;
@@ -31,6 +31,11 @@ export interface KnowledgePublicationResult {
 
 export interface KnowledgePublisher {
   publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult>;
+  deletePublished(
+    candidate: KnowledgeCandidate,
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    repository: RepositoryConfig
+  ): Promise<KnowledgePublicationResult>;
   reconcile(
     publication: NonNullable<KnowledgeCandidate["publication"]>,
     repository: RepositoryConfig
@@ -350,6 +355,103 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     };
   }
 
+  async deletePublished(
+    candidate: KnowledgeCandidate,
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    repository: RepositoryConfig
+  ): Promise<KnowledgePublicationResult> {
+    if (candidate.status !== "published" || publication.mergeRequestState !== "merged") {
+      throw new Error("Candidate must be genuinely published before deletion");
+    }
+    const { config, baseUrl, projectPath, token } = this.resolve(repository);
+    if (publication.projectPath !== projectPath) {
+      throw new Error("Knowledge publication project does not match repository publishing configuration");
+    }
+    const project = encodeURIComponent(projectPath);
+    const filePath = assertSafePath(publication.filePath);
+    const encodedFile = encodeURIComponent(filePath);
+    const targetBranch = config.targetBranch || repository.branch || publication.targetBranch || "main";
+    const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
+    const branch = `${prefix}-delete-${candidate.id.replace(/^kc_/, "").slice(0, 12)}`;
+    const fileUrl = `${baseUrl}/api/v4/projects/${project}/repository/files/${encodedFile}`;
+    const branchResponse = await this.request(
+      `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(branch)}`,
+      token,
+      { method: "GET" }
+    );
+    if (![200, 404].includes(branchResponse.status)) throw new Error(`GitLab deletion branch lookup failed (${branchResponse.status})`);
+    const branchExists = branchResponse.status === 200;
+    const targetResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, { method: "HEAD" });
+    if (targetResponse.status === 404) throw new Error("Published asset is already absent from the target branch");
+    if (targetResponse.status !== 200) throw new Error(`GitLab published file lookup failed (${targetResponse.status})`);
+    let deletionAlreadyCommitted = false;
+    if (branchExists) {
+      const branchFileResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(branch), token, { method: "GET" });
+      if (![200, 404].includes(branchFileResponse.status)) {
+        throw new Error(`GitLab deletion branch file lookup failed (${branchFileResponse.status})`);
+      }
+      deletionAlreadyCommitted = branchFileResponse.status === 404;
+    } else {
+      const verifyResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, { method: "GET" });
+      if (!verifyResponse.ok) throw new Error(`GitLab published file read failed (${verifyResponse.status})`);
+    }
+    if (!deletionAlreadyCommitted) {
+      const payload: Record<string, unknown> = {
+        branch,
+        commit_message: `chore: remove ${candidate.suggestedType} from ${candidate.id}`
+      };
+      if (!branchExists) payload.start_branch = targetBranch;
+      const deleteResponse = await this.request(fileUrl, token, { method: "DELETE", body: JSON.stringify(payload) });
+      if (!deleteResponse.ok) {
+        const detail = await deleteResponse.text().catch(() => "");
+        throw new Error(`GitLab file deletion failed (${deleteResponse.status}): ${detail.slice(0, 1000)}`);
+      }
+    }
+    const mrResponse = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        source_branch: branch,
+        target_branch: targetBranch,
+        title: `Delete ${candidateLabel(candidate)}: ${candidate.title}`,
+        description: `Delete published Team Skill Hub ${candidate.suggestedType} from ${filePath}.\n\nCandidate: ${candidate.id}`
+      })
+    });
+    let mr: { iid?: number; web_url?: string; state?: string } | undefined;
+    if (mrResponse.ok) {
+      mr = await mrResponse.json() as typeof mr;
+    } else if (mrResponse.status === 409) {
+      const query = new URLSearchParams({ state: "all", source_branch: branch, target_branch: targetBranch });
+      const existingResponse = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests?${query.toString()}`, token, { method: "GET" });
+      if (existingResponse.ok) {
+        const rows = await existingResponse.json() as Array<NonNullable<typeof mr>>;
+        const existing = rows[0];
+        if (existing?.state === "closed") {
+          throw new Error(`Existing GitLab deletion merge request !${existing.iid ?? "?"} is closed`);
+        }
+        mr = existing;
+      }
+    }
+    if (!mr) {
+      const detail = mrResponse.ok ? "" : await mrResponse.text().catch(() => "");
+      throw new Error(`GitLab deletion merge request creation failed (${mrResponse.status}): ${detail.slice(0, 1000)}`);
+    }
+    if (!mr.iid || !mr.web_url) throw new Error("GitLab deletion merge request response is incomplete");
+    const publishedAt = new Date().toISOString();
+    return {
+      provider: "gitlab",
+      projectPath,
+      branch,
+      targetBranch,
+      filePath,
+      action: "delete",
+      mergeRequestIid: mr.iid,
+      mergeRequestUrl: mr.web_url,
+      publishedAt,
+      mergeRequestState: mr.state === "closed" || mr.state === "locked" ? mr.state : "opened",
+      lastCheckedAt: publishedAt
+    };
+  }
+
   async reconcile(
     publication: NonNullable<KnowledgeCandidate["publication"]>,
     repository: RepositoryConfig
@@ -583,6 +685,92 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
         ...(pr.mergeable !== undefined && pr.mergeable !== null ? { hasConflicts: !pr.mergeable } : {}),
         ...(pr.mergeable_state ? { detailedMergeStatus: pr.mergeable_state } : {})
+      };
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+    }
+  }
+
+  async deletePublished(
+    candidate: KnowledgeCandidate,
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
+    repository: RepositoryConfig
+  ): Promise<KnowledgePublicationResult> {
+    if (candidate.status !== "published" || publication.mergeRequestState !== "merged") {
+      throw new Error("Candidate must be genuinely published before deletion");
+    }
+    const { config, apiBase, projectPath, token, sshUrl } = this.resolve(repository);
+    if (publication.projectPath !== projectPath) {
+      throw new Error("Knowledge publication project does not match repository publishing configuration");
+    }
+    const filePath = assertSafePath(publication.filePath);
+    const targetBranch = config.targetBranch || publication.targetBranch || "main";
+    const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
+    const branch = `${prefix}-delete-${candidate.id.replace(/^kc_/, "").slice(0, 12)}`;
+    const worktree = await mkdtemp(path.join(os.tmpdir(), "skill-hub-github-delete-"));
+    try {
+      await this.gitRun(["clone", "--depth", "1", "--no-tags", "--branch", targetBranch, sshUrl, worktree]);
+      const remoteBranch = await this.gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], worktree);
+      if (remoteBranch) {
+        await this.gitRun(["fetch", "--depth", "1", "origin", branch], worktree);
+        await this.gitRun(["checkout", "-B", branch, "FETCH_HEAD"], worktree);
+      } else {
+        await this.gitRun(["checkout", "-B", branch], worktree);
+      }
+      const branchStillTracksFile = remoteBranch
+        ? Boolean(await this.gitRun(["ls-files", "--error-unmatch", "--", filePath], worktree).catch(() => ""))
+        : true;
+      if (branchStillTracksFile) {
+        await this.gitRun(["rm", "--", filePath], worktree);
+        await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
+        await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
+        await this.gitRun(["commit", "-m", `chore: remove ${candidate.suggestedType} from ${candidate.id}`], worktree);
+        await this.gitRun(["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], worktree);
+      }
+      const pullsUrl = `${apiBase}/repos/${projectPath}/pulls`;
+      let response = await this.request(pullsUrl, token, {
+        method: "POST",
+        body: JSON.stringify({
+          title: `Delete ${candidateLabel(candidate)}: ${candidate.title}`,
+          head: branch,
+          base: targetBranch,
+          body: `Delete published Team Skill Hub ${candidate.suggestedType} from ${filePath}.\n\nCandidate: ${candidate.id}`
+        })
+      });
+      let pr: { number?: number; html_url?: string; state?: string; merged_at?: string | null } | undefined;
+      if (response.ok) {
+        pr = await response.json().catch(() => undefined) as typeof pr;
+      }
+      if (response.status === 422 || !pr?.number || !pr.html_url) {
+        const owner = projectPath.split("/")[0];
+        const query = new URLSearchParams({ state: "all", head: `${owner}:${branch}`, base: targetBranch });
+        response = await this.request(`${pullsUrl}?${query.toString()}`, token, { method: "GET" });
+        if (response.ok) {
+          const rows = await response.json() as Array<NonNullable<typeof pr>>;
+          pr = rows[0];
+          if (pr?.state === "closed" && !pr.merged_at) {
+            throw new Error(`Existing GitHub deletion pull request #${pr.number ?? "?"} is closed`);
+          }
+        }
+      }
+      if (!pr) {
+        const detail = response.ok ? "" : await response.text().catch(() => "");
+        throw new Error(`GitHub deletion pull request creation failed (${response.status}): ${detail.slice(0, 1000)}`);
+      }
+      if (!pr.number || !pr.html_url) throw new Error("GitHub deletion pull request response is incomplete");
+      const publishedAt = new Date().toISOString();
+      return {
+        provider: "github",
+        projectPath,
+        branch,
+        targetBranch,
+        filePath,
+        action: "delete",
+        mergeRequestIid: pr.number,
+        mergeRequestUrl: pr.html_url,
+        publishedAt,
+        mergeRequestState: pr.state === "closed" ? "closed" : "opened",
+        lastCheckedAt: publishedAt
       };
     } finally {
       await rm(worktree, { recursive: true, force: true });

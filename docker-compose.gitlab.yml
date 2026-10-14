@@ -31,6 +31,7 @@ services:
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
       GITLAB_WRITE_TOKEN: ${GITLAB_WRITE_TOKEN:-}
       GITLAB_USERNAME: ${GITLAB_USERNAME:-oauth2}
+      SKILL_HUB_ALLOWED_HOSTS: ${SKILL_HUB_ALLOWED_HOSTS:-}
     volumes:
       - ${SKILL_HUB_CONFIG_FILE:-./config/repositories.gitlab.example.yaml}:/app/config/repositories.yaml:ro
       - skill-hub-data:/var/lib/team-skill-hub

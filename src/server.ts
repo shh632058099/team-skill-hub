@@ -1306,6 +1306,19 @@ export async function startServer(
     }
   });
 
+  app.post<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id/delete-published", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { candidate: await service.deletePublishedKnowledgeCandidate(request.params.id) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   app.get("/admin/api/knowledge-gaps", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
