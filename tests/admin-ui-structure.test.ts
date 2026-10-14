@@ -118,11 +118,26 @@ test("candidate detail uses a separate history page and Chinese user-facing labe
 test("module index pages remain summary-only entry pages", () => {
   assertContainsAll(ADMIN_MODULE_INDEX_HTML, [
     "/admin/review/candidates?status=pending",
+    "/admin/review/history",
+    "历史记录",
+    "所有候选的状态变更流水",
     "/admin/gaps/items?status=active",
   ]);
   assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("/admin/governance/repositories"));
   assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("<table"));
   assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("<pre"));
+});
+
+test("candidate global history is a filterable second-level page", () => {
+  assertContainsAll(ADMIN_MODULE_HTML, [
+    "全局历史记录",
+    "/admin/api/knowledge-candidates/history",
+    "候选 ID / 标题",
+    "审核人",
+    "状态",
+    "历史时间",
+    "查看候选历史",
+  ]);
 });
 
 test("governance is a direct page and dashboard no longer embeds repository governance", () => {

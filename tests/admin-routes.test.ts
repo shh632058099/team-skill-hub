@@ -13,6 +13,7 @@ test("admin History API routes parse stable list and detail paths", () => {
 
 test("admin module routes keep bounded index/list/detail pathname semantics", () => {
   assert.deepEqual(parseAdminRoute("http://x/admin/review"), { kind: "module-index", module: "review", path: "/admin/review" });
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/history"), { kind: "module", module: "review", resource: "history", path: "/admin/review/history" });
   assert.deepEqual(parseAdminRoute("http://x/admin/governance"), { kind: "governance", path: "/admin/governance" });
   assert.deepEqual(parseAdminRoute("http://x/admin/review/candidates?status=pending"), { kind: "module", module: "review", resource: "candidates", path: "/admin/review/candidates" });
   assert.deepEqual(parseAdminRoute("http://x/admin/gaps/items/g%2F1"), { kind: "module", module: "gaps", resource: "items", id: "g/1", path: "/admin/gaps/items/g%2F1" });

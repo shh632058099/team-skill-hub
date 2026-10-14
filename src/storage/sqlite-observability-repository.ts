@@ -48,6 +48,12 @@ export class SqliteObservabilityRepository implements ObservabilityRepository{
   const cte="WITH latest AS (SELECT candidate_id,updated_at,status,repository,record_json,seq,row_number() OVER(PARTITION BY candidate_id ORDER BY updated_at DESC,seq DESC) rn FROM candidate_history) ";const clause=" WHERE "+w.join(" AND ");const total=Number((this.database.raw.prepare(cte+"SELECT count(*) n FROM latest"+clause).get(...a) as any).n);const rows=this.database.raw.prepare(cte+"SELECT record_json FROM latest"+clause+" ORDER BY updated_at DESC,seq DESC LIMIT ? OFFSET ?").all(...a,limit,offset) as any[];
   return{items:rows.map(r=>parse<KnowledgeCandidate>(r.record_json)),page:{total,limit,cursor:String(offset),nextCursor:offset+limit<total?String(offset+limit):undefined,previousCursor:offset>0?String(Math.max(0,offset-limit)):undefined}};
  }
+ adminCandidateHistory(query:{limit?:string;cursor?:string;q?:string;status?:string;repository?:string;sourceType?:string;reviewer?:string}){
+  const w:string[]=[],a:any[]=[],q=queryText(query.q);
+  if(query.status){w.push("status=?");a.push(query.status)}if(query.repository){w.push("repository=?");a.push(query.repository)}if(query.sourceType){w.push("json_extract(record_json,'$.sourceType')=?");a.push(query.sourceType)}if(query.reviewer){w.push("json_extract(record_json,'$.reviewer')=?");a.push(query.reviewer)}
+  if(q){w.push("lower(candidate_id||' '||coalesce(json_extract(record_json,'$.title'),'')||' '||status||' '||coalesce(repository,'')||' '||coalesce(json_extract(record_json,'$.sourceType'),'')||' '||coalesce(json_extract(record_json,'$.reviewer'),'')||' '||coalesce(json_extract(record_json,'$.reviewReason'),'')) LIKE ?");a.push("%"+q+"%")}
+  return this.adminPage<KnowledgeCandidate>("candidate_history","record_json",w,a,query,r=>parse(r.record_json),"updated_at DESC,seq DESC");
+ }
  private adminPage<T>(table:string,select:string,where:string[],args:any[],query:{limit?:string;cursor?:string},map:(row:any)=>T,order="ts DESC,id DESC"){
   const limit=Math.max(1,Math.min(Number(query.limit??20)||20,100));const parsed=Number(query.cursor??0);const offset=Number.isFinite(parsed)&&parsed>0?Math.floor(parsed):0;const clause=where.length?" WHERE "+where.join(" AND "):"";
   const total=Number((this.database.raw.prepare("SELECT count(*) n FROM "+table+clause).get(...args) as any).n);const rows=this.database.raw.prepare("SELECT "+select+" FROM "+table+clause+" ORDER BY "+order+" LIMIT ? OFFSET ?").all(...args,limit,offset) as any[];

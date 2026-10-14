@@ -381,6 +381,7 @@ export class McpObservabilityStore {
 
   adminFeedbackPage(query: Parameters<SqliteObservabilityRepository["adminFeedback"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminFeedback(query) : undefined; }
   adminCandidatesPage(query: Parameters<SqliteObservabilityRepository["adminCandidates"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidates(query) : undefined; }
+  adminCandidateHistoryPage(query: Parameters<SqliteObservabilityRepository["adminCandidateHistory"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateHistory(query) : undefined; }
   adminClientEventsPage(query: Parameters<SqliteObservabilityRepository["adminClientEvents"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminClientEvents(query) : undefined; }
   adminCandidateDetectionsPage(query: Parameters<SqliteObservabilityRepository["adminCandidateDetections"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateDetections(query) : undefined; }
   adminMcpCallsPage(query: Parameters<SqliteObservabilityRepository["adminMcpCalls"]>[0], mode: "all" | "reuse" | "failures" = "all") { return this.readBackend === "sqlite" ? this.sqlite!.adminMcpCalls(query, mode) : undefined; }
@@ -985,6 +986,13 @@ export class McpObservabilityStore {
       .filter((item) => item.id === id)
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
       .slice(-Math.max(1, Math.min(limit, 1000)));
+  }
+
+  async listCandidateHistory(limit = 2000): Promise<KnowledgeCandidate[]> {
+    const n = Math.max(1, Math.min(limit, 5000));
+    if (this.readBackend === "sqlite") return this.sqlite!.adminCandidateHistory({ limit: String(n) }).items;
+    const rows = await this.read<KnowledgeCandidate>("knowledge-candidates.jsonl", Math.max(n, this.maxEntries));
+    return rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, n);
   }
 
   async deleteCandidate(id: string): Promise<boolean> {

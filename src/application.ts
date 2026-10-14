@@ -3180,6 +3180,14 @@ export class SkillHubApplicationService {
     return await this.observability.getCandidateHistory(id, limit);
   }
 
+  adminKnowledgeCandidateHistoryPage(query: Parameters<McpObservabilityStore["adminCandidateHistoryPage"]>[0]) {
+    return this.observability.adminCandidateHistoryPage(query);
+  }
+
+  async listKnowledgeCandidateHistory(limit = 2000) {
+    return await this.observability.listCandidateHistory(limit);
+  }
+
   async getKnowledgeCandidate(id: string) {
     return await this.observability.getCandidate(id);
   }

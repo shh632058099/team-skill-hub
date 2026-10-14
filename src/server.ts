@@ -1098,6 +1098,26 @@ export async function startServer(
     };
   });
 
+  app.get<{
+    Querystring: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; sourceType?: string; reviewer?: string };
+  }>("/admin/api/knowledge-candidates/history", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const direct = service.adminKnowledgeCandidateHistoryPage(request.query);
+    if (direct) return { history: direct.items.map(({ content: _content, ...item }) => item), page: direct.page };
+    const rows = (await service.listKnowledgeCandidateHistory(5000))
+      .filter((item) => !request.query.status || item.status === request.query.status)
+      .filter((item) => !request.query.repository || item.repository === request.query.repository)
+      .filter((item) => !request.query.sourceType || item.sourceType === request.query.sourceType)
+      .filter((item) => !request.query.reviewer || item.reviewer === request.query.reviewer);
+    const result = paginateAdminRows(rows, request.query, (item) =>
+      [item.id, item.title, item.status, item.repository, item.sourceType, item.reviewer, item.reviewReason].filter(Boolean).join(" ")
+    );
+    return { history: result.items.map(({ content: _content, ...item }) => item), page: result.page };
+  });
+
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
     "/admin/api/knowledge-candidates/:id/history",
     async (request, reply) => {

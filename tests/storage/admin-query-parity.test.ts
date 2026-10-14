@@ -42,6 +42,28 @@ test("SQLite Admin Candidate and Feedback q filters only search legacy user-faci
   }
 });
 
+test("SQLite Admin candidate history lists every state transition and filters before paging", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-candidate-history-"));
+  const db = openSkillHubDatabase(path.join(root, "db.sqlite3"));
+  try {
+    const repo = new SqliteObservabilityRepository(db);
+    const base = { id: "kc-history", ts: "2026-10-14T00:00:00.000Z", actorId: "alice", tenantId: "tenant", title: "OTA 恢复", content: "content", sourceType: "troubleshooting" as const, suggestedType: "knowledge" as const };
+    await repo.recordKnowledgeCandidate({ ...base, updatedAt: "2026-10-14T00:00:00.000Z", status: "pending" });
+    await repo.recordKnowledgeCandidate({ ...base, updatedAt: "2026-10-14T00:01:00.000Z", status: "approved", reviewer: "reviewer-a", reviewReason: "useful" });
+    await repo.recordKnowledgeCandidate({ ...base, updatedAt: "2026-10-14T00:02:00.000Z", status: "published", reviewer: "reviewer-a", reviewReason: "useful" });
+    const all = repo.adminCandidateHistory({ limit: "2", cursor: "0" });
+    assert.equal(all.page.total, 3);
+    assert.deepEqual(all.items.map((item) => item.status), ["published", "approved"]);
+    assert.equal(all.page.nextCursor, "2");
+    const approved = repo.adminCandidateHistory({ status: "approved", reviewer: "reviewer-a", q: "OTA" });
+    assert.equal(approved.page.total, 1);
+    assert.equal(approved.items[0]?.id, "kc-history");
+  } finally {
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SQLite Admin session ordering is deterministic across duplicate session ids and timestamps", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-session-order-"));
   const db = openSkillHubDatabase(path.join(root, "db.sqlite3"));
