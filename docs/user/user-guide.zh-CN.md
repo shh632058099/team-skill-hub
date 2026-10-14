@@ -25,10 +25,13 @@ http://<hub-host>:8080/admin
 
 Admin 支持 History API 深链接，例如 `/admin/observability` 以及会话、Hook、自动候选判定、MCP 调用的列表/详情路径。运行观测一级页只显示稳定的模块入口；进入二级列表后可使用服务端筛选、分页（默认 20 条）和 URL 查询参数，详情页返回时可恢复列表状态。旧的 `/admin` 入口和现有管理 API 保持兼容。
 
-输入部署时配置的 `ADMIN_API_KEY`。该 Key 是平台管理员凭据，不应作为普通 MCP 用户 Key 分发。
+默认 Docker 部署会启用 Admin Web 登录。访问 `/admin` 时，未登录浏览器会跳转到 `/admin/login`。用户名默认是 `admin`（可通过 `ADMIN_USERNAME` 修改）；登录密码优先使用 `ADMIN_PASSWORD`，如果未配置则兼容使用 `ADMIN_API_KEY`。登录成功后浏览器只保存 HttpOnly Session Cookie，不会把密码写入 `sessionStorage`。`ADMIN_API_KEY` 仍保留给 CLI、旧脚本和应急管理接口使用，不应分发给普通 MCP 用户。
+
+在 **访问控制 → 管理员登录** 中可以查看当前登录会话、创建时间、最近活动、到期时间和来源，并可撤销单个会话、退出当前会话或一次性退出其他会话。Admin Session 默认 8 小时失效，服务重启后需要重新登录。连续登录失败默认按来源地址限制为 5 次/5 分钟。
 
 后台当前支持：
 
+- Admin 登录与登录会话管理；
 - 用户 API Key 管理；
 - Repository 运行配置；
 - Knowledge Source / RAG 配置；
@@ -65,7 +68,7 @@ API Key 文件只保存 SHA-256 哈希、末四位和 Principal 信息，不保�
 
 Key 可以随时禁用或删除，修改立即生效，不需要重启 Hub。
 
-普通 MCP 用户不需要修改 `.env`。生产环境推荐只把 `ADMIN_API_KEY` 和 Git/Webhook 等 bootstrap secret 放在部署环境中。
+普通 MCP 用户不需要修改 `.env`。生产环境推荐将 `ADMIN_PASSWORD`、`ADMIN_API_KEY` 和 Git/Webhook 等 bootstrap secret 放在部署环境或 Secret Manager 中；不要把管理员密码写入仓库。
 
 ## 4. 使用脚本接入 Codex
 

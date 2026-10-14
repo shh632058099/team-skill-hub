@@ -3,7 +3,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
-import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML } from "./admin-ui.js";
+import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_LOGIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML } from "./admin-ui.js";
 import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
 import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
 import { ApiKeyAuthenticationProvider } from "./security.js";
@@ -18,6 +18,7 @@ import {
 import { translateClaudeCodeHook } from "./claude-code-adapter.js";
 import { normalizeAdminLimit, paginateAdminRows } from "./admin-routes.js";
 import { isCandidateReviewReasonValid, isReuseMcpTool } from "./observability.js";
+import { AdminLoginAttemptLimiter, AdminSessionManager, adminSessionTokenFromCookie, clearAdminSessionCookie, safeAdminNextPath, serializeAdminSessionCookie } from "./admin-auth.js";
 
 export async function startServer(
   config: AppConfig,
@@ -49,10 +50,53 @@ export async function startServer(
   const mcpHandler = createSkillHubMcpHandler(service);
   const nodeHandler = toNodeHandler(mcpHandler);
 
-  const hasAdminAccess = (request: { headers: Record<string, unknown> }) => {
+  const adminLoginRequired = process.env.ADMIN_LOGIN_REQUIRED === "true";
+  const adminSessionCookieSecure = process.env.ADMIN_SESSION_COOKIE_SECURE === "true";
+  const adminSessionTtlSeconds = Math.max(300, Math.min(Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 28800) || 28800, 604800));
+  const adminSessions = new AdminSessionManager({
+    username: process.env.ADMIN_USERNAME ?? "admin",
+    password: process.env.ADMIN_PASSWORD,
+    apiKey: process.env.ADMIN_API_KEY,
+    ttlSeconds: adminSessionTtlSeconds,
+    maxSessions: Math.max(1, Math.min(Number(process.env.ADMIN_MAX_SESSIONS ?? 20) || 20, 100))
+  });
+  const adminLoginLimiter = new AdminLoginAttemptLimiter({
+    maxFailures: Math.max(1, Math.min(Number(process.env.ADMIN_LOGIN_MAX_FAILURES ?? 5) || 5, 100)),
+    windowMs: Math.max(1000, Math.min(Number(process.env.ADMIN_LOGIN_WINDOW_SECONDS ?? 300) || 300, 3600) * 1000)
+  });
+  const adminAuthContext = (request: any) => {
+    if (!adminLoginRequired && process.env.AUTH_MODE === "development") return { type: "development" as const };
     const adminKey = process.env.ADMIN_API_KEY;
-    if (process.env.AUTH_MODE === "development") return true;
-    return Boolean(adminKey && request.headers["x-skill-hub-admin-key"] === adminKey);
+    if (adminKey && request.headers?.["x-skill-hub-admin-key"] === adminKey) return { type: "api-key" as const };
+    const token = adminSessionTokenFromCookie(typeof request.headers?.cookie === "string" ? request.headers.cookie : undefined);
+    const session = adminSessions.authenticateToken(token);
+    return session ? { type: "session" as const, token, session } : undefined;
+  };
+  const hasAdminAccess = (request: any) => {
+    const auth = adminAuthContext(request);
+    if (!auth) return false;
+    if (auth.type !== "session") return true;
+    const method = String(request.method ?? "GET").toUpperCase();
+    if (["GET","HEAD","OPTIONS"].includes(method)) return true;
+    const origin = typeof request.headers?.origin === "string" ? request.headers.origin : undefined;
+    if (!origin) return true;
+    const host = typeof request.headers?.host === "string" ? request.headers.host : undefined;
+    try { return Boolean(host && new URL(origin).host === host); } catch { return false; }
+  };
+  const requireAdminPage = (request: any, reply: any) => {
+    if (!adminLoginRequired || adminAuthContext(request)) return true;
+    reply.code(302).header("location", "/admin/login?next=" + encodeURIComponent(safeAdminNextPath(request.url)));
+    return false;
+  };
+
+  const adminDateQueryError = (query: Record<string, unknown>, keys: string[]) => {
+    for (const key of keys) {
+      const value = query[key];
+      if (typeof value === "string" && value && !Number.isFinite(Date.parse(value))) {
+        return `${key} must be a valid date/time`;
+      }
+    }
+    return undefined;
   };
 
   const openApiDocument = {
@@ -224,7 +268,63 @@ export async function startServer(
     return clientEventSchemaInfo();
   });
 
-  app.get("/admin", async (_request, reply) => {
+  app.get<{ Querystring: { next?: string } }>("/admin/login", async (request, reply) => {
+    const next = safeAdminNextPath(request.query.next);
+    if (adminLoginRequired && adminAuthContext(request)) { reply.code(302).header("location", next); return ""; }
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_LOGIN_HTML;
+  });
+
+  app.post<{ Body: { username?: string; password?: string; next?: string } }>("/admin/api/auth/login", async (request, reply) => {
+    if (!adminSessions.credentialsConfigured) { reply.code(503); return { error: "admin login credential is not configured" }; }
+    const username = typeof request.body?.username === "string" ? request.body.username : "";
+    const password = typeof request.body?.password === "string" ? request.body.password : "";
+    if (!username || !password) { reply.code(400); return { error: "username and password are required" }; }
+    const loginKey = request.ip || "unknown";
+    if (!adminLoginLimiter.canAttempt(loginKey)) {
+      const retryAfter = adminLoginLimiter.retryAfterSeconds(loginKey);
+      reply.code(429).header("retry-after", String(retryAfter));
+      return { error: "too many failed login attempts", retryAfterSeconds: retryAfter };
+    }
+    if (!adminSessions.verifyCredentials(username, password)) { adminLoginLimiter.recordFailure(loginKey); reply.code(401); return { error: "invalid username or password" }; }
+    adminLoginLimiter.recordSuccess(loginKey);
+    const created = adminSessions.createSession({ userAgent: typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined, remoteAddress: request.ip });
+    reply.header("set-cookie", serializeAdminSessionCookie(created.token, adminSessionTtlSeconds, adminSessionCookieSecure)).header("cache-control", "no-store");
+    return { authenticated: true, next: safeAdminNextPath(request.body?.next), session: created.session };
+  });
+
+  app.post("/admin/api/auth/logout", async (request, reply) => {
+    adminSessions.revokeToken(adminSessionTokenFromCookie(typeof request.headers.cookie === "string" ? request.headers.cookie : undefined));
+    reply.header("set-cookie", clearAdminSessionCookie(adminSessionCookieSecure)).header("cache-control", "no-store");
+    return { loggedOut: true };
+  });
+
+  app.get("/admin/api/auth/session", async (request, reply) => {
+    const auth = adminAuthContext(request); if (!auth) { reply.code(401); return { error: "admin login required" }; }
+    return { authenticated: true, authType: auth.type, username: adminSessions.username, session: auth.type === "session" ? auth.session : undefined };
+  });
+
+  app.get("/admin/api/auth/sessions", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const token = adminSessionTokenFromCookie(typeof request.headers.cookie === "string" ? request.headers.cookie : undefined);
+    return { sessions: adminSessions.listSessions(token) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/admin/api/auth/sessions/:id", async (request, reply) => {
+    const auth = adminAuthContext(request); if (!auth || !hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const current = auth.type === "session" && auth.session.id === request.params.id;
+    if (!adminSessions.revokeSession(request.params.id)) { reply.code(404); return { error: "admin session not found" }; }
+    if (current) reply.header("set-cookie", clearAdminSessionCookie(adminSessionCookieSecure));
+    return { revoked: true, current };
+  });
+
+  app.post("/admin/api/auth/sessions/revoke-others", async (request, reply) => {
+    const auth = adminAuthContext(request); if (!auth || !hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    return { revoked: adminSessions.revokeOtherSessions(auth.type === "session" ? auth.token : undefined) };
+  });
+
+  app.get("/admin", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply
       .header("cache-control", "no-store, no-cache, must-revalidate")
       .header("pragma", "no-cache")
@@ -233,17 +333,20 @@ export async function startServer(
     return ADMIN_HTML;
   });
 
-  app.get("/admin/observability", async (_request, reply) => {
+  app.get("/admin/observability", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
     return ADMIN_OBSERVABILITY_INDEX_HTML;
   });
 
-  app.get("/admin/observability/*", async (_request, reply) => {
+  app.get("/admin/observability/*", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
     return ADMIN_OBSERVABILITY_HTML;
   });
 
-  const moduleShell = (request: { url: string }, reply: any) => {
+  const moduleShell = (request: { url: string; headers?: Record<string, unknown>; method?: string }, reply: any) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
     const pathname = new URL(request.url, "http://admin.local").pathname.replace(/\/+$/, "") || "/";
     return /^\/admin\/(review|gaps)$/.test(pathname)
@@ -254,16 +357,19 @@ export async function startServer(
   app.get("/admin/review/*", moduleShell);
   app.get("/admin/gaps", moduleShell);
   app.get("/admin/gaps/*", moduleShell);
-  app.get("/admin/governance", async (_request, reply) => {
+  app.get("/admin/governance", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
     return ADMIN_GOVERNANCE_HTML;
   });
-  app.get("/admin/governance/*", async (_request, reply) => {
+  app.get("/admin/governance/*", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply.code(302).header("location", "/admin/governance");
     return "";
   });
 
-  app.get("/admin/*", async (_request, reply) => {
+  app.get("/admin/*", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
     reply
       .header("cache-control", "no-store, no-cache, must-revalidate")
       .header("pragma", "no-cache")
@@ -277,6 +383,10 @@ export async function startServer(
   app.get("/admin/api/hooks", async (request, reply) => {
     const query = request.query as { limit?: string; cursor?: string; q?: string; event?: string; user?: string; session?: string; from?: string; until?: string };
     if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const dateError = adminDateQueryError(query, ["from", "until"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
+    const direct = service.adminClientEventsPage(query);
+    if (direct) return { events: direct.items, page: direct.page };
     const rows = (await service.listClientEvents(1000)).filter((item) => (!query.event || item.event === query.event) && (!query.user || item.actorId === query.user) && (!query.session || item.sessionId === query.session) && (!query.from || item.ts >= query.from) && (!query.until || item.ts <= query.until));
     const result = paginateAdminRows(rows, query, (item) => [item.event, item.actorId, item.sessionId, item.turnId, item.client, JSON.stringify(item.metadata ?? {})].filter(Boolean).join(" "));
     return { events: result.items, page: result.page };
@@ -633,6 +743,10 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
+    const dateError = adminDateQueryError(request.query, ["from", "until"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
+    const direct = service.adminClientEventsPage(request.query);
+    if (direct) return { events: direct.items, page: direct.page };
     const rows = (await service.listClientEvents(1000)).filter((item) =>
       (!request.query.event || item.event === request.query.event) &&
       (!request.query.user || item.actorId === request.query.user) &&
@@ -653,6 +767,10 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
+    const dateError = adminDateQueryError(request.query, ["from", "until"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
+    const direct = service.adminCandidateDetectionsPage(request.query);
+    if (direct) return { detections: direct.items, page: direct.page };
     const rows = (await service.listCandidateDetections(1000)).filter((item) =>
       (!request.query.outcome || item.outcome === request.query.outcome) &&
       (!request.query.user || item.actorId === request.query.user) &&
@@ -729,6 +847,10 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
+    const dateError = adminDateQueryError(request.query, ["from", "to"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
+    const direct = service.adminSessionsPage(request.query);
+    if (direct) return { sessions: direct.items, page: direct.page };
     const rows = await service.listClientSessions(1000, {
         actorId: request.query.actorId,
         repositoryId: request.query.repositoryId,
@@ -801,6 +923,8 @@ export async function startServer(
   });
 
   const derivedMcpRows = async (request: { query: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }, failures: boolean) => {
+    const direct = service.adminMcpCallsPage(request.query, failures ? "failures" : "reuse");
+    if (direct) return { rows: direct.items, page: direct.page };
     const rows = (await service.listMcpCalls(1000)).filter((item) =>
       (failures ? !item.success : isReuseMcpTool(item.tool)) &&
       (!request.query.tool || item.tool === request.query.tool) &&
@@ -815,6 +939,8 @@ export async function startServer(
 
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/reuse", async (request, reply) => {
     if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const dateError = adminDateQueryError(request.query, ["from", "to"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
     return derivedMcpRows(request, false);
   });
   app.get<{ Params: { id: string } }>("/admin/api/reuse/:id", async (request, reply) => {
@@ -825,6 +951,8 @@ export async function startServer(
   });
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/failures", async (request, reply) => {
     if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const dateError = adminDateQueryError(request.query, ["from", "to"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
     return derivedMcpRows(request, true);
   });
   app.get<{ Params: { id: string } }>("/admin/api/failures/:id", async (request, reply) => {
@@ -836,6 +964,10 @@ export async function startServer(
 
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; success?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/mcp-calls", async (request, reply) => {
     if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const dateError = adminDateQueryError(request.query, ["from", "to"]);
+    if (dateError) { reply.code(400); return { error: dateError }; }
+    const direct = service.adminMcpCallsPage(request.query, "all");
+    if (direct) return { calls: direct.items, page: direct.page };
     const rows = (await service.listMcpCalls(1000)).filter((item) =>
       (!request.query.tool || item.tool === request.query.tool) &&
       (!request.query.success || String(item.success) === request.query.success) &&
@@ -874,6 +1006,8 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
+    const direct = service.adminFeedbackPage(request.query);
+    if (direct) return { feedback: direct.items, page: direct.page };
     const rows = await service.listFeedback(5000);
     const result = paginateAdminRows(rows, request.query, (item) =>
       [item.actorId, item.rating, item.targetType, item.target, item.reason, item.traceId]
@@ -902,6 +1036,8 @@ export async function startServer(
       reply.code(403);
       return { error: "admin API access denied" };
     }
+    const direct = service.adminKnowledgeCandidatesPage(request.query);
+    if (direct) return { candidates: direct.items.map(({ content: _content, ...item }) => item), page: direct.page };
     const automatic =
       request.query.automatic === "true"
         ? true
@@ -1459,7 +1595,7 @@ export async function startServer(
 
   app.get("/health/live", async () => ({ status: "live" }));
   app.get("/health/ready", async (_request, reply) => {
-    const ready = service.isReady();
+    const ready = service.isReady() && await service.isObservabilityStorageReady();
     if (!ready) reply.code(503);
     const states = service.listRepositoryStates();
     return {
@@ -1529,8 +1665,7 @@ export async function startServer(
   });
 
   app.post<{ Params: { id: string } }>("/repositories/:id/sync", async (request, reply) => {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1611,8 +1746,7 @@ export async function startServer(
   app.get<{ Querystring: { repository?: string; limit?: string } }>(
     "/audit",
     async (request, reply) => {
-      const adminKey = process.env.ADMIN_API_KEY;
-      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1629,8 +1763,7 @@ export async function startServer(
   app.get<{ Querystring: { limit?: string; unmatched?: string } }>(
     "/analytics/usage",
     async (request, reply) => {
-      const adminKey = process.env.ADMIN_API_KEY;
-      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1646,8 +1779,7 @@ export async function startServer(
   app.get<{ Querystring: { limit?: string } }>(
     "/analytics/summary",
     async (request, reply) => {
-      const adminKey = process.env.ADMIN_API_KEY;
-      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1658,8 +1790,7 @@ export async function startServer(
   app.get<{ Params: { id: string }; Querystring: { revision?: string } }>(
     "/repositories/:id/evaluations/suites",
     async (request, reply) => {
-      const adminKey = process.env.ADMIN_API_KEY;
-      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1683,8 +1814,7 @@ export async function startServer(
     Params: { id: string };
     Body: { suite?: string; revision?: string; baseline_revision?: string };
   }>("/repositories/:id/evaluations/run", async (request, reply) => {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1709,8 +1839,7 @@ export async function startServer(
   app.get<{
     Querystring: { repository?: string; suite?: string; limit?: string };
   }>("/evaluations/runs", async (request, reply) => {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1725,8 +1854,7 @@ export async function startServer(
   });
 
   app.get<{ Params: { runId: string } }>("/evaluations/runs/:runId", async (request, reply) => {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1744,8 +1872,7 @@ export async function startServer(
   });
 
   app.get<{ Params: { id: string } }>("/repositories/:id/revisions", async (request, reply) => {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
@@ -1763,8 +1890,7 @@ export async function startServer(
   app.post<{ Params: { id: string }; Body: { revision?: string } }>(
     "/repositories/:id/rollback",
     async (request, reply) => {
-      const adminKey = process.env.ADMIN_API_KEY;
-      if (process.env.AUTH_MODE !== "development" && (!adminKey || request.headers["x-skill-hub-admin-key"] !== adminKey)) {
+    if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -1792,7 +1918,7 @@ export async function startServer(
 
   app.get("/api/v1/health/ready", async (_request, reply) => {
     reply.header("x-skill-hub-api-version", restApiVersion);
-    const ready = service.isReady();
+    const ready = service.isReady() && await service.isObservabilityStorageReady();
     if (!ready) reply.code(503);
     const states = service.listRepositoryStates();
     return {

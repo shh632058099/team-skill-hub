@@ -2,7 +2,7 @@ export type AdminRoute =
   | { kind: "index"; path: "/admin/observability" }
   | { kind: "governance"; path: "/admin/governance" }
   | { kind: "module-index"; module: "review" | "gaps"; path: string }
-  | { kind: "module"; module: "review" | "gaps" | "governance"; resource: string; id?: string; path: string }
+  | { kind: "module"; module: "review" | "gaps" | "governance"; resource: string; id?: string; subresource?: string; path: string }
   | { kind: "list"; resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures"; path: string }
   | { kind: "detail"; resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures"; id: string; path: string }
   | { kind: "legacy"; path: string };
@@ -32,12 +32,12 @@ export function parseAdminRoute(input: string | URL): AdminRoute {
   const path = url.pathname.replace(/\/$/, "") || "/admin";
   if (path === "/admin/observability") return { kind: "index", path };
   if (path === "/admin/governance") return { kind: "governance", path };
-  const moduleMatch = path.match(/^\/admin\/(review|gaps|governance)(?:\/([^/]+)(?:\/([^/]+))?)?$/);
+  const moduleMatch = path.match(/^\/admin\/(review|gaps|governance)(?:\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?)?$/);
   if (moduleMatch) {
     const module = moduleMatch[1] as "review" | "gaps" | "governance";
     if (!moduleMatch[2]) return { kind: "module-index", module: module as "review" | "gaps", path };
     return moduleMatch[3]
-      ? { kind: "module", module, resource: moduleMatch[2]!, id: decodeAdminRouteId(moduleMatch[3]), path }
+      ? { kind: "module", module, resource: moduleMatch[2]!, id: decodeAdminRouteId(moduleMatch[3]), ...(moduleMatch[4] ? { subresource: moduleMatch[4] } : {}), path }
       : { kind: "module", module, resource: moduleMatch[2]!, path };
   }
   const match = path.match(/^\/admin\/observability\/([^/]+)(?:\/([^/]+))?$/);

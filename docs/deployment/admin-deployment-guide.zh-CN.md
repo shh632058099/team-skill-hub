@@ -98,7 +98,11 @@ cp examples/deployment/gitlab.env.example .env
 ```dotenv
 SKILL_HUB_IMAGE=ghcr.io/<org>/team-skill-hub:v0.1.0
 AUTH_MODE=api-key
+ADMIN_LOGIN_REQUIRED=true
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<long-random-admin-password>
 ADMIN_API_KEY=<long-random-admin-key>
+ADMIN_SESSION_COOKIE_SECURE=true
 GITLAB_WEBHOOK_TOKEN=<long-random-webhook-token>
 GITLAB_SSH_KEY_FILE=./secrets/gitlab_skillhub_ed25519
 GITLAB_KNOWN_HOSTS_FILE=./secrets/gitlab_known_hosts
@@ -138,7 +142,7 @@ curl http://127.0.0.1:8080/metrics
 https://<hub-host>/admin
 ```
 
-使用 `ADMIN_API_KEY` 登录。
+使用 `ADMIN_USERNAME` + `ADMIN_PASSWORD` 登录。若没有单独配置 `ADMIN_PASSWORD`，系统会兼容使用 `ADMIN_API_KEY` 作为登录密码。登录成功后使用 HttpOnly Session Cookie；`ADMIN_API_KEY` 继续作为 CLI/旧脚本/应急访问凭据。生产 HTTPS 环境建议设置 `ADMIN_SESSION_COOKIE_SECURE=true`。
 
 首次建议依次检查：
 

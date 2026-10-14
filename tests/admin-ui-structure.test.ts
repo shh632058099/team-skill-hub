@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ADMIN_GOVERNANCE_HTML,
   ADMIN_HTML,
+  ADMIN_LOGIN_HTML,
   ADMIN_MODULE_HTML,
   ADMIN_MODULE_INDEX_HTML,
   ADMIN_OBSERVABILITY_HTML,
@@ -94,6 +95,26 @@ test("review and gap pages use user-facing filter labels", () => {
   assert.ok(!ADMIN_MODULE_HTML.includes("automatic true/false"));
 });
 
+test("candidate detail uses a separate history page and Chinese user-facing labels", () => {
+  assertContainsAll(ADMIN_MODULE_HTML, [
+    "候选详情",
+    "历史记录",
+    "批准",
+    "拒绝",
+    "发布",
+    "刷新发布状态",
+    "待审核",
+    "故障排查",
+    "/history",
+  ]);
+  assert.ok(!ADMIN_MODULE_HTML.includes(">Approve<"));
+  assert.ok(!ADMIN_MODULE_HTML.includes(">Reject<"));
+  assert.ok(!ADMIN_MODULE_HTML.includes(">Publish<"));
+  assert.ok(!ADMIN_MODULE_HTML.includes(">Reconcile<"));
+  assert.ok(!ADMIN_MODULE_HTML.includes("<h3>History</h3>"));
+  assert.ok(!ADMIN_MODULE_HTML.includes("Loading...</pre>"));
+});
+
 test("module index pages remain summary-only entry pages", () => {
   assertContainsAll(ADMIN_MODULE_INDEX_HTML, [
     "/admin/review/candidates?status=pending",
@@ -109,4 +130,10 @@ test("governance is a direct page and dashboard no longer embeds repository gove
   assert.ok(!ADMIN_HTML.includes('id="repositoryGovernanceTable"'));
   assert.ok(!ADMIN_HTML.includes('id="repositoryGovernanceSummary"'));
   assert.ok(!ADMIN_HTML.includes('id="syncAllRepositories"'));
+});
+
+
+test("admin login page and access tab expose browser session management", () => {
+  assertContainsAll(ADMIN_LOGIN_HTML, ["管理员登录", "username", "password", "/admin/api/auth/login", "HttpOnly Session Cookie"]);
+  assertContainsAll(ADMIN_HTML, ["adminLoginStatus", "adminSessionsTable", "adminLogout", "reloadAdminSessions", "revokeOtherAdminSessions", "/admin/api/auth/sessions"]);
 });

@@ -16,6 +16,7 @@ test("admin module routes keep bounded index/list/detail pathname semantics", ()
   assert.deepEqual(parseAdminRoute("http://x/admin/governance"), { kind: "governance", path: "/admin/governance" });
   assert.deepEqual(parseAdminRoute("http://x/admin/review/candidates?status=pending"), { kind: "module", module: "review", resource: "candidates", path: "/admin/review/candidates" });
   assert.deepEqual(parseAdminRoute("http://x/admin/gaps/items/g%2F1"), { kind: "module", module: "gaps", resource: "items", id: "g/1", path: "/admin/gaps/items/g%2F1" });
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/candidates/c%2F1/history"), { kind: "module", module: "review", resource: "candidates", id: "c/1", subresource: "history", path: "/admin/review/candidates/c%2F1/history" });
   assert.deepEqual(parseAdminRoute("http://x/admin/governance/repositories/r1"), { kind: "module", module: "governance", resource: "repositories", id: "r1", path: "/admin/governance/repositories/r1" });
 });
 
