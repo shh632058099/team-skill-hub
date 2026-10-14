@@ -193,7 +193,7 @@ function setupTooltips(){
   bulkApproveCandidates:"将已勾选的待审核 Candidate 批量批准；批准后仍需发布 PR/MR 才会进入对应正式仓库。",
   bulkRejectCandidates:"将已勾选候选批量拒绝，并记录审核原因。",
   manualCandidateTitle:"手工创建 Candidate 时填写标题。",
-  manualCandidateRepo:"目标 Repository；发布时会根据 Candidate 类型使用 knowledge_publishing 或 skill_publishing 配置。",
+  manualCandidateRepo:"目标 Repository，可留空；系统会根据 Candidate 类型，从 knowledge_publishing.project_path 或 skill_publishing.project_path 自动选择。显式填写时必须与对应发布目标一致。",
   manualCandidatePath:"Candidate 建议写入路径，例如 docs/knowledge/topic.md 或 domain/name/SKILL.md。",
   manualCandidateContent:"待审核的 Knowledge 正文或完整 SKILL.md；创建后仍可在 Review Detail 中继续编辑。",
   createManualCandidate:"手工创建一条待审核 Candidate，不会直接发布到 Git。",

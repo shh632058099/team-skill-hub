@@ -411,7 +411,9 @@ export class SkillHubApplicationService {
         content: excerpt.trim(),
         sourceType: "codex-summary",
         suggestedType: "knowledge",
-        repository: inferredRepository,
+        repository: inferredRepository
+          ? this.publishingTargetFromSource("knowledge", inferredRepository) ?? inferredRepository
+          : this.defaultPublishingRepository("knowledge"),
         traceId: this.observability.traceIdForSession(
           { id: event.actorId, tenantId: event.tenantId, roles: [] },
           event.sessionId
@@ -924,8 +926,10 @@ export class SkillHubApplicationService {
   }
 
   private async pollKnowledgeCandidatePublications(repositoryId: string): Promise<void> {
-    const repository = this.getRepository(repositoryId);
-    if (!repository.knowledgePublishing?.enabled && !repository.skillPublishing?.enabled) return;
+    const hasPublishingRoute =
+      this.publishingRoutes("knowledge").some((route) => route.targetRepository.id === repositoryId) ||
+      this.publishingRoutes("skill").some((route) => route.targetRepository.id === repositoryId);
+    if (!hasPublishingRoute) return;
 
     const candidates = (await this.observability.listCandidates(2000)).filter(
       (candidate) =>
@@ -3095,8 +3099,7 @@ export class SkillHubApplicationService {
       }
       candidateInput = {
         ...input,
-        skillCollection: input.skillCollection ?? "custom-skills",
-        repository: input.repository ?? "rd-skills"
+        skillCollection: input.skillCollection ?? "custom-skills"
       };
     } else if (input.sourceType === "manual" || input.sourceType === "mcp-session") {
       const normalizedSummary = normalizeKnowledgeCandidateSummary(input.content);
@@ -3111,13 +3114,16 @@ export class SkillHubApplicationService {
         content: normalizedSummary.content
       };
     }
-    if (candidateInput.suggestedType !== "skill" && !candidateInput.repository) {
-      const repository = this.defaultPublishingRepository("knowledge", this.allowedRepositories(principal));
+    const publishingType = candidateInput.suggestedType === "skill" ? "skill" : "knowledge";
+    const allowedRepositories = this.allowedRepositories(principal);
+    if (!candidateInput.repository) {
+      const repository = this.defaultPublishingRepository(publishingType, allowedRepositories);
       if (repository) candidateInput = { ...candidateInput, repository };
     }
     if (candidateInput.repository) {
-      const allowed = this.allowedRepositories(principal).some((repo) => repo.id === candidateInput.repository);
+      const allowed = allowedRepositories.some((repo) => repo.id === candidateInput.repository);
       if (!allowed) throw new Error("Repository not found");
+      this.assertPublishingTarget(publishingType, candidateInput.repository);
     }
     const created = await this.observability.createCandidate(principal, candidateInput);
     if (created.suggestedType === "knowledge" && !created.suggestedPath) {
@@ -3315,13 +3321,9 @@ export class SkillHubApplicationService {
       ? await this.observability.updateCandidate(id, candidatePatch)
       : candidate;
 
-    const repository = this.getRepository(repositoryId);
-    if (repository.provider !== "git") throw new Error("Automatic publishing requires a git repository");
-    const publishing = candidate.suggestedType === "skill" ? repository.skillPublishing : repository.knowledgePublishing;
-    if (!publishing?.enabled) {
-      throw new Error(`${candidate.suggestedType === "skill" ? "Skill" : "Knowledge"} publishing is disabled for this repository`);
-    }
-    const publishingRepository = { ...repository, knowledgePublishing: publishing };
+    const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
+    const route = this.requirePublishingRoute(publishingType, repositoryId);
+    const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
     await this.observability.markCandidatePublishing(id);
     try {
       const publisher = createKnowledgePublisher(publishingRepository);
@@ -3340,11 +3342,9 @@ export class SkillHubApplicationService {
     if (candidate.status !== "published") throw new Error("Knowledge candidate must be published before reconciliation");
     if (!candidate.repository) throw new Error("Knowledge candidate repository is required");
     if (!candidate.publication) throw new Error("Knowledge candidate has not been published");
-    const repository = this.getRepository(candidate.repository);
-    if (repository.provider !== "git") throw new Error("Publication reconcile requires a git repository");
-    const publishing = candidate.suggestedType === "skill" ? repository.skillPublishing : repository.knowledgePublishing;
-    if (!publishing?.enabled) throw new Error("Candidate publishing is disabled for this repository");
-    const publishingRepository = { ...repository, knowledgePublishing: publishing };
+    const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
+    const route = this.requirePublishingRoute(publishingType, candidate.repository);
+    const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
     const publisher = createKnowledgePublisher(publishingRepository);
     const status = await publisher.reconcile(candidate.publication, publishingRepository);
     return await this.observability.updateCandidatePublication(id, {
@@ -3441,6 +3441,7 @@ export class SkillHubApplicationService {
     if (input?.repository) {
       const allowed = this.allowedRepositories(principal).some((repo) => repo.id === input.repository);
       if (!allowed) throw new Error("Repository not found");
+      this.assertPublishingTarget("knowledge", input.repository);
     }
     const members = gap.members?.length ? gap.members : [gap.query];
     const content = [
@@ -3487,19 +3488,103 @@ export class SkillHubApplicationService {
     return repository;
   }
 
+  private normalizePublishingProjectPath(value: string): string {
+    return value.trim().replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+  }
+
+  private repositoryPublishingPaths(repository: RepositoryConfig): Set<string> {
+    const paths = new Set<string>([
+      this.normalizePublishingProjectPath(repository.id),
+      ...repository.webhookAliases.map((item) => this.normalizePublishingProjectPath(item))
+    ]);
+    const gitUrl = repository.gitUrl?.trim();
+    if (gitUrl) {
+      try {
+        if (/^(?:https?|ssh):\/\//i.test(gitUrl)) {
+          paths.add(this.normalizePublishingProjectPath(new URL(gitUrl).pathname));
+        } else {
+          const scp = gitUrl.match(/^[^@]+@[^:]+:(.+)$/);
+          if (scp?.[1]) paths.add(this.normalizePublishingProjectPath(scp[1]));
+        }
+      } catch {
+        // Keep aliases/id matching available for malformed or local-only Git URLs.
+      }
+    }
+    return paths;
+  }
+
+  private publishingTargetForProjectPath(projectPath: string): RepositoryConfig | undefined {
+    const normalized = this.normalizePublishingProjectPath(projectPath);
+    const exact = this.config.repositories.filter(
+      (repository) =>
+        repository.enabled &&
+        repository.provider === "git" &&
+        this.repositoryPublishingPaths(repository).has(normalized)
+    );
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return undefined;
+    const basename = normalized.split("/").filter(Boolean).at(-1);
+    const byId = this.config.repositories.filter(
+      (repository) => repository.enabled && repository.provider === "git" && repository.id === basename
+    );
+    return byId.length === 1 ? byId[0] : undefined;
+  }
+
+  private publishingRoutes(
+    type: "knowledge" | "skill",
+    targetRepositories: RepositoryConfig[] = this.config.repositories
+  ) {
+    const allowedTargetIds = new Set(targetRepositories.map((repository) => repository.id));
+    return this.config.repositories.flatMap((configRepository) => {
+      if (!configRepository.enabled || configRepository.provider !== "git") return [];
+      const publishing = type === "skill" ? configRepository.skillPublishing : configRepository.knowledgePublishing;
+      if (!publishing?.enabled || !publishing.projectPath) return [];
+      const targetRepository = this.publishingTargetForProjectPath(publishing.projectPath);
+      if (!targetRepository || !allowedTargetIds.has(targetRepository.id)) return [];
+      return [{ configRepository, targetRepository, publishing }];
+    });
+  }
+
+  private publishingTargetFromSource(type: "knowledge" | "skill", sourceRepositoryId: string): string | undefined {
+    const source = this.config.repositories.find((repository) => repository.id === sourceRepositoryId);
+    if (!source) return undefined;
+    const publishing = type === "skill" ? source.skillPublishing : source.knowledgePublishing;
+    if (!publishing?.enabled || !publishing.projectPath) return undefined;
+    return this.publishingTargetForProjectPath(publishing.projectPath)?.id;
+  }
+
+  private publishingRoute(type: "knowledge" | "skill", targetRepositoryId: string) {
+    const routes = this.publishingRoutes(type).filter((route) => route.targetRepository.id === targetRepositoryId);
+    const self = routes.find((route) => route.configRepository.id === targetRepositoryId);
+    if (self) return self;
+    if (routes.length === 1) return routes[0];
+    if (routes.length > 1) {
+      throw new Error(`Ambiguous ${type === "skill" ? "Skill" : "Knowledge"} publishing configuration for repository ${targetRepositoryId}`);
+    }
+    return undefined;
+  }
+
+  private assertPublishingTarget(type: "knowledge" | "skill", targetRepositoryId: string): void {
+    const routes = this.publishingRoutes(type);
+    if (!routes.length) return;
+    if (!this.publishingRoute(type, targetRepositoryId)) {
+      throw new Error(`${type === "skill" ? "Skill" : "Knowledge"} candidate repository ${targetRepositoryId} is not a configured ${type === "skill" ? "Skill" : "Knowledge"} publishing target`);
+    }
+  }
+
+  private requirePublishingRoute(type: "knowledge" | "skill", targetRepositoryId: string) {
+    const route = this.publishingRoute(type, targetRepositoryId);
+    if (!route) {
+      throw new Error(`${type === "skill" ? "Skill" : "Knowledge"} candidate repository ${targetRepositoryId} is not a configured ${type === "skill" ? "Skill" : "Knowledge"} publishing target`);
+    }
+    return route;
+  }
+
   private defaultPublishingRepository(
     type: "knowledge" | "skill",
     repositories: RepositoryConfig[] = this.config.repositories
   ): string | undefined {
-    const candidates = repositories.filter((repository) => {
-      if (!repository.enabled || repository.provider !== "git") return false;
-      return type === "skill"
-        ? repository.skillPublishing?.enabled === true
-        : repository.knowledgePublishing?.enabled === true;
-    });
-    const conventionalId = type === "skill" ? "rd-skills" : "rd-knowledges";
-    const conventional = candidates.find((repository) => repository.id === conventionalId);
-    if (conventional) return conventional.id;
-    return candidates.length === 1 ? candidates[0]?.id : undefined;
+    const targetIds = [...new Set(this.publishingRoutes(type, repositories).map((route) => route.targetRepository.id))];
+    return targetIds.length === 1 ? targetIds[0] : undefined;
   }
 }
