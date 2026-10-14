@@ -1,0 +1,262 @@
+# Team Skill Hub 普通开发者指南
+
+本文只面向使用 Team Skill Hub 的普通开发者。部署、管理员配置、Repository 运维、Evaluation 和内部实现请查看 `../deployment/` 与 `../repository/`。
+
+## 1. 你需要向管理员获取什么
+
+只需要两项：
+
+```text
+MCP URL: https://<skill-hub-host>/mcp
+Developer API Key: skh_...
+```
+
+API Key 只放在本机环境变量 `TEAM_SKILL_HUB_API_KEY` 中，不要写进项目仓库、聊天、日志或工单。
+
+## 2. 快速接入 Codex
+
+Linux / macOS / WSL：
+
+```bash
+export TEAM_SKILL_HUB_API_KEY='skh_...'
+bash scripts/setup-codex-mcp.sh --url https://<skill-hub-host>/mcp
+codex mcp list
+```
+
+Windows PowerShell：
+
+```powershell
+$env:TEAM_SKILL_HUB_API_KEY='skh_...'
+.\scripts\setup-codex-mcp.ps1 -Url https://<skill-hub-host>/mcp
+codex mcp list
+```
+
+接入脚本会自动完成 MCP 接入和知识回流所需配置，普通开发者不需要手工维护内部 Hook 或 Agent 配置。
+
+自动知识候选默认开启。如果团队不希望启用，可在安装时增加 `--no-auto-knowledge`，PowerShell 使用 `-NoAutoKnowledge`。
+
+### 手工配置 Codex
+
+如果不使用接入脚本，在 `~/.codex/config.toml` 中增加：
+
+```toml
+[mcp_servers.teamSkillHub]
+url = "https://<skill-hub-host>/mcp"
+bearer_token_env_var = "TEAM_SKILL_HUB_API_KEY"
+```
+
+然后重新启动 Codex。
+
+## 3. 快速接入 Claude Code
+
+Linux / macOS / WSL：
+
+```bash
+export TEAM_SKILL_HUB_API_KEY='skh_...'
+bash scripts/setup-claude-code.sh --url https://<skill-hub-host>/mcp
+claude mcp get teamSkillHub
+```
+
+Windows PowerShell：
+
+```powershell
+$env:TEAM_SKILL_HUB_API_KEY='skh_...'
+.\scripts\setup-claude-code.ps1 -Url https://<skill-hub-host>/mcp
+claude mcp get teamSkillHub
+```
+
+## 4. 验证连接
+
+让客户端执行：
+
+```text
+使用 teamSkillHub 的 get_server_info 检查连接，
+然后列出我当前可以访问的 Repository。
+```
+
+成功后即可正常使用 Team Skill Hub。
+
+## 5. 日常怎么使用
+
+不知道该用什么时，优先让客户端使用 `discover`。
+
+简单理解：
+
+- 找团队操作流程、规范和经验方法：Skill
+- 找设计、接口、故障记录和项目事实：Knowledge
+- 找可复用任务指令：Prompt
+- 找团队预定义工作角色：Agent
+
+普通开发者不需要记完整 MCP 工具清单，让客户端根据任务选择即可。
+
+### 示例：代码 Review
+
+```text
+使用 teamSkillHub 查找适合当前代码 Review 的团队 Skill 和 Knowledge，
+加载真正相关的内容后再开始 Review。
+```
+
+### 示例：查项目设计
+
+```text
+在 teamSkillHub 中搜索当前 OTA 断电恢复设计，
+使用最相关的 Knowledge 作为依据回答。
+```
+
+### 示例：复杂任务
+
+```text
+先使用 teamSkillHub discover 查找与当前任务相关的 Skill、Knowledge、Prompt 或 Agent，
+只加载真正需要的内容。
+```
+
+建议按需加载，不要一开始把所有 Skill、Knowledge 和资源全部塞进上下文。
+
+## 6. 如何创建 Skill
+
+当一次任务形成了稳定、可复用、已经验证的操作流程时，可以整理成 Skill。
+
+先让客户端生成完整 `SKILL.md`，检查后再提交 Candidate。例如：
+
+```text
+把刚才已经验证通过的流程整理成一个可复用 Skill。
+先生成完整 SKILL.md 给我检查，不要直接发布。
+确认后使用 teamSkillHub 的 submit_knowledge_candidate 提交：
+- suggested_type=skill
+- content=完整 SKILL.md
+```
+
+提交只会创建 Skill Candidate，不会直接写正式仓库。
+
+## 7. 如何回流 Knowledge
+
+Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、故障根因、测试结论和项目约束。
+
+### 自动回流
+
+使用 Codex 接入脚本时，自动知识候选默认开启。系统只会在任务包含明确工程动作和验证证据、并满足可复用条件时创建 Candidate。
+
+自动候选仍然必须经过管理员审核，不会直接发布。
+
+### 手工回流
+
+如果本次任务产生了稳定、可复用、已经验证的新知识，可以使用 `submit_knowledge_candidate`。
+
+建议内容保持固定结构：
+
+```markdown
+# 标题
+
+## 问题
+## 根因
+## 解决方案
+## 验证结果
+## 适用范围
+## 约束/限制
+```
+
+示例：
+
+```text
+把本次已经验证的结论整理为 Team Skill Hub Knowledge Candidate，
+按固定六章节格式生成，并使用 submit_knowledge_candidate 提交。
+不要包含 Token、密码、客户敏感信息或未经验证的推测。
+```
+
+## 8. 如何反馈已有内容有问题
+
+如果发现 Knowledge 或 Skill 已经过期、错误或质量较差，可以使用 `submit_feedback`，写清楚可验证的原因。
+
+如果已有资产完全不适用，也可以提交新的 Knowledge / Skill Candidate。
+
+## 9. 如何找管理员审批
+
+提交 Candidate 后，把 **Candidate ID** 发给管理员即可。
+
+管理员会在 Review Inbox 中查找并审核。Knowledge 和 Skill 共用同一套主要状态：
+
+```text
+pending（待审核）
+  -> approved（已批准）
+  -> publishing（PR/MR 已创建，等待合并）
+  -> published（PR/MR 已合并）
+```
+
+被拒绝后可以重新批准；发布失败后可以重试发布。
+
+需要特别注意：
+
+- `approved` 不等于已经正式发布；
+- PR/MR 创建成功也不等于正式发布；
+- 只有 PR/MR 合并后，Candidate 才进入 `published`。
+
+如果管理员拒绝 Candidate，会给出审核原因；开发者可以修改内容后重新提交，或者让管理员重新批准现有 Candidate。
+
+## 10. 权限和职责边界
+
+如果预期的 Repository、Skill 或 Knowledge 看不到：
+
+1. 确认使用的是正确的 Developer API Key；
+2. 用 `get_server_info` 查看当前账号能力；
+3. 确认查询关键词正确；
+4. 仍然找不到时联系管理员。
+
+普通开发者不应该通过索要仓库写凭据、服务器权限或管理员凭据来绕过权限控制。
+
+Repository 同步、回滚、发布配置、生命周期治理和 Evaluation 属于管理员或平台维护工作，不是普通开发者的日常操作。
+
+## 11. 常见问题
+
+### `codex mcp list` 中没有 teamSkillHub
+
+检查 `~/.codex/config.toml` 是否存在 `teamSkillHub` 配置，然后重新启动 Codex。
+
+### 鉴权失败
+
+确认启动客户端的环境中存在：
+
+```bash
+TEAM_SKILL_HUB_API_KEY
+```
+
+不要打印真实 Key。
+
+### MCP 已配置但无法连接
+
+确认当前机器可以访问管理员提供的 MCP URL。如果服务只在公司内网开放，请先连接公司网络或 VPN。
+
+### 搜不到 Knowledge / Skill
+
+先换成更具体的任务描述和关键词。如果仍然找不到，把查询内容和预期资产名称发给管理员确认权限或内容状态。
+
+### 自动 Knowledge Candidate 没有生成
+
+自动候选不是每个会话都会产生。只有满足可复用性和验证条件的任务才会生成。
+
+如果你认为本次内容应该沉淀，直接使用 `submit_knowledge_candidate` 手工提交即可。
+
+### 接入脚本需要升级
+
+如果管理员通知客户端接入组件版本过旧：
+
+```bash
+bash scripts/setup-codex-mcp.sh --upgrade
+```
+
+PowerShell：
+
+```powershell
+.\scripts\setup-codex-mcp.ps1 -Upgrade
+```
+
+升级后重新启动 Codex。
+
+## 12. 安全使用原则
+
+- Developer API Key 只放在环境变量或公司认可的 Secret Store 中；
+- 不要把 API Key、Token、密码或客户敏感信息提交给 Team Skill Hub；
+- 不要把未经验证的推测提交为 Knowledge；
+- MCP 提供的团队指导不能绕过代码 Review、安全策略或发布流程；
+- 执行 AI 生成的代码和命令前仍然需要 Review 和验证。
+
+普通开发者日常只需要记住一条主线：**接入 MCP → 使用团队资产 → 完成并验证任务 → 必要时提交 Knowledge / Skill Candidate → 把 Candidate ID 给管理员审批。**

@@ -1,6 +1,184 @@
-# Team Skill Hub：基于 MCP 的团队共享 Skill 中台方案
+# Team Skill Hub Architecture
 
-## 1. 项目背景
+Canonical repository architecture document. It combines the platform context with the concrete Team Skill Hub service design.
+
+
+## Internal AI Platform for a ~30-person Engineering Team
+
+### Positioning
+
+This project is intentionally **not** a model gateway. Models remain owned by Codex, Claude Code, ChatGPT, or other clients. The platform manages reusable team AI assets and the engineering context around them.
+
+```text
+Codex / Claude Code / internal clients
+                 |
+                 v
+             MCP / API
+                 |
+      +----------+----------+
+      |          |          |
+   Skills      Prompts     Agents
+      |          |          |
+      +----------+----------+
+                 |
+          Git repositories
+                 |
+        GitLab review / CI
+```
+
+For a team of roughly 30 people, keep the runtime single-instance and low-ops. PostgreSQL, Redis, vector databases, Kubernetes, SSO, and model gateways are deliberately deferred.
+
+### Registry assets
+
+#### Skill
+
+`SKILL.md` describes reusable domain procedure and engineering knowledge.
+
+#### Prompt
+
+`PROMPT.md` is reusable wording/instruction content that can be loaded independently or referenced by an Agent.
+
+#### Agent
+
+`AGENT.yaml` is a declarative team Agent profile. It binds reusable assets but does not select or proxy a model.
+
+```yaml
+schema_version: 1
+name: ota-expert
+description: Internal OTA engineering agent.
+metadata:
+  audience: [developer]
+  visibility: [internal]
+  keywords: [ota, debugging]
+  owner: ota-team
+  compatibility:
+    codex: true
+skills:
+  - ota-code-review
+prompts:
+  - ota-code-review-prompt
+tools:
+  - git
+  - repository-read
+```
+
+The Hub validates same-repository Skill and Prompt references before activating a new revision.
+
+### MCP capabilities
+
+Skill tools:
+
+```text
+list_skills
+search_skills
+resolve_skill
+get_skill
+get_skill_resource
+```
+
+Prompt tools:
+
+```text
+list_prompts
+search_prompts
+get_prompt
+```
+
+Agent tools:
+
+```text
+list_agents
+search_agents
+resolve_agent
+get_agent
+```
+
+Repository governance is shared by all asset types:
+
+```text
+sync_skill_repository
+list_repository_revisions
+rollback_repository_revision
+list_sync_audit
+```
+
+### Usage analytics
+
+The Hub records best-effort local usage events for:
+
+```text
+skill  search / resolve / load
+prompt search / load
+agent  search / resolve / load
+```
+
+Events are stored under:
+
+```text
+<data_dir>/analytics/usage.jsonl
+```
+
+The store is bounded. Query capture performs basic redaction for email addresses and common token prefixes before persistence.
+
+Admin APIs:
+
+```text
+GET /analytics/usage?limit=200
+GET /analytics/usage?limit=200&unmatched=true
+GET /analytics/summary?limit=10
+```
+
+All analytics endpoints require the admin key.
+
+The summary exposes total/matched/unmatched activity, usage by asset type/action, most frequently selected assets, and frequent sanitized unmatched queries. The unmatched-query list should drive the next Skill/Prompt/Agent improvements.
+
+### Recommended workflow
+
+```text
+Engineer identifies repeated task
+        |
+        +--> procedure -> SKILL.md
+        |
+        +--> reusable wording -> PROMPT.md
+        |
+        +--> stable bundle -> AGENT.yaml
+                    |
+                    v
+                GitLab MR
+                    |
+                    v
+          validate:repo in CI
+                    |
+                    v
+              review + merge
+                    |
+                    v
+            GitLab webhook
+                    |
+                    v
+      validate -> snapshot -> activate
+```
+
+### Evaluation
+
+A deterministic Evaluation Framework is now part of the platform. Golden cases are stored as `EVALUATION.yaml` in the same GitLab repository as the assets they protect. It supports Skill/Prompt/Agent search/resolve/get expectations, content contracts, Agent binding contracts, baseline-vs-candidate comparison, persisted evaluation runs, MCP/HTTP querying, and CI failure on regression.
+
+For details, see `docs/repository/evaluation-and-candidates.md`.
+
+### What to build next
+
+For this team size, the next useful work is:
+
+1. grow the golden datasets from real historical engineering tasks;
+2. add lightweight human useful/not-useful feedback to complement deterministic checks;
+3. add change-impact reporting that maps modified assets to affected suites;
+4. build a small Admin UI over health, revision, audit, analytics, and evaluation APIs;
+5. defer external databases and model-based judges until deterministic evaluation is no longer enough.
+
+
+## Team Skill Hub：基于 MCP 的团队共享 Skill 中台方案
+
+### 1. 项目背景
 
 团队正在逐步沉淀 OTA、Yocto、Linux、代码审查、部署、调试、文档审查等专业 Skill，并希望这些 Skill 能被 Codex、Claude Code、Cursor、内部 Agent 等 AI 客户端统一使用。
 
@@ -24,9 +202,9 @@
 
 ---
 
-## 2. 核心设计原则
+### 2. 核心设计原则
 
-### 2.1 Git First
+#### 2.1 Git First
 
 正式 Skill 必须通过 Git Repository 管理，支持：
 
@@ -41,7 +219,7 @@
 
 Git 是 Skill 的 **Single Source of Truth**。
 
-### 2.2 Repository First
+#### 2.2 Repository First
 
 系统的一级管理对象不是 Skill，而是 **Skill Repository**。
 
@@ -57,7 +235,7 @@ Repository
 
 Skill Hub 负责管理一个或多个 Skill Repository，再对 Repo 内的 Skill 进行扫描、索引和路由。
 
-### 2.3 Skill 与 MCP Server 完全解耦
+#### 2.3 Skill 与 MCP Server 完全解耦
 
 MCP Server 源码仓库不直接保存业务 Skill。
 
@@ -72,11 +250,11 @@ common-skills       # 公共 Skill（后续）
 
 Skill 更新不需要重新编译或重新发布 MCP Server。
 
-### 2.4 Multi Repository Ready
+#### 2.4 Multi Repository Ready
 
 V1 可以只接入 `rd-skills`，但架构必须天然支持 N 个 Repository。
 
-### 2.5 Progressive Loading
+#### 2.5 Progressive Loading
 
 客户端不要一次加载所有 Skill。
 
@@ -92,13 +270,13 @@ References / Examples
 Scripts / Tools
 ```
 
-### 2.6 Security by Server
+#### 2.6 Security by Server
 
 权限必须在 MCP Server / Registry 层过滤，不能只依赖 Prompt。
 
 ---
 
-## 3. 项目目标
+### 3. 项目目标
 
 Team Skill Hub 需要实现：
 
@@ -116,9 +294,9 @@ Team Skill Hub 需要实现：
 
 ---
 
-## 4. Repository 划分
+### 4. Repository 划分
 
-### 4.1 Team Skill Hub Repository
+#### 4.1 Team Skill Hub Repository
 
 仓库：
 
@@ -145,7 +323,7 @@ team-skill-hub
 
 不负责直接保存具体研发 Skill。
 
-### 4.2 研发 Skill Repository
+#### 4.2 研发 Skill Repository
 
 仓库：
 
@@ -191,7 +369,7 @@ rd-skills/
 
 ---
 
-## 5. 总体架构
+### 5. 总体架构
 
 ```text
                           GitLab / GitHub
@@ -252,7 +430,7 @@ rd-skills/
 
 ---
 
-## 6. Repository Registry
+### 6. Repository Registry
 
 Skill Hub 维护统一 Repo 配置。
 
@@ -289,7 +467,7 @@ repositories:
 
 ---
 
-## 7. Repository 数据模型
+### 7. Repository 数据模型
 
 建议：
 
@@ -322,7 +500,7 @@ disabled
 
 ---
 
-## 8. Skill 标准结构
+### 8. Skill 标准结构
 
 每个 Skill 是一个独立目录：
 
@@ -339,7 +517,7 @@ skill-name/
 
 ---
 
-## 9. Skill Metadata
+### 9. Skill Metadata
 
 推荐：
 
@@ -394,9 +572,9 @@ metadata:
 
 ---
 
-## 10. 分类体系
+### 10. 分类体系
 
-### Audience
+#### Audience
 
 ```text
 developer
@@ -407,7 +585,7 @@ architect
 manager
 ```
 
-### Domain
+#### Domain
 
 ```text
 ota
@@ -422,7 +600,7 @@ container
 ci
 ```
 
-### Category
+#### Category
 
 ```text
 development
@@ -438,7 +616,7 @@ refactor
 security
 ```
 
-### Visibility
+#### Visibility
 
 ```text
 internal
@@ -447,7 +625,7 @@ public
 restricted
 ```
 
-### Maturity
+#### Maturity
 
 ```text
 experimental
@@ -458,7 +636,7 @@ deprecated
 
 ---
 
-## 11. Repository 与 Skill 权限关系
+### 11. Repository 与 Skill 权限关系
 
 Repo 级权限是上限。
 
@@ -490,7 +668,7 @@ Effective Permission
 
 ---
 
-## 12. Git 工作流
+### 12. Git 工作流
 
 ```text
 Developer
@@ -522,7 +700,7 @@ Skill Hub 自动同步
 
 ---
 
-## 13. CODEOWNERS
+### 13. CODEOWNERS
 
 示例：
 
@@ -540,7 +718,7 @@ Repository Owner 与 Skill Owner 分离：
 
 ---
 
-## 14. CI Validation
+### 14. CI Validation
 
 PR 阶段执行：
 
@@ -567,7 +745,7 @@ skill security-check
 
 ---
 
-## 15. Repository Sync Manager
+### 15. Repository Sync Manager
 
 Team Skill Hub 中增加独立模块：
 
@@ -604,7 +782,7 @@ Repository Sync Manager
 
 ---
 
-## 16. Commit Snapshot 与回滚
+### 16. Commit Snapshot 与回滚
 
 不能直接对线上工作目录 `git pull` 后立即生效。
 
@@ -645,7 +823,7 @@ Atomic Switch Current
 
 ---
 
-## 17. Skill Index
+### 17. Skill Index
 
 V1 可以生成：
 
@@ -682,7 +860,7 @@ skills-index.json
 
 ---
 
-## 18. Skill 来源追踪
+### 18. Skill 来源追踪
 
 每个 Skill 都必须记录：
 
@@ -702,13 +880,13 @@ skills-index.json
 
 ---
 
-## 19. MCP API
+### 19. MCP API
 
-### list_skill_repositories
+#### list_skill_repositories
 
 列出用户允许访问的 Skill Repo。
 
-### list_skills
+#### list_skills
 
 支持：
 
@@ -720,7 +898,7 @@ skills-index.json
 }
 ```
 
-### search_skills
+#### search_skills
 
 输入：
 
@@ -745,7 +923,7 @@ skills-index.json
 ]
 ```
 
-### resolve_skill
+#### resolve_skill
 
 输入：
 
@@ -766,7 +944,7 @@ skills-index.json
 }
 ```
 
-### get_skill
+#### get_skill
 
 返回完整 SKILL.md，同时返回来源信息：
 
@@ -781,7 +959,7 @@ skills-index.json
 }
 ```
 
-### get_skill_resource
+#### get_skill_resource
 
 按需加载：
 
@@ -793,7 +971,7 @@ assets/
 
 ---
 
-## 20. Skill Router
+### 20. Skill Router
 
 第一版采用：
 
@@ -819,7 +997,7 @@ Selected Skill
 
 ---
 
-## 21. 搜索策略
+### 21. 搜索策略
 
 V1 推荐 SQLite FTS5 / BM25。
 
@@ -847,7 +1025,7 @@ score =
 
 ---
 
-## 22. Semantic Search（V2）
+### 22. Semantic Search（V2）
 
 后续可增加：
 
@@ -875,7 +1053,7 @@ V1 不建议直接引入 Milvus / Elasticsearch / Kafka 等重型组件。
 
 ---
 
-## 23. Skill Progressive Loading
+### 23. Skill Progressive Loading
 
 ```text
 Level 0
@@ -901,7 +1079,7 @@ MCP Client 启动时不要加载全部 Skill 正文。
 
 ---
 
-## 24. 权限模型
+### 24. 权限模型
 
 所有以下接口都必须经过 Permission Filter：
 
@@ -931,7 +1109,7 @@ public
 
 ---
 
-## 25. 客户 Skill 与研发 Skill
+### 25. 客户 Skill 与研发 Skill
 
 推荐 Repo 隔离：
 
@@ -946,17 +1124,17 @@ MCP Server 可以保持一个，通过权限决定用户可看到哪些 Repo。
 
 ---
 
-## 26. Skill 版本模型
+### 26. Skill 版本模型
 
 每个 Skill 同时维护：
 
-### 业务版本
+#### 业务版本
 
 ```text
 1.2.0
 ```
 
-### Git 来源版本
+#### Git 来源版本
 
 ```text
 repository + commit + path
@@ -977,7 +1155,7 @@ Repository Tag 和 Skill Version 是两个不同概念。
 
 ---
 
-## 27. Skill 生命周期
+### 27. Skill 生命周期
 
 ```text
 experimental
@@ -993,7 +1171,7 @@ Router 默认优先 stable。
 
 ---
 
-## 28. Skill 冲突处理
+### 28. Skill 冲突处理
 
 当多个 Skill 同时命中时，建议优先级：
 
@@ -1009,7 +1187,7 @@ Router 默认优先 stable。
 
 ---
 
-## 29. Skill Composition（V2）
+### 29. Skill Composition（V2）
 
 未来允许一次任务组合多个 Skill。
 
@@ -1034,7 +1212,7 @@ V1 暂不实现。
 
 ---
 
-## 30. 推荐代码结构
+### 30. 推荐代码结构
 
 ```text
 team-skill-hub/
@@ -1053,7 +1231,7 @@ team-skill-hub/
 ├── tests/
 ├── docker/
 ├── docs/
-│   └── team-skill-hub-design.md
+│   └── architecture.md
 └── docker-compose.yml
 ```
 
@@ -1077,7 +1255,7 @@ McpSkillService
 
 ---
 
-## 31. 推荐技术栈
+### 31. 推荐技术栈
 
 V1：
 
@@ -1104,7 +1282,7 @@ pgvector
 
 ---
 
-## 32. 本地缓存
+### 32. 本地缓存
 
 示例：
 
@@ -1129,7 +1307,7 @@ Cache / DB = Rebuildable
 
 ---
 
-## 33. Logging 与审计
+### 33. Logging 与审计
 
 每次 Skill 使用建议记录：
 
@@ -1156,7 +1334,7 @@ Cache / DB = Rebuildable
 
 ---
 
-## 34. Metrics
+### 34. Metrics
 
 建议统计：
 
@@ -1176,7 +1354,7 @@ Cache / DB = Rebuildable
 
 ---
 
-## 35. 安全设计
+### 35. 安全设计
 
 至少包含：
 
@@ -1194,11 +1372,11 @@ Skill 中可以带 `scripts/`，但 V1 默认 MCP Server 不直接执行脚本�
 
 ---
 
-## 36. 开源项目复用建议
+### 36. 开源项目复用建议
 
 实现前优先评估并复用：
 
-### mcp-skills-registry
+#### mcp-skills-registry
 
 重点参考：
 
@@ -1207,7 +1385,7 @@ Skill 中可以带 `scripts/`，但 V1 默认 MCP Server 不直接执行脚本�
 - MCP Server
 - REST API
 
-### awesome-skills-registry
+#### awesome-skills-registry
 
 重点参考：
 
@@ -1216,7 +1394,7 @@ Skill 中可以带 `scripts/`，但 V1 默认 MCP Server 不直接执行脚本�
 - Skill Catalog
 - CI 自动生成索引
 
-### MCPHub
+#### MCPHub
 
 重点参考：
 
@@ -1225,7 +1403,7 @@ Skill 中可以带 `scripts/`，但 V1 默认 MCP Server 不直接执行脚本�
 - MCP Gateway
 - 权限管理
 
-### skillmd
+#### skillmd
 
 重点参考：
 
@@ -1240,7 +1418,7 @@ Skill 中可以带 `scripts/`，但 V1 默认 MCP Server 不直接执行脚本�
 
 ---
 
-## 37. V1 范围
+### 37. V1 范围
 
 V1 只需要：
 
@@ -1252,7 +1430,7 @@ rd-skills
 
 必须完成：
 
-### P0
+#### P0
 
 1. Repository abstraction
 2. Repository Registry
@@ -1273,7 +1451,7 @@ rd-skills
 17. Permission filter
 18. Last Known Good rollback
 
-### P1
+#### P1
 
 1. resolve_skill
 2. Ranking
@@ -1283,7 +1461,7 @@ rd-skills
 6. Hot reload
 7. Deprecated management
 
-### P2
+#### P2
 
 1. Semantic Search
 2. Embedding
@@ -1294,7 +1472,7 @@ rd-skills
 
 ---
 
-## 38. V1 明确不做
+### 38. V1 明确不做
 
 暂时不要实现：
 
@@ -1312,7 +1490,7 @@ Git 本身已经解决编辑、版本控制、Review 和回滚，不应重复建
 
 ---
 
-## 39. MVP 闭环
+### 39. MVP 闭环
 
 第一阶段最重要的目标：
 
@@ -1342,7 +1520,7 @@ Skill Re-index
 
 ---
 
-## 40. 示例：OTA Skill 自动选择
+### 40. 示例：OTA Skill 自动选择
 
 用户：
 
@@ -1396,7 +1574,7 @@ SKILL.md
 
 ---
 
-## 41. 测试要求
+### 41. 测试要求
 
 至少覆盖：
 
@@ -1424,9 +1602,9 @@ SKILL.md
 
 ---
 
-## 42. 项目实施阶段
+### 42. 项目实施阶段
 
-### Phase 1：Repository 基础
+#### Phase 1：Repository 基础
 
 完成：
 
@@ -1436,7 +1614,7 @@ SKILL.md
 - Revision tracking；
 - rd-skills 接入。
 
-### Phase 2：Skill Registry
+#### Phase 2：Skill Registry
 
 完成：
 
@@ -1446,7 +1624,7 @@ SKILL.md
 - Metadata Schema；
 - Index。
 
-### Phase 3：MCP
+#### Phase 3：MCP
 
 完成：
 
@@ -1456,7 +1634,7 @@ SKILL.md
 - get_skill；
 - get_skill_resource。
 
-### Phase 4：Router
+#### Phase 4：Router
 
 完成：
 
@@ -1465,7 +1643,7 @@ SKILL.md
 - Ranking；
 - resolve_skill。
 
-### Phase 5：Enterprise
+#### Phase 5：Enterprise
 
 完成：
 
@@ -1475,7 +1653,7 @@ SKILL.md
 - Audit；
 - Analytics。
 
-### Phase 6：Semantic
+#### Phase 6：Semantic
 
 完成：
 
@@ -1486,7 +1664,7 @@ SKILL.md
 
 ---
 
-## 43. Docker / Docker Compose 部署方案
+### 43. Docker / Docker Compose 部署方案
 
 V1 必须支持：
 
@@ -1502,7 +1680,7 @@ docker compose
 
 其中 **Docker Compose 作为 V1 默认部署路径**，单独 Docker 运行作为轻量备用方式。
 
-### 43.1 容器架构
+#### 43.1 容器架构
 
 V1 推荐先保持单应用容器，不为了拆分而拆分：
 
@@ -1532,7 +1710,7 @@ V1 推荐先保持单应用容器，不为了拆分而拆分：
 
 如果后续增加 PostgreSQL、Redis，再拆成独立 Compose Service。
 
-### 43.2 Dockerfile 要求
+#### 43.2 Dockerfile 要求
 
 项目根目录提供：
 
@@ -1559,7 +1737,7 @@ team-skill-hub:1.0.0
 team-skill-hub:<git-sha>
 ```
 
-### 43.3 Docker Compose
+#### 43.3 Docker Compose
 
 项目根目录必须提供：
 
@@ -1604,7 +1782,7 @@ volumes:
 
 生产环境不要把 Git Token、SSH Private Key 等敏感信息直接写入 `docker-compose.yml`。
 
-### 43.4 持久化目录
+#### 43.4 持久化目录
 
 容器内统一使用：
 
@@ -1641,7 +1819,7 @@ Git = authoritative state
 Docker Volume = cache / derived state
 ```
 
-### 43.5 配置挂载
+#### 43.5 配置挂载
 
 推荐：
 
@@ -1659,7 +1837,7 @@ config/
 
 Repository 配置、端口、日志级别、轮询周期等不得写死在镜像中。
 
-### 43.6 Git 凭据
+#### 43.6 Git 凭据
 
 Skill Repository 如果使用 SSH：
 
@@ -1696,7 +1874,7 @@ rd-skills:
 - 企业内部 Git Service Token；
 - Docker Secret / 外部 Secret Manager。
 
-### 43.7 Webhook
+#### 43.7 Webhook
 
 容器提供 HTTP Webhook Endpoint，例如：
 
@@ -1728,7 +1906,7 @@ Repository Sync
 
 重复 Webhook 必须幂等。
 
-### 43.8 健康检查
+#### 43.8 健康检查
 
 提供：
 
@@ -1760,7 +1938,7 @@ GET /health
 
 Repo 健康状态应单独暴露。
 
-### 43.9 推荐启动方式
+#### 43.9 推荐启动方式
 
 本地或单机服务器：
 
@@ -1789,7 +1967,7 @@ docker compose down -v
 
 避免误删 Repo Cache / Index Volume。
 
-### 43.10 单 Docker 运行
+#### 43.10 单 Docker 运行
 
 同时支持：
 
@@ -1809,7 +1987,7 @@ docker run -d \
   team-skill-hub:latest
 ```
 
-### 43.11 MCP 暴露方式
+#### 43.11 MCP 暴露方式
 
 容器部署场景优先支持网络型 MCP Transport，例如 Streamable HTTP。
 
@@ -1822,7 +2000,7 @@ http(s)://skill-hub.company.com/mcp
 
 如果需要本机 STDIO 模式，可以作为开发/兼容模式保留，但生产部署应优先使用可集中治理的网络服务。
 
-### 43.12 Reverse Proxy
+#### 43.12 Reverse Proxy
 
 生产环境推荐：
 
@@ -1840,7 +2018,7 @@ Nginx / Traefik / Company Gateway
 
 Team Skill Hub 本身仍需执行应用层身份认证和权限检查，不能完全依赖反向代理。
 
-### 43.13 升级
+#### 43.13 升级
 
 推荐：
 
@@ -1867,7 +2045,7 @@ rd-skills Merge
 
 这两个发布周期必须保持独立。
 
-### 43.14 容器回滚
+#### 43.14 容器回滚
 
 应用版本回滚：
 
@@ -1894,7 +2072,7 @@ Skill Revision Rollback
 
 二者互不耦合。
 
-### 43.15 Docker Compose V1 验收条件
+#### 43.15 Docker Compose V1 验收条件
 
 V1 至少满足：
 
@@ -1913,7 +2091,7 @@ V1 至少满足：
 
 ---
 
-## 44. 最终目标
+### 44. 最终目标
 
 最终系统必须做到：
 
@@ -1956,7 +2134,7 @@ Git
 
 ---
 
-## 45. 扩展性设计原则
+### 45. 扩展性设计原则
 
 扩展性必须作为当前架构约束，而不是后续补丁。
 
@@ -1980,7 +2158,7 @@ V1 可以只实现最简单的一套能力，但以下边界必须从一开始�
 
 ---
 
-## 46. Repository Provider 扩展
+### 46. Repository Provider 扩展
 
 V1 主要支持 Git Repository，但不要把 Git 写死到业务层。
 
@@ -2021,7 +2199,7 @@ ArtifactRepositoryProvider
 
 ---
 
-## 47. Skill 类型扩展
+### 47. Skill 类型扩展
 
 当前核心资产是：
 
@@ -2058,7 +2236,7 @@ V1 MCP API 只暴露 Skill。
 
 ---
 
-## 48. Schema Version
+### 48. Schema Version
 
 Skill Metadata 必须显式支持 schema version。
 
@@ -2086,7 +2264,7 @@ SkillSchemaV2Parser
 
 ---
 
-## 49. Search Backend 抽象
+### 49. Search Backend 抽象
 
 业务层只依赖：
 
@@ -2123,7 +2301,7 @@ HybridSearchBackend
 
 ---
 
-## 50. Routing Strategy 抽象
+### 50. Routing Strategy 抽象
 
 定义：
 
@@ -2151,7 +2329,7 @@ Router 本身只负责编排，不直接实现具体评分算法。
 
 ---
 
-## 51. Permission Provider 抽象
+### 51. Permission Provider 抽象
 
 定义：
 
@@ -2191,7 +2369,7 @@ if role === ...
 
 ---
 
-## 52. Authentication Provider
+### 52. Authentication Provider
 
 认证与授权分离。
 
@@ -2224,7 +2402,7 @@ RequestPrincipal
 
 ---
 
-## 53. Registry Storage 抽象
+### 53. Registry Storage 抽象
 
 Registry 不要直接耦合 SQLite。
 
@@ -2258,7 +2436,7 @@ Registry Store = Derived State
 
 ---
 
-## 54. Event / Hook 机制
+### 54. Event / Hook 机制
 
 关键生命周期应产生内部事件。
 
@@ -2291,7 +2469,7 @@ Metrics Pipeline
 
 ---
 
-## 55. Resource Resolver
+### 55. Resource Resolver
 
 Skill Resource 不应只假设本地文件。
 
@@ -2319,7 +2497,7 @@ KnowledgeBaseResourceResolver
 
 ---
 
-## 56. 多环境
+### 56. 多环境
 
 从 V1 开始区分：
 
@@ -2356,7 +2534,7 @@ production -> rd-skills/main
 
 ---
 
-## 57. 多租户预留
+### 57. 多租户预留
 
 V1 不需要实现完整 Multi-Tenant。
 
@@ -2388,7 +2566,7 @@ default
 
 ---
 
-## 58. 多部署拓扑
+### 58. 多部署拓扑
 
 V1：
 
@@ -2418,7 +2596,7 @@ Shared Repository Cache / Object Storage
 
 ---
 
-## 59. MCP/API 版本兼容
+### 59. MCP/API 版本兼容
 
 对外 MCP Tool 参数不能随意破坏。
 
@@ -2451,7 +2629,7 @@ get_server_info
 
 ---
 
-## 60. Capability Discovery
+### 60. Capability Discovery
 
 客户端不要假设所有部署都支持所有高级功能。
 
@@ -2470,7 +2648,7 @@ rbac
 
 ---
 
-## 61. Migration Strategy
+### 61. Migration Strategy
 
 任何 Registry Schema、SQLite Schema、Metadata Schema 变化都必须有 migration 策略。
 
@@ -2496,7 +2674,7 @@ skillctl migrate
 
 ---
 
-## 62. Plugin 架构
+### 62. Plugin 架构
 
 不需要 V1 就实现复杂插件框架，但模块边界要允许插件化。
 
@@ -2518,7 +2696,7 @@ V1 可以通过 TypeScript interface + dependency injection 实现。
 
 ---
 
-## 63. Validation Rule 扩展
+### 63. Validation Rule 扩展
 
 Validator 使用规则集合：
 
@@ -2549,7 +2727,7 @@ CustomerExportRule
 
 ---
 
-## 64. Observability 扩展
+### 64. Observability 扩展
 
 统一抽象：
 
@@ -2585,7 +2763,7 @@ tenant
 
 ---
 
-## 65. 避免 V1 写死的清单
+### 65. 避免 V1 写死的清单
 
 V1 开发时禁止以下做法：
 
@@ -2606,7 +2784,7 @@ V1 开发时禁止以下做法：
 
 ---
 
-## 66. 推荐核心接口边界
+### 66. 推荐核心接口边界
 
 ```text
 RepositoryProvider
@@ -2640,7 +2818,7 @@ MCP 层只负责：
 
 ---
 
-## 67. 扩展性验收标准
+### 67. 扩展性验收标准
 
 即使 V1 只实现一套默认实现，也必须能够在不修改核心业务流程的情况下做到：
 

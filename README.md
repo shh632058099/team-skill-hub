@@ -6,19 +6,18 @@ Git-first MCP service for sharing, searching, routing and loading team Skills, P
 
 Team Skill Hub is open source under the [Apache License 2.0](LICENSE).
 
-完整文档导航见 [docs/README.md](docs/README.md)。用户文档与日常使用文档已分别整理到 docs/user/ 和 docs/usage/。
+完整文档导航见 [docs/README.md](docs/README.md)。文档只分为仓库设计与计划、部署与运维、普通开发者使用三类。
 
 For the recommended **GitHub Hub + private company GitLab Skills** deployment:
 
-- 中文管理员快速部署：`docs/deployment/admin-deployment-guide.zh-CN.md`
-- English: `docs/deployment/deployment-github-gitlab.md`
-- 中文完整部署：`docs/deployment/deployment-github-gitlab.zh-CN.md`
+- 中文：`docs/deployment/deployment-guide.zh-CN.md`
+- English: `docs/deployment/deployment-guide.md`
 
 For ordinary developers using the MCP service:
 
-- 中文快速使用：`docs/user/user-guide.zh-CN.md`
-- English: `docs/usage/developer-mcp-guide.md`
-- 中文开发者详细指南：`docs/usage/developer-mcp-guide.zh-CN.md`
+- 普通开发者入口：`docs/developer/README.md`
+- 中文详细指南：`docs/developer/developer-guide.zh-CN.md`
+- English: `docs/developer/developer-guide.md`
 
 ## Repositories
 
@@ -101,7 +100,7 @@ bash scripts/setup-claude-code.sh --url http://localhost:8080/mcp
 .\scripts\setup-claude-code.ps1 -Url http://localhost:8080/mcp
 ~~~
 
-The Claude installer merges user-level HTTP Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, and SessionEnd into ~/.claude/settings.json without removing unrelated hooks. It registers the Hub as a user-scoped HTTP MCP server when the claude CLI is available. Authentication is read dynamically from TEAM_SKILL_HUB_API_KEY (or the configured environment variable); the installer does not persist the token value. Native Claude Hook payloads are accepted at /client-events/claude-code, normalized to the same v1 Client Event model, and reuse Session, Evidence, Candidate Detector, Knowledge Gap, and Observability logic. See docs/development/claude-code-adapter.md.
+The Claude installer merges user-level HTTP Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, and SessionEnd into ~/.claude/settings.json without removing unrelated hooks. It registers the Hub as a user-scoped HTTP MCP server when the claude CLI is available. Authentication is read dynamically from TEAM_SKILL_HUB_API_KEY (or the configured environment variable); the installer does not persist the token value. Native Claude Hook payloads are accepted at /client-events/claude-code, normalized to the same v1 Client Event model, and reuse Session, Evidence, Candidate Detector, Knowledge Gap, and Observability logic. See docs/repository/client-integration.md.
 
 For Codex marketplace distribution, build a portable Agent Plugin for a concrete Hub URL:
 
@@ -110,7 +109,7 @@ npm run plugin:build -- --url https://skill-hub.example.com/mcp --marketplace-ro
 codex plugin marketplace add ./team-plugin-marketplace
 ~~~
 
-The generated package contains the remote MCP configuration, Team Skill Hub skill guidance, and cross-platform lifecycle hooks. It stores only the API-key environment-variable name, never the token value. See docs/development/codex-plugin-distribution.md.
+The generated package contains the remote MCP configuration, Team Skill Hub skill guidance, and cross-platform lifecycle hooks. It stores only the API-key environment-variable name, never the token value. See docs/repository/client-integration.md.
 
 Observability now groups Hook Events and MCP calls into Codex Sessions. MCP calls are auto-linked only when the principal has exactly one active Codex session; concurrent sessions are left unbound unless the client supplies an explicit session ID. Skill and Knowledge FTS queries also apply allowed Repository filters before the FTS candidate LIMIT.
 For normal task discovery, clients can now call `discover` once to retrieve visible, client-compatible Skill, Knowledge, Prompt, Agent, and Tool candidates together. Existing category-specific search tools remain available for narrower follow-up searches.
@@ -373,7 +372,7 @@ npm run evaluate:repo -- \
 
 The command exits non-zero when a golden case fails, a candidate regresses versus baseline, or a previously passing baseline case/suite is removed. The GitLab CI example performs this comparison automatically for merge requests.
 
-See `docs/evaluation/evaluation-framework.md` for the full format and workflow.
+See `docs/repository/evaluation-and-candidates.md` for the full format and workflow.
 
 ## Benchmark
 

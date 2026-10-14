@@ -63,7 +63,7 @@ For a tag release, validate the exact tag before push/publish:
 npm run release:check -- --tag v0.1.0
 ~~~
 
-The check requires the tag version to match `package.json`, a matching `CHANGELOG.md` section, a versioned migration note under `docs/migrations/`, and immutable tag/SHA image metadata in the Docker workflow.
+The check requires the tag version to match `package.json`, a matching `CHANGELOG.md` section, a versioned migration note under `docs/deployment/migration-<version>.md`, and immutable tag/SHA image metadata in the Docker workflow.
 
 ## Registry acceptance
 
@@ -112,3 +112,43 @@ Verify:
 4. representative MCP search/load;
 5. Hook Runtime current/outdated distribution;
 6. automatic Candidate detector quality trends.
+
+## Migration Notes — 0.1.0
+
+### Summary
+
+0.1.0 establishes the first versioned Team Skill Hub application baseline.
+
+### Server
+
+- Node.js 24 or newer is required.
+- Preserve and back up DATA_DIR before upgrade.
+- Existing Git-managed repositories remain the source of truth.
+- REST legacy routes remain available; new stable read surfaces are under /api/v1.
+
+### Client / Hook Runtime
+
+- Upgrade the Hook Runtime with the setup scripts.
+- Client Event schema v1 is the supported schema.
+- Events without an explicit schema version are treated as legacy v1.
+- Explicit unknown schema versions are rejected.
+
+### Data
+
+- Existing JSONL observability data remains readable.
+- Retention/rotation may compact old observability data according to policy.
+- Verify a backup before upgrading a production DATA_DIR.
+
+### Knowledge publishing
+
+- GitLab publishing requires a configured write-token environment variable.
+- Candidate approval and MR merge remain human-controlled.
+- Repository Sync activates merged Knowledge after Git becomes authoritative.
+
+### Validation
+
+Run npm ci, npm run check, npm run release:check, and the Evaluation CI gate for each critical content repository.
+
+### Rollback
+
+Retain the previous immutable image tag/SHA. Restore the previous application image first; restore DATA_DIR only when data compatibility or corruption requires it.
