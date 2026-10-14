@@ -111,6 +111,12 @@ test("candidate detail uses a separate history page and Chinese user-facing labe
     "runCandidateAction",
     "发布中...",
     "['publishing','published'].includes(status)",
+    "重新批准",
+    "删除 Candidate",
+    "重试发布 PR/MR",
+    "status==='rejected'",
+    "status==='publish_failed'",
+    "method:'DELETE'",
   ]);
   assert.ok(!ADMIN_MODULE_HTML.includes(">Approve<"));
   assert.ok(!ADMIN_MODULE_HTML.includes(">Reject<"));

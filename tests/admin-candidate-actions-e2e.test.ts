@@ -86,3 +86,75 @@ test("admin candidate actions support approve then publish over HTTP", async () 
     delete process.env.ADMIN_API_KEY;
   }
 });
+
+test("admin candidate actions support reject, reapprove, and delete over HTTP", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-candidate-manage-"));
+  const search = new SqliteFtsSearchBackend();
+  process.env.ADMIN_API_KEY = "candidate-manage-admin";
+  const config: AppConfig = {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    defaultRoles: ["developer", "internal"],
+    authentication: { mode: "development", apiKeys: {} },
+    repositories: []
+  };
+  const service = new SkillHubApplicationService(
+    config,
+    [],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [],
+    new LoggingEventSink()
+  );
+  await service.initialize();
+  const principal: Principal = { id: "candidate-manager", tenantId: "rd", roles: ["developer", "internal"] };
+  const candidate = await (service as any).observability.createCandidate(principal, {
+    title: "Admin manage chain",
+    content: "Verified candidate management chain.",
+    sourceType: "review",
+    suggestedType: "skill"
+  });
+  const app = await startServer(config, service);
+  try {
+    const address = app.server.address();
+    assert.ok(address && typeof address !== "string");
+    const base = `http://127.0.0.1:${address.port}`;
+    const headers = { "x-skill-hub-admin-key": "candidate-manage-admin", "content-type": "application/json" };
+    const candidateUrl = base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id);
+
+    const rejected = await fetch(candidateUrl + "/review", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ status: "rejected", reviewReason: "false_positive" })
+    });
+    assert.equal(rejected.status, 200);
+    assert.equal(((await rejected.json()) as { candidate: { status: string } }).candidate.status, "rejected");
+
+    const reapproved = await fetch(candidateUrl + "/review", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ status: "approved", reviewReason: "useful" })
+    });
+    assert.equal(reapproved.status, 200);
+    assert.equal(((await reapproved.json()) as { candidate: { status: string } }).candidate.status, "approved");
+
+    const deleted = await fetch(candidateUrl, {
+      method: "DELETE",
+      headers: { "x-skill-hub-admin-key": "candidate-manage-admin" }
+    });
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(await deleted.json(), { deleted: true });
+
+    const missing = await fetch(candidateUrl, { headers });
+    assert.equal(missing.status, 404);
+  } finally {
+    await app.close();
+    search.close();
+    await rm(dataDir, { recursive: true, force: true });
+    delete process.env.ADMIN_API_KEY;
+  }
+});
