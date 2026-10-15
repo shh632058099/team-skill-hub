@@ -24,6 +24,7 @@ async function runSetup(configDir: string, binDir: string, extraArgs: string[] =
     env: {
       ...process.env,
       CLAUDE_CONFIG_DIR: configDir,
+      TEAM_SKILL_HUB_CLIENT_ROOT: path.join(path.dirname(configDir), ".team-skill-hub"),
       PATH: `${binDir}:${process.env.PATH ?? ""}`
     }
   });
