@@ -185,6 +185,17 @@ test("legacy candidate routes normalize into the unified review center", () => {
     "location.replace",
   ]);
 });
+test("knowledge gap list keeps pagination controls after review-center refactor", () => {
+  assertContainsAll(ADMIN_MODULE_HTML, [
+    "gapPrev",
+    "gapNext",
+    "gapPage",
+    "prev.disabled=!p.previousCursor",
+    "next.disabled=!p.nextCursor",
+    "最近出现",
+  ]);
+});
+
 test("governance is a direct page and dashboard no longer embeds repository governance", () => {
   assertContainsAll(ADMIN_GOVERNANCE_HTML, ["仓库治理", "同步全部仓库", "/admin/api/repository-governance"]);
   assert.ok(
