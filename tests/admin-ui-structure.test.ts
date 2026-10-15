@@ -217,6 +217,17 @@ test("admin login page and access tab expose browser session management", () => 
   assertContainsAll(ADMIN_HTML, ["adminLoginStatus", "adminSessionsTable", "adminLogout", "reloadAdminSessions", "revokeOtherAdminSessions", "/admin/api/auth/sessions"]);
 });
 
+test("governance tab exposes Knowledge submission spec as a first-class entry", () => {
+  assert.ok(
+    ADMIN_HTML.includes('<div class="view" data-view="governance"><div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>'),
+    "governance should link directly to the Knowledge submission spec editor"
+  );
+  assert.ok(
+    !ADMIN_HTML.includes('<div class="view" data-view="settings">\n<div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>'),
+    "Knowledge submission spec entry should live under governance rather than system settings"
+  );
+});
+
 test("knowledge submission spec admin page exposes editable rules, preview, history and rollback", async () => {
   const { ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML } = await import("../src/admin-ui.js");
   assertContainsAll(ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML, [
