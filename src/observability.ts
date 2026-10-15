@@ -181,8 +181,8 @@ export interface KnowledgeCandidate {
   sourceSessionId?: string;
   sourceTurnId?: string;
   sourceGapKey?: string;
-  submittedSpecVersion?: number;
   submissionSpecVersion?: number;
+  validationSpecVersion?: number;
   submissionSpecSchemaVersion?: number;
   submissionMode?: "mcp" | "admin" | "automatic" | "gap" | "curator" | "server";
   automation?: {
@@ -937,7 +937,7 @@ export class McpObservabilityStore {
   async createCandidate(
     principal: Principal,
     input: Pick<KnowledgeCandidate, "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"> &
-      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "submittedSpecVersion" | "submissionSpecVersion" | "submissionSpecSchemaVersion" | "submissionMode" | "automation" | "relatedKnowledge" | "relationHint">>
+      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "submissionSpecVersion" | "validationSpecVersion" | "submissionSpecSchemaVersion" | "submissionMode" | "automation" | "relatedKnowledge" | "relationHint">>
   ): Promise<KnowledgeCandidate> {
     const ts = new Date().toISOString();
     const title = redactText(input.title, 200);

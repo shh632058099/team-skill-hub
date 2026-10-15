@@ -116,7 +116,15 @@ test("candidate repository defaults come from publishing project_path and reject
     const service = await createService(root);
     const knowledge = await service.submitKnowledgeCandidate(principal, {
       title: "Knowledge routing",
-      content: "Verified reusable routing behavior.",
+      content: [
+        "# Knowledge routing",
+        "", "## 问题", "Knowledge publishing requires deterministic routing.",
+        "", "## 根因", "The publishing target is derived from configured knowledge_publishing project paths.",
+        "", "## 解决方案", "Resolve the configured Knowledge publishing destination before Candidate persistence.",
+        "", "## 验证结果", "The routing test verifies the selected repository.",
+        "", "## 适用范围", "Knowledge Candidate publishing routing.",
+        "", "## 约束/限制", "The target must be a configured Knowledge publishing repository."
+      ].join("\n"),
       sourceType: "review",
       suggestedType: "knowledge"
     });

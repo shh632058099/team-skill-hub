@@ -187,12 +187,47 @@ export class SkillHubApplicationService {
       await decision("skipped", "stop-hook-recursion");
       return;
     }
-    const parsedSummary = parseKnowledgeSummary(rawExcerpt);
+    if (typeof rawExcerpt !== "string") {
+      await decision("skipped", "summary-format-not-text");
+      return;
+    }
+    let normalizedAutomatic;
+    try {
+      normalizedAutomatic = await this.knowledgeSubmission.normalize({ title: "", content: rawExcerpt });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/missing-(?:problem|rootCause|solution|verification|applicability|constraints)/.test(message)) {
+        await decision("skipped", "missing-required-knowledge-field");
+      } else {
+        await decision("skipped", `summary-format-${message.split(": ").at(-1) ?? "invalid"}`);
+      }
+      return;
+    }
+    const currentSpec = (await this.knowledgeSubmission.currentSpec()).rules;
+    const parsedSummary = parseKnowledgeSummary(normalizedAutomatic.content, currentSpec);
     if (!parsedSummary.ok) {
       await decision("skipped", `summary-format-${parsedSummary.reason}`);
       return;
     }
-    const excerpt = parsedSummary.summary.markdown;
+    let automaticDraft;
+    try {
+      automaticDraft = await this.knowledgeSubmission.buildFromStructuredDraft({
+        title: parsedSummary.summary.title,
+        problem: parsedSummary.summary.problem,
+        rootCause: parsedSummary.summary.rootCause,
+        solution: parsedSummary.summary.solution,
+        verification: parsedSummary.summary.verification,
+        applicability: parsedSummary.summary.applicability,
+        constraints: parsedSummary.summary.constraints
+      });
+    } catch (error) {
+      if ((error instanceof Error ? error.message : String(error)).includes("missing-required-knowledge-field")) {
+        await decision("skipped", "missing-required-knowledge-field");
+        return;
+      }
+      throw error;
+    }
+    const excerpt = automaticDraft.content;
     const normalizedExcerpt = excerpt.normalize("NFKC").toLowerCase().replace(/\b[0-9a-f]{8,}\b/g, "#").replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
 
     const summarySignalText = [
@@ -442,7 +477,7 @@ export class SkillHubApplicationService {
       : undefined;
     reasons.unshift(`classification: ${classification}`);
     if (relationHint) reasons.push(`relation hint: ${relationHint.type} -> ${relationHint.target.path}`);
-    const candidate = await this.observability.createCandidate(
+    const candidate = await this.persistKnowledgeCandidate(
       { id: event.actorId, tenantId: event.tenantId, roles: [] },
       {
         title,
@@ -465,16 +500,13 @@ export class SkillHubApplicationService {
           reasons: [...new Set(reasons)].slice(0, 10),
           evidenceCount,
           evidence: evidenceDetails.slice(0, 10)
-        }
-,
+        },
         relatedKnowledge,
         relationHint
-      }
+      },
+      { submissionMode: "automatic" }
     );
-    const candidateWithPath = candidate.suggestedPath
-      ? candidate
-      : await this.observability.updateCandidate(candidate.id, { suggestedPath: defaultCandidatePath(candidate) });
-    await decision("created", "verified-engineering-result", evidenceCount, candidateWithPath.id);
+    await decision("created", "verified-engineering-result", evidenceCount, candidate.id);
   }
 
   private statePath(): string {
@@ -1352,18 +1384,23 @@ export class SkillHubApplicationService {
       ""
     ].filter((item): item is string => Boolean(item));
 
-    return await this.observability.createCandidate(principal, {
+    const lifecycleDraft = await this.knowledgeSubmission.buildFromStructuredDraft({
       title: `Lifecycle review: ${document.title}`,
-      content: [
-        ...frontmatter,
-        document.content,
+      problem: `Lifecycle audit detected ${issue.kind}: ${issue.message}`,
+      rootCause: `The existing Knowledge lifecycle state requires review because the audit detected ${issue.kind}.`,
+      solution: [
+        "Review and update the existing Knowledge content and lifecycle metadata as needed.",
         "",
-        "<!--",
-        `Lifecycle issue: ${issue.kind}`,
-        issue.message,
-        "Reviewer: verify the knowledge content and lifecycle metadata before approval.",
-        "-->"
+        ...frontmatter,
+        document.content
       ].join("\n"),
+      verification: `Lifecycle audit detected ${issue.kind} for ${repositoryId}:${relativePath}.`,
+      applicability: `Applies to the existing Knowledge item ${repositoryId}:${relativePath}.`,
+      constraints: "A human reviewer must verify both the Knowledge content and lifecycle metadata before approval."
+    });
+    return await this.persistKnowledgeCandidate(principal, {
+      title: lifecycleDraft.title,
+      content: lifecycleDraft.content,
       sourceType: "review",
       suggestedType: "knowledge",
       repository: repositoryId,
@@ -1387,7 +1424,7 @@ export class SkillHubApplicationService {
         reason: `lifecycle issue: ${issue.kind}`,
         confidence: "high"
       }
-    });
+    }, { submissionMode: "server" });
   }
 
   searchKnowledge(
@@ -3230,6 +3267,43 @@ export class SkillHubApplicationService {
     return await this.knowledgeSubmission.currentSpec();
   }
 
+  async getKnowledgeSubmissionSpecHistory() {
+    return await this.knowledgeSubmissionSpecStore.history();
+  }
+
+  async saveKnowledgeSubmissionSpec(input: import("./knowledge-submission-spec.js").KnowledgeSubmissionSpec) {
+    return await this.knowledgeSubmissionSpecStore.saveNext(input);
+  }
+
+  async rollbackKnowledgeSubmissionSpec(version: number) {
+    return await this.knowledgeSubmissionSpecStore.rollbackTo(version);
+  }
+
+  private async persistKnowledgeCandidate(
+    principal: Principal,
+    input: Parameters<McpObservabilityStore["createCandidate"]>[1],
+    options: { submittedSpecVersion?: number; submissionMode: NonNullable<KnowledgeCandidate["submissionMode"]> }
+  ): Promise<KnowledgeCandidate> {
+    const normalized = await this.knowledgeSubmission.normalize({
+      title: input.title,
+      content: input.content,
+      submittedSpecVersion: options.submittedSpecVersion
+    });
+    const created = await this.observability.createCandidate(principal, {
+      ...input,
+      title: normalized.title,
+      content: normalized.content,
+      submissionSpecVersion: normalized.submittedSpecVersion ?? normalized.appliedSpecVersion,
+      validationSpecVersion: normalized.appliedSpecVersion,
+      submissionSpecSchemaVersion: normalized.schemaVersion,
+      submissionMode: options.submissionMode
+    });
+    if (!created.suggestedPath) {
+      return await this.observability.updateCandidate(created.id, { suggestedPath: defaultCandidatePath(created) });
+    }
+    return created;
+  }
+
   async submitKnowledgeCandidate(
     principal: Principal,
     input: Pick<
@@ -3243,25 +3317,7 @@ export class SkillHubApplicationService {
       if (!body.startsWith("---") || !/\bschema_version:\s*1\b/.test(body) || !/\bname:\s*[^\s]+/.test(body) || !/\bmetadata:\s*$/m.test(body)) {
         throw new Error("Skill candidate content must be a complete SKILL.md with schema_version: 1, name, and metadata front matter");
       }
-      candidateInput = {
-        ...input,
-        skillCollection: input.skillCollection ?? "custom-skills"
-      };
-    } else if (input.sourceType === "manual" || input.sourceType === "mcp-session") {
-      const normalized = await this.knowledgeSubmission.normalize({
-        title: input.title,
-        content: input.content,
-        submittedSpecVersion: input.submittedSpecVersion
-      });
-      candidateInput = {
-        ...input,
-        title: normalized.title,
-        content: normalized.content,
-        ...(normalized.submittedSpecVersion !== undefined ? { submittedSpecVersion: normalized.submittedSpecVersion } : {}),
-        submissionSpecVersion: normalized.appliedSpecVersion,
-        submissionSpecSchemaVersion: normalized.schemaVersion,
-        submissionMode: input.submissionMode ?? (input.sourceType === "mcp-session" ? "mcp" : "admin")
-      };
+      candidateInput = { ...input, skillCollection: input.skillCollection ?? "custom-skills" };
     }
     const publishingType = candidateInput.suggestedType === "skill" ? "skill" : "knowledge";
     const allowedRepositories = this.allowedRepositories(principal);
@@ -3274,13 +3330,13 @@ export class SkillHubApplicationService {
       if (!allowed) throw new Error("Repository not found");
       this.assertPublishingTarget(publishingType, candidateInput.repository);
     }
-    const created = await this.observability.createCandidate(principal, candidateInput);
-    if (created.suggestedType === "knowledge" && !created.suggestedPath) {
-      return await this.observability.updateCandidate(created.id, {
-        suggestedPath: defaultCandidatePath(created)
-      });
+    if (candidateInput.suggestedType === "skill") {
+      return await this.observability.createCandidate(principal, candidateInput);
     }
-    return created;
+    return await this.persistKnowledgeCandidate(principal, candidateInput, {
+      submittedSpecVersion: input.submittedSpecVersion,
+      submissionMode: input.submissionMode ?? (input.sourceType === "mcp-session" ? "mcp" : "admin")
+    });
   }
 
   private skillBundlePublishingRepository(principal: Principal, repositoryId?: string): RepositoryConfig {
@@ -3889,42 +3945,33 @@ export class SkillHubApplicationService {
       this.assertPublishingTarget("knowledge", input.repository);
     }
     const members = gap.members?.length ? gap.members : [gap.query];
-    const content = [
-      "## Knowledge gap",
-      "",
-      gap.query,
-      "",
-      "## Evidence",
-      "",
-      "- Occurrences: " + gap.occurrences,
-      "- Source: " + gap.source,
-      "- Last seen: " + gap.lastSeenAt,
-      "",
-      "## Related queries",
-      "",
-      ...members.map((item) => "- " + item),
-      "",
-      "## Proposed knowledge",
-      "",
-      "TODO: Reviewer/owner should replace this section with the verified reusable engineering knowledge before approval."
-    ].join("\n");
-    const candidate = await this.observability.createCandidate(principal, {
+    const gapDraft = await this.knowledgeSubmission.buildFromStructuredDraft({
       title: "Knowledge gap: " + gap.query.slice(0, 120),
-      content,
+      problem: [gap.query, "", "Related queries:", ...members.map((item) => "- " + item)].join("\n"),
+      rootCause: "Team Skill Hub does not yet contain verified reusable Knowledge that resolves this recurring query cluster.",
+      solution: "Use this Candidate as a review container and replace the triage guidance with the verified reusable engineering answer before publishing.",
+      verification: [
+        `Occurrences: ${gap.occurrences}`,
+        `Source: ${gap.source}`,
+        `Last seen: ${gap.lastSeenAt}`
+      ].join("\n"),
+      applicability: "Applies to Knowledge-gap triage for this query cluster.",
+      constraints: "This is a triage Candidate. Human review must supply and verify the engineering conclusion before approval and publication."
+    });
+    const candidate = await this.persistKnowledgeCandidate(principal, {
+      title: gapDraft.title,
+      content: gapDraft.content,
       sourceType: "review",
       suggestedType: "knowledge",
       repository: input?.repository ?? this.defaultPublishingRepository("knowledge", this.allowedRepositories(principal)),
       suggestedPath: input?.suggestedPath,
       sourceGapKey: gap.key
-    });
-    const candidateWithPath = candidate.suggestedPath
-      ? candidate
-      : await this.observability.updateCandidate(candidate.id, { suggestedPath: defaultCandidatePath(candidate) });
+    }, { submissionMode: "gap" });
     await this.observability.updateKnowledgeGapManagement(gap.key, {
       status: "active",
-      candidateId: candidateWithPath.id
+      candidateId: candidate.id
     });
-    return candidateWithPath;
+    return candidate;
   }
 
   private getRepository(id: string): RepositoryConfig {

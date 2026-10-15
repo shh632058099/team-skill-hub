@@ -434,6 +434,13 @@ test("knowledge gap candidate creation is single-shot and terminal states reject
     const created = await service.createKnowledgeCandidateFromGap(gap.key, principal);
     assert.equal(created.sourceGapKey, gap.key);
     assert.equal(created.status, "pending");
+    assert.equal(created.submissionMode, "gap");
+    assert.equal(created.submissionSpecVersion, 1);
+    assert.equal(created.validationSpecVersion, 1);
+    assert.equal(created.submissionSpecSchemaVersion, 1);
+    assert.match(created.content, /## 问题/);
+    assert.match(created.content, /## 验证结果/);
+    assert.doesNotMatch(created.content, /TODO:/);
     await assert.rejects(
       () => service.createKnowledgeCandidateFromGap(gap.key, principal),
       /already has a Candidate/

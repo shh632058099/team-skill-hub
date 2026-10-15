@@ -813,6 +813,10 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
           evidence: Array<{ type: string; sourceTool: string; success?: boolean; counts?: { passed?: number; failed?: number } }>;
         };
         repository?: string;
+        submissionSpecVersion?: number;
+        validationSpecVersion?: number;
+        submissionSpecSchemaVersion?: number;
+        submissionMode?: string;
       }>;
     };
     const automatic = candidatesBody.candidates.find(
@@ -829,6 +833,10 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(automatic?.automation?.evidence[0]?.sourceTool, "Bash");
     assert.equal(automatic?.automation?.evidence[0]?.counts?.passed, 12);
     assert.equal(automatic?.automation?.evidence[0]?.counts?.failed, 0);
+    assert.equal(automatic?.submissionMode, "automatic");
+    assert.equal(automatic?.submissionSpecVersion, 1);
+    assert.equal(automatic?.validationSpecVersion, 1);
+    assert.equal(automatic?.submissionSpecSchemaVersion, 1);
 
     const eventsAfterEvidence = await fetch(base + "/admin/api/client-events", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" }
@@ -867,6 +875,37 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(filteredDetections.status, 200);
     assert.ok(((await filteredDetections.json()) as { detections: unknown[] }).detections.length >= 1);
     assert.equal((await fetch(base + "/admin/api/candidate-detections/missing-detection", { headers: { "x-skill-hub-admin-key": "client-events-admin" } })).status, 404);
+
+    const missingRequiredStop = await fetch(base + "/client-events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...stopPayload,
+        turn_id: "turn-auto-missing-required",
+        metadata: {
+          stop_hook_active: false,
+          assistant_result_excerpt: assistantResult.replace(/\n\n## 约束\/限制[\s\S]*$/, "")
+        }
+      })
+    });
+    assert.equal(missingRequiredStop.status, 202);
+    const detectionsAfterMissing = await fetch(base + "/admin/api/candidate-detections", {
+      headers: { "x-skill-hub-admin-key": "client-events-admin" }
+    });
+    const detectionsAfterMissingBody = (await detectionsAfterMissing.json()) as {
+      detections: Array<{ turnId?: string; outcome: string; reason: string }>
+    };
+    assert.ok(detectionsAfterMissingBody.detections.some((item) =>
+      item.turnId === "turn-auto-missing-required" &&
+      item.outcome === "skipped" &&
+      item.reason === "missing-required-knowledge-field"
+    ));
+    const candidatesAfterMissing = await fetch(base + "/admin/api/knowledge-candidates", {
+      headers: { "x-skill-hub-admin-key": "client-events-admin" }
+    });
+    assert.equal(((await candidatesAfterMissing.json()) as { candidates: Array<{ sourceTurnId?: string }> }).candidates.some(
+      (item) => item.sourceTurnId === "turn-auto-missing-required"
+    ), false);
 
     const sessionDetailResponse = await fetch(
       base +
