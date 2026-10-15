@@ -116,17 +116,16 @@ Prefer progressive loading instead of loading all Skills, Knowledge, and resourc
 
 When a task produces a stable, reusable, verified procedure, turn it into a Skill.
 
-Ask the client to generate a complete `SKILL.md`, review it, and then submit it as a Candidate. For example:
+Ask the client to generate and validate the complete Skill directory, review it, and then submit it as a Skill Bundle. A single-file Skill is still a Bundle with one `SKILL.md`. For example:
 
 ```text
 Turn the verified workflow we just completed into a reusable Skill.
 Generate the complete SKILL.md first and let me review it.
-After confirmation, use teamSkillHub submit_knowledge_candidate with:
-- suggested_type=skill
-- content=the complete SKILL.md
+After confirmation, use teamSkillHub submit_skill_bundle with import_type=skill.
+Submit the complete Skill root, including SKILL.md and any scripts/, references/, or assets/ files.
 ```
 
-Submission creates a Skill Candidate only. It does not write directly to the formal repository.
+Submission creates a pending Skill Bundle import for administrator review. It does not write directly to the formal repository.
 
 ## 7. Feed back Knowledge
 
@@ -167,7 +166,7 @@ Do not include tokens, passwords, customer-sensitive data, or unverified specula
 
 If a Knowledge or Skill result is outdated, incorrect, or low quality, use `submit_feedback` and provide a short, verifiable reason.
 
-If the existing asset is no longer suitable, you can also submit a new Knowledge or Skill Candidate.
+If the existing asset is no longer suitable, submit a new Knowledge Candidate or Skill Bundle as appropriate.
 
 ## 9. Get administrator approval
 
@@ -259,4 +258,4 @@ Restart Codex after the upgrade.
 - Team MCP guidance does not bypass code review, security policy, or release controls.
 - Review and verify AI-generated code and commands before execution.
 
-For ordinary developers, the main workflow is simple: **connect MCP -> use team assets -> complete and verify the task -> submit a Knowledge / Skill Candidate when useful -> send the Candidate ID to an administrator for approval.**
+For ordinary developers, the main workflow is simple: **connect MCP -> use team assets -> complete and verify the task -> submit a Knowledge Candidate or Skill Bundle when useful -> send the resulting ID to an administrator for approval.**

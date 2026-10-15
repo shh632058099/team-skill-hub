@@ -102,11 +102,11 @@
 
 **Interfaces:**
 - Consumes: Task 3 application methods.
-- Produces: MCP `submit_skill_bundle`; deterministic legacy `submit_skill_candidate` adapter for unambiguous `rd-skills` paths only.
+- Produces: MCP `submit_skill_bundle` as the only client-visible Skill submission entrypoint. The legacy `submit_skill_candidate` MCP entrypoint was removed after Bundle-first migration completed.
 
 - [x] Write failing MCP tests for `skill` and `collection` payload schemas, optional mode, idempotency key, no direct PR creation, principal authorization, and legacy mapping without changing `custom-skills` behavior.
 - [x] Run focused test and verify RED.
-- [x] Register the new tool and wire legacy `rd-skills` compatibility to the Bundle service while retaining legacy fallback for ambiguous/custom paths.
+- [x] Register the Bundle tool; after migration, remove the legacy `submit_skill_candidate` MCP entrypoint and keep Knowledge Candidate APIs Knowledge-only.
 - [x] Re-run focused tests and `npm test`.
 
 ### Task 6: Admin API, ZIP/Git import and Admin Web UX

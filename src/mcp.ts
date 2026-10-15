@@ -834,29 +834,24 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "submit_knowledge_candidate",
       {
-        description: "Submit a candidate team Knowledge/Skill item for human review. Knowledge candidates use the fixed summary format; Skill candidates contain a complete SKILL.md. This never publishes directly to Git.",
+        description: "Knowledge ONLY. Submit a candidate team Knowledge item for human review using the fixed summary format. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
           title: z.string().min(1).max(200),
           content: z.string().min(1).max(10000),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
-          suggested_type: z.enum(["knowledge", "skill"]).optional(),
-          skill_collection: z.enum(["rd-skills", "custom-skills"]).optional(),
-          repository: z.string().min(1).optional(),
-          suggested_path: z.string().min(1).optional()
+          repository: z.string().min(1).optional()
         })
       },
-      async ({ trace_id, title, content, source_type, suggested_type, skill_collection, repository, suggested_path }) =>
+      async ({ trace_id, title, content, source_type, repository }) =>
         toolResult({
           candidate: await appService.submitKnowledgeCandidate(principal, {
             traceId: trace_id,
             title,
             content,
             sourceType: source_type ?? "mcp-session",
-            suggestedType: suggested_type ?? "knowledge",
-            skillCollection: skill_collection,
-            repository,
-            suggestedPath: suggested_path
+            suggestedType: "knowledge",
+            repository
           })
         })
     );
@@ -864,50 +859,52 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "submit_skill_bundle",
       {
-        description: "Submit one complete Skill root or one complete Skill collection snapshot for administrator review. The Bundle is validated against the target repository and is never published directly.",
-        inputSchema: z.discriminatedUnion("import_type", [
-          z.object({
-            trace_id: z.string().min(1).optional(),
-            namespace: z.string().min(1).max(200),
-            import_type: z.literal("skill"),
-            skill_path: z.string().min(1).max(500),
-            skill_collection: z.literal("rd-skills"),
-            repository: z.string().min(1).optional(),
-            files: z.array(z.object({
-              path: z.string().min(1).max(1000),
-              content: z.string().max(512 * 1024).optional(),
-              content_base64: z.string().max(700 * 1024).optional(),
-              mode: z.enum(["0644", "0755"]).optional()
-            }).refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), { message: "file must contain exactly one of content or content_base64" })).min(1).max(500),
-            source: z.object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() }).optional(),
-            note: z.string().max(4000).optional(),
-            submission_key: z.string().min(1).max(500).optional()
-          }),
-          z.object({
-            trace_id: z.string().min(1).optional(),
-            namespace: z.string().min(1).max(200),
-            import_type: z.literal("collection"),
-            skill_collection: z.literal("rd-skills"),
-            repository: z.string().min(1).optional(),
-            files: z.array(z.object({
-              path: z.string().min(1).max(1000),
-              content: z.string().max(512 * 1024).optional(),
-              content_base64: z.string().max(700 * 1024).optional(),
-              mode: z.enum(["0644", "0755"]).optional()
-            }).refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), { message: "file must contain exactly one of content or content_base64" })).min(1).max(500),
-            source: z.object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() }).optional(),
-            note: z.string().max(4000).optional(),
-            submission_key: z.string().min(1).max(500).optional()
-          })
-        ])
+        description: "The only MCP entrypoint for submitting Skills. Use this for every Skill, including a single-file Skill containing only SKILL.md, and for explicit multi-Skill collections. Submit one complete Skill root with import_type=skill or one complete namespace snapshot with import_type=collection. The Bundle is validated against the target repository and is never published directly.",
+        inputSchema: z.object({
+          trace_id: z.string().min(1).optional(),
+          namespace: z.string().min(1).max(200),
+          import_type: z.enum(["skill", "collection"]),
+          skill_path: z.string().min(1).max(500).optional(),
+          skill_collection: z.literal("rd-skills"),
+          repository: z.string().min(1).optional(),
+          files: z.array(z.object({
+            path: z.string().min(1).max(1000),
+            content: z.string().max(512 * 1024).optional().describe("UTF-8 text file content. For a text file, set this field and omit content_base64 (an empty content_base64 placeholder is tolerated)."),
+            content_base64: z.string().max(700 * 1024).optional().describe("Base64-encoded binary file content. For a binary file, set this field and omit content (an empty content placeholder is tolerated)."),
+            mode: z.enum(["0644", "0755"]).optional()
+          }).refine((file) => {
+            const hasTextField = file.content !== undefined;
+            const hasBinaryField = file.content_base64 !== undefined;
+            if (!hasTextField && !hasBinaryField) return false;
+            if (hasTextField && hasBinaryField && file.content !== "" && file.content_base64 !== "") return false;
+            return true;
+          }, { message: "file must contain one representation: content for text or content_base64 for binary; an empty unused placeholder is allowed" })).min(1).max(500),
+          source: z.object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() }).optional(),
+          note: z.string().max(4000).optional(),
+          submission_key: z.string().min(1).max(500).optional()
+        }).superRefine((input, ctx) => {
+          if (input.import_type === "skill" && !input.skill_path) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["skill_path"], message: "skill_path is required when import_type=skill" });
+          }
+          if (input.import_type === "collection" && input.skill_path !== undefined) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["skill_path"], message: "skill_path is not allowed when import_type=collection" });
+          }
+        })
       },
       async (input) =>
         toolResult({
           import: await appService.submitSkillBundle(principal, {
             namespace: input.namespace,
             importType: input.import_type,
-            ...(input.import_type === "skill" ? { skillPath: input.skill_path } : {}),
-            files: input.files.map((file: { path: string; content?: string; content_base64?: string; mode?: "0644" | "0755" }) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.content_base64 }), mode: file.mode })),
+            ...(input.import_type === "skill" ? { skillPath: input.skill_path! } : {}),
+            files: input.files.map((file: { path: string; content?: string; content_base64?: string; mode?: "0644" | "0755" }) => {
+              const useBinary = file.content_base64 !== undefined && file.content_base64 !== "" && (file.content === undefined || file.content === "");
+              return {
+                path: file.path,
+                ...(useBinary ? { contentBase64: file.content_base64 } : { content: file.content ?? "" }),
+                mode: file.mode
+              };
+            }),
             sourceType: "mcp",
             sourceMetadata: {
               ...(input.source?.repository_url ? { repository_url: input.source.repository_url } : {}),
@@ -917,32 +914,6 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             },
             submissionKey: input.submission_key,
             repository: input.repository
-          })
-        })
-    );
-
-    registerTool(
-      "submit_skill_candidate",
-      {
-        description: "Submit a complete generated SKILL.md to Team Skill Hub for administrator review. The Skill is not pushed directly; approval is required before a PR/MR can be created.",
-        inputSchema: z.object({
-          trace_id: z.string().min(1).optional(),
-          title: z.string().min(1).max(200),
-          content: z.string().min(1).max(10000),
-          skill_collection: z.enum(["rd-skills", "custom-skills"]),
-          repository: z.string().min(1).optional(),
-          suggested_path: z.string().min(1)
-        })
-      },
-      async ({ trace_id, title, content, skill_collection, repository, suggested_path }) =>
-        toolResult({
-          candidate: await appService.submitSkillCandidateCompat(principal, {
-            traceId: trace_id,
-            title,
-            content,
-            skillCollection: skill_collection,
-            repository,
-            suggestedPath: suggested_path
           })
         })
     );

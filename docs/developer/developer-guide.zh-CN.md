@@ -116,17 +116,16 @@ claude mcp get teamSkillHub
 
 当一次任务形成了稳定、可复用、已经验证的操作流程时，可以整理成 Skill。
 
-先让客户端生成完整 `SKILL.md`，检查后再提交 Candidate。例如：
+先让客户端生成并验证完整 Skill 目录，检查后再作为 Skill Bundle 提交。即使只有一个 `SKILL.md`，也仍然是 Bundle。例如：
 
 ```text
 把刚才已经验证通过的流程整理成一个可复用 Skill。
 先生成完整 SKILL.md 给我检查，不要直接发布。
-确认后使用 teamSkillHub 的 submit_knowledge_candidate 提交：
-- suggested_type=skill
-- content=完整 SKILL.md
+确认后使用 teamSkillHub 的 submit_skill_bundle，并设置 import_type=skill。
+提交完整 Skill 根目录，包括 SKILL.md 以及可选的 scripts/、references/、assets/ 等文件。
 ```
 
-提交只会创建 Skill Candidate，不会直接写正式仓库。
+提交只会创建待管理员审核的 Skill Bundle Import，不会直接写正式仓库。
 
 ## 7. 如何回流 Knowledge
 
@@ -167,7 +166,7 @@ Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、�
 
 如果发现 Knowledge 或 Skill 已经过期、错误或质量较差，可以使用 `submit_feedback`，写清楚可验证的原因。
 
-如果已有资产完全不适用，也可以提交新的 Knowledge / Skill Candidate。
+如果已有资产完全不适用，也可以按类型提交新的 Knowledge Candidate 或 Skill Bundle。
 
 ## 9. 如何找管理员审批
 
@@ -259,4 +258,4 @@ PowerShell：
 - MCP 提供的团队指导不能绕过代码 Review、安全策略或发布流程；
 - 执行 AI 生成的代码和命令前仍然需要 Review 和验证。
 
-普通开发者日常只需要记住一条主线：**接入 MCP → 使用团队资产 → 完成并验证任务 → 必要时提交 Knowledge / Skill Candidate → 把 Candidate ID 给管理员审批。**
+普通开发者日常只需要记住一条主线：**接入 MCP → 使用团队资产 → 完成并验证任务 → 必要时提交 Knowledge Candidate 或 Skill Bundle → 把对应 ID 给管理员审批。**

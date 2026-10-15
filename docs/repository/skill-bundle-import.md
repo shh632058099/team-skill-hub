@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-Team Skill Hub 当前的 Skill Candidate 发布模型以单个 `SKILL.md` 为单位，但从长期模型看，**Skill 本身就应该被视为一个 Bundle**：`SKILL.md` 只是必需入口文件，`scripts/`、`references/`、`assets/` 等都是同一个 Skill 的组成部分。现有单文件 Skill 只是“只包含一个 `SKILL.md` 的最小 Bundle”。Superpowers 这类仓库则是在一个命名空间下包含多个 Skill Bundle。
+Team Skill Hub 的 Skill 发布模型统一采用 Bundle：**Skill 本身就是一个 Bundle**。`SKILL.md` 是必需入口文件，`scripts/`、`references/`、`assets/` 等都是同一个 Skill 的组成部分；单文件 Skill 只是“只包含一个 `SKILL.md` 的最小 Bundle”。Superpowers 这类仓库则是在一个命名空间下包含多个 Skill Bundle。
 
 本设计新增 **Skill Bundle Import** 能力，使开发者可以在 Codex / Claude Code 会话里通过 MCP 提交已有 Skill 集合，也可以由管理员在 Web 页面导入外部 Bundle。两种入口共享同一套后端模型、校验、审核和发布逻辑。
 
@@ -32,7 +32,7 @@ Team Skill Hub 当前的 Skill Candidate 发布模型以单个 `SKILL.md` 为单
 - 把 Bundle 拆成多个独立 PR/MR；
 - 修改单个 Knowledge Candidate 的发布语义。
 
-现有 `submit_skill_candidate` 在兼容期继续保留，但语义上视为 `submit_skill_bundle` 的单 Skill / 单文件兼容入口，后续可随新的 Skill Creator 演进逐步收敛到 Bundle-first 模型。新的 Skill Creator 无论只生成 `SKILL.md`，还是同时生成 `scripts/`、`references/`、`assets/`，都应产出同一种 Skill Bundle Snapshot。
+Skill 对外提交入口统一为 `submit_skill_bundle`。单文件 Skill 不是另一种业务类型，而是只包含一个 `SKILL.md` 的 Skill Bundle；新的 Skill Creator 无论只生成 `SKILL.md`，还是同时生成 `scripts/`、`references/`、`assets/`，都应产出同一种 Skill Bundle Snapshot。
 
 ## 3. 总体流程
 
@@ -170,7 +170,7 @@ Hub 不因为删除数量较多而自动拒绝，但 Admin Review 必须清晰�
 
 Skill 发布领域采用 **Bundle-first** 模型：所有 Skill 都以 Snapshot Bundle 表示，不再把“单文件 Skill”和“多文件 Bundle”设计成两种并列业务类型。单文件 Skill 只是文件集合中只有一个 `SKILL.md` 的 Bundle；多文件 Skill 可以包含同一 Skill root 下的资源；Superpowers 这类集合则由一个 namespace Snapshot 同时包含多个 Skill root。
 
-`KnowledgeCandidate` 仍可保持现有单文件模型；Skill Candidate 应逐步迁移到统一的 Skill Bundle / Skill Snapshot 模型。兼容期 API 可以继续接受现有 `submit_skill_candidate` 输入，其中 `rd-skills` 在 Application Service 兼容层规范化为单 Skill Bundle；第一阶段尚未纳入 Bundle collection 模型的 `custom-skills` 保持现有 legacy 单文件发布行为。
+`KnowledgeCandidate` 保持 Knowledge 专用的单内容模型；Skill 不再通过 Candidate MCP API 提交，而统一使用 Skill Bundle / Skill Snapshot 模型。历史内部兼容代码可在不影响旧持久化数据的前提下暂时保留，但不得作为客户端可见入口继续暴露。
 
 建议核心类型：
 
@@ -474,9 +474,9 @@ Bundle Import 必须复用现有 Principal / repository visibility 与 publishin
 
 ## 19. 与现有能力的关系
 
-Skill 侧统一采用 Bundle-first：新的主入口是 `submit_skill_bundle`。现有 `submit_skill_candidate` 作为兼容入口保留一段时间。当前 legacy `rd-skills` 实际 `suggested_path` 形式是 `<namespace>/<skill-path>/SKILL.md`，例如 `ota/design/SKILL.md` 映射为 `namespace = ota`、`skill_path = design`、`replacementRoot = skills/ota/design`；兼容层也可以容忍并剥离历史输入中的可选 leading `skills/`。只有能够无歧义解析出 namespace 和非空 skill path 的路径才迁移到 Bundle 模型；例如 `ota/SKILL.md` 不允许猜测 replacement boundary，应保持 legacy 行为或明确拒绝迁移。兼容入口绝不能因为只拿到单个 `SKILL.md` 就默认拥有整个 `skills/ota/**` 的 collection 替换权。第一阶段新的 Bundle API 只支持 `rd-skills`，因此旧 `custom-skills` Candidate 暂时继续走现有 legacy 单文件发布路径，直到 Bundle collection 模型扩展后再迁移，不能为了表面统一破坏当前 `custom/` 路径语义。
+Skill 侧统一采用 Bundle-first，唯一客户端提交入口是 `submit_skill_bundle`。`import_type=skill` 表示一个明确 Skill root，`import_type=collection` 表示用户明确选择的多 Skill namespace Snapshot；服务端不得根据“文件少”或“只有一个 SKILL.md”把单 Skill降级到另一套 Candidate 协议，也不得因为输入歧义扩大 replacement boundary。
 
-后续新的 Skill Creator 应直接生成完整 Skill 目录并调用 `submit_skill_bundle`，因此不需要再设计一套“单文件 Skill 发布”协议；旧兼容入口只是适配层，不再作为新的领域能力继续扩展。
+Skill Creator 应直接生成完整 Skill 目录并调用 `submit_skill_bundle`，因此不再存在单独的“单文件 Skill 发布”协议。
 
 现有 `list_skills`、`search_skills`、`resolve_skill`、`get_skill`、`get_skill_resource` 不需要改变；Bundle merge 并 Repository Sync 后，各 Skill 仍作为普通 Skill 被索引和消费。
 
@@ -505,7 +505,7 @@ Skill 侧统一采用 Bundle-first：新的主入口是 `submit_skill_bundle`。
 15. Git Import 对未允许 host、loopback/private/link-local 地址、redirect 绕过、submodule/LFS 和资源超限输入拒绝；
 16. Snapshot 状态多次变化不会在持久化层重复保存全部文件正文；
 17. Git/MCP 提供 executable mode、或 ZIP entry 明确保留可信 Unix executable mode 时，`0755` 文本脚本发布后仍保持 executable；缺失 mode 的 ZIP 文件按 `0644`；
-18. `rd-skills` 的旧 `submit_skill_candidate` 可映射到 Bundle，而 `custom-skills` 在第一阶段仍保持 legacy 行为；
+18. MCP `tools/list` 暴露 `submit_skill_bundle`，且不再暴露 `submit_skill_candidate`；`submit_knowledge_candidate` 的 schema 不接受 Skill 专用字段；
 19. 先提交 `namespace=ota, import_type=skill, skill_path=design`，再提交 `namespace=ota, import_type=skill, skill_path=usage`，第二个 PR 不得删除或修改 `skills/ota/design/**`；
 20. `namespace=superpowers, import_type=collection` 仍可对整个 `skills/superpowers/**` 执行完整快照更新；
 21. `import_type=skill` 只接受 Snapshot 根的唯一一个 `SKILL.md`，包含 `nested/SKILL.md` 或多个 `SKILL.md` 时原子拒绝；
@@ -531,6 +531,6 @@ Skill 侧统一采用 Bundle-first：新的主入口是 `submit_skill_bundle`。
 
 实现优先复用现有 repository publishing config、GitHub/GitLab request/auth、PR/MR reconciliation、Admin session/auth、storage abstraction、Skill parser/validator 和 Repository Sync。
 
-Skill 侧以 Bundle Snapshot 作为唯一的新发布抽象：单文件 Skill、多文件 Skill、多 Skill collection 都使用同一数据结构和 Publisher；差异只体现在 `importType` / `replacementRoot`。不要继续给 `KnowledgeCandidate` 增加 Skill Bundle 专用字段；`rd-skills` 旧 `submit_skill_candidate` 通过兼容适配层转为 `skill` Bundle 模型，`custom-skills` 在第一阶段明确保持 legacy 路径，待后续 collection 模型统一后再迁移。
+Skill 侧以 Bundle Snapshot 作为唯一发布抽象：单文件 Skill、多文件 Skill、多 Skill collection 都使用同一数据结构和 Publisher；差异只体现在 `importType` / `replacementRoot`。不要给 `KnowledgeCandidate` 增加 Skill Bundle 专用字段，也不要重新增加第二个 Skill 提交入口。
 
 当前实现按本设计及 `docs/superpowers/plans/2026-10-14-skill-bundle-import.md` 以 TDD 顺序落地；后续变更继续以本文件的 replacement boundary、审核基线、CAS、幂等和安全边界为契约。

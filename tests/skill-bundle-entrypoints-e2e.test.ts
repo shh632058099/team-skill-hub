@@ -163,7 +163,7 @@ test("MCP submit_skill_bundle maps Codex payload to Bundle application workflow"
             import_type: "skill",
             skill_path: "design",
             skill_collection: "rd-skills",
-            files: [{ path: "SKILL.md", content: "skill" }],
+            files: [{ path: "SKILL.md", content: "skill", content_base64: "" }],
             submission_key: "codex-retry-1"
           }
         }
@@ -176,7 +176,40 @@ test("MCP submit_skill_bundle maps Codex payload to Bundle application workflow"
     assert.equal(captured.input.skillPath, "design");
     assert.equal(captured.input.submissionKey, "codex-retry-1");
     assert.equal(captured.input.sourceType, "mcp");
+    assert.equal(captured.input.files[0].content, "skill");
+    assert.equal("contentBase64" in captured.input.files[0], false);
     assert.equal(captured.principal.id, "development-user");
+  } finally {
+    await app.close();
+    search.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP exposes Bundle as the only Skill submission entrypoint", async () => {
+  const { dataDir, search, config, service } = await fixture("skill-bundle-tools-e2e-");
+  const app = await startServer(config, service);
+  try {
+    const address = app.server.address();
+    assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-skill-hub-client": "claude-code" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /submit_skill_bundle/);
+    assert.doesNotMatch(text, /submit_skill_candidate/);
+    assert.doesNotMatch(text, /suggested_type/);
+    assert.match(text, /only MCP entrypoint for submitting Skills/i);
+    const dataLine = text.split("\n").find((line) => line.startsWith("data: "));
+    assert.ok(dataLine);
+    const payload = JSON.parse(dataLine.slice("data: ".length)) as any;
+    const bundleTool = payload.result.tools.find((tool: any) => tool.name === "submit_skill_bundle");
+    assert.ok(bundleTool);
+    assert.equal(bundleTool.inputSchema.type, "object");
+    assert.equal(bundleTool.inputSchema.oneOf, undefined);
   } finally {
     await app.close();
     search.close();
