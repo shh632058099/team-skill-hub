@@ -11,21 +11,11 @@ For team-specific engineering tasks and questions, including short questions con
 5. Load only the selected assets; do not load every candidate. If no relevant Team Skill Hub asset is found, continue normally and do not invent team-specific guidance.
 6. Respect repository visibility, role filtering, and client compatibility.
 7. If a retrieved Team Skill Hub asset is clearly outdated or incorrect, use `submit_feedback` with a concise evidence-based reason.
-8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, first summarize it with the exact six-section Markdown format defined below, then use `submit_knowledge_candidate`. The server validates and canonicalizes the same format. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.
+8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, call `get_knowledge_submission_spec` immediately before submission, follow the returned current rules/template, then call `submit_knowledge_candidate` with the returned `spec_version`. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.
 9. When creating or submitting any Skill, including a Skill that contains only one `SKILL.md`, use `submit_skill_bundle`. Use `import_type=skill` for one Skill root and `import_type=collection` only for an explicit multi-Skill namespace snapshot. Never substitute `submit_knowledge_candidate` for a Skill. If `submit_skill_bundle` is not currently loaded in Claude Code, use ToolSearch to load that MCP tool before submitting.
 10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
 11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run `{{CLIENT_LAUNCHER}} upgrade`; after a required update, restart Claude Code before relying on new integration behavior.
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.
 
-For durable knowledge, the final response must use this exact Markdown summary format.
-Keep the title at no more than 160 characters (prefer 20-80 characters) and make it a concise, searchable conclusion. Keep the entire summary at no more than 50,000 characters.
-# Title
-
-## 问题
-## 根因
-## 解决方案
-## 验证结果
-## 适用范围
-## 约束/限制
 <!-- END TEAM-SKILL-HUB -->

@@ -35,6 +35,15 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   const claudeSettings = await readFile(path.join(claude, "settings.json"), "utf8");
   assert.match(claudeSettings, /team-skill-hub-client.*session-start --client claude/);
   assert.match(claudeSettings, /team-skill-hub-client.*session-start-display --client claude/);
+  const codexGuidance = await readFile(path.join(codex, "AGENTS.md"), "utf8");
+  const claudeGuidance = await readFile(path.join(claude, "CLAUDE.md"), "utf8");
+  for (const guidance of [codexGuidance, claudeGuidance]) {
+    assert.match(guidance, /get_knowledge_submission_spec/);
+    assert.match(guidance, /submit_knowledge_candidate/);
+    assert.doesNotMatch(guidance, /## 问题/);
+    assert.doesNotMatch(guidance, /exact six-section/i);
+  }
+  assert.ok(releaseVersion >= 6, "dynamic Knowledge spec guidance requires a new client integration release");
 });
 
 test("second client targeting a different Hub fails before setup mutation", async () => {

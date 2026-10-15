@@ -161,28 +161,16 @@ Automatic candidates still require administrator review and are never published 
 
 ### Manual feedback
 
-For stable, reusable, verified knowledge, use `submit_knowledge_candidate`.
+For stable, reusable, verified knowledge, use the server-managed Knowledge Submission Spec instead of relying on a client-embedded format:
 
-Recommended structure:
+1. Call `get_knowledge_submission_spec` immediately before submission.
+2. Follow the returned current rules, Markdown template, and safety requirements.
+3. Call `submit_knowledge_candidate` with the returned `spec_version`.
+4. If the server returns `KNOWLEDGE_SPEC_OUTDATED`, fetch the current spec again and retry.
 
-```markdown
-# Title
+The administrator can edit and version the active specification at `/admin/knowledge-submission-spec`. Clients do not need a new hard-coded format when the server-side policy changes.
 
-## Problem
-## Root cause
-## Solution
-## Verification
-## Scope
-## Constraints / limitations
-```
-
-Example:
-
-```text
-Turn the verified conclusion from this task into a Team Skill Hub Knowledge Candidate.
-Use the fixed six-section structure and submit it with submit_knowledge_candidate.
 Do not include tokens, passwords, customer-sensitive data, or unverified speculation.
-```
 
 ## 9. Report bad or outdated content
 

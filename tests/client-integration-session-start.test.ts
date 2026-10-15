@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -73,4 +73,22 @@ test("Codex and Claude use client-specific renderer contracts", async () => {
   assert.equal(renderCodexDecision("none", { installed: 5, latest: 5, minimum: 4 }), "");
   assert.equal(renderCodexTerminalNotice("none", { installed: 5, latest: 5, minimum: 4 }), "");
   assert.equal(renderClaudeTerminalNotice("none", { installed: 5, latest: 5, minimum: 4 }), "");
+});
+
+
+test("client guidance fetches server Knowledge submission spec instead of embedding the six-section policy", async () => {
+  const files = [
+    "client-integration/templates/codex-guidance.md",
+    "client-integration/templates/claude-guidance.md",
+    "scripts/setup-codex-mcp.sh",
+    "scripts/setup-codex-mcp.ps1",
+    "scripts/setup-claude-code.sh",
+    "scripts/setup-claude-code.ps1"
+  ];
+  for (const file of files) {
+    const source = await readFile(file, "utf8");
+    assert.match(source, /get_knowledge_submission_spec/);
+    assert.doesNotMatch(source, /## 问题/);
+    assert.doesNotMatch(source, /exact six-section/i);
+  }
 });
