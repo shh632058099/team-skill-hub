@@ -65,7 +65,29 @@ $env:TEAM_SKILL_HUB_API_KEY='skh_...'
 claude mcp get teamSkillHub
 ```
 
-## 4. 验证连接
+## 4. Client Integration 更新
+
+setup 脚本会完成一次性的本地 Team Skill Hub Client Runtime bootstrap。完成后，Hub 接入逻辑再次变化时，正常情况下**不需要**研发重新下载并执行新的 setup 文件。
+
+Codex/Claude 在 SessionStart 可能提示有新版本。检查使用缓存并且 fail-open，不会静默升级。只有用户明确要求升级时，客户端才应执行：
+
+Linux / macOS / WSL：
+
+```bash
+~/.team-skill-hub/bin/team-skill-hub-client upgrade
+```
+
+Windows PowerShell：
+
+```powershell
+& "$HOME\.team-skill-hub\bin\team-skill-hub-client.ps1" upgrade
+```
+
+如果提示为 required update，升级成功后需要重启 CLI。排查和恢复时使用同一个 launcher 路径并传入 `doctor` 或 `rollback`。旧的 setup `--upgrade` / `-Upgrade` 仅保留给首次迁移或 launcher 损坏时的灾难恢复。
+
+setup 会记录实际解析后的 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`，后续升级继续修改原安装位置。state 只保存 API Key 的环境变量名称，不保存 API Key 值。
+
+## 5. 验证连接
 
 让客户端执行：
 
@@ -76,7 +98,7 @@ claude mcp get teamSkillHub
 
 成功后即可正常使用 Team Skill Hub。
 
-## 5. 日常怎么使用
+## 6. 日常怎么使用
 
 不知道该用什么时，优先让客户端使用 `discover`。
 
@@ -112,7 +134,7 @@ claude mcp get teamSkillHub
 
 建议按需加载，不要一开始把所有 Skill、Knowledge 和资源全部塞进上下文。
 
-## 6. 如何创建 Skill
+## 7. 如何创建 Skill
 
 当一次任务形成了稳定、可复用、已经验证的操作流程时，可以整理成 Skill。
 
@@ -127,7 +149,7 @@ claude mcp get teamSkillHub
 
 提交只会创建待管理员审核的 Skill Bundle Import，不会直接写正式仓库。
 
-## 7. 如何回流 Knowledge
+## 8. 如何回流 Knowledge
 
 Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、故障根因、测试结论和项目约束。
 
@@ -162,13 +184,13 @@ Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、�
 不要包含 Token、密码、客户敏感信息或未经验证的推测。
 ```
 
-## 8. 如何反馈已有内容有问题
+## 9. 如何反馈已有内容有问题
 
 如果发现 Knowledge 或 Skill 已经过期、错误或质量较差，可以使用 `submit_feedback`，写清楚可验证的原因。
 
 如果已有资产完全不适用，也可以按类型提交新的 Knowledge Candidate 或 Skill Bundle。
 
-## 9. 如何找管理员审批
+## 10. 如何找管理员审批
 
 提交 Candidate 后，把 **Candidate ID** 发给管理员即可。
 
@@ -191,7 +213,7 @@ pending（待审核）
 
 如果管理员拒绝 Candidate，会给出审核原因；开发者可以修改内容后重新提交，或者让管理员重新批准现有 Candidate。
 
-## 10. 权限和职责边界
+## 11. 权限和职责边界
 
 如果预期的 Repository、Skill 或 Knowledge 看不到：
 
@@ -204,7 +226,7 @@ pending（待审核）
 
 Repository 同步、回滚、发布配置、生命周期治理和 Evaluation 属于管理员或平台维护工作，不是普通开发者的日常操作。
 
-## 11. 常见问题
+## 12. 常见问题
 
 ### `codex mcp list` 中没有 teamSkillHub
 
@@ -250,7 +272,7 @@ PowerShell：
 
 升级后重新启动 Codex。
 
-## 12. 安全使用原则
+## 13. 安全使用原则
 
 - Developer API Key 只放在环境变量或公司认可的 Secret Store 中；
 - 不要把 API Key、Token、密码或客户敏感信息提交给 Team Skill Hub；

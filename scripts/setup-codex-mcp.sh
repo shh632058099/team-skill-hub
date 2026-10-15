@@ -6,8 +6,8 @@ SERVER_NAME="teamSkillHub"
 API_KEY_ENV="TEAM_SKILL_HUB_API_KEY"
 MCP_URL=""
 AUTO_KNOWLEDGE="true"
-HOOK_RUNTIME_VERSION="1.1.0"
-HOOK_SCHEMA_VERSION="1"
+HOOK_RUNTIME_VERSION=""
+HOOK_SCHEMA_VERSION=""
 UPGRADE="false"
 SERVER_NAME_EXPLICIT="false"
 API_KEY_ENV_EXPLICIT="false"
@@ -61,6 +61,20 @@ fi
 [[ "$API_KEY_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "Invalid API key env name" >&2; exit 2; }
 MCP_BASE="${MCP_URL%/}"
 EVENT_URL="${MCP_BASE%/mcp}/client-events"
+HUB_BASE_URL="${MCP_BASE%/mcp}"
+CLIENT_ROOT="${TEAM_SKILL_HUB_CLIENT_ROOT:-$HOME/.team-skill-hub}"
+bash "$SCRIPT_DIR/bootstrap-client-integration.sh" --client codex --config-home "$CODEX_DIR" --hub-base-url "$HUB_BASE_URL" --server-name "$SERVER_NAME" --api-key-env "$API_KEY_ENV"
+CLIENT_LAUNCHER="$CLIENT_ROOT/bin/team-skill-hub-client"
+CLIENT_RELEASE_FILE="$CLIENT_ROOT/releases/v$(tr -d '\r\n' < "$CLIENT_ROOT/current")/release.json"
+if command -v python3 >/dev/null 2>&1; then
+  HOOK_RUNTIME_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hookRuntimeVersion"])' "$CLIENT_RELEASE_FILE")"
+  HOOK_SCHEMA_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hookSchemaVersion"])' "$CLIENT_RELEASE_FILE")"
+elif command -v node >/dev/null 2>&1; then
+  HOOK_RUNTIME_VERSION="$(node -e 'const x=require(process.argv[1]);process.stdout.write(String(x.hookRuntimeVersion))' "$CLIENT_RELEASE_FILE")"
+  HOOK_SCHEMA_VERSION="$(node -e 'const x=require(process.argv[1]);process.stdout.write(String(x.hookSchemaVersion))' "$CLIENT_RELEASE_FILE")"
+else
+  echo "python3 or node is required to read client integration release metadata" >&2; exit 2
+fi
 
 mkdir -p "$CODEX_DIR" "$HOOKS_DIR"
 touch "$CODEX_CONFIG" "$AGENTS_FILE"
@@ -117,6 +131,7 @@ For team-specific engineering tasks and questions, including short questions con
 8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, first summarize it with the exact six-section Markdown format defined below, then use \`submit_knowledge_candidate\`. The server validates and canonicalizes the same format. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.
 9. When creating or submitting any Skill, including a Skill that contains only one \`SKILL.md\`, use \`submit_skill_bundle\`. Use \`import_type=skill\` for one Skill root and \`import_type=collection\` only for an explicit multi-Skill namespace snapshot. Do not submit Skills through Knowledge Candidate APIs.
 10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
+11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run \`"$CLIENT_LAUNCHER" upgrade\`; after a required update, restart Codex before relying on new integration behavior.
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.
 
@@ -139,7 +154,7 @@ cp "$SCRIPT_DIR/team-skill-hub-hook.ps1" "$PS_HOOK"
 chmod +x "$SH_HOOK"
 printf 'event_url=%s\nserver_name=%s\napi_key_env=%s\ncapture_stop_message=%s\nruntime_version=%s\nhook_schema_version=%s\n' "$EVENT_URL" "$SERVER_NAME" "$API_KEY_ENV" "$AUTO_KNOWLEDGE" "$HOOK_RUNTIME_VERSION" "$HOOK_SCHEMA_VERSION" > "$HOOK_CONF"
 
-export HOOKS_JSON SH_HOOK PS_HOOK
+export HOOKS_JSON SH_HOOK PS_HOOK CLIENT_LAUNCHER
 if command -v python3 >/dev/null 2>&1; then
   python3 <<'PY'
 import json,os
@@ -166,6 +181,14 @@ for event in events:
         group["matcher"]="^__team_skill_hub_reserved__$"
     kept.append(group)
     hooks[event]=kept
+client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
+kept=[]
+for group in hooks.get("SessionStart",[]) or []:
+    handlers=[h for h in (group.get("hooks",[]) or []) if "team-skill-hub-client" not in str(h.get("command","")) and "team-skill-hub-client" not in str(h.get("commandWindows",""))]
+    if handlers:
+        copy=dict(group);copy["hooks"]=handlers;kept.append(copy)
+kept.append({"hooks":[{"type":"command","command":f'"{client}" session-start --client codex',"timeout":2}]})
+hooks["SessionStart"]=kept
 root.setdefault("description","Codex lifecycle hooks including Team Skill Hub client events.")
 with open(path,"w",encoding="utf-8") as f: json.dump(root,f,ensure_ascii=False,indent=2);f.write("\n")
 PY
@@ -175,6 +198,7 @@ const fs=require("fs");const path=process.env.HOOKS_JSON;let root={};if(fs.exist
 root.hooks ||= {};
 const events=["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","PreCompact","PostCompact","Stop","SessionEnd"];
 for(const event of events){const handler={type:"command",command:`bash "${process.env.SH_HOOK.replaceAll("\\","/")}"`,commandWindows:`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${process.env.PS_HOOK}"`,async:!["SessionStart","PostToolUse","Stop","SessionEnd"].includes(event),timeout:2};const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-hook")&&!String(h.commandWindows||"").includes("team-skill-hub-hook"));if(hs.length)kept.push({...group,hooks:hs})}const group={hooks:[handler]};if(["PreToolUse","PreCompact","PostCompact"].includes(event))group.matcher="^__team_skill_hub_reserved__$";kept.push(group);root.hooks[event]=kept}
+const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client")&&!String(h.commandWindows||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client codex`,timeout:2}]});root.hooks.SessionStart=sk;
 root.description ||= "Codex lifecycle hooks including Team Skill Hub client events.";
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");
 NODE

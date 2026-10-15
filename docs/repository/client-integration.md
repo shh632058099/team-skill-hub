@@ -403,7 +403,7 @@ Every current Hook event carries:
 - `runtime_version
 - `hook_schema_version
 
-Current values are defined in `src/client-events.ts` and mirrored by the setup scripts. Admin Session views classify clients as `current`, `outdated`, or `unknown`.
+Client integration release metadata is defined once in `client-integration/release.json`. Bootstrap/setup reads the installed release metadata instead of maintaining separate Hook Runtime/schema constants in each setup script. Admin Session views continue to classify Hook clients as `current`, `outdated`, or `unknown`.
 
 ### Failure behavior
 
@@ -411,20 +411,14 @@ Normal lifecycle hooks are fail-open: inability to reach the Hub must not block 
 
 ### Upgrade
 
-Linux/macOS/WSL:
+Normal upgrades no longer require downloading a new setup script. After the one-time bootstrap migration, SessionStart checks the Hub's `/client-integration/manifest.json` with a 12-hour cache and a bounded network budget. It never installs an update automatically.
 
-~~~bash
-bash scripts/setup-codex-mcp.sh --upgrade
-~~~
+When an update notice appears, the user explicitly requests the upgrade. Use the stable launcher at `~/.team-skill-hub/bin/team-skill-hub-client` on Linux/macOS/WSL, or `~/.team-skill-hub/bin/team-skill-hub-client.ps1` from PowerShell on Windows, with the `upgrade` argument.
 
-PowerShell:
+The runtime downloads the versioned package from the configured Hub, verifies SHA-256, applies managed configuration under an exclusive mutation lock, updates versioned guidance and lifecycle Hook files, and commits `current`/`state.json` only after updater self-check succeeds. A transaction journal restores the previous committed state after interruption.
 
-~~~powershell
-.\scripts\setup-codex-mcp.ps1 -Upgrade
-~~~
-
-Upgrade reuses the existing URL, server name, API-key environment reference, and automatic-Knowledge preference unless explicitly overridden.
-
+Use the same launcher with `doctor` for local diagnostics and `rollback` to reconcile to the locally retained previous successful release. Rollback does not require the server to still host that package. `setup-codex-mcp.* --upgrade` and `setup-claude-code.* --upgrade` remain only as bootstrap/disaster-recovery paths when the stable launcher is missing or damaged.
+The local runtime lives under `~/.team-skill-hub` by default. Setup records the resolved `CODEX_HOME` / `CLAUDE_CONFIG_DIR`; later upgrades always use those recorded absolute paths.
 
 ## Claude Code Adapter
 

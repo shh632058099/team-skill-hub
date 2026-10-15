@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const BEGIN = "<!-- BEGIN TEAM-SKILL-HUB -->";
@@ -25,8 +25,24 @@ function replaceBlock(content, begin, end, block) {
   const base = out.join("\n").trimEnd();
   return (base ? base + "\n\n" : "") + block.trimEnd() + "\n";
 }
-function guidanceBlock(serverName) {
-  return `${BEGIN}\n## Team Skill Hub\n\nUse the \`${serverName}\` MCP server proactively for team-specific engineering work.\n\nWhen Team Skill Hub reports a client integration update, never upgrade silently. Only when the user explicitly asks to upgrade, run \`team-skill-hub-client upgrade\`; after a required update, restart the CLI before relying on new integration behavior.\n${END}`;
+function launcherCommand(clientRoot) {
+  if (process.platform === "win32") return `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.join(clientRoot, "bin", "team-skill-hub-client.ps1")}"`;
+  return `"${path.join(clientRoot, "bin", "team-skill-hub-client")}"`;
+}
+function fallbackGuidance(serverName, clientRoot) {
+  return `${BEGIN}\n## Team Skill Hub\n\nUse the \`${serverName}\` MCP server proactively for team-specific engineering work.\n\nWhen Team Skill Hub reports a client integration update, never upgrade silently. Only when the user explicitly asks to upgrade, run \`${launcherCommand(clientRoot)} upgrade\`; after a required update, restart the CLI before relying on new integration behavior.\n${END}`;
+}
+async function renderGuidance(content, serverName, client, releaseRoot, clientRoot) {
+  let block = fallbackGuidance(serverName, clientRoot);
+  if (releaseRoot) {
+    const templateFile = path.join(releaseRoot, "templates", `${client}-guidance.md`);
+    if (await exists(templateFile)) {
+      block = (await readFile(templateFile, "utf8"))
+        .replaceAll("{{SERVER_NAME}}", serverName)
+        .replaceAll("{{CLIENT_LAUNCHER}}", launcherCommand(clientRoot));
+    }
+  }
+  return replaceBlock(content, BEGIN, END, block);
 }
 function codexMcpBlock(serverName, url, apiKeyEnv) {
   return `${MCP_BEGIN}\n[mcp_servers.${serverName}]\nurl = "${url}"\nbearer_token_env_var = "${apiKeyEnv}"\ndefault_tools_approval_mode = "approve"\n${MCP_END}`;
@@ -54,6 +70,52 @@ function mergeHook(root, event, marker, handler) {
   kept.push({ hooks: [handler] });
   root.hooks[event] = kept;
 }
+async function readKeyValueFile(file) {
+  const values = {};
+  const raw = await readText(file);
+  for (const line of raw.split(/\r?\n/)) {
+    const i = line.indexOf("=");
+    if (i > 0) values[line.slice(0, i)] = line.slice(i + 1);
+  }
+  return values;
+}
+async function getReleaseMetadata(context) {
+  if (context.releaseMetadata) return context.releaseMetadata;
+  if (!context.releaseRoot) return null;
+  return JSON.parse(await readFile(path.join(context.releaseRoot, "release.json"), "utf8"));
+}
+async function updateHookFiles(context) {
+  if (!context.releaseRoot) return;
+  const meta = await getReleaseMetadata(context);
+  const { state, releaseRoot } = context;
+  const codex = state.clients?.codex?.enabled ? state.clients.codex : null;
+  if (codex) {
+    const hooksDir = path.join(codex.config_home, "hooks");
+    await mkdir(hooksDir, { recursive: true });
+    for (const name of ["team-skill-hub-hook.sh", "team-skill-hub-hook.ps1"]) {
+      const source = path.join(releaseRoot, "scripts", name);
+      if (await exists(source)) await copyFile(source, path.join(hooksDir, name));
+    }
+    const sh = path.join(hooksDir, "team-skill-hub-hook.sh");
+    if (await exists(sh)) await chmod(sh, 0o755).catch(() => {});
+    const conf = path.join(hooksDir, "team-skill-hub.conf");
+    const old = await readKeyValueFile(conf);
+    const eventUrl = `${String(state.hub_base_url).replace(/\/$/, "")}/client-events`;
+    await writeAtomic(conf, `event_url=${eventUrl}\nserver_name=${codex.server_name}\napi_key_env=${state.api_key_env}\ncapture_stop_message=${old.capture_stop_message ?? "true"}\nruntime_version=${meta?.hookRuntimeVersion ?? old.runtime_version ?? "unknown"}\nhook_schema_version=${meta?.hookSchemaVersion ?? old.hook_schema_version ?? "0"}\n`);
+  }
+  const claude = state.clients?.claude?.enabled ? state.clients.claude : null;
+  if (claude) {
+    const hooksDir = path.join(claude.config_home, "hooks");
+    await mkdir(hooksDir, { recursive: true });
+    const stopSource = path.join(releaseRoot, "scripts", "team-skill-hub-claude-stop.sh");
+    const stopTarget = path.join(hooksDir, "team-skill-hub-claude-stop.sh");
+    if (await exists(stopSource)) { await copyFile(stopSource, stopTarget); await chmod(stopTarget, 0o755).catch(() => {}); }
+    const conf = path.join(hooksDir, "team-skill-hub.conf");
+    const old = await readKeyValueFile(conf);
+    const base = String(state.hub_base_url).replace(/\/$/, "");
+    await writeAtomic(conf, `event_url=${base}/client-events/claude-code\nmcp_url=${base}/mcp\nserver_name=${claude.server_name}\napi_key_env=${state.api_key_env}\ncapture_stop_message=${old.capture_stop_message ?? "true"}\nruntime_version=${meta?.hookRuntimeVersion ?? old.runtime_version ?? "unknown"}\nhook_schema_version=${meta?.hookSchemaVersion ?? old.hook_schema_version ?? "0"}\n`);
+  }
+}
 
 export async function applyManagedConfig(context) {
   const { state, clientRoot } = context;
@@ -67,6 +129,8 @@ export async function applyManagedConfig(context) {
     catch { throw new Error(`Existing Claude settings.json is invalid JSON: ${settingsFile}`); }
   }
   const launcher = path.join(clientRoot, "bin", "team-skill-hub-client").replaceAll("\\", "/");
+  const sessionLauncher = launcherCommand(clientRoot);
+  const windowsLauncher = `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.join(clientRoot, "bin", "team-skill-hub-client.ps1")}"`;
   const mcpUrl = `${String(state.hub_base_url).replace(/\/$/, "")}/mcp`;
   if (codex) {
     await mkdir(codex.config_home, { recursive: true });
@@ -75,12 +139,10 @@ export async function applyManagedConfig(context) {
     const hooksFile = path.join(codex.config_home, "hooks.json");
     const originalConfig = await readText(configFile);
     const config = replaceBlock(removeLegacyTomlServer(originalConfig, codex.server_name), MCP_BEGIN, MCP_END, codexMcpBlock(codex.server_name, mcpUrl, state.api_key_env));
-    const agents = replaceBlock(await readText(agentsFile), BEGIN, END, guidanceBlock(codex.server_name));
+    const agents = await renderGuidance(await readText(agentsFile), codex.server_name, "codex", context.releaseRoot, clientRoot);
     let hooks = {}; const hooksRaw = await readText(hooksFile, "{}");
     try { hooks = hooksRaw.trim() ? JSON.parse(hooksRaw) : {}; } catch { throw new Error(`Existing Codex hooks.json is invalid JSON: ${hooksFile}`); }
-    const normal = commandHook(`"${launcher}" lifecycle --client codex`, `powershell.exe -NoProfile -File "${clientRoot}\\bin\\team-skill-hub-client.ps1" lifecycle --client codex`);
-    for (const event of ["UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) mergeHook(hooks, event, "team-skill-hub-client", normal);
-    const session = commandHook(`"${launcher}" session-start --client codex`, `powershell.exe -NoProfile -File "${clientRoot}\\bin\\team-skill-hub-client.ps1" session-start --client codex`);
+    const session = commandHook(`${sessionLauncher} session-start --client codex`, `${windowsLauncher} session-start --client codex`);
     mergeHook(hooks, "SessionStart", "team-skill-hub-client", session);
     await writeAtomic(configFile, config);
     await writeAtomic(agentsFile, agents);
@@ -93,11 +155,12 @@ export async function applyManagedConfig(context) {
     claudeSettings.permissions ||= {}; const allow = Array.isArray(claudeSettings.permissions.allow) ? claudeSettings.permissions.allow : [];
     const rule = `mcp__${claude.server_name}__*`; if (!allow.includes(rule)) allow.push(rule); claudeSettings.permissions.allow = allow;
     claudeSettings.hooks ||= {};
-    const session = { type: "command", command: `"${launcher}" session-start --client claude`, timeout: 2 };
+    const session = { type: "command", command: `${sessionLauncher} session-start --client claude`, timeout: 2 };
     mergeHook(claudeSettings, "SessionStart", "team-skill-hub-client", session);
     await writeAtomic(settingsFile, JSON.stringify(claudeSettings, null, 2) + "\n");
-    await writeAtomic(mdFile, replaceBlock(await readText(mdFile), BEGIN, END, guidanceBlock(claude.server_name)));
+    await writeAtomic(mdFile, await renderGuidance(await readText(mdFile), claude.server_name, "claude", context.releaseRoot, clientRoot));
   }
+  await updateHookFiles(context);
 }
 
 export async function selfCheckManagedConfig(context) {

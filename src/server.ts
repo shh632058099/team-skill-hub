@@ -1,6 +1,8 @@
 import { createMcpFastifyApp } from "@modelcontextprotocol/fastify";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import * as z from "zod/v4";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
@@ -106,6 +108,33 @@ export async function startServer(
   const app = createMcpFastifyApp({
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {})
+  });
+  const clientIntegrationDir = path.resolve(process.env.CLIENT_INTEGRATION_DIR ?? path.join(process.cwd(), "dist", "client-integration"));
+  const clientReleaseFiles = new Set(["linux.tar.gz", "windows.zip", "checksums.json"]);
+  app.get("/client-integration/manifest.json", async (_request, reply) => {
+    try {
+      const body = await readFile(path.join(clientIntegrationDir, "manifest.json"));
+      reply.header("cache-control", "no-cache, max-age=0").type("application/json; charset=utf-8");
+      return reply.send(body);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") { reply.code(404); return { error: "client integration manifest not found" }; }
+      throw error;
+    }
+  });
+  app.get<{ Params: { version: string; file: string } }>("/client-integration/releases/:version/:file", async (request, reply) => {
+    const { version, file } = request.params;
+    if (!/^\d+$/.test(version) || !clientReleaseFiles.has(file)) { reply.code(404); return { error: "client integration release not found" }; }
+    try {
+      const body = await readFile(path.join(clientIntegrationDir, "releases", version, file));
+      reply.header("cache-control", "public, max-age=31536000, immutable");
+      if (file.endsWith(".zip")) reply.type("application/zip");
+      else if (file.endsWith(".tar.gz")) reply.type("application/gzip");
+      else reply.type("application/json; charset=utf-8");
+      return reply.send(body);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") { reply.code(404); return { error: "client integration release not found" }; }
+      throw error;
+    }
   });
   const mcpHandler = createSkillHubMcpHandler(service);
   const nodeHandler = toNodeHandler(mcpHandler);

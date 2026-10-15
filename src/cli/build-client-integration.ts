@@ -24,10 +24,12 @@ async function sha256(file: string): Promise<string> {
 
 async function addTreeToZip(zip: JSZip, root: string, current = ""): Promise<void> {
   const abs = path.join(root, current);
-  for (const entry of await readdir(abs, { withFileTypes: true })) {
+  const entries = await readdir(abs, { withFileTypes: true });
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
     const rel = path.posix.join(current.split(path.sep).join("/"), entry.name);
     if (entry.isDirectory()) await addTreeToZip(zip, root, rel);
-    else zip.file(rel, await readFile(path.join(root, rel)));
+    else zip.file(rel, await readFile(path.join(root, rel)), { date: new Date("1980-01-01T00:00:00.000Z"), createFolders: false });
   }
 }
 
@@ -38,6 +40,8 @@ async function copyAllowedAssets(repoRoot: string, staging: string): Promise<voi
     "scripts/setup-codex-mcp.ps1",
     "scripts/setup-claude-code.sh",
     "scripts/setup-claude-code.ps1",
+    "scripts/bootstrap-client-integration.sh",
+    "scripts/bootstrap-client-integration.ps1",
     "scripts/team-skill-hub-hook.sh",
     "scripts/team-skill-hub-hook.ps1",
     "scripts/team-skill-hub-claude-stop.sh"
@@ -50,7 +54,7 @@ async function copyAllowedAssets(repoRoot: string, staging: string): Promise<voi
     await mkdir(path.dirname(dest), { recursive: true });
     await cp(source, dest);
   }
-  for (const rel of ["client-integration/runtime", "client-integration/updater"]) {
+  for (const rel of ["client-integration/runtime", "client-integration/updater", "client-integration/templates"]) {
     const source = path.join(repoRoot, rel);
     if (await exists(source)) await cp(source, path.join(staging, path.basename(rel)), { recursive: true });
   }

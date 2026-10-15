@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${TEAM_SKILL_HUB_CLIENT_ROOT:-$HOME/.team-skill-hub}"
+SELF="$ROOT/bin/team-skill-hub-client"
+if [[ -f "$SELF.next" ]]; then mv -f "$SELF.next" "$SELF" 2>/dev/null || true; chmod +x "$SELF" 2>/dev/null || true; fi
+[[ -f "$ROOT/current" ]] || { echo "Team Skill Hub client integration is not installed" >&2; exit 2; }
+VERSION="$(tr -d '\r\n' < "$ROOT/current")"
+RUNTIME="$ROOT/releases/v$VERSION/runtime/client-runtime.mjs"
+[[ -f "$RUNTIME" ]] || { echo "Team Skill Hub client runtime v$VERSION is missing" >&2; exit 2; }
+exec node "$RUNTIME" "$@"

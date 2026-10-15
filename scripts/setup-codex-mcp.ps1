@@ -13,8 +13,8 @@ $McpBegin = "# BEGIN TEAM-SKILL-HUB MCP"
 $McpEnd = "# END TEAM-SKILL-HUB MCP"
 $AgentsBegin = "<!-- BEGIN TEAM-SKILL-HUB -->"
 $AgentsEnd = "<!-- END TEAM-SKILL-HUB -->"
-$HookRuntimeVersion = "1.1.0"
-$HookSchemaVersion = "1"
+$HookRuntimeVersion = $null
+$HookSchemaVersion = $null
 
 $CodexDir = if ($CodexHome) { $CodexHome } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
 $CodexConfig = Join-Path $CodexDir "config.toml"
@@ -46,6 +46,14 @@ if ($Url -notmatch '^https?://') { throw "MCP URL must start with http:// or htt
 if ($ServerName -notmatch '^[A-Za-z0-9_-]+$') { throw "Invalid server name" }
 if ($ApiKeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "Invalid API key env name" }
 $EventUrl = ($Url -replace '/mcp/?$', '') + "/client-events"
+$HubBaseUrl = ($Url -replace '/mcp/?$', '').TrimEnd('/')
+$ClientRoot = if ($env:TEAM_SKILL_HUB_CLIENT_ROOT) { $env:TEAM_SKILL_HUB_CLIENT_ROOT } else { Join-Path $HOME '.team-skill-hub' }
+& (Join-Path $PSScriptRoot 'bootstrap-client-integration.ps1') -Client codex -ConfigHome $CodexDir -HubBaseUrl $HubBaseUrl -ServerName $ServerName -ApiKeyEnv $ApiKeyEnv
+$ClientLauncher = Join-Path $ClientRoot 'bin\team-skill-hub-client.ps1'
+$ClientVersion = (Get-Content -Raw (Join-Path $ClientRoot 'current')).Trim()
+$ClientRelease = Get-Content -Raw (Join-Path $ClientRoot ("releases\v$ClientVersion\release.json")) | ConvertFrom-Json
+$HookRuntimeVersion = [string]$ClientRelease.hookRuntimeVersion
+$HookSchemaVersion = [string]$ClientRelease.hookSchemaVersion
 
 New-Item -ItemType Directory -Force -Path $CodexDir | Out-Null
 New-Item -ItemType Directory -Force -Path $HooksDir | Out-Null
@@ -114,6 +122,7 @@ $AgentsBlock = @(
     "8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, first summarize it with the exact six-section Markdown format defined below, then use ``submit_knowledge_candidate``. The server validates and canonicalizes the same format. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.",
     "9. When creating or submitting any Skill, including a Skill that contains only one ``SKILL.md``, use ``submit_skill_bundle``. Use ``import_type=skill`` for one Skill root and ``import_type=collection`` only for an explicit multi-Skill namespace snapshot. Do not submit Skills through Knowledge Candidate APIs.",
     "10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.",
+    "11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run ``powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ClientLauncher`" upgrade``; after a required update, restart Codex before relying on new integration behavior.",
     "",
     "Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.",
     "",
@@ -183,6 +192,16 @@ foreach ($Event in $Events) {
     if ($null -ne $Prop) { $HooksRoot.hooks.$Event = @($Kept) }
     else { Add-Member -InputObject $HooksRoot.hooks -MemberType NoteProperty -Name $Event -Value @($Kept) }
 }
+$SessionKept = @()
+$SessionProp = $HooksRoot.hooks.PSObject.Properties['SessionStart']
+if ($null -ne $SessionProp) {
+    foreach ($Group in @($SessionProp.Value)) {
+        $Handlers = @($Group.hooks | Where-Object { ([string]$_.command) -notmatch 'team-skill-hub-client' -and ([string]$_.commandWindows) -notmatch 'team-skill-hub-client' })
+        if ($Handlers.Count -gt 0) { $Group.hooks = $Handlers; $SessionKept += $Group }
+    }
+}
+$SessionKept += [pscustomobject]@{ hooks = @([pscustomobject]@{ type='command'; command=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ClientLauncher + '" session-start --client codex'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ClientLauncher + '" session-start --client codex'); async=$false; timeout=2 }) }
+$HooksRoot.hooks.SessionStart = @($SessionKept)
 $HooksContent = $HooksRoot | ConvertTo-Json -Depth 20
 Write-Utf8NoBom -Path $HooksJson -Content ($HooksContent + [Environment]::NewLine)
 

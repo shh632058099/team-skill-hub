@@ -65,7 +65,29 @@ $env:TEAM_SKILL_HUB_API_KEY='skh_...'
 claude mcp get teamSkillHub
 ```
 
-## 4. Verify the connection
+## 4. Client integration updates
+
+The setup command performs the one-time bootstrap of the local Team Skill Hub client runtime. After that, you normally do **not** download or rerun setup for each Hub integration change.
+
+At SessionStart, Codex/Claude may show an update notice. The check is cached and fail-open; it never upgrades silently. Only after you explicitly ask to upgrade should the client run:
+
+Linux / macOS / WSL:
+
+```bash
+~/.team-skill-hub/bin/team-skill-hub-client upgrade
+```
+
+Windows PowerShell:
+
+```powershell
+& "$HOME\.team-skill-hub\bin\team-skill-hub-client.ps1" upgrade
+```
+
+If the notice says the update is required, restart the CLI after a successful upgrade. Use the same launcher path with `doctor` or `rollback` for diagnostics/recovery. The old setup `--upgrade` / `-Upgrade` path is reserved for bootstrap or disaster recovery if the launcher itself is damaged.
+
+Custom `CODEX_HOME` and `CLAUDE_CONFIG_DIR` locations are recorded during setup and preserved across later upgrades. The local state stores the API-key environment-variable **name**, never the API-key value.
+
+## 5. Verify the connection
 
 Ask the client:
 
@@ -76,7 +98,7 @@ then list the repositories I can access.
 
 Once this succeeds, Team Skill Hub is ready for normal use.
 
-## 5. Daily use
+## 6. Daily use
 
 If you are not sure what to use, start with `discover`.
 
@@ -112,7 +134,7 @@ Load only what is needed for the current task.
 
 Prefer progressive loading instead of loading all Skills, Knowledge, and resources at once.
 
-## 6. Create a Skill
+## 7. Create a Skill
 
 When a task produces a stable, reusable, verified procedure, turn it into a Skill.
 
@@ -127,7 +149,7 @@ Submit the complete Skill root, including SKILL.md and any scripts/, references/
 
 Submission creates a pending Skill Bundle import for administrator review. It does not write directly to the formal repository.
 
-## 7. Feed back Knowledge
+## 8. Feed back Knowledge
 
 Knowledge is for current facts such as design details, API behavior, root causes, test conclusions, and project constraints.
 
@@ -162,13 +184,13 @@ Use the fixed six-section structure and submit it with submit_knowledge_candidat
 Do not include tokens, passwords, customer-sensitive data, or unverified speculation.
 ```
 
-## 8. Report bad or outdated content
+## 9. Report bad or outdated content
 
 If a Knowledge or Skill result is outdated, incorrect, or low quality, use `submit_feedback` and provide a short, verifiable reason.
 
 If the existing asset is no longer suitable, submit a new Knowledge Candidate or Skill Bundle as appropriate.
 
-## 9. Get administrator approval
+## 10. Get administrator approval
 
 After submitting a Candidate, send the **Candidate ID** to the administrator.
 
@@ -191,7 +213,7 @@ Important:
 
 If a Candidate is rejected, the administrator provides a reason. Update the content and resubmit, or ask the administrator to re-approve the existing Candidate when appropriate.
 
-## 10. Permissions and responsibility boundaries
+## 11. Permissions and responsibility boundaries
 
 If an expected Repository, Skill, or Knowledge item is missing:
 
@@ -204,7 +226,7 @@ Do not work around access controls by asking for repository write credentials, s
 
 Repository sync, rollback, publishing configuration, lifecycle governance, and Evaluation are administrator or platform-maintainer responsibilities, not ordinary developer tasks.
 
-## 11. Common problems
+## 12. Common problems
 
 ### teamSkillHub is missing from `codex mcp list`
 
@@ -250,7 +272,7 @@ PowerShell:
 
 Restart Codex after the upgrade.
 
-## 12. Safe usage principles
+## 13. Safe usage principles
 
 - Keep the Developer API Key in an environment variable or approved secret store.
 - Do not submit API keys, tokens, passwords, or customer-sensitive data to Team Skill Hub.

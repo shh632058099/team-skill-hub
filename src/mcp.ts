@@ -1,6 +1,7 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import type { SkillHubApplicationService } from "./application.js";
+import { loadClientIntegrationStatus } from "./client-integration/release.js";
 
 const filterSchema = {
   repositories: z.array(z.string()).optional(),
@@ -161,10 +162,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         description: "Return Team Skill Hub version and capabilities.",
         inputSchema: z.object({})
       },
-      async () =>
-        toolResult({
+      async () => {
+        const clientIntegration = await loadClientIntegrationStatus();
+        return toolResult({
           server_version: "0.1.0",
           skill_schema_versions: [1],
+          client_integration: clientIntegration,
           principal: {
             id: principal.id,
             roles: principal.roles,
@@ -203,7 +206,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "project-context-recommendations",
         "agent-tool-resolution"
           ]
-        })
+        });
+      }
     );
 
     registerTool(

@@ -25,4 +25,12 @@ test("builds versioned linux and windows client packages with matching hashes", 
   const zip = await JSZip.loadAsync(await readFile(windows));
   assert.ok(zip.file("release.json"));
   assert.ok(zip.file("scripts/setup-codex-mcp.ps1"));
+  assert.ok(zip.file("templates/codex-guidance.md"));
+  assert.ok(zip.file("templates/claude-guidance.md"));
+
+  const out2 = await mkdtemp(path.join(os.tmpdir(), "skill-hub-client-build-"));
+  await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/build-client-integration.ts", "--out", out2], { cwd: process.cwd() });
+  const manifest2 = JSON.parse(await readFile(path.join(out2, "manifest.json"), "utf8"));
+  assert.equal(manifest2.packages.linux.sha256, manifest.packages.linux.sha256);
+  assert.equal(manifest2.packages.windows.sha256, manifest.packages.windows.sha256);
 });

@@ -47,6 +47,18 @@ export async function loadClientIntegrationRelease(root = process.cwd()): Promis
   return validateRelease(JSON.parse(await readFile(file, "utf8")));
 }
 
+export async function loadClientIntegrationStatus(root = process.cwd()): Promise<{ latest_version: number; minimum_supported_version: number; manifest_path: string }> {
+  const servedDir = process.env.CLIENT_INTEGRATION_DIR ?? path.join(root, "dist", "client-integration");
+  try {
+    const manifest = JSON.parse(await readFile(path.join(servedDir, "manifest.json"), "utf8")) as { version?: number; minimum_supported_version?: number };
+    if (Number.isInteger(manifest.version) && Number.isInteger(manifest.minimum_supported_version)) {
+      return { latest_version: manifest.version!, minimum_supported_version: manifest.minimum_supported_version!, manifest_path: "/client-integration/manifest.json" };
+    }
+  } catch {}
+  const release = await loadClientIntegrationRelease(root);
+  return { latest_version: release.version, minimum_supported_version: release.minimumSupportedVersion, manifest_path: "/client-integration/manifest.json" };
+}
+
 export function buildClientIntegrationManifest(
   release: ClientIntegrationRelease,
   options: {

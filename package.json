@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "build:client-integration": "tsx src/cli/build-client-integration.ts",
+    "client-integration:version-check": "tsx src/cli/client-integration-version-check.ts",
     "start": "node dist/src/index.js",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "check": "npm run build && npm test",

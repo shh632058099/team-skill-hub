@@ -12,8 +12,8 @@ $ErrorActionPreference = "Stop"
 
 $ClaudeBegin = "<!-- BEGIN TEAM-SKILL-HUB -->"
 $ClaudeEnd = "<!-- END TEAM-SKILL-HUB -->"
-$HookRuntimeVersion = "1.1.0"
-$HookSchemaVersion = "1"
+$HookRuntimeVersion = $null
+$HookSchemaVersion = $null
 
 $ServerNameExplicit = $PSBoundParameters.ContainsKey("ServerName")
 $ApiKeyEnvExplicit = $PSBoundParameters.ContainsKey("ApiKeyEnv")
@@ -48,6 +48,13 @@ $McpUrl = $Url.TrimEnd('/')
 if (-not $McpUrl.EndsWith('/mcp')) { $McpUrl = $McpUrl.TrimEnd('/') + '/mcp' }
 $BaseUrl = $McpUrl.Substring(0, $McpUrl.Length - 4)
 $EventUrl = $BaseUrl + '/client-events/claude-code'
+$ClientRoot = if ($env:TEAM_SKILL_HUB_CLIENT_ROOT) { $env:TEAM_SKILL_HUB_CLIENT_ROOT } else { Join-Path $HOME '.team-skill-hub' }
+& (Join-Path $PSScriptRoot 'bootstrap-client-integration.ps1') -Client claude -ConfigHome $ClaudeDir -HubBaseUrl $BaseUrl -ServerName $ServerName -ApiKeyEnv $ApiKeyEnv
+$ClientLauncher = Join-Path $ClientRoot 'bin\team-skill-hub-client.ps1'
+$ClientVersion = (Get-Content -Raw (Join-Path $ClientRoot 'current')).Trim()
+$ClientRelease = Get-Content -Raw (Join-Path $ClientRoot ("releases\v$ClientVersion\release.json")) | ConvertFrom-Json
+$HookRuntimeVersion = [string]$ClientRelease.hookRuntimeVersion
+$HookSchemaVersion = [string]$ClientRelease.hookSchemaVersion
 
 $AutoKnowledgeValue = if ($NoAutoKnowledge.IsPresent) { "false" } elseif ($AutoKnowledge.IsPresent) { "true" } elseif ($Upgrade.IsPresent -and (Test-Path $HookConf) -and $Existing["capture_stop_message"]) { [string]$Existing["capture_stop_message"] } else { "true" }
 
@@ -142,6 +149,16 @@ foreach ($event in @('SessionStart','UserPromptSubmit','PostToolUse','SessionEnd
   $kept += ,@{ hooks = @($httpHandler) }
   $root['hooks'][$event] = @($kept)
 }
+$sessionKept = @()
+foreach ($groupValue in @($root['hooks']['SessionStart'])) {
+  if ($null -eq $groupValue) { continue }
+  $group = Convert-ToHashtable $groupValue
+  $handlers = @($group['hooks']) | Where-Object { -not ([string]$_['command'] -like '*team-skill-hub-client*') }
+  if ($handlers.Count -gt 0) { $copy=@{}; foreach($key in $group.Keys){$copy[$key]=$group[$key]}; $copy['hooks']=@($handlers); $sessionKept += ,$copy }
+}
+$sessionCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ClientLauncher + '" session-start --client claude'
+$sessionKept += ,@{ hooks = @(@{ type='command'; command=$sessionCommand; timeout=2 }) }
+$root['hooks']['SessionStart'] = @($sessionKept)
 
 $kept = @()
 foreach ($groupValue in @($root['hooks']['Stop'])) {
@@ -191,6 +208,7 @@ $ClaudeBlock = @(
     "8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, first summarize it with the exact six-section Markdown format defined below, then use ``submit_knowledge_candidate``. The server validates and canonicalizes the same format. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.",
     "9. When creating or submitting any Skill, including a Skill that contains only one ``SKILL.md``, use ``submit_skill_bundle``. Use ``import_type=skill`` for one Skill root and ``import_type=collection`` only for an explicit multi-Skill namespace snapshot. Never substitute ``submit_knowledge_candidate`` for a Skill. If ``submit_skill_bundle`` is not currently loaded in Claude Code, use ToolSearch to load that MCP tool before submitting.",
     "10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.",
+    "11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run ``powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ClientLauncher`" upgrade``; after a required update, restart Claude Code before relying on new integration behavior.",
     "",
     "Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.",
     "",

@@ -6,6 +6,9 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
+COPY scripts ./scripts
+COPY client-integration ./client-integration
+RUN npm run build:client-integration
 RUN npm run build
 RUN npm prune --omit=dev
 

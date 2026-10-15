@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HUB_URL=""
 SERVER_NAME="teamSkillHub"
@@ -10,8 +11,8 @@ UPGRADE="false"
 SERVER_NAME_EXPLICIT="false"
 API_KEY_ENV_EXPLICIT="false"
 AUTO_KNOWLEDGE_EXPLICIT="false"
-HOOK_RUNTIME_VERSION="1.1.0"
-HOOK_SCHEMA_VERSION="1"
+HOOK_RUNTIME_VERSION=""
+HOOK_SCHEMA_VERSION=""
 
 CLAUDE_BEGIN="<!-- BEGIN TEAM-SKILL-HUB -->"
 CLAUDE_END="<!-- END TEAM-SKILL-HUB -->"
@@ -64,10 +65,23 @@ MCP_URL="${HUB_URL%/}"
 if [[ "$MCP_URL" != */mcp ]]; then MCP_URL="${MCP_URL%/}/mcp"; fi
 BASE_URL="${MCP_URL%/mcp}"
 EVENT_URL="${BASE_URL}/client-events/claude-code"
+CLIENT_ROOT="${TEAM_SKILL_HUB_CLIENT_ROOT:-$HOME/.team-skill-hub}"
+bash "$SCRIPT_DIR/bootstrap-client-integration.sh" --client claude --config-home "$CLAUDE_DIR" --hub-base-url "$BASE_URL" --server-name "$SERVER_NAME" --api-key-env "$API_KEY_ENV"
+CLIENT_LAUNCHER="$CLIENT_ROOT/bin/team-skill-hub-client"
+CLIENT_RELEASE_FILE="$CLIENT_ROOT/releases/v$(tr -d '\r\n' < "$CLIENT_ROOT/current")/release.json"
+if command -v python3 >/dev/null 2>&1; then
+  HOOK_RUNTIME_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hookRuntimeVersion"])' "$CLIENT_RELEASE_FILE")"
+  HOOK_SCHEMA_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hookSchemaVersion"])' "$CLIENT_RELEASE_FILE")"
+elif command -v node >/dev/null 2>&1; then
+  HOOK_RUNTIME_VERSION="$(node -e 'const x=require(process.argv[1]);process.stdout.write(String(x.hookRuntimeVersion))' "$CLIENT_RELEASE_FILE")"
+  HOOK_SCHEMA_VERSION="$(node -e 'const x=require(process.argv[1]);process.stdout.write(String(x.hookSchemaVersion))' "$CLIENT_RELEASE_FILE")"
+else
+  echo "python3 or node is required to read client integration release metadata" >&2; exit 2
+fi
 
 mkdir -p "$CLAUDE_DIR" "$HOOKS_DIR"
 touch "$SETTINGS_FILE" "$CLAUDE_MD"
-export SETTINGS_FILE EVENT_URL API_KEY_ENV SERVER_NAME SKIP_MCP
+export SETTINGS_FILE EVENT_URL API_KEY_ENV SERVER_NAME SKIP_MCP CLIENT_LAUNCHER
 
 if command -v python3 >/dev/null 2>&1; then
   python3 <<'PY'
@@ -103,6 +117,14 @@ for group in hooks.get("Stop",[]) or []:
         copy=dict(group); copy["hooks"]=handlers; kept.append(copy)
 kept.append({"hooks":[{"type":"command","command":'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',"timeout":4}]})
 hooks["Stop"]=kept
+client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
+kept=[]
+for group in hooks.get("SessionStart",[]) or []:
+    handlers=[h for h in (group.get("hooks",[]) or []) if "team-skill-hub-client" not in str(h.get("command",""))]
+    if handlers:
+        copy=dict(group);copy["hooks"]=handlers;kept.append(copy)
+kept.append({"hooks":[{"type":"command","command":f'"{client}" session-start --client claude',"timeout":2}]})
+hooks["SessionStart"]=kept
 with open(path,"w",encoding="utf-8") as f:
     json.dump(root,f,ensure_ascii=False,indent=2); f.write("\n")
 PY
@@ -115,6 +137,7 @@ if(!skipMcp){root.permissions ||= {};const allow=Array.isArray(root.permissions.
 const httpHandler={type:"http",url,timeout:2,headers:{Authorization:"Bearer ${"+key+"}"},allowedEnvVars:[key]};
 for(const event of ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"]){const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!(h.type==="http"&&String(h.url||"").includes("/client-events/claude-code")));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[httpHandler]});root.hooks[event]=kept}
 const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-claude-stop"));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[{type:"command",command:'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',timeout:4}]});root.hooks.Stop=kept;
+const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");
 NODE
 else
@@ -157,6 +180,7 @@ For team-specific engineering tasks and questions, including short questions con
 8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, first summarize it with the exact six-section Markdown format defined below, then use \`submit_knowledge_candidate\`. The server validates and canonicalizes the same format. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.
 9. When creating or submitting any Skill, including a Skill that contains only one \`SKILL.md\`, use \`submit_skill_bundle\`. Use \`import_type=skill\` for one Skill root and \`import_type=collection\` only for an explicit multi-Skill namespace snapshot. Never substitute \`submit_knowledge_candidate\` for a Skill. If \`submit_skill_bundle\` is not currently loaded in Claude Code, use ToolSearch to load that MCP tool before submitting.
 10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
+11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run \`"$CLIENT_LAUNCHER" upgrade\`; after a required update, restart Claude Code before relying on new integration behavior.
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.
 
