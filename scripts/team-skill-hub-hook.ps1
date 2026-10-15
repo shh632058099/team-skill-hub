@@ -59,7 +59,7 @@ try {
         $value = $Text -replace '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '[redacted-email]'
         $value = $value -replace '(?:skh_|sk-|ghp_|glpat-)[A-Za-z0-9_-]{8,}', '[redacted-token]'
         $value = $value -replace '(?i)(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+', '$1=[redacted]'
-        if ($value.Length -gt 4000) { return $value.Substring(0, 4000) }
+        if ($value.Length -gt 50000) { return $value.Substring(0, 50000) }
         return $value
     }
     $evidence = @{}

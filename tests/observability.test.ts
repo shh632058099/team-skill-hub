@@ -248,7 +248,7 @@ test("Stop assistant excerpt keeps a larger bounded payload with server-side red
     });
     const excerpt = String(event.metadata.assistant_result_excerpt ?? "");
     assert.ok(excerpt.length > 500);
-    assert.ok(excerpt.length <= 4000);
+    assert.ok(excerpt.length <= 50_000);
     assert.doesNotMatch(excerpt, /SUPER_SECRET_TOKEN_VALUE/);
     assert.match(excerpt, /\[redacted\]/);
   } finally {

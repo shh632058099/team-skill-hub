@@ -184,7 +184,8 @@ For team-specific engineering tasks and questions, including short questions con
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.
 
-For durable knowledge, the final response must use this exact Markdown summary format:
+For durable knowledge, the final response must use this exact Markdown summary format.
+Keep the title at no more than 160 characters (prefer 20-80 characters) and make it a concise, searchable conclusion. Keep the entire summary at no more than 50,000 characters.
 # Title
 
 ## 问题

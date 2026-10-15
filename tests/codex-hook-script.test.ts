@@ -32,7 +32,7 @@ test("Codex shell hook posts structured unittest evidence", async () => {
         "server_name=teamSkillHub",
         "api_key_env=TEST_HOOK_MARKER",
         "capture_stop_message=true",
-        "runtime_version=1.1.0",
+        "runtime_version=1.2.0",
         "hook_schema_version=1",
         ""
       ].join("\n"),

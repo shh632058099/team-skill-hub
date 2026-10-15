@@ -1,4 +1,6 @@
 export const KNOWLEDGE_SUMMARY_SCHEMA_VERSION = 1 as const;
+export const MAX_KNOWLEDGE_SUMMARY_CHARS = 50_000;
+export const MAX_KNOWLEDGE_TITLE_CHARS = 160;
 
 export type KnowledgeSummarySection =
   | "problem"
@@ -66,7 +68,7 @@ export function parseKnowledgeSummary(input: unknown): KnowledgeSummaryParseResu
   if (typeof input !== "string") return invalid("not-text");
   const text = input.replace(/\r\n?/g, "\n").trim();
   if (!text) return invalid("empty");
-  if (text.length > 4000) return invalid("too-long");
+  if (text.length > MAX_KNOWLEDGE_SUMMARY_CHARS) return invalid("too-long");
 
   let title = "";
   let current: KnowledgeSummarySection | undefined;
@@ -97,7 +99,7 @@ export function parseKnowledgeSummary(input: unknown): KnowledgeSummaryParseResu
   }
 
   const markdown = [
-    `# ${title.slice(0, 160)}`,
+    `# ${title.slice(0, MAX_KNOWLEDGE_TITLE_CHARS)}`,
     "",
     "## 问题",
     values.problem,
@@ -122,7 +124,7 @@ export function parseKnowledgeSummary(input: unknown): KnowledgeSummaryParseResu
     ok: true,
     summary: {
       schemaVersion: KNOWLEDGE_SUMMARY_SCHEMA_VERSION,
-      title: title.slice(0, 160),
+      title: title.slice(0, MAX_KNOWLEDGE_TITLE_CHARS),
       ...values,
       markdown
     }

@@ -713,7 +713,7 @@ export class McpObservabilityStore {
   ): Promise<ClientEventRecord> {
     const metadata = (sanitizeValue(input.metadata ?? {}) ?? {}) as Record<string, unknown>;
     if (typeof input.metadata?.assistant_result_excerpt === "string") {
-      metadata.assistant_result_excerpt = redactText(input.metadata.assistant_result_excerpt, 4000);
+      metadata.assistant_result_excerpt = redactText(input.metadata.assistant_result_excerpt, 50_000);
     }
     const record: ClientEventRecord = {
       id: "evt_" + randomUUID().replaceAll("-", ""),

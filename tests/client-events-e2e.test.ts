@@ -708,7 +708,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(session?.runtimeVersion, "0.9.0");
     assert.equal(session?.hookSchemaVersion, 1);
     assert.equal(session?.runtimeStatus, "outdated");
-    assert.equal(session?.expectedRuntimeVersion, "1.1.0");
+    assert.equal(session?.expectedRuntimeVersion, "1.2.0");
 
     const filteredSessions = await fetch(base + "/admin/api/sessions?q=session-e2e&status=active&hasMcp=true&runtimeStatus=outdated", { headers: { "x-skill-hub-admin-key": "client-events-admin" } });
     assert.equal(filteredSessions.status, 200);

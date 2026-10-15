@@ -119,7 +119,7 @@ export function translateClaudeCodeHook(raw: unknown): ClaudeCodeClientEvent {
   if (event === "Stop") {
     if (typeof input.stop_hook_active === "boolean") metadata.stop_hook_active = input.stop_hook_active;
     if (typeof input.last_assistant_message === "string" && input.last_assistant_message.trim()) {
-      metadata.assistant_result_excerpt = input.last_assistant_message.trim().slice(0, 4000);
+      metadata.assistant_result_excerpt = input.last_assistant_message.trim().slice(0, 50_000);
     }
   }
 

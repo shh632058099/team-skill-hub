@@ -46,7 +46,7 @@ def redact(value):
     value = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted-email]", value)
     value = re.sub(r"(?:skh_|sk-|ghp_|glpat-)[A-Za-z0-9_-]{8,}", "[redacted-token]", value)
     value = re.sub(r"(?i)(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+", r"\1=[redacted]", value)
-    return value[:4000]
+    return value[:50000]
 
 payload = {"hook_event_name": "Stop", "session_id": session_id.strip()}
 for key in ("prompt_id", "cwd", "model", "permission_mode", "reason", "stop_hook_active"):
@@ -59,7 +59,7 @@ if os.environ.get("CAPTURE_STOP_MESSAGE", "true").lower() == "true":
         payload["last_assistant_message"] = redact(message.strip())
 print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))' 2>/dev/null)"
 elif command -v node >/dev/null 2>&1; then
-  PAYLOAD="$(printf '%s' "$INPUT" | node -e 'let raw="";process.stdin.on("data",chunk=>raw+=chunk).on("end",()=>{try{const x=JSON.parse(raw);if(x.hook_event_name!=="Stop"||typeof x.session_id!=="string"||!x.session_id.trim())process.exit(0);const redact=v=>v.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,"[redacted-email]").replace(/(?:skh_|sk-|ghp_|glpat-)[A-Za-z0-9_-]{8,}/g,"[redacted-token]").replace(/(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi,"$1=[redacted]").slice(0,4000);const p={hook_event_name:"Stop",session_id:x.session_id.trim()};for(const k of ["prompt_id","cwd","model","permission_mode","reason","stop_hook_active"])if(["string","number","boolean"].includes(typeof x[k]))p[k]=x[k];if(String(process.env.CAPTURE_STOP_MESSAGE||"true").toLowerCase()==="true"&&typeof x.last_assistant_message==="string"&&x.last_assistant_message.trim())p.last_assistant_message=redact(x.last_assistant_message.trim());process.stdout.write(JSON.stringify(p))}catch{}})' 2>/dev/null)"
+  PAYLOAD="$(printf '%s' "$INPUT" | node -e 'let raw="";process.stdin.on("data",chunk=>raw+=chunk).on("end",()=>{try{const x=JSON.parse(raw);if(x.hook_event_name!=="Stop"||typeof x.session_id!=="string"||!x.session_id.trim())process.exit(0);const redact=v=>v.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,"[redacted-email]").replace(/(?:skh_|sk-|ghp_|glpat-)[A-Za-z0-9_-]{8,}/g,"[redacted-token]").replace(/(password|token|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi,"$1=[redacted]").slice(0,50000);const p={hook_event_name:"Stop",session_id:x.session_id.trim()};for(const k of ["prompt_id","cwd","model","permission_mode","reason","stop_hook_active"])if(["string","number","boolean"].includes(typeof x[k]))p[k]=x[k];if(String(process.env.CAPTURE_STOP_MESSAGE||"true").toLowerCase()==="true"&&typeof x.last_assistant_message==="string"&&x.last_assistant_message.trim())p.last_assistant_message=redact(x.last_assistant_message.trim());process.stdout.write(JSON.stringify(p))}catch{}})' 2>/dev/null)"
 fi
 
 [[ -n "$PAYLOAD" ]] || exit 0

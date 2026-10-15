@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   KNOWLEDGE_SUMMARY_SCHEMA_VERSION,
+  MAX_KNOWLEDGE_SUMMARY_CHARS,
+  MAX_KNOWLEDGE_TITLE_CHARS,
   normalizeKnowledgeCandidateSummary,
   parseKnowledgeSummary
 } from "../src/knowledge-summary.js";
@@ -35,6 +37,27 @@ test("parses and canonicalizes the fixed knowledge summary format", () => {
   assert.equal(result.summary.schemaVersion, KNOWLEDGE_SUMMARY_SCHEMA_VERSION);
   assert.equal(result.summary.title, "OTA 断电恢复修复");
   assert.equal(result.summary.markdown, validSummary);
+});
+
+test("accepts large knowledge summaries up to the configured limit", () => {
+  const padding = "A".repeat(5_000);
+  const input = validSummary.replace("设备升级过程中断电后可能无法恢复。", padding);
+  assert.ok(input.length > 4_000);
+  assert.ok(input.length < MAX_KNOWLEDGE_SUMMARY_CHARS);
+  assert.equal(parseKnowledgeSummary(input).ok, true);
+});
+
+test("rejects knowledge summaries above the configured limit", () => {
+  const input = validSummary + "\n" + "A".repeat(MAX_KNOWLEDGE_SUMMARY_CHARS);
+  assert.deepEqual(parseKnowledgeSummary(input), { ok: false, reason: "too-long" });
+});
+
+test("caps knowledge titles at the documented limit", () => {
+  const title = "题".repeat(MAX_KNOWLEDGE_TITLE_CHARS + 20);
+  const result = parseKnowledgeSummary(validSummary.replace("# OTA 断电恢复修复", `# ${title}`));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.summary.title.length, MAX_KNOWLEDGE_TITLE_CHARS);
 });
 
 test("manual candidate normalization rejects raw notes and returns canonical content", () => {
