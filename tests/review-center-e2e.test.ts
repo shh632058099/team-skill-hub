@@ -55,6 +55,65 @@ test("unified review admin APIs require admin access and return mixed rows", asy
   }
 });
 
+test("application review paging reads only the requested global window while preserving source totals", async () => {
+  const { dataDir, search, service } = await fixture("review-center-window-");
+  let candidateCalls = 0;
+  let bundleCalls = 0;
+  (service as any).observability.adminCandidatesPage = (query: any) => {
+    candidateCalls += 1;
+    const offset = Number(query.cursor ?? 0);
+    const limit = Number(query.limit ?? 100);
+    const items = Array.from({ length: limit }, (_, index) => ({
+      id: `kc_${offset + index}`,
+      ts: "2026-10-15T00:00:00.000Z",
+      updatedAt: new Date(Date.UTC(2026, 9, 15, 23, 59, 59 - index)).toISOString(),
+      actorId: "alice",
+      tenantId: "rd",
+      title: `Candidate ${offset + index}`,
+      content: "body",
+      sourceType: "manual",
+      suggestedType: "knowledge",
+      repository: "rd-knowledges",
+      status: "pending",
+    }));
+    return { items, page: { total: 5000, limit, cursor: String(offset), nextCursor: String(offset + limit) } };
+  };
+  (service as any).skillBundles.listImportsPage = (query: any) => {
+    bundleCalls += 1;
+    const offset = Number(query.cursor ?? 0);
+    const limit = Number(query.limit ?? 100);
+    const items = Array.from({ length: limit }, (_, index) => ({
+      id: `sbi_${offset + index}`,
+      revision: 1,
+      namespace: "superpowers",
+      importType: "collection",
+      replacementRoot: "skills/superpowers",
+      collection: "rd-skills",
+      repository: "rd-skills",
+      sourceType: "mcp",
+      snapshotId: `sbs_${offset + index}`,
+      snapshotSha256: "sha",
+      status: "pending",
+      submitter: "bob",
+      createdAt: "2026-10-14T00:00:00.000Z",
+      updatedAt: new Date(Date.UTC(2026, 9, 14, 23, 59, 59 - index)).toISOString(),
+    }));
+    return { items, total: 4000, limit, cursor: String(offset), nextCursor: String(offset + limit) };
+  };
+  (service as any).skillBundles.getSnapshot = () => undefined;
+  try {
+    const result = await service.adminReviewItemsPage({ limit: "20" });
+    assert.equal(candidateCalls, 1);
+    assert.equal(bundleCalls, 1);
+    assert.equal(result.items.length, 20);
+    assert.equal(result.page.total, 9000);
+    assert.equal(result.page.nextCursor, "20");
+  } finally {
+    search.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("unified review API rejects malformed filters and bounded scan errors", async () => {
   const { dataDir, search, config, service } = await fixture("review-center-errors-");
   process.env.ADMIN_API_KEY = "review-admin-errors";

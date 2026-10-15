@@ -189,6 +189,38 @@ test("bounded collector fetches beyond one source page for a global window", asy
   assert.ok(bundleCalls >= 3, "bundle source must page beyond its first page");
 });
 
+test("bounded collector stops after the requested global window and reports source totals", async () => {
+  let candidateCalls = 0;
+  let bundleCalls = 0;
+  const totals = new Map<string, number>();
+  const items = await collectReviewItemsBounded({ limit: "20" }, {
+    pageSize: 20,
+    maxSourceRows: 1000,
+    onSourceTotal: (kind, total) => totals.set(kind, total),
+    fetchCandidates: async (cursor, limit) => {
+      candidateCalls += 1;
+      const offset = Number(cursor ?? 0);
+      const rows = Array.from({ length: limit }, (_, index) => candidate({ id: `kc_${offset + index}`, updatedAt: new Date(Date.UTC(2026, 9, 15, 23, 59, offset + index)).toISOString() }));
+      return { items: rows, total: 5000, nextCursor: String(offset + limit) };
+    },
+    fetchBundles: async (cursor, limit) => {
+      bundleCalls += 1;
+      const offset = Number(cursor ?? 0);
+      const rows = Array.from({ length: limit }, (_, index) => bundle({ id: `sbi_${offset + index}`, updatedAt: new Date(Date.UTC(2026, 9, 14, 23, 59, offset + index)).toISOString() }));
+      return { items: rows, total: 4000, nextCursor: String(offset + limit) };
+    },
+  });
+  assert.equal(items.length, 40, "top-20 globally needs at most 20 rows from each sorted source");
+  assert.equal(candidateCalls, 1);
+  assert.equal(bundleCalls, 1);
+  assert.equal(totals.get("candidate"), 5000);
+  assert.equal(totals.get("skill-bundle"), 4000);
+  const page = paginateReviewItems(sortReviewItems(items), { limit: "20" }, 9000);
+  assert.equal(page.items.length, 20);
+  assert.equal(page.page.total, 9000);
+  assert.equal(page.page.nextCursor, "20");
+});
+
 test("bounded collector fails instead of scanning beyond its source cap", async () => {
   await assert.rejects(
     collectReviewItemsBounded({ q: "never-matches", limit: "2" }, {

@@ -2024,8 +2024,10 @@ export class SkillHubApplicationService {
   adminFeedbackPage(query: Parameters<McpObservabilityStore["adminFeedbackPage"]>[0]) { return this.observability.adminFeedbackPage(query); }
   adminKnowledgeCandidatesPage(query: Parameters<McpObservabilityStore["adminCandidatesPage"]>[0]) { return this.observability.adminCandidatesPage(query); }
 
-  private async collectAdminReviewItems(query: ReviewItemsQuery): Promise<ReviewItem[]> {
+  private async collectAdminReviewItems(query: ReviewItemsQuery, complete = false): Promise<{ items: ReviewItem[]; total: number }> {
     let fallbackCandidates: KnowledgeCandidate[] | undefined;
+    let candidateTotal = 0;
+    let bundleTotal = 0;
     const fetchCandidates = async (cursor: string | undefined, limit: number) => {
       const suggestedType = query.type === "knowledge" ? "knowledge" : query.type === "legacy-skill" ? "skill" : undefined;
       const direct = this.observability.adminCandidatesPage({
@@ -2036,6 +2038,7 @@ export class SkillHubApplicationService {
         ...(query.repository ? { repository: query.repository } : {}),
         ...(query.sourceType ? { sourceType: query.sourceType } : {}),
         ...(query.reviewer ? { reviewer: query.reviewer } : {}),
+        ...(query.submitter ? { submitter: query.submitter } : {}),
         ...(suggestedType ? { suggestedType } : {}),
         ...(query.skillCollection ? { skillCollection: query.skillCollection } : {}),
       });
@@ -2047,16 +2050,33 @@ export class SkillHubApplicationService {
         };
       }
       fallbackCandidates ??= await this.listKnowledgeCandidates(ADMIN_REVIEW_MAX_SOURCE_ROWS);
-      const offset = Math.max(0, Number(cursor ?? 0) || 0);
-      const items = fallbackCandidates.slice(offset, offset + limit);
+      const q = query.q?.trim().toLowerCase();
+      const filtered = fallbackCandidates.filter((item) => {
+        if (query.status && item.status !== query.status) return false;
+        if (query.repository && item.repository !== query.repository) return false;
+        if (query.sourceType && item.sourceType !== query.sourceType) return false;
+        if (query.reviewer && item.reviewer !== query.reviewer) return false;
+        if (query.submitter && item.actorId !== query.submitter) return false;
+        if (suggestedType && item.suggestedType !== suggestedType) return false;
+        if (query.skillCollection && item.skillCollection !== query.skillCollection) return false;
+        if (q) {
+          const text = [item.id, item.title, item.content, item.repository, item.status, item.sourceType, item.suggestedType, item.skillCollection, item.reviewer, item.reviewReason]
+            .filter(Boolean).join(" ").toLowerCase();
+          if (!text.includes(q)) return false;
+        }
+        return true;
+      });
       const possiblyTruncated = fallbackCandidates.length >= ADMIN_REVIEW_MAX_SOURCE_ROWS;
-      const total = possiblyTruncated ? ADMIN_REVIEW_MAX_SOURCE_ROWS + 1 : fallbackCandidates.length;
+      if (complete && possiblyTruncated) throw new Error("Admin review query exceeded bounded source scan");
+      const offset = Math.max(0, Number(cursor ?? 0) || 0);
+      if (possiblyTruncated && offset >= filtered.length) throw new Error("Admin review query exceeded bounded source scan");
+      const items = filtered.slice(offset, offset + limit);
+      const total = filtered.length + (possiblyTruncated ? 1 : 0);
       return {
         items,
         total,
         nextCursor: offset + items.length < total ? String(offset + items.length) : undefined,
-      };
-    };
+      };    };
 
     const fetchBundles = async (cursor: string | undefined, limit: number) => {
       const impliedImportType = query.type === "skill-bundle-skill" ? "skill" : query.type === "skill-bundle-collection" ? "collection" : undefined;
@@ -2067,15 +2087,23 @@ export class SkillHubApplicationService {
         ...(query.status ? { status: query.status } : {}),
         ...(query.repository ? { repository: query.repository } : {}),
         ...(query.namespace ? { namespace: query.namespace } : {}),
+        ...(query.sourceType ? { sourceType: query.sourceType } : {}),
+        ...(query.reviewer ? { reviewer: query.reviewer } : {}),
+        ...(query.submitter ? { submitter: query.submitter } : {}),
         ...((query.importType || impliedImportType) ? { importType: query.importType || impliedImportType } : {}),
       });
       return { items: page.items, total: page.total, nextCursor: page.nextCursor };
     };
 
-    return await collectReviewItemsBounded(query, {
+    const items = await collectReviewItemsBounded(query, {
       pageSize: 100,
       maxSourceRows: ADMIN_REVIEW_MAX_SOURCE_ROWS,
-      targetCount: Number.POSITIVE_INFINITY,
+      ...(complete ? { targetCount: Number.POSITIVE_INFINITY } : {}),
+      filterQuery: { ...query, q: undefined },
+      onSourceTotal: (kind, total) => {
+        if (kind === "candidate") candidateTotal = total;
+        else bundleTotal = total;
+      },
       fetchCandidates,
       fetchBundles,
       bundleSnapshotSummary: (record) => {
@@ -2083,16 +2111,18 @@ export class SkillHubApplicationService {
         return snapshot ? { skillCount: snapshot.skills.length, fileCount: snapshot.fileCount, totalBytes: snapshot.totalBytes } : undefined;
       },
     });
+    return { items, total: candidateTotal + bundleTotal };
   }
 
   async adminReviewItemsPage(query: ReviewItemsQuery): Promise<{ items: ReviewItem[]; page: ReviewPage }> {
-    const items = sortReviewItems(await this.collectAdminReviewItems(query));
-    return paginateReviewItems(items, query);
+    const collected = await this.collectAdminReviewItems(query);
+    const items = sortReviewItems(collected.items);
+    return paginateReviewItems(items, query, collected.total);
   }
 
   async adminReviewSummary(): Promise<{ counts: Record<ReviewStatusGroup, number>; total: number }> {
-    const items = await this.collectAdminReviewItems({});
-    return summarizeReviewItems(items);
+    const collected = await this.collectAdminReviewItems({}, true);
+    return summarizeReviewItems(collected.items);
   }
 
   adminClientEventsPage(query: Parameters<McpObservabilityStore["adminClientEventsPage"]>[0]) {

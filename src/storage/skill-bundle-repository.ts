@@ -104,6 +104,9 @@ export class SqliteSkillBundleRepository {
     repository?: string;
     namespace?: string;
     importType?: string;
+    sourceType?: string;
+    reviewer?: string;
+    submitter?: string;
   }) {
     const parsedLimit = Number(query.limit ?? 20);
     const limit = Math.max(1, Math.min(Number.isFinite(parsedLimit) ? Math.floor(parsedLimit) : 20, 100));
@@ -120,6 +123,9 @@ export class SqliteSkillBundleRepository {
     addExact("repository", query.repository);
     addExact("namespace", query.namespace);
     addExact("import_type", query.importType);
+    addExact("submission_principal", query.submitter);
+    if (query.sourceType) { where.push("json_extract(record_json,'$.sourceType')=?"); params.push(query.sourceType); }
+    if (query.reviewer) { where.push("json_extract(record_json,'$.review.reviewer')=?"); params.push(query.reviewer); }
     const q = query.q?.trim().toLowerCase();
     if (q) {
       where.push("lower(id || ' ' || namespace || ' ' || import_type || ' ' || coalesce(skill_path,'') || ' ' || replacement_root || ' ' || status || ' ' || repository || ' ' || coalesce(submission_principal,'') || ' ' || record_json) LIKE ?");

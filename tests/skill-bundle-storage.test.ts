@@ -179,6 +179,10 @@ test("admin import paging filters in SQLite before applying the page limit", asy
     const page = (repo as any).listImportsPage?.({ limit: 1, cursor: 0, status: "pending" });
     assert.equal(page?.items?.[0]?.id, "pending-old");
     assert.equal(page?.total, 1);
+    repo.createImport({ ...base, id: "filtered", status: "approved", sourceType: "web-files", submitter: "review-author", review: { reviewer: "reviewer-1", reason: "ok", reviewedAt: "2026-10-14T00:03:00.000Z", targetRevision: "r", targetTreeSha256: "t", diffSha256: "d", added: 0, modified: 0, deleted: 0 }, submissionKey: undefined, updatedAt: "2026-10-14T00:03:00.000Z" });
+    assert.equal(repo.listImportsPage({ sourceType: "web-files" } as any).total, 1);
+    assert.equal(repo.listImportsPage({ reviewer: "reviewer-1" } as any).total, 1);
+    assert.equal(repo.listImportsPage({ submitter: "review-author" } as any).total, 1);
   } finally {
     db.close();
     await rm(dir, { recursive: true, force: true });

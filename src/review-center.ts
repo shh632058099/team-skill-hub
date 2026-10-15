@@ -167,7 +167,7 @@ export function filterReviewItems(items: ReviewItem[], query: ReviewItemsQuery):
     if (query.skillCollection && item.skillCollection !== query.skillCollection) return false;
     if (query.importType && item.importType !== query.importType) return false;
     if (needle) {
-      const searchable = [item.id, item.title, item.status, item.sourceType, item.repository, item.namespace, item.skillCollection, item.submitter, item.reviewer, item.importType]
+      const searchable = [item.id, item.title, item.status, item.sourceType, item.repository, item.namespace, item.skillCollection, item.reviewer, item.importType]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -193,17 +193,17 @@ export function normalizeReviewOffset(value: ReviewItemsQuery["cursor"]): number
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
 }
 
-export function paginateReviewItems(items: ReviewItem[], query: ReviewItemsQuery): { items: ReviewItem[]; page: ReviewPage } {
+export function paginateReviewItems(items: ReviewItem[], query: ReviewItemsQuery, total = items.length): { items: ReviewItem[]; page: ReviewPage } {
   const limit = normalizeReviewLimit(query.limit);
   const offset = normalizeReviewOffset(query.cursor);
   const pageItems = items.slice(offset, offset + limit);
   return {
     items: pageItems,
     page: {
-      total: items.length,
+      total,
       limit,
       cursor: String(offset),
-      nextCursor: offset + limit < items.length ? String(offset + limit) : undefined,
+      nextCursor: offset + limit < total ? String(offset + limit) : undefined,
       previousCursor: offset > 0 ? String(Math.max(0, offset - limit)) : undefined,
     },
   };
@@ -219,6 +219,8 @@ export interface ReviewCollectorOptions {
   pageSize?: number;
   maxSourceRows?: number;
   targetCount?: number;
+  filterQuery?: ReviewItemsQuery;
+  onSourceTotal?: (kind: ReviewItemKind, total: number) => void;
   fetchCandidates: (cursor: string | undefined, limit: number) => Promise<ReviewSourcePage<KnowledgeCandidate>>;
   fetchBundles: (cursor: string | undefined, limit: number) => Promise<ReviewSourcePage<SkillBundleImport>>;
   bundleSnapshotSummary?: (record: SkillBundleImport) => SkillBundleSnapshotSummary | undefined;
@@ -229,13 +231,18 @@ export async function collectReviewItemsBounded(query: ReviewItemsQuery, options
   const pageSize = Math.max(1, Math.min(options.pageSize ?? 100, 100));
   const maxSourceRows = Math.max(pageSize, options.maxSourceRows ?? 1000);
   const collected: ReviewItem[] = [];
+  const filterQuery = options.filterQuery ?? query;
 
   const collectSource = async <T>(
+    kind: ReviewItemKind,
     enabled: boolean,
     fetchPage: (cursor: string | undefined, limit: number) => Promise<ReviewSourcePage<T>>,
     project: (value: T) => ReviewItem,
   ) => {
-    if (!enabled) return;
+    if (!enabled) {
+      options.onSourceTotal?.(kind, 0);
+      return;
+    }
     let cursor: string | undefined;
     let scanned = 0;
     let exhausted = false;
@@ -244,6 +251,7 @@ export async function collectReviewItemsBounded(query: ReviewItemsQuery, options
       if (scanned >= maxSourceRows) throw new Error("Admin review query exceeded bounded source scan");
       const limit = Math.min(pageSize, maxSourceRows - scanned);
       const page = await fetchPage(cursor, limit);
+      options.onSourceTotal?.(kind, page.total);
       if (!page.items.length) {
         exhausted = true;
         break;
@@ -251,7 +259,7 @@ export async function collectReviewItemsBounded(query: ReviewItemsQuery, options
       scanned += page.items.length;
       const projected = page.items.map(project);
       collected.push(...projected);
-      matching += filterReviewItems(projected, query).length;
+      matching += filterReviewItems(projected, filterQuery).length;
       exhausted = !page.nextCursor || scanned >= page.total;
       cursor = page.nextCursor;
       if (!exhausted && scanned >= maxSourceRows && matching < targetCount) {
@@ -265,13 +273,14 @@ export async function collectReviewItemsBounded(query: ReviewItemsQuery, options
   const candidateApplicable = query.kind !== "skill-bundle" && candidateTypeApplicable && !query.namespace && !query.importType;
   const bundleApplicable = query.kind !== "candidate" && bundleTypeApplicable && (!query.skillCollection || query.skillCollection === "rd-skills");
 
-  await collectSource(candidateApplicable, options.fetchCandidates, projectCandidateReviewItem);
+  await collectSource("candidate", candidateApplicable, options.fetchCandidates, projectCandidateReviewItem);
   await collectSource(
+    "skill-bundle",
     bundleApplicable,
     options.fetchBundles,
     (record) => projectSkillBundleReviewItem(record, options.bundleSnapshotSummary?.(record)),
   );
-  return filterReviewItems(collected, query);
+  return filterReviewItems(collected, filterQuery);
 }
 
 export function summarizeReviewItems(items: ReviewItem[]): { counts: Record<ReviewStatusGroup, number>; total: number } {
