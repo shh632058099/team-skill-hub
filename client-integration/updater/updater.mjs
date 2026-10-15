@@ -57,6 +57,34 @@ function removeLegacyTomlServer(content, serverName) {
   }
   return out.join("\n");
 }
+export function ensureCodexWritableRoot(content, clientRoot) {
+  const root = path.resolve(clientRoot).replaceAll("\\", "/");
+  const quotedRoot = JSON.stringify(root);
+  const normalized = content.replace(/\r\n/g, "\n");
+  const header = /^\[sandbox_workspace_write\]\s*$/m.exec(normalized);
+  if (!header) {
+    const base = normalized.trimEnd();
+    return `${base ? `${base}\n\n` : ""}[sandbox_workspace_write]\nwritable_roots = [${quotedRoot}]\n`;
+  }
+  const sectionStart = header.index;
+  const searchFrom = header.index + header[0].length;
+  const nextSectionPattern = /^\[[^\]]+\]\s*$/gm;
+  nextSectionPattern.lastIndex = searchFrom;
+  const nextSection = nextSectionPattern.exec(normalized);
+  const sectionEnd = nextSection?.index ?? normalized.length;
+  const section = normalized.slice(sectionStart, sectionEnd);
+  if (section.includes(quotedRoot)) return normalized;
+  const arrayMatch = /^(\s*writable_roots\s*=\s*\[)([\s\S]*?)(\])/m.exec(section);
+  let updatedSection;
+  if (arrayMatch) {
+    const existing = arrayMatch[2].trim();
+    const replacement = `${arrayMatch[1]}${existing ? `${existing}, ` : ""}${quotedRoot}${arrayMatch[3]}`;
+    updatedSection = section.slice(0, arrayMatch.index) + replacement + section.slice(arrayMatch.index + arrayMatch[0].length);
+  } else {
+    updatedSection = `${section.trimEnd()}\nwritable_roots = [${quotedRoot}]\n`;
+  }
+  return normalized.slice(0, sectionStart) + updatedSection + normalized.slice(sectionEnd);
+}
 function commandHook(command, windowsCommand) {
   return { type: "command", command, commandWindows: windowsCommand, timeout: 2 };
 }
@@ -138,7 +166,8 @@ export async function applyManagedConfig(context) {
     const agentsFile = path.join(codex.config_home, "AGENTS.md");
     const hooksFile = path.join(codex.config_home, "hooks.json");
     const originalConfig = await readText(configFile);
-    const config = replaceBlock(removeLegacyTomlServer(originalConfig, codex.server_name), MCP_BEGIN, MCP_END, codexMcpBlock(codex.server_name, mcpUrl, state.api_key_env));
+    const withWritableRoot = ensureCodexWritableRoot(removeLegacyTomlServer(originalConfig, codex.server_name), clientRoot);
+    const config = replaceBlock(withWritableRoot, MCP_BEGIN, MCP_END, codexMcpBlock(codex.server_name, mcpUrl, state.api_key_env));
     const agents = await renderGuidance(await readText(agentsFile), codex.server_name, "codex", context.releaseRoot, clientRoot);
     let hooks = {}; const hooksRaw = await readText(hooksFile, "{}");
     try { hooks = hooksRaw.trim() ? JSON.parse(hooksRaw) : {}; } catch { throw new Error(`Existing Codex hooks.json is invalid JSON: ${hooksFile}`); }
@@ -170,6 +199,11 @@ export async function selfCheckManagedConfig(context) {
   if (state.clients?.codex?.enabled) {
     const text = await readFile(path.join(state.clients.codex.config_home, "AGENTS.md"), "utf8");
     if (!text.includes(BEGIN) || !text.includes(END)) throw new Error("Codex managed guidance self-check failed");
+  }
+  if (state.clients?.codex?.enabled) {
+    const config = await readFile(path.join(state.clients.codex.config_home, "config.toml"), "utf8");
+    const root = path.resolve(context.clientRoot).replaceAll("\\", "/");
+    if (!config.includes(JSON.stringify(root))) throw new Error("Codex writable root self-check failed");
   }
   if (state.clients?.claude?.enabled) {
     const settings = JSON.parse(await readFile(path.join(state.clients.claude.config_home, "settings.json"), "utf8"));

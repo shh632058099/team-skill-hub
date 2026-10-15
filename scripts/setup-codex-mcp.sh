@@ -66,6 +66,7 @@ CLIENT_ROOT="${TEAM_SKILL_HUB_CLIENT_ROOT:-$HOME/.team-skill-hub}"
 bash "$SCRIPT_DIR/bootstrap-client-integration.sh" --client codex --config-home "$CODEX_DIR" --hub-base-url "$HUB_BASE_URL" --server-name "$SERVER_NAME" --api-key-env "$API_KEY_ENV"
 CLIENT_LAUNCHER="$CLIENT_ROOT/bin/team-skill-hub-client"
 CLIENT_RELEASE_FILE="$CLIENT_ROOT/releases/v$(tr -d '\r\n' < "$CLIENT_ROOT/current")/release.json"
+CLIENT_RELEASE_DIR="$(dirname "$CLIENT_RELEASE_FILE")"
 if command -v python3 >/dev/null 2>&1; then
   HOOK_RUNTIME_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hookRuntimeVersion"])' "$CLIENT_RELEASE_FILE")"
   HOOK_SCHEMA_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["hookSchemaVersion"])' "$CLIENT_RELEASE_FILE")"
@@ -112,6 +113,43 @@ $MCP_END
 EOF
 replace_block "$CODEX_CONFIG" "$MCP_BEGIN" "$MCP_END" "$mcp_block"
 rm -f "$mcp_block"
+
+if command -v node >/dev/null 2>&1; then
+  node --input-type=module - "$CLIENT_RELEASE_DIR/updater/updater.mjs" "$CODEX_CONFIG" "$CLIENT_ROOT" <<'NODE'
+import { readFile, writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+const [updaterFile, configFile, clientRoot] = process.argv.slice(2);
+const { ensureCodexWritableRoot } = await import(pathToFileURL(updaterFile).href);
+const content = await readFile(configFile, "utf8");
+await writeFile(configFile, ensureCodexWritableRoot(content, clientRoot));
+NODE
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$CODEX_CONFIG" "$CLIENT_ROOT" <<'PY'
+import json, pathlib, re, sys
+config_file, client_root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve()
+root = str(client_root).replace("\\", "/")
+quoted = json.dumps(root)
+content = config_file.read_text(encoding="utf-8").replace("\r\n", "\n")
+match = re.search(r"(?ms)^\[sandbox_workspace_write\]\s*$.*?(?=^\[[^\]]+\]\s*$|\Z)", content)
+if not match:
+    base = content.rstrip()
+    content = (base + "\n\n" if base else "") + f"[sandbox_workspace_write]\nwritable_roots = [{quoted}]\n"
+elif quoted not in match.group(0):
+    section = match.group(0)
+    array = re.search(r"(?ms)^(\s*writable_roots\s*=\s*\[)(.*?)(\])", section)
+    if array:
+        existing = array.group(2).strip()
+        replacement = array.group(1) + (existing + ", " if existing else "") + quoted + array.group(3)
+        section = section[:array.start()] + replacement + section[array.end():]
+    else:
+        section = section.rstrip() + f"\nwritable_roots = [{quoted}]\n"
+    content = content[:match.start()] + section + content[match.end():]
+config_file.write_text(content, encoding="utf-8")
+PY
+else
+  echo "node or python3 is required to update Codex sandbox writable_roots" >&2
+  exit 2
+fi
 
 agents_block="$(mktemp)"
 cat > "$agents_block" <<EOF

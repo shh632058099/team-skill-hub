@@ -34,12 +34,12 @@ test("relative package URL preserves reverse proxy prefix", async () => {
   assert.equal(r.resolvePackageUrl("releases/5/linux.tar.gz", "https://host/skill-hub/client-integration/manifest.json"), "https://host/skill-hub/client-integration/releases/5/linux.tar.gz");
 });
 
-test("manifest cache honors 12 hour TTL", async () => {
+test("manifest cache honors 1 hour TTL", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-runtime-"));
   const r = await runtime(root);
   await r.writeManifestCache({ version: 2 }, Date.now() - 1000);
   assert.equal((await r.readManifestCache())?.fresh, true);
-  await r.writeManifestCache({ version: 2 }, Date.now() - 13 * 60 * 60 * 1000);
+  await r.writeManifestCache({ version: 2 }, Date.now() - 61 * 60 * 1000);
   assert.equal((await r.readManifestCache())?.fresh, false);
 });
 

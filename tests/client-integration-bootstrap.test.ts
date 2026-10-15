@@ -29,6 +29,9 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "templates", "codex-guidance.md"));
   await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "scripts", "team-skill-hub-hook.sh"));
   assert.match(await readFile(path.join(codex, "hooks.json"), "utf8"), /team-skill-hub-client.*session-start/);
+  const codexConfig = await readFile(path.join(codex, "config.toml"), "utf8");
+  assert.match(codexConfig, /\[sandbox_workspace_write\]/);
+  assert.match(codexConfig, new RegExp(`writable_roots\\s*=\\s*\\[[^\\]]*${home.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\/.team-skill-hub`));
   const claudeSettings = await readFile(path.join(claude, "settings.json"), "utf8");
   assert.match(claudeSettings, /team-skill-hub-client.*session-start --client claude/);
   assert.match(claudeSettings, /team-skill-hub-client.*session-start-display --client claude/);

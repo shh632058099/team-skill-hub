@@ -79,6 +79,32 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Content, $encoding)
 }
 
+function Ensure-CodexWritableRoot {
+    param([string]$Content, [string]$ClientRoot)
+    $root = ([System.IO.Path]::GetFullPath($ClientRoot)).Replace('\\', '/')
+    $quotedRoot = '"' + $root.Replace('"', '\\"') + '"'
+    $sectionPattern = '(?ms)^\[sandbox_workspace_write\]\s*$.*?(?=^\[[^\]]+\]\s*$|\z)'
+    $sectionMatch = [regex]::Match($Content, $sectionPattern)
+    if (-not $sectionMatch.Success) {
+        $base = $Content.TrimEnd()
+        if ($base.Length -gt 0) { return $base + [Environment]::NewLine + [Environment]::NewLine + '[sandbox_workspace_write]' + [Environment]::NewLine + 'writable_roots = [' + $quotedRoot + ']' + [Environment]::NewLine }
+        return '[sandbox_workspace_write]' + [Environment]::NewLine + 'writable_roots = [' + $quotedRoot + ']' + [Environment]::NewLine
+    }
+    $section = $sectionMatch.Value
+    if ($section.Contains($quotedRoot)) { return $Content }
+    $arrayPattern = '(?ms)^(\s*writable_roots\s*=\s*\[)(.*?)(\])'
+    $arrayMatch = [regex]::Match($section, $arrayPattern)
+    if ($arrayMatch.Success) {
+        $existing = $arrayMatch.Groups[2].Value.Trim()
+        $middle = if ($existing.Length -gt 0) { $existing + ', ' + $quotedRoot } else { $quotedRoot }
+        $replacement = $arrayMatch.Groups[1].Value + $middle + $arrayMatch.Groups[3].Value
+        $section = $section.Substring(0, $arrayMatch.Index) + $replacement + $section.Substring($arrayMatch.Index + $arrayMatch.Length)
+    } else {
+        $section = $section.TrimEnd() + [Environment]::NewLine + 'writable_roots = [' + $quotedRoot + ']' + [Environment]::NewLine
+    }
+    return $Content.Substring(0, $sectionMatch.Index) + $section + $Content.Substring($sectionMatch.Index + $sectionMatch.Length)
+}
+
 $ConfigContent = Get-Content -Raw $CodexConfig
 if ($null -eq $ConfigContent) { $ConfigContent = "" }
 $ConfigContent = $ConfigContent.TrimStart([char]0xFEFF)
@@ -103,6 +129,7 @@ $McpBlock = @(
     $McpEnd
 ) -join [Environment]::NewLine
 $ConfigContent = Replace-ManagedBlock $ConfigContent $McpBegin $McpEnd $McpBlock
+$ConfigContent = Ensure-CodexWritableRoot $ConfigContent $ClientRoot
 Write-Utf8NoBom -Path $CodexConfig -Content $ConfigContent
 
 $AgentsBlock = @(

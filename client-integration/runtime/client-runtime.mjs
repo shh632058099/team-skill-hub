@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+export const CACHE_TTL_MS = 60 * 60 * 1000;
 export const DEFAULT_SESSION_BUDGET_MS = 800;
 
 export async function writeTerminalNotice(text) {
