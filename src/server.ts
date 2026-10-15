@@ -1141,6 +1141,39 @@ export async function startServer(
     return { detection };
   });
 
+  app.get<{
+    Querystring: {
+      limit?: string; cursor?: string; q?: string; status?: string; kind?: string; type?: string;
+      repository?: string; sourceType?: string; reviewer?: string; submitter?: string;
+      namespace?: string; skillCollection?: string; importType?: string;
+    };
+  }>("/admin/api/review-items", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const kinds = new Set(["candidate", "skill-bundle"]);
+    const types = new Set(["knowledge", "legacy-skill", "skill-bundle-skill", "skill-bundle-collection"]);
+    const statuses = new Set(["pending", "approved", "publishing", "rejected", "publish_failed", "published", "deleting", "delete_failed", "deleted", "review_stale", "published_drifted"]);
+    if (request.query.kind && !kinds.has(request.query.kind)) { reply.code(400); return { error: "invalid review kind" }; }
+    if (request.query.type && !types.has(request.query.type)) { reply.code(400); return { error: "invalid review type" }; }
+    if (request.query.status && !statuses.has(request.query.status)) { reply.code(400); return { error: "invalid review status" }; }
+    if (request.query.importType && !["skill", "collection"].includes(request.query.importType)) { reply.code(400); return { error: "invalid review importType" }; }
+    try {
+      return await service.adminReviewItemsPage(request.query);
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get("/admin/api/review-summary", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try {
+      return await service.adminReviewSummary();
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; namespace?: string; importType?: string } }>("/admin/api/skill-bundles", async (request, reply) => {
     if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
     const result = service.skillBundleImportsPage(request.query);
