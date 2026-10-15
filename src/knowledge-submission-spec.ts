@@ -94,10 +94,12 @@ export function validateKnowledgeSubmissionSpec(value: unknown): KnowledgeSubmis
   if (!raw.title || typeof raw.title !== "object") fail("title is required");
   if (!raw.content || typeof raw.content !== "object") fail("content is required");
   const maxTitle = positiveInteger(raw.title.max_chars, "title.max_chars");
+  if (maxTitle > 200) fail("title.max_chars must not exceed 200");
   const recommendedMin = positiveInteger(raw.title.recommended_min_chars, "title.recommended_min_chars");
   const recommendedMax = positiveInteger(raw.title.recommended_max_chars, "title.recommended_max_chars");
   if (recommendedMin > recommendedMax || recommendedMax > maxTitle) fail("title recommendations must fit max_chars");
   const maxContent = positiveInteger(raw.content.max_chars, "content.max_chars");
+  if (maxContent > 50_000) fail("content.max_chars must not exceed 50000");
   if (raw.content.format !== "markdown") fail("content.format must be markdown");
   if (!Array.isArray(raw.sections) || raw.sections.length !== KNOWLEDGE_SECTION_IDS.length) fail("sections must contain the supported section ids exactly once");
   const seen = new Set<string>();
@@ -177,14 +179,31 @@ export class KnowledgeSubmissionSpecStore {
   }
 
   private async ensureVersionPersisted(spec: KnowledgeSubmissionSpec): Promise<void> {
+    const file = this.historyFile(spec.spec_version);
     try {
-      await readFile(this.historyFile(spec.spec_version), "utf8");
+      const existing = await this.readSpec(file);
+      if (JSON.stringify(existing) !== JSON.stringify(spec)) {
+        throw new Error(`immutable history version v${spec.spec_version} already exists with different content`);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await this.atomicWrite(this.historyFile(spec.spec_version), spec);
+      await this.atomicWrite(file, spec);
     }
   }
 
+  private async writeHistoryImmutable(spec: KnowledgeSubmissionSpec): Promise<void> {
+    const file = this.historyFile(spec.spec_version);
+    try {
+      const existing = await this.readSpec(file);
+      if (JSON.stringify(existing) !== JSON.stringify(spec)) {
+        throw new Error(`immutable history version v${spec.spec_version} already exists with different content`);
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await this.atomicWrite(file, spec);
+  }
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.mutationQueue.then(operation, operation);
     this.mutationQueue = run.then(() => undefined, () => undefined);
@@ -196,7 +215,7 @@ export class KnowledgeSubmissionSpecStore {
       const current = await this.loadCurrent();
       await this.ensureVersionPersisted(current);
       const validated = validateKnowledgeSubmissionSpec({ ...clone(input), schema_version: 1, spec_version: current.spec_version + 1 });
-      await this.atomicWrite(this.historyFile(validated.spec_version), validated);
+      await this.writeHistoryImmutable(validated);
       await this.atomicWrite(this.currentFile(), validated);
       return clone(validated);
     });
@@ -227,7 +246,7 @@ export class KnowledgeSubmissionSpecStore {
       if (version === 1) source = defaultKnowledgeSubmissionSpec();
       else source = await this.readSpec(this.historyFile(version));
       const next = validateKnowledgeSubmissionSpec({ ...clone(source), spec_version: current.spec_version + 1 });
-      await this.atomicWrite(this.historyFile(next.spec_version), next);
+      await this.writeHistoryImmutable(next);
       await this.atomicWrite(this.currentFile(), next);
       return clone(next);
     });

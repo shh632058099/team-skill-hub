@@ -57,6 +57,33 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
     if (url.pathname === "/health/ready") return send(200, { ready: true });
     if (request.headers["x-skill-hub-admin-key"] !== "sandbox-admin-key") return send(403, { error: "denied" });
 
+    if (url.pathname === "/admin/api/knowledge-submission-spec" && request.method === "GET") {
+      return send(200, {
+        spec: {
+          schema_version: 1,
+          spec_version: 7,
+          title: { max_chars: 160, recommended_min_chars: 20, recommended_max_chars: 80 },
+          content: { max_chars: 50000 },
+          sections: [
+            { id: "problem", heading: "Dynamic Problem", description: "problem", required: true },
+            { id: "root_cause", heading: "Dynamic Root Cause", description: "root cause", required: true },
+            { id: "solution", heading: "Dynamic Solution", description: "solution", required: true },
+            { id: "verification", heading: "Dynamic Verification", description: "verification", required: true },
+            { id: "applicability", heading: "Dynamic Scope", description: "scope", required: true },
+            { id: "constraints", heading: "Dynamic Constraints", description: "constraints", required: true }
+          ],
+          requirements: {
+            durable_verified_team_specific: true,
+            no_raw_transcript: true,
+            no_secrets: true,
+            no_customer_sensitive_data: true,
+            no_speculation: true
+          }
+        },
+        template: "dynamic template",
+        instruction: "dynamic instruction"
+      });
+    }
     if (url.pathname === "/admin/api/knowledge-candidates" && request.method === "POST") {
       return send(201, { candidate: { id: candidateId, status: "pending", repository } });
     }
@@ -125,6 +152,13 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
     assert.ok(submit);
     assert.equal((submit!.body as Record<string, unknown>).repository, repository);
     assert.match(String((submit!.body as Record<string, unknown>).content), new RegExp(marker));
+    const submittedContent = String((submit!.body as Record<string, unknown>).content);
+    assert.match(submittedContent, /## Dynamic Problem/);
+    assert.match(submittedContent, /## Dynamic Constraints/);
+    assert.doesNotMatch(submittedContent, /## 问题/);
+    const specIndex = requests.findIndex((item) => item.method === "GET" && item.path === "/admin/api/knowledge-submission-spec");
+    const submitIndex = requests.findIndex((item) => item.method === "POST" && item.path === "/admin/api/knowledge-candidates");
+    assert.ok(specIndex >= 0 && submitIndex > specIndex, "sandbox acceptance must fetch the current Knowledge submission spec before creating a Candidate");
 
     const verify = await execFileAsync(process.execPath, [
       "--import", "tsx", "src/cli/gitlab-sandbox-acceptance.ts",

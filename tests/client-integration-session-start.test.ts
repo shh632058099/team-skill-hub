@@ -83,12 +83,15 @@ test("client guidance fetches server Knowledge submission spec instead of embedd
     "scripts/setup-codex-mcp.sh",
     "scripts/setup-codex-mcp.ps1",
     "scripts/setup-claude-code.sh",
-    "scripts/setup-claude-code.ps1"
+    "scripts/setup-claude-code.ps1",
+    "docs/developer/developer-guide.md",
+    "docs/developer/developer-guide.zh-CN.md"
   ];
   for (const file of files) {
     const source = await readFile(file, "utf8");
     assert.match(source, /get_knowledge_submission_spec/);
     assert.doesNotMatch(source, /## 问题/);
     assert.doesNotMatch(source, /exact six-section/i);
+    assert.doesNotMatch(source, /固定六章节|固定结构/);
   }
 });

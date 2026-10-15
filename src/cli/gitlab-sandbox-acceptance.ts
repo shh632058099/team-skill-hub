@@ -108,28 +108,30 @@ async function main(): Promise<void> {
     const marker = opts.marker ?? defaultMarker();
     const suggestedPath = opts.suggestedPath ?? "knowledge/sandbox-acceptance-" + safeSlug(marker) + ".md";
     const title = "Team Skill Hub Sandbox Acceptance " + marker;
-    const content = [
-      "# Team Skill Hub Sandbox Acceptance " + marker,
-      "",
-      "## 问题",
-      "需要验证候选知识从 Review 到 GitLab MR、合并、同步和检索的完整链路。验收标记：" + marker,
-      "",
-      "## 根因",
-      "沙盒验收需要一个可追踪且不会与真实团队知识混淆的候选条目。",
-      "",
-      "## 解决方案",
-      "通过 Team Skill Hub GitLab sandbox acceptance flow 创建并发布此候选。",
-      "",
-      "## 验证结果",
-      "候选审核、GitLab MR 发布、Webhook 同步和人工合并后的检索结果均应可验证。",
-      "",
-      "## 适用范围",
-      "仅适用于 Team Skill Hub GitLab 沙盒验收。",
-      "",
-      "## 约束/限制",
-      "不得将此沙盒条目当作生产知识；验收标记必须保持可检索。"
-    ].join("\n");
-
+    const submissionSpec = await request<{
+      spec: {
+        spec_version: number;
+        sections: Array<{ id: string; heading: string; required?: boolean }>;
+      };
+    }>("/admin/api/knowledge-submission-spec");
+    const sectionValues: Record<string, string> = {
+      problem: "需要验证候选知识从 Review 到 GitLab MR、合并、同步和检索的完整链路。验收标记：" + marker,
+      root_cause: "沙盒验收需要一个可追踪且不会与真实团队知识混淆的候选条目。",
+      solution: "通过 Team Skill Hub GitLab sandbox acceptance flow 创建并发布此候选。",
+      verification: "候选审核、GitLab MR 发布、Webhook 同步和人工合并后的检索结果均应可验证。",
+      applicability: "仅适用于 Team Skill Hub GitLab 沙盒验收。",
+      constraints: "不得将此沙盒条目当作生产知识；验收标记必须保持可检索。"
+    };
+    const contentLines = ["# " + title];
+    for (const section of submissionSpec.spec.sections) {
+      const value = sectionValues[section.id];
+      if (!value && section.required !== false) {
+        throw new Error("Sandbox acceptance has no fixture value for required Knowledge section " + section.id);
+      }
+      if (!value) continue;
+      contentLines.push("", "## " + section.heading, value);
+    }
+    const content = contentLines.join("\n");
     const submitted = await request<{ candidate: CandidateView }>("/admin/api/knowledge-candidates", {
       method: "POST",
       body: JSON.stringify({

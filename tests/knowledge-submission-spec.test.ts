@@ -71,9 +71,37 @@ test("concurrent saves are serialized and never reuse a spec version", async () 
   assert.equal(current.spec_version, 3);
 });
 
+test("existing next-version history is immutable but identical orphan history can recover current", async () => {
+  const dataDir = await tempDir();
+  const dir = path.join(dataDir, "config", "knowledge-submission-spec");
+  const historyDir = path.join(dir, "history");
+  await mkdir(historyDir, { recursive: true });
+  const base = defaultKnowledgeSubmissionSpec();
+  const orphan = { ...base, spec_version: 2, title: { ...base.title, max_chars: 120 } };
+  await writeFile(path.join(historyDir, "v2.json"), JSON.stringify(orphan, null, 2) + "\n", "utf8");
+
+  const store = new KnowledgeSubmissionSpecStore(dataDir);
+  const recovered = await store.saveNext({ ...base, title: { ...base.title, max_chars: 120 } });
+  assert.equal(recovered.spec_version, 2);
+  assert.equal((await store.loadCurrent()).title.max_chars, 120);
+
+  await writeFile(path.join(dir, "current.json"), JSON.stringify(base, null, 2) + "\n", "utf8");
+  await assert.rejects(
+    store.saveNext({ ...base, title: { ...base.title, max_chars: 110 } }),
+    /immutable history version v2 already exists with different content/
+  );
+  const persisted = JSON.parse(await readFile(path.join(historyDir, "v2.json"), "utf8"));
+  assert.equal(persisted.title.max_chars, 120);
+  assert.equal((await store.loadCurrent()).spec_version, 1);
+});
+
 test("validation rejects unsupported section ids and invalid limits", () => {
   const bad = { ...defaultKnowledgeSubmissionSpec(), title: { ...defaultKnowledgeSubmissionSpec().title, max_chars: 0 } };
   assert.throws(() => validateKnowledgeSubmissionSpec(bad), /Invalid knowledge submission spec/);
+  const tooLongTitle = { ...defaultKnowledgeSubmissionSpec(), title: { ...defaultKnowledgeSubmissionSpec().title, max_chars: 201 } };
+  assert.throws(() => validateKnowledgeSubmissionSpec(tooLongTitle), /title\.max_chars must not exceed 200/);
+  const tooLongContent = { ...defaultKnowledgeSubmissionSpec(), content: { ...defaultKnowledgeSubmissionSpec().content, max_chars: 50_001 } };
+  assert.throws(() => validateKnowledgeSubmissionSpec(tooLongContent), /content\.max_chars must not exceed 50000/);
   const badSection = defaultKnowledgeSubmissionSpec();
   (badSection.sections as any).push({ id: "extra", heading: "Extra", required: true });
   assert.throws(() => validateKnowledgeSubmissionSpec(badSection), /Invalid knowledge submission spec/);

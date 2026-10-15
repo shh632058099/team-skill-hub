@@ -163,27 +163,18 @@ Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、�
 
 如果本次任务产生了稳定、可复用、已经验证的新知识，可以使用 `submit_knowledge_candidate`。
 
-建议内容保持固定结构。标题最多 160 个字符，建议控制在 20–80 个字符，并使用简洁、可检索的结论式标题；整个 Knowledge Summary 最多 50,000 个字符。
+不要在客户端或自己的提示词里长期保存固定章节、标题长度或正文长度。管理员可以在服务端调整 Knowledge Submission Spec，因此每次提交前应先调用 `get_knowledge_submission_spec`，按返回的当前模板和规则整理内容，并把返回的 `spec_version` 一起传给 `submit_knowledge_candidate`。
 
-```markdown
-# 标题
-
-## 问题
-## 根因
-## 解决方案
-## 验证结果
-## 适用范围
-## 约束/限制
-```
-
-示例：
+建议流程：
 
 ```text
-把本次已经验证的结论整理为 Team Skill Hub Knowledge Candidate，
-按固定六章节格式生成，并使用 submit_knowledge_candidate 提交。
-不要包含 Token、密码、客户敏感信息或未经验证的推测。
+1. 调用 get_knowledge_submission_spec 获取当前规则、模板和 spec_version。
+2. 按当前模板整理本次已经验证的结论，不要补写 unknown / N/A / 未验证内容。
+3. 调用 submit_knowledge_candidate，并传入刚刚获取的 spec_version。
+4. 不要包含 Token、密码、客户敏感信息或未经验证的推测。
 ```
 
+如果服务端返回 `KNOWLEDGE_SPEC_OUTDATED`，说明提交期间规则已经升级；重新调用 `get_knowledge_submission_spec`，按最新规则重新整理后再提交。
 ## 9. 如何反馈已有内容有问题
 
 如果发现 Knowledge 或 Skill 已经过期、错误或质量较差，可以使用 `submit_feedback`，写清楚可验证的原因。

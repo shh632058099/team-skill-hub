@@ -560,6 +560,9 @@ export class SkillHubApplicationService {
 
   async initialize(): Promise<void> {
     await mkdir(path.dirname(this.statePath()), { recursive: true });
+    // Fail closed during startup if a persisted Knowledge submission spec exists but is malformed.
+    // Missing state is valid and resolves to the built-in v1 contract.
+    await this.knowledgeSubmissionSpecStore.loadCurrent();
     await this.loadWebhookDedup();
     try {
       this.registry.hydrate(JSON.parse(await readFile(this.statePath(), "utf8")));
