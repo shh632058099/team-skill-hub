@@ -3272,11 +3272,26 @@ export class SkillHubApplicationService {
   }
 
   async saveKnowledgeSubmissionSpec(input: import("./knowledge-submission-spec.js").KnowledgeSubmissionSpec) {
-    return await this.knowledgeSubmissionSpecStore.saveNext(input);
+    const previous = await this.knowledgeSubmissionSpecStore.loadCurrent();
+    const saved = await this.knowledgeSubmissionSpecStore.saveNext(input);
+    this.events.emit("knowledge_submission_spec.updated", {
+      previousSpecVersion: previous.spec_version,
+      specVersion: saved.spec_version,
+      schemaVersion: saved.schema_version
+    });
+    return saved;
   }
 
   async rollbackKnowledgeSubmissionSpec(version: number) {
-    return await this.knowledgeSubmissionSpecStore.rollbackTo(version);
+    const previous = await this.knowledgeSubmissionSpecStore.loadCurrent();
+    const saved = await this.knowledgeSubmissionSpecStore.rollbackTo(version);
+    this.events.emit("knowledge_submission_spec.rolled_back", {
+      previousSpecVersion: previous.spec_version,
+      sourceSpecVersion: version,
+      specVersion: saved.spec_version,
+      schemaVersion: saved.schema_version
+    });
+    return saved;
   }
 
   private async persistKnowledgeCandidate(
@@ -3682,6 +3697,28 @@ export class SkillHubApplicationService {
     id: string,
     input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation">>
   ) {
+    const current = await this.observability.getCandidate(id);
+    if (!current) throw new Error("Knowledge candidate not found");
+    let candidateUpdate: Parameters<McpObservabilityStore["updateCandidate"]>[1] = { ...input };
+    const effectiveType = input.suggestedType ?? current.suggestedType;
+    if (effectiveType === "knowledge" && (input.content !== undefined || input.title !== undefined || input.suggestedType !== undefined)) {
+      let content = input.content ?? current.content;
+      if (input.title !== undefined) {
+        const requestedTitle = input.title.trim();
+        if (!requestedTitle) throw new Error("Knowledge candidate title is required");
+        content = /^#\s+.+$/m.test(content)
+          ? content.replace(/^#\s+.+$/m, `# ${requestedTitle}`)
+          : `# ${requestedTitle}\n\n${content}`;
+      }
+      const normalized = await this.knowledgeSubmission.normalize({ title: input.title ?? current.title, content });
+      candidateUpdate = {
+        ...candidateUpdate,
+        title: normalized.title,
+        content: normalized.content,
+        validationSpecVersion: normalized.appliedSpecVersion,
+        submissionSpecSchemaVersion: normalized.schemaVersion
+      };
+    }
     if (input.repository !== undefined && input.repository) {
       const repository = this.config.repositories.find((repo) => repo.id === input.repository);
       if (!repository) throw new Error("Repository not found");
@@ -3689,12 +3726,12 @@ export class SkillHubApplicationService {
     if (input.knowledgeRelation) {
       const relation = input.knowledgeRelation;
       if (relation.type === "new") {
-        input.knowledgeRelation = { type: "new" };
+        candidateUpdate.knowledgeRelation = { type: "new" };
       } else {
         if (!relation.target?.key) throw new Error("Knowledge relation target is required");
         const target = this.knowledgeDocuments.get(relation.target.key);
         if (!target) throw new Error("Knowledge relation target not found");
-        input.knowledgeRelation = {
+        candidateUpdate.knowledgeRelation = {
           type: relation.type,
           target: {
             key: target.key,
@@ -3705,7 +3742,7 @@ export class SkillHubApplicationService {
         };
       }
     }
-    return await this.observability.updateCandidate(id, input);
+    return await this.observability.updateCandidate(id, candidateUpdate);
   }
 
   async reviewKnowledgeCandidate(

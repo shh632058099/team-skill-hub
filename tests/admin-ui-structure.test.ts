@@ -216,3 +216,20 @@ test("admin login page and access tab expose browser session management", () => 
   assertContainsAll(ADMIN_LOGIN_HTML, ["管理员登录", "username", "password", "/admin/api/auth/login", "HttpOnly Session Cookie"]);
   assertContainsAll(ADMIN_HTML, ["adminLoginStatus", "adminSessionsTable", "adminLogout", "reloadAdminSessions", "revokeOtherAdminSessions", "/admin/api/auth/sessions"]);
 });
+
+test("knowledge submission spec admin page exposes editable rules, preview, history and rollback", async () => {
+  const { ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML } = await import("../src/admin-ui.js");
+  assertContainsAll(ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML, [
+    "Knowledge 回流规范",
+    "spec_version",
+    "标题最大长度",
+    "正文最大长度",
+    "Sections",
+    "安全/质量规则",
+    "模板预览",
+    "保存为新版本",
+    "版本历史",
+    "回滚",
+    "/admin/api/knowledge-submission-spec",
+  ]);
+});

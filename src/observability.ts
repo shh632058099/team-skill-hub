@@ -1031,7 +1031,7 @@ export class McpObservabilityStore {
 
   async updateCandidate(
     id: string,
-    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation">>
+    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation" | "validationSpecVersion" | "submissionSpecSchemaVersion">>
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -1069,6 +1069,8 @@ export class McpObservabilityStore {
       ...(input.skillCollection !== undefined ? { skillCollection: input.skillCollection } : {}),
       ...(input.repository !== undefined ? { repository: input.repository || undefined } : {}),
       ...(input.suggestedPath !== undefined ? { suggestedPath: input.suggestedPath || undefined } : {}),
+      ...(input.validationSpecVersion !== undefined ? { validationSpecVersion: input.validationSpecVersion } : {}),
+      ...(input.submissionSpecSchemaVersion !== undefined ? { submissionSpecSchemaVersion: input.submissionSpecSchemaVersion } : {}),
       status: current.status === "pending" ? "pending" : "approved",
       publishError: undefined,
       updatedAt: new Date().toISOString()

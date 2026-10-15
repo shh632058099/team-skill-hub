@@ -5,9 +5,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import * as z from "zod/v4";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
+import type { KnowledgeSubmissionSpec } from "./knowledge-submission-spec.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
-import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_LOGIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML, ADMIN_SKILL_BUNDLES_HTML } from "./admin-ui.js";
+import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML, ADMIN_LOGIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML, ADMIN_SKILL_BUNDLES_HTML } from "./admin-ui.js";
 import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
 import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
 import { ApiKeyAuthenticationProvider } from "./security.js";
@@ -513,6 +514,48 @@ export async function startServer(
     if (!requireAdminPage(request, reply)) return "";
     reply.code(302).header("location", "/admin/governance");
     return "";
+  });
+
+  app.get("/admin/knowledge-submission-spec", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML;
+  });
+
+  app.get("/admin/api/knowledge-submission-spec", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const view = await service.getKnowledgeSubmissionSpec();
+    return { spec: view.rules, template: view.template, instruction: view.instruction };
+  });
+
+  app.put<{ Body: KnowledgeSubmissionSpec }>("/admin/api/knowledge-submission-spec", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try {
+      const spec = await service.saveKnowledgeSubmissionSpec(request.body);
+      const view = await service.getKnowledgeSubmissionSpec();
+      return { spec, template: view.template, instruction: view.instruction };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get("/admin/api/knowledge-submission-spec/history", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    return { specs: await service.getKnowledgeSubmissionSpecHistory() };
+  });
+
+  app.post<{ Body: { version?: number } }>("/admin/api/knowledge-submission-spec/rollback", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const version = Number(request.body?.version);
+    if (!Number.isInteger(version) || version < 1) { reply.code(400); return { error: "version must be a positive integer" }; }
+    try {
+      return { spec: await service.rollbackKnowledgeSubmissionSpec(version) };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400;
+      reply.code(code);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   app.get("/admin/*", async (request, reply) => {
