@@ -42,6 +42,16 @@ test("legacy admin tabs route migrated modules to stable pages", () => {
   ]);
 });
 
+
+test("migrated admin modules are removed from the legacy dashboard payload", () => {
+  for (const legacyView of ["observability", "review", "gaps", "governance"]) {
+    assert.ok(!ADMIN_HTML.includes(`data-view="${legacyView}"`), `legacy ${legacyView} view should be removed from ADMIN_HTML`);
+  }
+  for (const legacyLoader of ["loadObservability", "loadCandidates", "loadGaps", "loadArtifactGovernance"]) {
+    assert.ok(!ADMIN_HTML.includes(`function ${legacyLoader}`), `legacy ${legacyLoader} implementation should be removed from ADMIN_HTML`);
+  }
+});
+
 test("observability list filters use user-facing labels and boolean selects", () => {
   assertContainsAll(ADMIN_OBSERVABILITY_HTML, [
     "关键字",
@@ -217,15 +227,14 @@ test("admin login page and access tab expose browser session management", () => 
   assertContainsAll(ADMIN_HTML, ["adminLoginStatus", "adminSessionsTable", "adminLogout", "reloadAdminSessions", "revokeOtherAdminSessions", "/admin/api/auth/sessions"]);
 });
 
-test("governance tab exposes Knowledge submission spec as a first-class entry", () => {
-  assert.ok(
-    ADMIN_HTML.includes('<div class="view" data-view="governance"><div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>'),
-    "governance should link directly to the Knowledge submission spec editor"
-  );
-  assert.ok(
-    !ADMIN_HTML.includes('<div class="view" data-view="settings">\n<div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>'),
-    "Knowledge submission spec entry should live under governance rather than system settings"
-  );
+test("governance page exposes Knowledge submission spec as a first-class action", () => {
+  assertContainsAll(ADMIN_GOVERNANCE_HTML, [
+    "Knowledge 回流规范",
+    'href="/admin/knowledge-submission-spec"',
+    'class="governance-spec-action"',
+    ".governance-spec-action{",
+  ]);
+  assert.ok(!ADMIN_HTML.includes('<div class="view" data-view="governance"><div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>'));
 });
 
 test("knowledge submission spec admin page exposes editable rules, preview, history and rollback", async () => {
@@ -243,4 +252,13 @@ test("knowledge submission spec admin page exposes editable rules, preview, hist
     "回滚",
     "/admin/api/knowledge-submission-spec",
   ]);
+});
+
+test("knowledge submission spec inline script is valid browser JavaScript", async () => {
+  const { ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML } = await import("../src/admin-ui.js");
+  const scripts = [...ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!);
+  assert.ok(scripts.length > 0, "spec page should contain an inline script");
+  for (const script of scripts) {
+    assert.doesNotThrow(() => new Function(script), "generated spec page inline script should parse");
+  }
 });
