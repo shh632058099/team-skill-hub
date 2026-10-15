@@ -67,12 +67,13 @@ EVENT_URL="${BASE_URL}/client-events/claude-code"
 
 mkdir -p "$CLAUDE_DIR" "$HOOKS_DIR"
 touch "$SETTINGS_FILE" "$CLAUDE_MD"
-export SETTINGS_FILE EVENT_URL API_KEY_ENV
+export SETTINGS_FILE EVENT_URL API_KEY_ENV SERVER_NAME SKIP_MCP
 
 if command -v python3 >/dev/null 2>&1; then
   python3 <<'PY'
 import json, os
 path=os.environ["SETTINGS_FILE"]; url=os.environ["EVENT_URL"]; key=os.environ["API_KEY_ENV"]
+server=os.environ["SERVER_NAME"]; skip_mcp=os.environ["SKIP_MCP"] == "true"
 try:
     with open(path,"r",encoding="utf-8") as f:
         content=f.read().strip()
@@ -80,6 +81,13 @@ try:
 except json.JSONDecodeError:
     raise SystemExit("Existing Claude settings.json is invalid JSON; leaving it unchanged.")
 hooks=root.setdefault("hooks",{})
+if not skip_mcp:
+    permissions=root.setdefault("permissions",{})
+    allow=list(permissions.get("allow",[]) or [])
+    mcp_allow="mcp__"+server+"__*"
+    if mcp_allow not in allow:
+        allow.append(mcp_allow)
+    permissions["allow"]=allow
 http_handler={"type":"http","url":url,"timeout":2,"headers":{"Authorization":"Bearer ${"+key+"}"},"allowedEnvVars":[key]}
 for event in ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"]:
     kept=[]
@@ -100,9 +108,10 @@ with open(path,"w",encoding="utf-8") as f:
 PY
 elif command -v node >/dev/null 2>&1; then
   node <<'NODE'
-const fs=require("fs"),path=process.env.SETTINGS_FILE,url=process.env.EVENT_URL,key=process.env.API_KEY_ENV;
+const fs=require("fs"),path=process.env.SETTINGS_FILE,url=process.env.EVENT_URL,key=process.env.API_KEY_ENV,server=process.env.SERVER_NAME,skipMcp=process.env.SKIP_MCP==="true";
 let root={};if(fs.existsSync(path)&&fs.readFileSync(path,"utf8").trim()){try{root=JSON.parse(fs.readFileSync(path,"utf8"))}catch{console.error("Existing Claude settings.json is invalid JSON; leaving it unchanged.");process.exit(2)}}
 root.hooks ||= {};
+if(!skipMcp){root.permissions ||= {};const allow=Array.isArray(root.permissions.allow)?root.permissions.allow:[];const rule=`mcp__${server}__*`;if(!allow.includes(rule))allow.push(rule);root.permissions.allow=allow;}
 const httpHandler={type:"http",url,timeout:2,headers:{Authorization:"Bearer ${"+key+"}"},allowedEnvVars:[key]};
 for(const event of ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"]){const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!(h.type==="http"&&String(h.url||"").includes("/client-events/claude-code")));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[httpHandler]});root.hooks[event]=kept}
 const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-claude-stop"));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[{type:"command",command:'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',timeout:4}]});root.hooks.Stop=kept;

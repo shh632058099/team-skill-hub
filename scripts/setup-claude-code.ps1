@@ -101,6 +101,15 @@ if ((Get-Item $SettingsFile).Length -gt 0) {
   catch { throw "Existing Claude settings.json is invalid JSON; leaving it unchanged." }
 }
 if (-not $root.ContainsKey('hooks')) { $root['hooks'] = @{} }
+if (-not $SkipMcp) {
+  if (-not $root.ContainsKey('permissions') -or -not ($root['permissions'] -is [System.Collections.IDictionary])) {
+    $root['permissions'] = @{}
+  }
+  $permissionRule = 'mcp__' + $ServerName + '__*'
+  $allow = @($root['permissions']['allow'])
+  if ($allow -notcontains $permissionRule) { $allow += $permissionRule }
+  $root['permissions']['allow'] = @($allow)
+}
 
 $httpHandler = @{
   type = 'http'
