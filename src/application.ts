@@ -66,6 +66,18 @@ import { openSkillHubDatabase, type SkillHubDatabase } from "./storage/database.
 import { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundleService, type SubmitSkillBundleServiceInput } from "./skill-bundle-service.js";
 import { legacyRdSkillPathToTarget, type SkillBundleImport } from "./skill-bundles.js";
+import {
+  collectReviewItemsBounded,
+  paginateReviewItems,
+  sortReviewItems,
+  summarizeReviewItems,
+  type ReviewItem,
+  type ReviewItemsQuery,
+  type ReviewPage,
+  type ReviewStatusGroup,
+} from "./review-center.js";
+
+export const ADMIN_REVIEW_MAX_SOURCE_ROWS = 1000;
 
 function discoveryConfidence(score: number, coverage: number | undefined, scale: number): number {
   const normalizedScore = 1 - Math.exp(-Math.max(0, score) / scale);
@@ -2011,6 +2023,77 @@ export class SkillHubApplicationService {
 
   adminFeedbackPage(query: Parameters<McpObservabilityStore["adminFeedbackPage"]>[0]) { return this.observability.adminFeedbackPage(query); }
   adminKnowledgeCandidatesPage(query: Parameters<McpObservabilityStore["adminCandidatesPage"]>[0]) { return this.observability.adminCandidatesPage(query); }
+
+  private async collectAdminReviewItems(query: ReviewItemsQuery): Promise<ReviewItem[]> {
+    let fallbackCandidates: KnowledgeCandidate[] | undefined;
+    const fetchCandidates = async (cursor: string | undefined, limit: number) => {
+      const suggestedType = query.type === "knowledge" ? "knowledge" : query.type === "legacy-skill" ? "skill" : undefined;
+      const direct = this.observability.adminCandidatesPage({
+        limit: String(limit),
+        ...(cursor ? { cursor } : {}),
+        ...(query.q ? { q: query.q } : {}),
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.repository ? { repository: query.repository } : {}),
+        ...(query.sourceType ? { sourceType: query.sourceType } : {}),
+        ...(query.reviewer ? { reviewer: query.reviewer } : {}),
+        ...(suggestedType ? { suggestedType } : {}),
+        ...(query.skillCollection ? { skillCollection: query.skillCollection } : {}),
+      });
+      if (direct) {
+        return {
+          items: direct.items,
+          total: direct.page.total,
+          nextCursor: direct.page.nextCursor,
+        };
+      }
+      fallbackCandidates ??= await this.listKnowledgeCandidates(ADMIN_REVIEW_MAX_SOURCE_ROWS);
+      const offset = Math.max(0, Number(cursor ?? 0) || 0);
+      const items = fallbackCandidates.slice(offset, offset + limit);
+      const possiblyTruncated = fallbackCandidates.length >= ADMIN_REVIEW_MAX_SOURCE_ROWS;
+      const total = possiblyTruncated ? ADMIN_REVIEW_MAX_SOURCE_ROWS + 1 : fallbackCandidates.length;
+      return {
+        items,
+        total,
+        nextCursor: offset + items.length < total ? String(offset + items.length) : undefined,
+      };
+    };
+
+    const fetchBundles = async (cursor: string | undefined, limit: number) => {
+      const impliedImportType = query.type === "skill-bundle-skill" ? "skill" : query.type === "skill-bundle-collection" ? "collection" : undefined;
+      const page = this.skillBundles.listImportsPage({
+        limit: String(limit),
+        ...(cursor ? { cursor } : {}),
+        ...(query.q ? { q: query.q } : {}),
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.repository ? { repository: query.repository } : {}),
+        ...(query.namespace ? { namespace: query.namespace } : {}),
+        ...((query.importType || impliedImportType) ? { importType: query.importType || impliedImportType } : {}),
+      });
+      return { items: page.items, total: page.total, nextCursor: page.nextCursor };
+    };
+
+    return await collectReviewItemsBounded(query, {
+      pageSize: 100,
+      maxSourceRows: ADMIN_REVIEW_MAX_SOURCE_ROWS,
+      targetCount: Number.POSITIVE_INFINITY,
+      fetchCandidates,
+      fetchBundles,
+      bundleSnapshotSummary: (record) => {
+        const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
+        return snapshot ? { skillCount: snapshot.skills.length, fileCount: snapshot.fileCount, totalBytes: snapshot.totalBytes } : undefined;
+      },
+    });
+  }
+
+  async adminReviewItemsPage(query: ReviewItemsQuery): Promise<{ items: ReviewItem[]; page: ReviewPage }> {
+    const items = sortReviewItems(await this.collectAdminReviewItems(query));
+    return paginateReviewItems(items, query);
+  }
+
+  async adminReviewSummary(): Promise<{ counts: Record<ReviewStatusGroup, number>; total: number }> {
+    const items = await this.collectAdminReviewItems({});
+    return summarizeReviewItems(items);
+  }
 
   adminClientEventsPage(query: Parameters<McpObservabilityStore["adminClientEventsPage"]>[0]) {
     return this.observability.adminClientEventsPage(query);

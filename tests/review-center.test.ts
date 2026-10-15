@@ -4,6 +4,7 @@ import test from "node:test";
 import type { KnowledgeCandidate } from "../src/observability.js";
 import type { SkillBundleImport } from "../src/skill-bundles.js";
 import {
+  collectReviewItemsBounded,
   filterReviewItems,
   paginateReviewItems,
   projectCandidateReviewItem,
@@ -152,4 +153,54 @@ test("review summary includes type-specific states", () => {
   assert.equal(summary.counts.deleted, 1);
   assert.equal(summary.counts.review_stale, 1);
   assert.equal(summary.counts.published_drifted, 1);
+});
+
+test("bounded collector fetches beyond one source page for a global window", async () => {
+  const candidateRows = [
+    candidate({ id: "kc_6", updatedAt: "2026-10-15T06:00:00.000Z" }),
+    candidate({ id: "kc_4", updatedAt: "2026-10-15T04:00:00.000Z" }),
+    candidate({ id: "kc_2", updatedAt: "2026-10-15T02:00:00.000Z" }),
+  ];
+  const bundleRows = [
+    bundle({ id: "sbi_5", updatedAt: "2026-10-15T05:00:00.000Z" }),
+    bundle({ id: "sbi_3", updatedAt: "2026-10-15T03:00:00.000Z" }),
+    bundle({ id: "sbi_1", updatedAt: "2026-10-15T01:00:00.000Z" }),
+  ];
+  let candidateCalls = 0;
+  let bundleCalls = 0;
+  const items = await collectReviewItemsBounded({ limit: "2", cursor: "2" }, {
+    pageSize: 1,
+    maxSourceRows: 10,
+    fetchCandidates: async (cursor, limit) => {
+      candidateCalls += 1;
+      const offset = Number(cursor ?? 0);
+      const page = candidateRows.slice(offset, offset + limit);
+      return { items: page, total: candidateRows.length, nextCursor: offset + limit < candidateRows.length ? String(offset + limit) : undefined };
+    },
+    fetchBundles: async (cursor, limit) => {
+      bundleCalls += 1;
+      const offset = Number(cursor ?? 0);
+      const page = bundleRows.slice(offset, offset + limit);
+      return { items: page, total: bundleRows.length, nextCursor: offset + limit < bundleRows.length ? String(offset + limit) : undefined };
+    },
+  });
+  assert.deepEqual(sortReviewItems(items).slice(2, 4).map((item) => item.id), ["kc_4", "sbi_3"]);
+  assert.ok(candidateCalls >= 3, "candidate source must page beyond its first page");
+  assert.ok(bundleCalls >= 3, "bundle source must page beyond its first page");
+});
+
+test("bounded collector fails instead of scanning beyond its source cap", async () => {
+  await assert.rejects(
+    collectReviewItemsBounded({ q: "never-matches", limit: "2" }, {
+      pageSize: 2,
+      maxSourceRows: 4,
+      fetchCandidates: async (cursor, limit) => {
+        const offset = Number(cursor ?? 0);
+        const rows = Array.from({ length: limit }, (_, index) => candidate({ id: `kc_${offset + index}`, title: "other" }));
+        return { items: rows, total: 100, nextCursor: String(offset + limit) };
+      },
+      fetchBundles: async () => ({ items: [], total: 0 }),
+    }),
+    /Admin review query exceeded bounded source scan/
+  );
 });

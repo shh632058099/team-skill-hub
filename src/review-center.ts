@@ -209,6 +209,71 @@ export function paginateReviewItems(items: ReviewItem[], query: ReviewItemsQuery
   };
 }
 
+export interface ReviewSourcePage<T> {
+  items: T[];
+  total: number;
+  nextCursor?: string;
+}
+
+export interface ReviewCollectorOptions {
+  pageSize?: number;
+  maxSourceRows?: number;
+  targetCount?: number;
+  fetchCandidates: (cursor: string | undefined, limit: number) => Promise<ReviewSourcePage<KnowledgeCandidate>>;
+  fetchBundles: (cursor: string | undefined, limit: number) => Promise<ReviewSourcePage<SkillBundleImport>>;
+  bundleSnapshotSummary?: (record: SkillBundleImport) => SkillBundleSnapshotSummary | undefined;
+}
+
+export async function collectReviewItemsBounded(query: ReviewItemsQuery, options: ReviewCollectorOptions): Promise<ReviewItem[]> {
+  const targetCount = options.targetCount ?? (normalizeReviewOffset(query.cursor) + normalizeReviewLimit(query.limit));
+  const pageSize = Math.max(1, Math.min(options.pageSize ?? 100, 100));
+  const maxSourceRows = Math.max(pageSize, options.maxSourceRows ?? 1000);
+  const collected: ReviewItem[] = [];
+
+  const collectSource = async <T>(
+    enabled: boolean,
+    fetchPage: (cursor: string | undefined, limit: number) => Promise<ReviewSourcePage<T>>,
+    project: (value: T) => ReviewItem,
+  ) => {
+    if (!enabled) return;
+    let cursor: string | undefined;
+    let scanned = 0;
+    let exhausted = false;
+    let matching = 0;
+    while (!exhausted && matching < targetCount) {
+      if (scanned >= maxSourceRows) throw new Error("Admin review query exceeded bounded source scan");
+      const limit = Math.min(pageSize, maxSourceRows - scanned);
+      const page = await fetchPage(cursor, limit);
+      if (!page.items.length) {
+        exhausted = true;
+        break;
+      }
+      scanned += page.items.length;
+      const projected = page.items.map(project);
+      collected.push(...projected);
+      matching += filterReviewItems(projected, query).length;
+      exhausted = !page.nextCursor || scanned >= page.total;
+      cursor = page.nextCursor;
+      if (!exhausted && scanned >= maxSourceRows && matching < targetCount) {
+        throw new Error("Admin review query exceeded bounded source scan");
+      }
+    }
+  };
+
+  const candidateTypeApplicable = !query.type || query.type === "knowledge" || query.type === "legacy-skill";
+  const bundleTypeApplicable = !query.type || query.type === "skill-bundle-skill" || query.type === "skill-bundle-collection";
+  const candidateApplicable = query.kind !== "skill-bundle" && candidateTypeApplicable && !query.namespace && !query.importType;
+  const bundleApplicable = query.kind !== "candidate" && bundleTypeApplicable && (!query.skillCollection || query.skillCollection === "rd-skills");
+
+  await collectSource(candidateApplicable, options.fetchCandidates, projectCandidateReviewItem);
+  await collectSource(
+    bundleApplicable,
+    options.fetchBundles,
+    (record) => projectSkillBundleReviewItem(record, options.bundleSnapshotSummary?.(record)),
+  );
+  return filterReviewItems(collected, query);
+}
+
 export function summarizeReviewItems(items: ReviewItem[]): { counts: Record<ReviewStatusGroup, number>; total: number } {
   const counts = Object.fromEntries(REVIEW_STATUS_GROUPS.map((status) => [status, 0])) as Record<ReviewStatusGroup, number>;
   for (const item of items) counts[item.statusGroup] += 1;
