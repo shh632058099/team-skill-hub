@@ -504,29 +504,35 @@ This keeps the Hub software lifecycle separate from company Skill content and cr
 
 The REST v1 surface preserves legacy routes while clients migrate.
 
-### Codex Hook Runtime upgrade
+### Client integration upgrade
+
+The setup scripts perform the one-time bootstrap of the local Client Integration runtime for both Codex and Claude Code. Normal upgrades do **not** require downloading a new setup script.
+
+At SessionStart, the client may show an update notice. The check is cached and fail-open and never upgrades silently. After explicit user approval, run:
 
 Linux/macOS/WSL:
 
 ~~~bash
-bash scripts/setup-codex-mcp.sh --upgrade
+~/.team-skill-hub/bin/team-skill-hub-client upgrade
 ~~~
 
-PowerShell:
+Windows PowerShell:
 
 ~~~powershell
-.\scripts\setup-codex-mcp.ps1 -Upgrade
+& "$HOME\.team-skill-hub\bin\team-skill-hub-client.ps1" upgrade
 ~~~
 
-Upgrade preserves existing Hub URL, server name, API-key environment reference, and automatic Knowledge preference unless explicitly overridden.
+After a successful required update, restart Codex/Claude Code before continuing work that depends on the new Client Integration version. The updater preserves the configured Hub URL, server name, API-key environment-variable reference, resolved `CODEX_HOME` / `CLAUDE_CONFIG_DIR`, managed guidance, lifecycle hooks, and automatic Knowledge preference.
+
+`setup-codex-mcp.* --upgrade` / `setup-claude-code.* --upgrade` remain available only for bootstrap migration or disaster recovery when the stable launcher is missing or damaged.
 
 ### Compatibility checks
 
 Admin Sessions display Hook Runtime state:
 
-- `curren
-- `outdated
-- `unknown
+- `current`
+- `outdated`
+- `unknown`
 
 Client Event schema discovery:
 
@@ -547,8 +553,9 @@ Server rollback:
 
 Client rollback:
 
-- reinstall the previously approved Hook Runtime/setup package;
-- verify runtime/schema status in Admin.
+- run `~/.team-skill-hub/bin/team-skill-hub-client rollback` on Linux/macOS/WSL, or the PowerShell launcher with `rollback` on Windows;
+- rollback reconciles to the locally retained previous successful release and does not require the server to still host that package;
+- restart Codex/Claude Code and verify runtime/schema status in Admin.
 
 ### Required gates
 

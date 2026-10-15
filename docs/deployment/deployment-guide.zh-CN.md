@@ -810,29 +810,35 @@ External transport  HTTPS reverse proxy
 
 The REST v1 surface preserves legacy routes while clients migrate.
 
-### Codex Hook Runtime upgrade
+### Client Integration 升级
 
-Linux/macOS/WSL:
+Codex 和 Claude Code 的 setup 脚本只负责一次性的本地 Client Integration Runtime bootstrap。正常升级**不需要**重新下载新的 setup 脚本。
+
+SessionStart 时客户端可能提示存在新版本。检查带缓存并且 fail-open，不会静默升级。只有用户明确确认后才执行：
+
+Linux/macOS/WSL：
 
 ~~~bash
-bash scripts/setup-codex-mcp.sh --upgrade
+~/.team-skill-hub/bin/team-skill-hub-client upgrade
 ~~~
 
-PowerShell:
+Windows PowerShell：
 
 ~~~powershell
-.\scripts\setup-codex-mcp.ps1 -Upgrade
+& "$HOME\.team-skill-hub\bin\team-skill-hub-client.ps1" upgrade
 ~~~
 
-Upgrade preserves existing Hub URL, server name, API-key environment reference, and automatic Knowledge preference unless explicitly overridden.
+如果是 required update，升级成功后需要重启 Codex/Claude Code，再继续依赖新版 Client Integration 的操作。升级会保留 Hub URL、server name、API Key 环境变量名称、实际解析后的 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`、managed guidance、生命周期 hooks 和自动 Knowledge 偏好。
+
+`setup-codex-mcp.* --upgrade` / `setup-claude-code.* --upgrade` 仅保留给首次迁移或 stable launcher 丢失/损坏时的灾难恢复。
 
 ### Compatibility checks
 
-Admin Sessions display Hook Runtime state:
+Admin Sessions 会显示 Hook Runtime 状态：
 
-- `curren
-- `outdated
-- `unknown
+- `current`
+- `outdated`
+- `unknown`
 
 Client Event schema discovery:
 
@@ -851,10 +857,11 @@ Server rollback:
 - preserve/restore compatible `DATA_DIR`;
 - use repository last-known-good revision when a repository update caused the issue.
 
-Client rollback:
+Client rollback：
 
-- reinstall the previously approved Hook Runtime/setup package;
-- verify runtime/schema status in Admin.
+- Linux/macOS/WSL 执行 `~/.team-skill-hub/bin/team-skill-hub-client rollback`；Windows 使用 PowerShell launcher 并传入 `rollback`；
+- rollback 会回到本地保留的上一个成功 release，不要求服务端仍保留对应安装包；
+- 重启 Codex/Claude Code，并在 Admin 中确认 runtime/schema 状态。
 
 ### Required gates
 

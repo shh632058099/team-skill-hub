@@ -256,22 +256,23 @@ Automatic candidates are intentionally selective and are not created for every s
 
 If the content should be preserved, submit it manually with `submit_knowledge_candidate`.
 
-### The setup component needs an upgrade
+### The client integration needs an upgrade
 
-If an administrator tells you the client integration is outdated:
+If an administrator tells you the client integration is outdated, or SessionStart reports a new version, use the stable launcher rather than downloading a new setup script:
+
+Linux / macOS / WSL:
 
 ```bash
-bash scripts/setup-codex-mcp.sh --upgrade
+~/.team-skill-hub/bin/team-skill-hub-client upgrade
 ```
 
 PowerShell:
 
 ```powershell
-.\scripts\setup-codex-mcp.ps1 -Upgrade
+& "$HOME\.team-skill-hub\bin\team-skill-hub-client.ps1" upgrade
 ```
 
-Restart Codex after the upgrade.
-
+Restart Codex or Claude Code after a required upgrade. Use the original setup `--upgrade` / `-Upgrade` command only if the stable launcher is missing or damaged.
 ## 13. Safe usage principles
 
 - Keep the Developer API Key in an environment variable or approved secret store.

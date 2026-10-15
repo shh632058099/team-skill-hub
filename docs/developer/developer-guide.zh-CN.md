@@ -256,22 +256,23 @@ TEAM_SKILL_HUB_API_KEY
 
 如果你认为本次内容应该沉淀，直接使用 `submit_knowledge_candidate` 手工提交即可。
 
-### 接入脚本需要升级
+### Client Integration 需要升级
 
-如果管理员通知客户端接入组件版本过旧：
+如果管理员通知客户端接入组件版本过旧，或者 SessionStart 提示有新版本，应使用 stable launcher 升级，不需要重新下载新的 setup 文件：
+
+Linux / macOS / WSL：
 
 ```bash
-bash scripts/setup-codex-mcp.sh --upgrade
+~/.team-skill-hub/bin/team-skill-hub-client upgrade
 ```
 
 PowerShell：
 
 ```powershell
-.\scripts\setup-codex-mcp.ps1 -Upgrade
+& "$HOME\.team-skill-hub\bin\team-skill-hub-client.ps1" upgrade
 ```
 
-升级后重新启动 Codex。
-
+如果是 required update，升级后重新启动 Codex 或 Claude Code。只有 stable launcher 丢失或损坏时，才使用原 setup 的 `--upgrade` / `-Upgrade` 作为灾难恢复手段。
 ## 13. 安全使用原则
 
 - Developer API Key 只放在环境变量或公司认可的 Secret Store 中；
