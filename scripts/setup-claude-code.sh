@@ -124,6 +124,7 @@ for group in hooks.get("SessionStart",[]) or []:
     if handlers:
         copy=dict(group);copy["hooks"]=handlers;kept.append(copy)
 kept.append({"hooks":[{"type":"command","command":f'"{client}" session-start --client claude',"timeout":2}]})
+kept.append({"hooks":[{"type":"command","command":f'"{client}" session-start-display --client claude',"timeout":2}]})
 hooks["SessionStart"]=kept
 with open(path,"w",encoding="utf-8") as f:
     json.dump(root,f,ensure_ascii=False,indent=2); f.write("\n")
@@ -137,7 +138,7 @@ if(!skipMcp){root.permissions ||= {};const allow=Array.isArray(root.permissions.
 const httpHandler={type:"http",url,timeout:2,headers:{Authorization:"Bearer ${"+key+"}"},allowedEnvVars:[key]};
 for(const event of ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"]){const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!(h.type==="http"&&String(h.url||"").includes("/client-events/claude-code")));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[httpHandler]});root.hooks[event]=kept}
 const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-claude-stop"));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[{type:"command",command:'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',timeout:4}]});root.hooks.Stop=kept;
-const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
+const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});sk.push({hooks:[{type:"command",command:`"${client}" session-start-display --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");
 NODE
 else

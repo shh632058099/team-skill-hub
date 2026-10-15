@@ -23,12 +23,15 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   assert.equal(state.clients.claude.config_home, path.resolve(claude));
   assert.equal(state.api_key_env, "TEAM_SKILL_HUB_API_KEY");
   assert.doesNotMatch(raw, /super-secret-key/);
-  assert.equal(state.installed_version, 1);
+  const releaseVersion = JSON.parse(await readFile("client-integration/release.json", "utf8")).version;
+  assert.equal(state.installed_version, releaseVersion);
   await stat(path.join(home, ".team-skill-hub", "bin", "team-skill-hub-client"));
-  await stat(path.join(home, ".team-skill-hub", "releases", "v1", "templates", "codex-guidance.md"));
-  await stat(path.join(home, ".team-skill-hub", "releases", "v1", "scripts", "team-skill-hub-hook.sh"));
+  await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "templates", "codex-guidance.md"));
+  await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "scripts", "team-skill-hub-hook.sh"));
   assert.match(await readFile(path.join(codex, "hooks.json"), "utf8"), /team-skill-hub-client.*session-start/);
-  assert.match(await readFile(path.join(claude, "settings.json"), "utf8"), /team-skill-hub-client.*session-start/);
+  const claudeSettings = await readFile(path.join(claude, "settings.json"), "utf8");
+  assert.match(claudeSettings, /team-skill-hub-client.*session-start --client claude/);
+  assert.match(claudeSettings, /team-skill-hub-client.*session-start-display --client claude/);
 });
 
 test("second client targeting a different Hub fails before setup mutation", async () => {
@@ -46,11 +49,13 @@ test("bootstrap refuses to downgrade a newer installed runtime", async () => {
   const config = path.join(home, "codex");
   const root = path.join(home, ".team-skill-hub");
   await mkdir(root, { recursive: true });
-  await writeFile(path.join(root, "state.json"), JSON.stringify({ schema_version: 1, installed_version: 2, hub_base_url: "http://127.0.0.1:8080", api_key_env: "TEAM_SKILL_HUB_API_KEY", clients: {} }));
-  await writeFile(path.join(root, "current"), "2\n");
+  const releaseVersion = JSON.parse(await readFile("client-integration/release.json", "utf8")).version;
+  const newerVersion = releaseVersion + 1;
+  await writeFile(path.join(root, "state.json"), JSON.stringify({ schema_version: 1, installed_version: newerVersion, hub_base_url: "http://127.0.0.1:8080", api_key_env: "TEAM_SKILL_HUB_API_KEY", clients: {} }));
+  await writeFile(path.join(root, "current"), `${newerVersion}\n`);
   await assert.rejects(() => execFileAsync("bash", ["scripts/bootstrap-client-integration.sh", "--client", "codex", "--config-home", config, "--hub-base-url", "http://127.0.0.1:8080", "--server-name", "teamSkillHub", "--api-key-env", "TEAM_SKILL_HUB_API_KEY"], { cwd: process.cwd(), env: { ...process.env, HOME: home } }), /newer.*installed|downgrade/i);
-  assert.equal(JSON.parse(await readFile(path.join(root, "state.json"), "utf8")).installed_version, 2);
-  assert.equal((await readFile(path.join(root, "current"), "utf8")).trim(), "2");
+  assert.equal(JSON.parse(await readFile(path.join(root, "state.json"), "utf8")).installed_version, newerVersion);
+  assert.equal((await readFile(path.join(root, "current"), "utf8")).trim(), String(newerVersion));
 });
 
 test("PowerShell setup scripts contain runtime bootstrap and SessionStart integration", async () => {
@@ -58,5 +63,6 @@ test("PowerShell setup scripts contain runtime bootstrap and SessionStart integr
     const source = await readFile(file, "utf8");
     assert.match(source, /bootstrap-client-integration\.ps1/);
     assert.match(source, /session-start/);
+    if (file.endsWith("setup-claude-code.ps1")) assert.match(source, /session-start-display/);
   }
 });

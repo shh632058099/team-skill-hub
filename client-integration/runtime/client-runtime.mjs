@@ -12,6 +12,19 @@ const execFileAsync = promisify(execFile);
 export const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 export const DEFAULT_SESSION_BUDGET_MS = 800;
 
+export async function writeTerminalNotice(text) {
+  if (!text) return false;
+  const terminal = process.platform === "win32" ? "CONOUT$" : "/dev/tty";
+  try {
+    const handle = await open(terminal, "w");
+    try { await handle.writeFile(`${text}\n`); }
+    finally { await handle.close(); }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function clientRoot() {
   return process.env.TEAM_SKILL_HUB_CLIENT_ROOT || path.join(os.homedir(), ".team-skill-hub");
 }
@@ -382,7 +395,7 @@ async function main() {
     return;
   }
   if (command === "lifecycle") return;
-  if (command === "check-update" || command === "session-start") {
+  if (command === "check-update" || command === "session-start" || command === "session-start-display") {
     const state = await readState();
     if (!state) return;
     const manifestUrl = new URL("client-integration/manifest.json", `${String(state.hub_base_url).replace(/\/$/, "")}/`).href;
@@ -395,6 +408,15 @@ async function main() {
     const client = clientIndex >= 0 ? process.argv[clientIndex + 1] : "codex";
     const detail = { installed: state.installed_version, latest: result.manifest?.version ?? state.installed_version, minimum: result.manifest?.minimum_supported_version ?? state.installed_version };
     const renderer = client === "claude" ? await import("./render-claude.mjs") : await import("./render-codex.mjs");
+    const terminalNotice = renderer.renderTerminalNotice(result.decision, detail);
+    if (command === "session-start-display") {
+      if (terminalNotice) {
+        process.stderr.write(terminalNotice + (terminalNotice.endsWith("\n") ? "" : "\n"));
+        process.exitCode = 2;
+      }
+      return;
+    }
+    if (client !== "claude" && terminalNotice) await writeTerminalNotice(terminalNotice);
     const output = client === "claude" ? renderer.renderClaudeDecision(result.decision, detail) : renderer.renderCodexDecision(result.decision, detail);
     if (output) process.stdout.write(output + (output.endsWith("\n") ? "" : "\n"));
     return;

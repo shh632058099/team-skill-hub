@@ -157,7 +157,9 @@ foreach ($groupValue in @($root['hooks']['SessionStart'])) {
   if ($handlers.Count -gt 0) { $copy=@{}; foreach($key in $group.Keys){$copy[$key]=$group[$key]}; $copy['hooks']=@($handlers); $sessionKept += ,$copy }
 }
 $sessionCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ClientLauncher + '" session-start --client claude'
+$displayCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ClientLauncher + '" session-start-display --client claude'
 $sessionKept += ,@{ hooks = @(@{ type='command'; command=$sessionCommand; timeout=2 }) }
+$sessionKept += ,@{ hooks = @(@{ type='command'; command=$displayCommand; timeout=2 }) }
 $root['hooks']['SessionStart'] = @($sessionKept)
 
 $kept = @()

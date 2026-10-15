@@ -59,7 +59,7 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     const conf = await readFile(path.join(out, "hooks", "team-skill-hub.conf"), "utf8");
     assert.match(conf, /event_url=https:\/\/hub\.example\.test\/client-events/);
     assert.match(conf, /api_key_env=TEST_TEAM_HUB_TOKEN/);
-    assert.match(conf, /runtime_version=1\.1\.0/);
+    assert.match(conf, /runtime_version=1\.2\.0/);
     assert.match(conf, /hook_schema_version=1/);
 
     const catalog = JSON.parse(

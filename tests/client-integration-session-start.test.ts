@@ -61,11 +61,16 @@ test("network timeout fails open within budget", async () => {
 });
 
 test("Codex and Claude use client-specific renderer contracts", async () => {
-  const { renderCodexDecision } = await import(codexUrl.href);
-  const { renderClaudeDecision } = await import(claudeUrl.href);
-  assert.match(renderCodexDecision("optional_update", { installed: 4, latest: 5, minimum: 4 }), /v4 -> v5/);
+  const { renderCodexDecision, renderTerminalNotice: renderCodexTerminalNotice } = await import(codexUrl.href);
+  const { renderClaudeDecision, renderTerminalNotice: renderClaudeTerminalNotice } = await import(claudeUrl.href);
+  const optionalDetail = { installed: 4, latest: 5, minimum: 4 };
+  assert.match(renderCodexDecision("optional_update", optionalDetail), /v4 -> v5/);
+  assert.match(renderCodexTerminalNotice("optional_update", optionalDetail), /v4 -> v5/);
+  assert.match(renderClaudeTerminalNotice("optional_update", optionalDetail), /v4 -> v5/);
   const claude = JSON.parse(renderClaudeDecision("required_update", { installed: 3, latest: 5, minimum: 4 }));
   assert.equal(claude.hookSpecificOutput.hookEventName, "SessionStart");
   assert.match(claude.hookSpecificOutput.additionalContext, /Minimum required version: v4/);
   assert.equal(renderCodexDecision("none", { installed: 5, latest: 5, minimum: 4 }), "");
+  assert.equal(renderCodexTerminalNotice("none", { installed: 5, latest: 5, minimum: 4 }), "");
+  assert.equal(renderClaudeTerminalNotice("none", { installed: 5, latest: 5, minimum: 4 }), "");
 });

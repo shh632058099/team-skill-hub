@@ -7,4 +7,9 @@ if [[ -f "$SELF.next" ]]; then mv -f "$SELF.next" "$SELF" 2>/dev/null || true; c
 VERSION="$(tr -d '\r\n' < "$ROOT/current")"
 RUNTIME="$ROOT/releases/v$VERSION/runtime/client-runtime.mjs"
 [[ -f "$RUNTIME" ]] || { echo "Team Skill Hub client runtime v$VERSION is missing" >&2; exit 2; }
-exec node "$RUNTIME" "$@"
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [[ -z "$NODE_BIN" && -d "$HOME/.nvm/versions/node" ]]; then
+  NODE_BIN="$(find "$HOME/.nvm/versions/node" -mindepth 3 -maxdepth 3 \( -type f -o -type l \) -path '*/bin/node' 2>/dev/null | sort -V | tail -n 1)"
+fi
+[[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { echo "Team Skill Hub client requires Node.js but node was not found in PATH or ~/.nvm/versions/node" >&2; exit 2; }
+exec "$NODE_BIN" "$RUNTIME" "$@"

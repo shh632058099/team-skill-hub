@@ -156,7 +156,9 @@ export async function applyManagedConfig(context) {
     const rule = `mcp__${claude.server_name}__*`; if (!allow.includes(rule)) allow.push(rule); claudeSettings.permissions.allow = allow;
     claudeSettings.hooks ||= {};
     const session = { type: "command", command: `${sessionLauncher} session-start --client claude`, timeout: 2 };
-    mergeHook(claudeSettings, "SessionStart", "team-skill-hub-client", session);
+    const display = { type: "command", command: `${sessionLauncher} session-start-display --client claude`, timeout: 2 };
+    mergeHook(claudeSettings, "SessionStart", "session-start-display --client claude", display);
+    mergeHook(claudeSettings, "SessionStart", "session-start --client claude", session);
     await writeAtomic(settingsFile, JSON.stringify(claudeSettings, null, 2) + "\n");
     await writeAtomic(mdFile, await renderGuidance(await readText(mdFile), claude.server_name, "claude", context.releaseRoot, clientRoot));
   }
