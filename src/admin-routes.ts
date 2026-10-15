@@ -2,6 +2,8 @@ export type AdminRoute =
   | { kind: "index"; path: "/admin/observability" }
   | { kind: "governance"; path: "/admin/governance" }
   | { kind: "module-index"; module: "review" | "gaps"; path: string }
+  | { kind: "review-list"; path: "/admin/review/items" }
+  | { kind: "review-detail"; reviewKind: "candidate" | "skill-bundle"; id: string; subresource?: "history"; path: string }
   | { kind: "module"; module: "review" | "gaps" | "governance"; resource: string; id?: string; subresource?: string; path: string }
   | { kind: "list"; resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures"; path: string }
   | { kind: "detail"; resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures"; id: string; path: string }
@@ -32,6 +34,17 @@ export function parseAdminRoute(input: string | URL): AdminRoute {
   const path = url.pathname.replace(/\/$/, "") || "/admin";
   if (path === "/admin/observability") return { kind: "index", path };
   if (path === "/admin/governance") return { kind: "governance", path };
+  if (path === "/admin/review/items") return { kind: "review-list", path };
+  const reviewDetailMatch = path.match(/^\/admin\/review\/items\/(candidate|skill-bundle)\/([^/]+)(?:\/(history))?$/);
+  if (reviewDetailMatch) {
+    return {
+      kind: "review-detail",
+      reviewKind: reviewDetailMatch[1] as "candidate" | "skill-bundle",
+      id: decodeAdminRouteId(reviewDetailMatch[2]!),
+      ...(reviewDetailMatch[3] ? { subresource: "history" as const } : {}),
+      path
+    };
+  }
   const moduleMatch = path.match(/^\/admin\/(review|gaps|governance)(?:\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?)?$/);
   if (moduleMatch) {
     const module = moduleMatch[1] as "review" | "gaps" | "governance";

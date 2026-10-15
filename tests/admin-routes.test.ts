@@ -12,6 +12,10 @@ test("admin History API routes parse stable list and detail paths", () => {
 });
 
 test("admin module routes keep bounded index/list/detail pathname semantics", () => {
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/items?status=pending"), { kind: "review-list", path: "/admin/review/items" });
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/items/candidate/kc%2F1"), { kind: "review-detail", reviewKind: "candidate", id: "kc/1", path: "/admin/review/items/candidate/kc%2F1" });
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/items/skill-bundle/sbi%2F1"), { kind: "review-detail", reviewKind: "skill-bundle", id: "sbi/1", path: "/admin/review/items/skill-bundle/sbi%2F1" });
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/items/candidate/kc1/history"), { kind: "review-detail", reviewKind: "candidate", id: "kc1", subresource: "history", path: "/admin/review/items/candidate/kc1/history" });
   assert.deepEqual(parseAdminRoute("http://x/admin/review"), { kind: "module-index", module: "review", path: "/admin/review" });
   assert.deepEqual(parseAdminRoute("http://x/admin/review/history"), { kind: "module", module: "review", resource: "history", path: "/admin/review/history" });
   assert.deepEqual(parseAdminRoute("http://x/admin/governance"), { kind: "governance", path: "/admin/governance" });
@@ -20,7 +24,6 @@ test("admin module routes keep bounded index/list/detail pathname semantics", ()
   assert.deepEqual(parseAdminRoute("http://x/admin/review/candidates/c%2F1/history"), { kind: "module", module: "review", resource: "candidates", id: "c/1", subresource: "history", path: "/admin/review/candidates/c%2F1/history" });
   assert.deepEqual(parseAdminRoute("http://x/admin/governance/repositories/r1"), { kind: "module", module: "governance", resource: "repositories", id: "r1", path: "/admin/governance/repositories/r1" });
 });
-
 test("admin route parsing tolerates malformed percent-encoded ids", () => {
   assert.doesNotThrow(() => parseAdminRoute("http://x/admin/observability/sessions/%E0%A4%A"));
   assert.deepEqual(parseAdminRoute("http://x/admin/observability/sessions/%E0%A4%A"), {
@@ -30,6 +33,8 @@ test("admin route parsing tolerates malformed percent-encoded ids", () => {
     path: "/admin/observability/sessions/%E0%A4%A"
   });
   assert.doesNotThrow(() => parseAdminRoute("http://x/admin/gaps/items/%ZZ"));
+  assert.doesNotThrow(() => parseAdminRoute("http://x/admin/review/items/candidate/%ZZ"));
+  assert.deepEqual(parseAdminRoute("http://x/admin/review/items/candidate/%ZZ"), { kind: "review-detail", reviewKind: "candidate", id: "%ZZ", path: "/admin/review/items/candidate/%ZZ" });
 });
 
 test("admin pagination query helpers default to 20 and cap at 100", () => {
@@ -85,6 +90,10 @@ test("admin detail return paths stay on the expected admin module", () => {
   assert.equal(
     safeAdminReturnPath("https://example.com/admin/observability/sessions", fallback, "/admin/observability/"),
     fallback
+  );
+  assert.equal(
+    safeAdminReturnPath("/admin/review/items?status=pending&kind=candidate", "/admin/review/items", "/admin/review/"),
+    "/admin/review/items?status=pending&kind=candidate"
   );
   assert.equal(safeAdminReturnPath("/admin/review/candidates", fallback, "/admin/observability/"), fallback);
 });
