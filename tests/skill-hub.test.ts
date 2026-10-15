@@ -774,6 +774,63 @@ metadata:
   search.close();
 });
 
+test("discover matches Chinese workflow intent from skill metadata", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-multilingual-discover-"));
+  const definitions = [
+    ["systematic-debugging", "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes", ["superpowers", "systematic-debugging", "debugging", "troubleshooting", "root-cause", "调试", "排查", "根因", "故障", "报错"]],
+    ["test-driven-development", "Use when implementing any feature or bugfix, before writing implementation code", ["superpowers", "test-driven-development", "tdd", "testing", "test-first", "测试驱动", "先写测试", "单元测试"]],
+    ["brainstorming", "Use before creative work to explore user intent, requirements and design before implementation", ["superpowers", "brainstorming", "requirements", "design", "需求分析", "方案设计", "头脑风暴"]],
+    ["writing-plans", "Use when you have a spec or requirements for a multi-step task, before touching code", ["superpowers", "writing-plans", "implementation-plan", "planning", "实现计划", "实施计划"]]
+  ] as const;
+  for (const [name, description, keywords] of definitions) {
+    const skillDir = path.join(root, "skills", "superpowers", name);
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      path.join(skillDir, "SKILL.md"),
+      `---\nschema_version: 1\nname: ${name}\nversion: 1.0.0\ndescription: ${description}\nmetadata:\n  audience: [developer]\n  domain: [software-engineering]\n  category: [workflow]\n  keywords: [${keywords.join(", ")}]\n  visibility: [internal]\n  maturity: stable\n  owner: superpowers\n  priority: 50\n  depends_on: []\n  compatibility:\n    codex: true\n---\n# ${name}\n`,
+      "utf8"
+    );
+  }
+
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-multilingual-data-"));
+  const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: ["developer", "internal"],
+      authentication: { mode: "development", apiKeys: {} },
+      repositories: [repository]
+    },
+    [new LocalRepositoryProvider()],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
+    new LoggingEventSink()
+  );
+
+  await service.initialize();
+  try {
+    const cases = [
+      ["这个功能先做需求分析和方案设计", "brainstorming"],
+      ["这个报错先别急着修复，先排查根因", "systematic-debugging"],
+      ["这个 bug 按测试驱动方式做，先写测试", "test-driven-development"],
+      ["需求已经明确，给我写实现计划", "writing-plans"]
+    ] as const;
+    for (const [query, expected] of cases) {
+      const result = service.discover(query, { topK: 5, repositories: ["rd-skills"], client: "codex" });
+      assert.equal(result.skills[0]?.skill.name, expected, query);
+      assert.ok((result.skills[0]?.coverage ?? 0) >= 0.2, `${query}: expected meaningful metadata coverage`);
+    }
+  } finally {
+    search.close();
+  }
+});
 test("missing local tool binding prevents repository activation", async () => {
   const root = await makeSkillRoot();
   await addPromptAndAgent(root);

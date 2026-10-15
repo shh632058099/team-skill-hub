@@ -58,6 +58,7 @@ function manualScore(skill: Skill, query: string): { score: number; coverage: nu
     category: new Set(tokenize(skill.metadata.category.join(" ")))
   };
   let score = 0;
+  let phraseMatched = false;
   const matched = new Set<string>();
   for (const term of terms) {
     let hit = false;
@@ -69,13 +70,19 @@ function manualScore(skill: Skill, query: string): { score: number; coverage: nu
     if (hit) matched.add(term);
   }
   const normalizedName = skill.name.toLowerCase().replace(/[-_]+/g, " ");
-  if (normalizedName.length >= 4 && q.includes(normalizedName)) score += 8;
+  if (normalizedName.length >= 4 && q.includes(normalizedName)) {
+    score += 8;
+    phraseMatched = true;
+  }
   for (const keyword of skill.metadata.keywords) {
     const normalized = keyword.toLowerCase().trim().replace(/[-_]+/g, " ");
-    if (normalized.length >= 3 && !SEARCH_STOP_WORDS.has(normalized) && q.includes(normalized)) score += 6;
+    if (normalized.length >= 3 && !SEARCH_STOP_WORDS.has(normalized) && q.includes(normalized)) {
+      score += 6;
+      phraseMatched = true;
+    }
   }
   if (score <= 0) return { score: 0, coverage: 0 };
-  const coverage = matched.size / terms.length;
+  const coverage = Math.max(matched.size / terms.length, phraseMatched ? 0.35 : 0);
   score *= 0.4 + coverage * 0.6;
   score += skill.metadata.priority / 100;
   if (skill.metadata.maturity === "stable") score += 0.5;
