@@ -98,7 +98,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
       }
     }
     for (const [route, requiredLinks] of [
-      ["/admin/review", ["/admin/review/candidates?status=pending", "/admin/review/candidates?status=published"]],
+      ["/admin/review", ["/admin/review/items?status=pending", "/admin/review/items?status=published"]],
       ["/admin/gaps", ["/admin/gaps/items?status=active", "/admin/gaps/items?status=resolved"]]
     ] as const) {
       const page = await fetch(base + route);
@@ -119,7 +119,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(legacyGovernance.status, 302);
     assert.equal(legacyGovernance.headers.get("location"), "/admin/governance");
     for (const [route, markers] of [
-      ["/admin/review/candidates?status=pending&limit=50", ["关键字", "状态", "仓库", "来源类型", "审核人", "自动候选", "每页数量", "筛选", "上一页", "下一页", "requestJson"]],
+      ["/admin/review/items?status=pending&limit=50", ["关键字", "状态", "Item Kind", "内容类型", "仓库", "来源类型", "审核人", "提交人", "每页数量", "筛选", "上一页", "下一页", "requestJson"]],
       ["/admin/gaps/items?status=active&limit=20", ["关键字", "状态", "每页数量", "筛选", "上一页", "下一页", "最近出现"]]
     ] as const) {
       const page = await fetch(base + route);

@@ -89,6 +89,7 @@ test("review center exposes unified filters and list controls", () => {
     "审核人",
     "提交人",
     "Namespace / Skill 分类",
+    "skillCollection",
     "Import Type",
     "每页数量",
     "筛选",
