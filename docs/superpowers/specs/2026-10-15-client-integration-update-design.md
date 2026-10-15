@@ -34,7 +34,7 @@ Say "升级 Team Skill Hub" to install it.
 - 客户端包由 Team Skill Hub 服务端静态托管，不依赖 GitHub/GitLab 可访问性。
 - SessionStart 主动检查更新，但使用本地缓存控制检查频率。
 - 只在用户明确同意后执行升级，不做静默自动升级。
-- 升级采用 side-by-side 安装和原子切换，失败时保持旧版本可用。
+- 升级采用 side-by-side 安装、transaction journal 和 current pointer 原子切换，失败或中断时恢复到上一 committed 状态。
 - MCP API 正确性不依赖 setup guidance。
 - 版本源单一，避免 server / hooks / setup / docs 多处版本漂移。
 
@@ -49,7 +49,7 @@ Say "升级 Team Skill Hub" to install it.
 
 ## 4. 总体架构
 
-采用“服务端版本清单 + 本地 Client Runtime + SessionStart 检查 + 用户确认升级 + side-by-side 原子切换”的方案。
+采用“服务端版本清单 + 本地 Client Runtime + SessionStart 检查 + 用户确认升级 + side-by-side 安装 + transaction recovery”的方案。
 
 ```text
                     Git Repository
@@ -162,11 +162,13 @@ GET /client-integration/releases/5/linux.tar.gz
 GET /client-integration/releases/5/windows.zip
 ```
 
+第一阶段 manifest/package endpoint 在受信任内网中作为只读发行资源，不要求 API Key；这样即使 MCP API Key 未注入或已失效，客户端仍能发现并修复自身版本。package 不包含 secret。若未来需要收紧访问控制，应作为独立部署策略增加，不改变本地 updater 的版本/事务模型。
+
 服务端不在 runtime 阶段从 Git 仓库拉取 setup 或 updater。这样 `Server API + Client integration package + MCP compatibility` 始终来自同一个 release snapshot。
 
 ### 6.3 历史版本保留策略
 
-镜像不无限保存所有历史版本，至少保留 `latest` 和 `minimum supported`。例如 latest=v5、minimum=v4 时保留 v4/v5；最低支持版本提升后可在后续 release 移除更老版本。
+镜像不无限保存所有历史版本，至少保留 `latest` 和 `minimum supported`。例如 latest=v5、minimum=v4 时保留 v4/v5；最低支持版本提升后可在后续 release 移除更老版本。服务端历史包仅用于升级/修复，不承担客户端 rollback 的 previous package 持久化责任；客户端本机负责保留 current + previous。
 
 ## 7. Manifest 设计
 
@@ -184,11 +186,11 @@ GET /client-integration/releases/5/windows.zip
   "summary": "Unify Skill submission through submit_skill_bundle",
   "packages": {
     "linux": {
-      "path": "/client-integration/releases/5/linux.tar.gz",
+      "path": "releases/5/linux.tar.gz",
       "sha256": "..."
     },
     "windows": {
-      "path": "/client-integration/releases/5/windows.zip",
+      "path": "releases/5/windows.zip",
       "sha256": "..."
     }
   }
@@ -196,6 +198,8 @@ GET /client-integration/releases/5/windows.zip
 ```
 
 是否属于 required update 不单独存成可矛盾字段，而是由 `installed_version < minimum_supported_version` 确定。`restart_required` 表示升级后当前 CLI 是否需要重启才能保证所有 guidance/hooks/MCP 配置生效。
+
+`packages.*.path` 必须是相对于当前 manifest URL 的相对路径，由标准 URL resolution 生成下载 URL；禁止用字符串拼接根路径，以支持反向代理 path prefix。
 
 ## 8. 本地 Client Runtime
 
@@ -216,7 +220,9 @@ GET /client-integration/releases/5/windows.zip
 
 Windows 使用语义相同的目录和 PowerShell launcher；若符号链接不可靠，使用 current pointer 文件，不要求 symlink。
 
-Launcher 必须保持极小和稳定，只负责读取 state、定位 Hub、获取 manifest、下载 package、校验 SHA-256、解压到临时目录、调用版本化 updater、成功后原子切换 current。复杂迁移逻辑全部放在版本化 updater 中。
+Launcher 必须保持极小和稳定，只负责读取 state、定位 Hub、获取 manifest、下载 package、校验 SHA-256、解压到临时目录、调用版本化 updater、成功后切换 current，并在启动时恢复未完成的升级事务。复杂迁移逻辑全部放在版本化 updater 中。
+
+本地安装路径不能在后续升级时重新根据当前环境猜测。首次 setup/bootstrap 必须记录实际解析后的 Codex/Claude 配置目录，例如 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 或默认目录的最终绝对路径；后续 updater 始终以 state 中的已安装路径为准。
 
 ### 8.1 Launcher 自更新与 bootstrap 兼容
 
@@ -247,12 +253,19 @@ team-skill-hub-client doctor
   "schema_version": 1,
   "installed_version": 5,
   "previous_version": 4,
-  "hub_url": "http://127.0.0.1:8080",
-  "server_name": "teamSkillHub",
+  "hub_base_url": "http://127.0.0.1:8080",
   "api_key_env": "TEAM_SKILL_HUB_API_KEY",
   "clients": {
-    "codex": { "enabled": true },
-    "claude": { "enabled": true }
+    "codex": {
+      "enabled": true,
+      "config_home": "/home/user/.codex",
+      "server_name": "teamSkillHub"
+    },
+    "claude": {
+      "enabled": true,
+      "config_home": "/home/user/.claude",
+      "server_name": "teamSkillHub"
+    }
   },
   "last_update_check_at": "2026-10-15T03:30:00Z",
   "last_successful_upgrade_at": "2026-10-15T03:35:00Z"
@@ -260,6 +273,10 @@ team-skill-hub-client doctor
 ```
 
 只保存配置元数据，不保存 API Key 或 token。
+
+默认假设同一台机器上的 Codex 和 Claude 指向同一个 Team Skill Hub base URL。bootstrap 如果检测到两个客户端现有配置指向不同 Hub，不得静默合并为一个 state；第一阶段直接给出明确错误并要求用户选择统一目标，后续如确有需求再扩展为多 profile 模型。
+
+`hub_base_url` 表示部署基址，不包含 `/mcp`。package URL 必须使用相对于 manifest 的相对路径并通过标准 URL resolution 解析，避免反向代理部署在 `/skill-hub/` 等 path prefix 下时丢失前缀。
 
 ## 10. SessionStart 更新检查
 
@@ -271,7 +288,9 @@ team-skill-hub-client session-start --client <codex|claude>
 
 要求：快速返回、不阻断正常开发、网络失败静默降级、不执行升级。
 
-默认使用 12 小时缓存。缓存有效时不访问服务器；缓存过期才请求 `/client-integration/manifest.json`。
+SessionStart 采用明确的执行预算：缓存命中路径目标小于 50 ms；网络检查 connect/read 使用短超时，单次 manifest 检查总预算默认不超过 800 ms；整个 SessionStart runtime 必须在客户端 hook timeout 之前主动结束。manifest 设置合理的最大响应尺寸，SessionStart 不下载 package、不解压、不执行 updater。
+
+默认使用 12 小时缓存。缓存有效时不访问服务器；缓存过期才请求 `/client-integration/manifest.json`。更新检查使用 non-blocking `update-check.lock`；如果其他 session 正在刷新 manifest，则当前 session 直接使用旧缓存或静默继续，不等待锁。
 
 无更新时不输出。可选更新时提示：
 
@@ -289,6 +308,8 @@ Please upgrade before using Team Skill Hub operations that depend on the new cli
 ```
 
 网络失败、manifest 不可达、缓存解析失败默认不打断用户工作；错误只进入本地诊断信息。
+
+`session-start` 内部只生成结构化决策：`none | optional_update | required_update`，不假设向 stdout 打印任意文本就一定能被 Claude/Codex 正确展示。Codex 与 Claude 分别由 client-specific renderer 按各自 SessionStart hook 输出协议呈现提示。实现前 acceptance 必须验证两端的 stdout/stderr/结构化 hook output 行为，避免把提示误解释为 hook control output。
 
 ## 11. Claude 与 Codex 集成
 
@@ -314,6 +335,8 @@ team-skill-hub-client session-start --client claude
 
 原 HTTP lifecycle hook 保持不变，不把 updater 逻辑塞进 Stop hook。
 
+Codex 和 Claude 的 SessionStart update notice 共享同一决策逻辑，但输出适配分离。runtime 不直接绑定某个客户端的 hook 输出格式。
+
 ### 11.3 Managed Guidance
 
 Claude `CLAUDE.md` 和 Codex `AGENTS.md` managed block 增加统一规则：
@@ -335,30 +358,41 @@ SessionStart 不可以自动升级
 ## 13. 升级流程
 
 ```text
-1. GET manifest
-2. 检查 installed < latest
-3. 选择 platform package
-4. 下载到临时文件
-5. 校验 SHA-256
-6. 解压到 releases/vN.tmp
-7. 校验包内 manifest 与服务端 manifest 一致
-8. 执行 vN updater apply
-9. updater 修改 Team Skill Hub managed 配置
-10. updater 自检
-11. rename vN.tmp -> vN
-12. 原子切换 current
-13. 更新 state.json
-14. 保留 previous_version
-15. 输出成功与 restart 要求
+1. 获取全局 `upgrade.lock`；已被其他 upgrade/rollback 持有时直接提示并退出
+2. GET manifest
+3. 检查 installed < latest
+4. 选择 platform package
+5. 下载到临时文件
+6. 校验 SHA-256
+7. 解压到 releases/vN.tmp
+8. 校验包内 manifest 与服务端 manifest 一致
+9. 创建 upgrade transaction journal，记录 from/to version、目标客户端、受管文件和恢复信息
+10. 备份即将修改的 Team Skill Hub managed 状态
+11. 将事务状态写为 `applying`
+12. 执行 vN updater apply
+13. updater 自检
+14. 将事务状态写为 `applied`
+15. rename vN.tmp -> vN
+16. 切换 current pointer
+17. 更新 state.json，保留 previous_version
+18. 将事务标记为 `committed`
+19. 清理 transaction backup 和临时文件
+20. 输出成功与 restart 要求
 ```
 
 只有 updater apply 与自检成功后才允许切换 current。
+
+升级不是单文件原子操作，因此必须通过 transaction journal 保证 crash recovery。launcher 每次执行任何命令前先检查未完成事务：如果事务停在 `applying/applied` 且尚未 committed，则根据 journal 恢复升级前的 managed 状态和 previous current/state，再继续正常命令。事务 journal 与 `state.json` 自身都使用临时文件 + 原子 rename 写入。
+
+`upgrade` 与 `rollback` 共享同一把全局 exclusive mutation lock，避免多个 Codex/Claude session 同时改写 `AGENTS.md`、`CLAUDE.md`、hooks、MCP 配置和 state。
 
 ## 14. Updater 修改范围
 
 版本化 updater 可以修改：Claude MCP registration、Claude Team Skill Hub permission allow rule、Claude managed `CLAUDE.md` block、Claude hooks、Codex MCP managed block、Codex managed `AGENTS.md` block、Codex hooks、Team Skill Hub hook config 和 `~/.team-skill-hub/state.json`。
 
 不得删除非 Team Skill Hub 管理的用户配置，不得覆盖用户 Markdown 非 managed 内容，不得将 API Key 写入 package/state。所有配置写入继续使用 merge/managed block 语义，并使用临时文件 + 原子替换。
+
+Updater 只能使用 state 中记录的实际 client install path，不得因为升级进程当前未设置 `CODEX_HOME` 或 `CLAUDE_CONFIG_DIR` 而回退到默认目录。
 
 ## 15. Optional 与 Required 更新
 
@@ -373,6 +407,8 @@ SessionStart 提示可升级；用户可以暂时忽略。升级后若 `restart_
 条件：`installed < minimum_supported`。
 
 SessionStart 明确提示必须升级。升级完成后要求重启 Claude/Codex；在重启前，不继续执行依赖新版 client integration 的 Team Skill Hub 操作。普通本地编码工作不因 updater 被阻断。
+
+Required update 是客户端接入层状态，不可作为服务端 API 正确性的唯一保护。breaking MCP 变更仍必须由服务端自身的 schema/tool compatibility window、明确拒绝策略或版本化 contract 保证；旧 guidance 即使未升级，也不能使服务端进入未定义行为。
 
 ## 16. MCP API 与 Client Integration 职责边界
 
@@ -404,7 +440,8 @@ Client integration guidance                    = behavior enhancement
 
 ## 18. 安全设计
 
-- package 必须有 SHA-256，hash 不匹配立即终止。
+- Team Skill Hub 运行在受信任内网环境，本设计不针对恶意服务端或网络中间人建立独立软件签名信任链。
+- package 必须有 SHA-256，hash 不匹配立即终止；SHA-256 用于检测下载损坏、传输异常和错误构建产物，不作为恶意发布源对抗机制。
 - 客户端只允许从当前配置的 Team Skill Hub base URL 下载更新。
 - 第一版不允许 manifest 指向第三方 host。
 - manifest、package、state 均不包含 API Key。
@@ -416,8 +453,10 @@ Client integration guidance                    = behavior enhancement
 - 检查更新失败：不影响 CLI 启动；有有效缓存则使用缓存，无缓存静默继续。
 - 下载失败：不修改 current，删除不完整临时包。
 - Hash 失败：不执行包内脚本，保留旧版本。
-- updater apply 失败：不切换 current，恢复 apply 前 managed 配置。
-- 新版运行异常：`team-skill-hub-client rollback` 回到 `previous_version`，重新执行上一版本 updater apply。
+- updater apply 失败：不切换 current，使用 transaction backup 精确恢复 apply 前 managed 配置。
+- 进程在 apply/current/state 任意中间阶段异常退出：下一次 launcher 启动先根据 transaction journal 恢复到上一 committed 状态。
+- 新版运行异常：`team-skill-hub-client rollback` 回到 `previous_version`。主动 version rollback 由目标版本 reconciliation/migration 逻辑恢复该版本应有的 managed 状态，不假设“重新执行旧 updater apply”天然等价于完整反向迁移。
+- 本机至少保留 current + previous 两个成功版本；rollback 不依赖服务端仍能下载 previous package。升级成功后可清理更老的本地 release。
 
 ## 20. 构建与版本防护
 
@@ -439,11 +478,11 @@ managed guidance templates
 
 ### 21.1 Unit tests
 
-覆盖版本比较、minimum/latest 决策、TTL cache、manifest schema、SHA-256、state 读写、platform package 选择、optional/required/restart_required 决策。
+覆盖版本比较、minimum/latest 决策、TTL cache、manifest schema、SHA-256、state 读写、platform package 选择、optional/required/restart_required 决策、relative package URL resolution、自定义 client config_home、update-check lock 和 upgrade lock 决策。
 
 ### 21.2 Updater integration tests
 
-使用临时 HOME 覆盖首次安装、v4->v5、保留用户原配置、managed block 更新、hook 替换、permission 合并、幂等、下载失败、hash 错误、apply 失败回滚和 rollback 恢复。
+使用临时 HOME 覆盖首次安装、v4->v5、保留用户原配置、managed block 更新、hook 替换、permission 合并、幂等、下载失败、hash 错误、apply 失败回滚、apply 后进程中断恢复、current/state 切换中断恢复、并发 upgrade 拒绝、rollback 恢复，以及自定义 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 在后续升级中保持不变。
 
 ### 21.3 Server tests
 
@@ -451,7 +490,7 @@ managed guidance templates
 
 ### 21.4 Real CLI acceptance
 
-WSL2 Ubuntu 24.04 验证：Codex/Claude SessionStart 都能看到 update notice；无更新无噪声；缓存有效期内不重复请求；用户确认后 upgrade；required update 后提示重启；重启后新 guidance/hooks/MCP config 生效。
+WSL2 Ubuntu 24.04 验证：Codex/Claude SessionStart 都能按各自 hook output contract 看到 update notice；无更新无噪声；缓存有效期内不重复请求；并发 session 不重复阻塞更新检查；用户确认后 upgrade；并发 upgrade 只有一个获得 mutation lock；required update 后提示重启；重启后新 guidance/hooks/MCP config 生效；自定义 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 能正确升级原安装位置。
 
 Windows PowerShell 路径执行同等 setup/updater integration tests。
 
@@ -491,6 +530,7 @@ Docker build
 
 1. 新版 `setup-claude-code.*` / `setup-codex-mcp.*` 安装 launcher 和初始 release。
 2. 现有 `--upgrade` 保留，用于这一次迁移和灾难恢复。
+   bootstrap 时读取并保存每个客户端实际解析后的配置目录；如果 Claude/Codex 现有配置指向不同 Hub，则停止并提示用户先选择统一目标，不做隐式合并。
 3. 完成 bootstrap 后，后续升级统一走 `team-skill-hub-client upgrade`。
 
 也就是说，只接受“一次最后的 setup 升级”，之后不再把 setup 文件分发作为日常升级机制。
@@ -521,5 +561,8 @@ Docker build
 - 用户确认后能通过一条稳定命令自动升级。
 - 更新失败不会破坏现有可用环境。
 - 可以回滚到上一个成功版本。
+- 进程在升级中途退出后，下次 launcher 启动能恢复到上一 committed 状态。
+- 多个 Claude/Codex session 并发启动或请求升级时不会并发改写 managed 配置。
+- 自定义 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 安装在后续升级中不会被重置到默认目录。
 - breaking update 能明确要求升级和重启。
 - MCP API correctness 继续由服务端保证，不依赖 guidance 是否最新。
