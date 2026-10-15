@@ -37,6 +37,8 @@ test("legacy admin tabs route migrated modules to stable pages", () => {
     'governance:"/admin/governance"',
     "location.href=stableRoute",
     "location.replace(stableRoute)",
+    "审核中心",
+    "Skill Bundle 导入",
   ]);
 });
 
@@ -75,95 +77,113 @@ test("observability list filters use user-facing labels and boolean selects", ()
   ]);
 });
 
-test("review and gap pages use user-facing filter labels", () => {
+test("review center exposes unified filters and list controls", () => {
   assertContainsAll(ADMIN_MODULE_HTML, [
+    "审核中心",
     "关键字",
     "状态",
+    "内容类型",
+    "Item Kind",
     "仓库",
     "来源类型",
     "审核人",
-    "自动候选",
-    "候选类型",
-    "Skill 分类",
+    "提交人",
+    "Namespace / Skill 分类",
+    "Import Type",
     "每页数量",
     "筛选",
     "清除",
     "上一页",
     "下一页",
+    "刷新",
     "暂无记录",
+    "/admin/api/review-items",
+    "externalPublicationUrl",
+    "data-review-id",
+    "reviewPrev",
+    "reviewNext",
+    "reviewRefresh",
   ]);
-  assert.ok(!ADMIN_MODULE_HTML.includes("automatic true/false"));
 });
 
-test("candidate detail uses a separate history page and Chinese user-facing labels", () => {
+test("candidate and bundle details share the unified review shell with clickable actions", () => {
   assertContainsAll(ADMIN_MODULE_HTML, [
+    "返回审核列表",
     "候选详情",
+    "Bundle 详情",
     "历史记录",
     "批准",
     "拒绝",
-    "发布",
+    "发布 PR/MR",
     "刷新 PR/MR 状态",
     "打开 PR/MR",
     "PR/MR 编号",
     "源分支",
     "目标分支",
-    "mergeRequestUrl",
-    "target=\"_blank\"",
-    "rel=\"noopener noreferrer\"",
     "删除已发布内容",
-    "delete-published",
-    "deleting",
-    "deleted",
-    "等待合并",
-    "待审核",
-    "故障排查",
-    "/history",
-    'id="actionState"',
-    "runCandidateAction",
-    "发布中...",
-    "['publishing','deleting','deleted'].includes(status)",
     "重新批准",
     "删除 Candidate",
     "重试发布 PR/MR",
-    "status==='rejected'",
-    "status==='publish_failed'",
-    "method:'DELETE'",
+    "Namespace",
+    "Import Type",
+    "Replacement Root",
+    "Snapshot",
+    "Skill",
+    "Files",
+    "当前 Preview",
+    "基于最新 Target 新建 Import",
+    "runCandidateAction",
+    "runBundleAction",
+    "button.disabled=true",
+    "button.disabled=false",
+    "/admin/api/skill-bundles/",
+    "/admin/api/knowledge-candidates/",
   ]);
-  assert.ok(!ADMIN_MODULE_HTML.includes(">Approve<"));
-  assert.ok(!ADMIN_MODULE_HTML.includes(">Reject<"));
-  assert.ok(!ADMIN_MODULE_HTML.includes(">Publish<"));
-  assert.ok(!ADMIN_MODULE_HTML.includes(">Reconcile<"));
-  assert.ok(!ADMIN_MODULE_HTML.includes("<h3>History</h3>"));
-  assert.ok(!ADMIN_MODULE_HTML.includes("Loading...</pre>"));
+  assertContainsAll(ADMIN_MODULE_HTML, ["target=\"_blank\"", "rel=\"noopener noreferrer\""]);
 });
 
-test("module index pages remain summary-only entry pages", () => {
+test("review landing cards remain categories but all statuses target one list", () => {
   assertContainsAll(ADMIN_MODULE_INDEX_HTML, [
-    "/admin/review/candidates?status=pending",
-    "/admin/review/candidates?status=publishing",
+    "审核中心",
+    "/admin/review/items",
+    "/admin/review/items?status=pending",
+    "/admin/review/items?status=publishing",
+    "/admin/review/items?status=review_stale",
+    "/admin/review/items?status=published_drifted",
+    "全部审核项",
+    "待审核",
     "等待合并",
+    "审核已过期",
+    "发布内容漂移",
     "/admin/review/history",
     "历史记录",
-    "所有候选的状态变更流水",
-    "/admin/gaps/items?status=active",
+    "/admin/api/review-summary",
   ]);
-  assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("/admin/governance/repositories"));
+  assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("/admin/review/candidates?status="));
   assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("<table"));
-  assert.ok(!ADMIN_MODULE_INDEX_HTML.includes("<pre"));
 });
 
-test("candidate global history is a filterable second-level page", () => {
+test("review history exposes candidate and skill bundle sources truthfully", () => {
   assertContainsAll(ADMIN_MODULE_HTML, [
-    "全局历史记录",
+    "审核历史",
+    "Candidate",
+    "Skill Bundle",
+    "historyType",
     "/admin/api/knowledge-candidates/history",
-    "候选 ID / 标题",
-    "审核人",
-    "状态",
-    "历史时间",
-    "查看候选历史",
+    "/admin/api/skill-bundles/",
+    "查看 Bundle 历史",
+    "未混合排序",
   ]);
 });
 
+test("legacy candidate routes normalize into the unified review center", () => {
+  assertContainsAll(ADMIN_MODULE_HTML, [
+    "/admin/review/candidates",
+    "q.set('kind','candidate')",
+    "/admin/review/items/candidate/",
+    "location.replace",
+  ]);
+});
 test("governance is a direct page and dashboard no longer embeds repository governance", () => {
   assertContainsAll(ADMIN_GOVERNANCE_HTML, ["仓库治理", "同步全部仓库", "/admin/api/repository-governance"]);
   assert.ok(
