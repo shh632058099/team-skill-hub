@@ -1,9 +1,11 @@
 import { createMcpFastifyApp } from "@modelcontextprotocol/fastify";
 import { toNodeHandler } from "@modelcontextprotocol/node";
+import { createHash } from "node:crypto";
+import * as z from "zod/v4";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
-import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_LOGIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML } from "./admin-ui.js";
+import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_LOGIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML, ADMIN_SKILL_BUNDLES_HTML } from "./admin-ui.js";
 import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
 import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
 import { ApiKeyAuthenticationProvider } from "./security.js";
@@ -19,6 +21,64 @@ import { translateClaudeCodeHook } from "./claude-code-adapter.js";
 import { normalizeAdminLimit, paginateAdminRows } from "./admin-routes.js";
 import { isCandidateReviewReasonValid, isReuseMcpTool } from "./observability.js";
 import { AdminLoginAttemptLimiter, AdminSessionManager, adminSessionTokenFromCookie, clearAdminSessionCookie, safeAdminNextPath, serializeAdminSessionCookie } from "./admin-auth.js";
+import { extractSkillBundleZip, importSkillBundleGit, selectSkillBundleFiles } from "./skill-bundle-sources.js";
+
+const skillBundleWebFileSchema = z.object({
+  path: z.string().min(1).max(1000),
+  content: z.string().max(512 * 1024).optional(),
+  content_base64: z.string().max(700 * 1024).optional(),
+  mode: z.enum(["0644", "0755"]).optional()
+}).refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), {
+  message: "file must contain exactly one of content or content_base64"
+});
+
+const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
+  z.object({
+    namespace: z.string().min(1).max(200).optional(),
+    import_type: z.literal("skill"),
+    skill_path: z.string().min(1).max(500).optional(),
+    target_path: z.string().min(1).max(700).optional(),
+    repository: z.string().min(1).optional(),
+    source_type: z.enum(["files", "zip", "git"]).default("files"),
+    source_root: z.string().max(1000).optional(),
+    submission_key: z.string().min(1).max(500).optional(),
+    files: z.array(skillBundleWebFileSchema).max(500).optional(),
+    zip_base64: z.string().optional(),
+    git_url: z.string().max(2000).optional(),
+    revision: z.string().max(500).optional()
+  }),
+  z.object({
+    namespace: z.string().min(1).max(200),
+    import_type: z.literal("collection"),
+    skill_path: z.never().optional(),
+    target_path: z.never().optional(),
+    repository: z.string().min(1).optional(),
+    source_type: z.enum(["files", "zip", "git"]).default("files"),
+    source_root: z.string().max(1000).optional(),
+    submission_key: z.string().min(1).max(500).optional(),
+    files: z.array(skillBundleWebFileSchema).max(500).optional(),
+    zip_base64: z.string().optional(),
+    git_url: z.string().max(2000).optional(),
+    revision: z.string().max(500).optional()
+  })
+]);
+
+type SkillBundleWebBody = z.infer<typeof skillBundleWebBodySchema>;
+
+function resolveSkillBundleWebTarget(body: SkillBundleWebBody): { namespace: string; skillPath?: string } {
+  if (body.import_type === "collection") return { namespace: body.namespace };
+  if (body.target_path !== undefined) {
+    if (body.namespace !== undefined || body.skill_path !== undefined) {
+      throw new Error("target_path cannot be combined with namespace or skill_path");
+    }
+    const parts = body.target_path.split("/");
+    const namespace = parts[0] ?? "";
+    const skillPath = parts.length > 1 ? parts.slice(1).join("/") : undefined;
+    return { namespace, ...(skillPath !== undefined ? { skillPath } : {}) };
+  }
+  if (!body.namespace) throw new Error("target_path or namespace is required for skill imports");
+  return { namespace: body.namespace, ...(body.skill_path !== undefined ? { skillPath: body.skill_path } : {}) };
+}
 
 export async function startServer(
   config: AppConfig,
@@ -87,6 +147,52 @@ export async function startServer(
     if (!adminLoginRequired || adminAuthContext(request)) return true;
     reply.code(302).header("location", "/admin/login?next=" + encodeURIComponent(safeAdminNextPath(request.url)));
     return false;
+  };
+
+  const resolveSkillBundleSource = async (body: any) => {
+    const sourceType = body?.source_type ?? "files";
+    if (sourceType === "files") {
+      if (!Array.isArray(body?.files)) throw new Error("files is required for files source");
+      return { files: body.files.map((file: any) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.content_base64 }), mode: file.mode })), sourceType: "web-files" as const, sourceMetadata: { source: "files" } };
+    }
+    if (sourceType === "zip") {
+      if (typeof body?.zip_base64 !== "string" || !body.zip_base64) throw new Error("zip_base64 is required for ZIP source");
+      const extracted = await extractSkillBundleZip(body.zip_base64, body.source_root);
+      return {
+        files: body.source_root ? extracted : selectSkillBundleFiles(extracted, body.import_type),
+        sourceType: "web-zip" as const,
+        sourceMetadata: {
+          source: "zip",
+          ...(body.source_root ? { source_root: String(body.source_root) } : {}),
+          archive_sha256: createHash("sha256").update(Buffer.from(body.zip_base64, "base64")).digest("hex")
+        }
+      };
+    }
+    if (sourceType === "git") {
+      if (typeof body?.git_url !== "string" || !body.git_url) throw new Error("git_url is required for Git source");
+      const allowedHosts = (process.env.SKILL_BUNDLE_GIT_ALLOWED_HOSTS ?? "github.com")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const imported = await importSkillBundleGit({
+        repositoryUrl: body.git_url,
+        revision: typeof body.revision === "string" ? body.revision : undefined,
+        sourceRoot: typeof body.source_root === "string" ? body.source_root : undefined,
+        allowedHosts
+      });
+      return {
+        files: body.source_root ? imported.files : selectSkillBundleFiles(imported.files, body.import_type),
+        sourceType: "web-git" as const,
+        sourceMetadata: {
+          source: "git",
+          repository_url: body.git_url,
+          ...(body.revision ? { requested_revision: String(body.revision) } : {}),
+          resolved_revision: imported.resolvedRevision,
+          ...(body.source_root ? { source_root: String(body.source_root) } : {})
+        }
+      };
+    }
+    throw new Error("source_type must be files, zip, or git");
   };
 
   const adminDateQueryError = (query: Record<string, unknown>, keys: string[]) => {
@@ -343,6 +449,18 @@ export async function startServer(
     if (!requireAdminPage(request, reply)) return "";
     reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
     return ADMIN_OBSERVABILITY_HTML;
+  });
+
+  app.get("/admin/skill-bundles", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_SKILL_BUNDLES_HTML;
+  });
+
+  app.get("/admin/skill-bundles/*", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
+    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    return ADMIN_SKILL_BUNDLES_HTML;
   });
 
   const moduleShell = (request: { url: string; headers?: Record<string, unknown>; method?: string }, reply: any) => {
@@ -992,6 +1110,131 @@ export async function startServer(
     const detection = await service.getCandidateDetection(request.params.id);
     if (!detection) { reply.code(404); return { error: "candidate detection not found" }; }
     return { detection };
+  });
+
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; namespace?: string; importType?: string } }>("/admin/api/skill-bundles", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const result = service.skillBundleImportsPage(request.query);
+    return {
+      imports: result.items.map((item) => {
+        const snapshot = service.getSkillBundleSnapshot(item.snapshotId);
+        return {
+          ...item,
+          skillCount: snapshot?.skills.length ?? 0,
+          fileCount: snapshot?.fileCount ?? 0,
+          totalBytes: snapshot?.totalBytes ?? 0
+        };
+      }),
+      page: {
+        total: result.total,
+        limit: result.limit,
+        cursor: result.cursor,
+        nextCursor: result.nextCursor,
+        previousCursor: result.previousCursor
+      }
+    };
+  });
+
+  app.post<{ Body: unknown }>("/admin/api/skill-bundles/preview", { bodyLimit: 64 * 1024 * 1024 }, async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try {
+      const body = skillBundleWebBodySchema.parse(request.body);
+      const target = resolveSkillBundleWebTarget(body);
+      const source = await resolveSkillBundleSource(body);
+      return await service.previewSkillBundle(adminPrincipal, {
+        namespace: target.namespace,
+        importType: body.import_type,
+        skillPath: target.skillPath,
+        files: source.files,
+        repository: body.repository
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/admin/api/skill-bundles/import", { bodyLimit: 64 * 1024 * 1024 }, async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try {
+      const body = skillBundleWebBodySchema.parse(request.body);
+      const target = resolveSkillBundleWebTarget(body);
+      const source = await resolveSkillBundleSource(body);
+      const created = await service.submitSkillBundle(adminPrincipal, {
+        namespace: target.namespace,
+        importType: body.import_type,
+        skillPath: target.skillPath,
+        files: source.files,
+        sourceType: source.sourceType,
+        sourceMetadata: source.sourceMetadata,
+        repository: body.repository,
+        submissionKey: body.submission_key
+      });
+      reply.code(201);
+      return { import: created };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const record = service.getSkillBundleImport(request.params.id);
+    if (!record) { reply.code(404); return { error: "Skill Bundle import not found" }; }
+    const snapshot = service.getSkillBundleSnapshot(record.snapshotId);
+    return {
+      import: {
+        ...record,
+        skillCount: snapshot?.skills.length ?? 0,
+        fileCount: snapshot?.fileCount ?? 0,
+        totalBytes: snapshot?.totalBytes ?? 0,
+        skills: snapshot?.skills ?? []
+      }
+    };
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/preview", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try { return await service.getSkillBundlePreview(adminPrincipal, request.params.id); }
+    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/history", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const history = service.getSkillBundleHistory(request.params.id);
+    if (!history.length) { reply.code(404); return { error: "Skill Bundle import not found" }; }
+    return { importId: request.params.id, history };
+  });
+
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>("/admin/api/skill-bundles/:id/approve", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try { return { import: await service.reviewSkillBundle(adminPrincipal, request.params.id, "approved", request.body?.reason) }; }
+    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
+  });
+
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>("/admin/api/skill-bundles/:id/reject", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try { return { import: await service.reviewSkillBundle(adminPrincipal, request.params.id, "rejected", request.body?.reason) }; }
+    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/publish", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try { return { import: await service.publishSkillBundle(adminPrincipal, request.params.id) }; }
+    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reconcile", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try { return { import: await service.reconcileSkillBundle(adminPrincipal, request.params.id) }; }
+    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reimport", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try { reply.code(201); return { import: await service.reimportSkillBundle(adminPrincipal, request.params.id) }; }
+    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {

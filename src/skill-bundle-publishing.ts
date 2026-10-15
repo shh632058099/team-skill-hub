@@ -1,0 +1,286 @@
+import { execFile } from "node:child_process";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import type { RepositoryConfig } from "./types.js";
+import {
+  canonicalTreeHash,
+  diffSkillBundleTrees,
+  skillBundleFileBytes,
+  type SkillBundleFile,
+  type SkillBundleImport,
+  type SkillBundlePublication,
+  type SkillBundlePullRequestPublication,
+  type SkillBundleSnapshot
+} from "./skill-bundles.js";
+
+const execFileAsync = promisify(execFile);
+export type SkillBundleGitRun = (args: string[], cwd?: string) => Promise<string>;
+type FetchLike = typeof fetch;
+
+export class SkillBundleReviewStaleError extends Error {
+  constructor(message = "Skill Bundle review baseline changed before publication") {
+    super(message);
+    this.name = "SkillBundleReviewStaleError";
+  }
+}
+
+async function defaultGitRun(args: string[], cwd?: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      ...(cwd ? { cwd } : {}),
+      windowsHide: true,
+      timeout: 120_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    });
+    return stdout.trim();
+  } catch (error) {
+    throw new Error(`git ${args[0] ?? "command"} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function githubApiBase(baseUrl: string): string {
+  const url = new URL(baseUrl.replace(/\/+$/, ""));
+  return url.hostname.toLowerCase() === "github.com" ? "https://api.github.com" : `${url.origin}/api/v3`;
+}
+
+function sshUrl(baseUrl: string, projectPath: string): string {
+  const host = new URL(baseUrl).hostname;
+  return `git@${host}:${projectPath.replace(/^\/+/, "").replace(/\.git$/i, "")}.git`;
+}
+
+function branchSuffix(id: string): string {
+  return id.replace(/^sbi_/, "").replace(/[^A-Za-z0-9]+/g, "").slice(0, 12).toLowerCase() || "bundle";
+}
+
+async function readTree(root: string): Promise<SkillBundleFile[]> {
+  const result: SkillBundleFile[] = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  async function walk(dir: string, relative = ""): Promise<void> {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    for (const entry of entries) {
+      const filePath = path.join(dir, entry.name);
+      const relativePath = relative ? `${relative}/${entry.name}` : entry.name;
+      const info = await lstat(filePath);
+      if (info.isSymbolicLink()) throw new Error(`replacementRoot contains symlink: ${relativePath}`);
+      if (info.isDirectory()) { await walk(filePath, relativePath); continue; }
+      if (!info.isFile()) throw new Error(`replacementRoot contains unsupported file: ${relativePath}`);
+      const bytes = await readFile(filePath);
+      let content: string | undefined;
+      try {
+        const decoded = decoder.decode(bytes);
+        if (!decoded.includes("\0")) content = decoded;
+      } catch {}
+      const crypto = await import("node:crypto");
+      result.push({
+        path: relativePath.replaceAll("\\", "/"),
+        ...(content !== undefined ? { content } : { contentBase64: bytes.toString("base64") }),
+        sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        sizeBytes: bytes.byteLength,
+        mode: (info.mode & 0o111) !== 0 ? "0755" : "0644"
+      });    }
+  }
+  await walk(root);
+  return result;
+}
+
+async function replaceRoot(worktree: string, targetRoot: string, snapshot: SkillBundleSnapshot): Promise<void> {
+  const target = path.join(worktree, ...targetRoot.split("/"));
+  await rm(target, { recursive: true, force: true });
+  await mkdir(target, { recursive: true });
+  for (const file of snapshot.files) {
+    const destination = path.join(target, ...file.path.split("/"));
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, skillBundleFileBytes(file));
+    await chmod(destination, file.mode === "0755" ? 0o755 : 0o644);
+  }
+}
+
+export interface SkillBundleReconcileResult {
+  publication: SkillBundlePullRequestPublication;
+  finalTreeMatches?: boolean;
+  finalDiff?: ReturnType<typeof diffSkillBundleTrees>;
+}
+
+export class SkillBundlePublisher {
+  constructor(
+    private readonly fetchImpl: FetchLike = fetch,
+    private readonly gitRun: SkillBundleGitRun = defaultGitRun
+  ) {}
+
+  private resolve(repository: RepositoryConfig) {
+    const config = repository.skillPublishing;
+    if (!config?.enabled) throw new Error("Skill publishing is disabled for repository");
+    if (!config.projectPath) throw new Error("Skill publishing projectPath is required");
+    const baseUrl = (config.baseUrl ?? (config.provider === "github" ? "https://github.com" : undefined))?.replace(/\/+$/, "");
+    if (!baseUrl) throw new Error("Skill publishing baseUrl is required");
+    const token = process.env[config.tokenEnv];
+    if (!token) throw new Error(`Missing Skill publishing token environment variable ${config.tokenEnv}`);
+    return {
+      config,
+      baseUrl,
+      projectPath: config.projectPath.replace(/^\/+/, "").replace(/\.git$/i, ""),
+      token,
+      remoteUrl: sshUrl(baseUrl, config.projectPath),
+      targetBranch: config.targetBranch || repository.branch || "main"
+    };
+  }
+
+  private async request(url: string, token: string, provider: "github" | "gitlab", init: RequestInit): Promise<Response> {
+    return await this.fetchImpl(url, {
+      ...init,
+      headers: {
+        ...(provider === "github" ? {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${token}`,
+          "x-github-api-version": "2022-11-28"
+        } : { "private-token": token }),
+        "content-type": "application/json",
+        ...(init.headers ?? {})
+      }
+    });
+  }
+
+  async publish(record: SkillBundleImport, snapshot: SkillBundleSnapshot, repository: RepositoryConfig): Promise<SkillBundlePublication> {
+    if (!["approved", "publish_failed"].includes(record.status)) throw new Error("Skill Bundle import must be approved before publishing");
+    if (!record.review?.targetTreeSha256 || !record.review.targetRevision) {
+      throw new Error("Skill Bundle approval review is missing target baseline");
+    }
+    const { config, baseUrl, projectPath, token, remoteUrl, targetBranch } = this.resolve(repository);
+    const branch = `${config.branchPrefix || "skill-hub-skill"}-${branchSuffix(record.id)}`;
+    const parent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-publish-"));
+    const worktree = path.join(parent, "repo");
+    try {
+      await this.gitRun(["clone", "--depth", "1", "--no-tags", "--branch", targetBranch, remoteUrl, worktree]);
+      const targetPath = path.join(worktree, ...record.replacementRoot.split("/"));
+      const before = await readTree(targetPath);
+      if (canonicalTreeHash(before) !== record.review.targetTreeSha256) {
+        throw new SkillBundleReviewStaleError();
+      }
+      const expectedTreeSha256 = canonicalTreeHash(snapshot.files);
+      if (canonicalTreeHash(before) === expectedTreeSha256) {
+        const targetRevision = (await this.gitRun(["rev-parse", "HEAD"], worktree)) || targetBranch;
+        return { kind: "no-op", targetRevision, targetRoot: record.replacementRoot, checkedAt: new Date().toISOString(), expectedTreeSha256 };
+      }
+      const diff = diffSkillBundleTrees(before, snapshot.files);
+      const remoteBranch = await this.gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], worktree);
+      const remoteBranchSha = remoteBranch.trim() ? remoteBranch.trim().split(/\s+/)[0] : undefined;
+      await this.gitRun(["checkout", "-B", branch], worktree);
+      await replaceRoot(worktree, record.replacementRoot, snapshot);
+      await this.gitRun(["add", "-A", "--", record.replacementRoot], worktree);
+      await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
+      await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
+      await this.gitRun(["commit", "-m", `feat: sync skill bundle ${record.namespace} from ${record.id}`], worktree);
+      if (remoteBranchSha) {
+        await this.gitRun(["push", `--force-with-lease=refs/heads/${branch}:${remoteBranchSha}`, "origin", `HEAD:refs/heads/${branch}`], worktree);
+      } else {
+        await this.gitRun(["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], worktree);
+      }
+      const now = new Date().toISOString();
+      if (config.provider === "github") {
+        const api = githubApiBase(baseUrl);
+        const create = await this.request(`${api}/repos/${projectPath}/pulls`, token, "github", {
+          method: "POST",
+          body: JSON.stringify({
+            title: `Sync Skill Bundle: ${record.namespace}`,
+            head: branch,
+            base: targetBranch,
+            body: `Skill Bundle Import: ${record.id}\nReplacement root: ${record.replacementRoot}\nAdded: ${diff.added.length}, modified: ${diff.modified.length}, deleted: ${diff.deleted.length}`
+          })
+        });
+        let pr: { number?: number; html_url?: string; state?: string } | undefined;
+        if (create.ok) pr = await create.json() as typeof pr;
+        else if (create.status === 422) {
+          const list = await this.request(`${api}/repos/${projectPath}/pulls?state=open&head=${encodeURIComponent(projectPath.split("/")[0] + ":" + branch)}&base=${encodeURIComponent(targetBranch)}`, token, "github", { method: "GET" });
+          if (list.ok) pr = (await list.json() as Array<NonNullable<typeof pr>>)[0];
+        }
+        if (!pr?.number || !pr.html_url) throw new Error(`GitHub pull request creation failed (${create.status})`);
+        return {
+          kind: "pull-request", provider: "github", projectPath, branch, targetBranch, targetRoot: record.replacementRoot,
+          mergeRequestIid: pr.number, mergeRequestUrl: pr.html_url, mergeRequestState: pr.state === "closed" ? "closed" : "opened",
+          added: diff.added.length, modified: diff.modified.length, deleted: diff.deleted.length, expectedTreeSha256,
+          pullRequestCreatedAt: now, lastCheckedAt: now
+        };
+      }
+      const project = encodeURIComponent(projectPath);
+      const create = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, "gitlab", {
+        method: "POST",
+        body: JSON.stringify({
+          source_branch: branch,
+          target_branch: targetBranch,
+          title: `Sync Skill Bundle: ${record.namespace}`,
+          description: `Skill Bundle Import: ${record.id}\nReplacement root: ${record.replacementRoot}`
+        })
+      });
+      let mr: { iid?: number; web_url?: string; state?: string } | undefined;
+      if (create.ok) mr = await create.json() as typeof mr;
+      else if (create.status === 409) {
+        const list = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&target_branch=${encodeURIComponent(targetBranch)}`, token, "gitlab", { method: "GET" });
+        if (list.ok) mr = (await list.json() as Array<NonNullable<typeof mr>>)[0];
+      }
+      if (!mr?.iid || !mr.web_url) throw new Error(`GitLab merge request creation failed (${create.status})`);
+      return {
+        kind: "pull-request", provider: "gitlab", projectPath, branch, targetBranch, targetRoot: record.replacementRoot,
+        mergeRequestIid: mr.iid, mergeRequestUrl: mr.web_url, mergeRequestState: mr.state === "closed" || mr.state === "locked" ? mr.state : "opened",
+        added: diff.added.length, modified: diff.modified.length, deleted: diff.deleted.length, expectedTreeSha256,
+        pullRequestCreatedAt: now, lastCheckedAt: now
+      };
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  }
+
+  async reconcile(publication: SkillBundlePullRequestPublication, snapshot: SkillBundleSnapshot, repository: RepositoryConfig): Promise<SkillBundleReconcileResult> {
+    const { config, baseUrl, projectPath, token, remoteUrl, targetBranch } = this.resolve(repository);
+    if (publication.projectPath !== projectPath) throw new Error("Skill Bundle publication project does not match repository configuration");
+    const now = new Date().toISOString();
+    let next: SkillBundlePullRequestPublication;
+    if (config.provider === "github") {
+      const response = await this.request(`${githubApiBase(baseUrl)}/repos/${projectPath}/pulls/${publication.mergeRequestIid}`, token, "github", { method: "GET" });
+      if (!response.ok) throw new Error(`GitHub pull request lookup failed (${response.status})`);
+      const pr = await response.json() as { state?: string; merged_at?: string | null; closed_at?: string | null; merge_commit_sha?: string | null };
+      const state = pr.merged_at ? "merged" : pr.state === "closed" ? "closed" : "opened";
+      next = {
+        ...publication,
+        mergeRequestState: state,
+        lastCheckedAt: now,
+        ...(pr.merged_at ? { mergedAt: pr.merged_at } : {}),
+        ...(pr.closed_at ? { closedAt: pr.closed_at } : {}),
+        ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {})
+      };
+    } else {
+      const response = await this.request(`${baseUrl}/api/v4/projects/${encodeURIComponent(projectPath)}/merge_requests/${publication.mergeRequestIid}`, token, "gitlab", { method: "GET" });
+      if (!response.ok) throw new Error(`GitLab merge request lookup failed (${response.status})`);
+      const mr = await response.json() as { state?: string; merged_at?: string | null; closed_at?: string | null; merge_commit_sha?: string | null };
+      const state = mr.state === "merged" || mr.state === "closed" || mr.state === "locked" ? mr.state : "opened";
+      next = {
+        ...publication,
+        mergeRequestState: state,
+        lastCheckedAt: now,
+        ...(mr.merged_at ? { mergedAt: mr.merged_at } : {}),
+        ...(mr.closed_at ? { closedAt: mr.closed_at } : {}),
+        ...(mr.merge_commit_sha ? { mergeCommitSha: mr.merge_commit_sha } : {})
+      };
+    }
+    if (next.mergeRequestState !== "merged") return { publication: next };
+    const parent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-reconcile-"));
+    const worktree = path.join(parent, "repo");
+    try {
+      await this.gitRun(["clone", "--depth", "1", "--no-tags", "--branch", targetBranch, remoteUrl, worktree]);
+      const tree = await readTree(path.join(worktree, ...next.targetRoot.split("/")));
+      const finalTreeSha256 = canonicalTreeHash(tree);
+      next = { ...next, finalTreeSha256, finalTreeVerifiedAt: new Date().toISOString() };
+      const finalTreeMatches = finalTreeSha256 === next.expectedTreeSha256;
+      return {
+        publication: next,
+        finalTreeMatches,
+        ...(finalTreeMatches ? {} : { finalDiff: diffSkillBundleTrees(snapshot.files, tree) })
+      };
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  }
+}

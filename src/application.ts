@@ -62,6 +62,10 @@ import {
 } from "./client-events.js";
 import { resolveProjectContext } from "./project-context.js";
 import { listDataGovernanceRules } from "./data-governance.js";import { normalizeKnowledgeCandidateSummary, parseKnowledgeSummary } from "./knowledge-summary.js";
+import { openSkillHubDatabase, type SkillHubDatabase } from "./storage/database.js";
+import { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
+import { SkillBundleService, type SubmitSkillBundleServiceInput } from "./skill-bundle-service.js";
+import { legacyRdSkillPathToTarget, type SkillBundleImport } from "./skill-bundles.js";
 
 function discoveryConfidence(score: number, coverage: number | undefined, scale: number): number {
   const normalizedScore = 1 - Math.exp(-Math.max(0, score) / scale);
@@ -89,6 +93,8 @@ export class SkillHubApplicationService {
   private readonly analytics: UsageAnalyticsStore;
   private readonly evaluations: EvaluationRunStore;
   private readonly observability: McpObservabilityStore;
+  private readonly skillBundleDatabase: SkillHubDatabase;
+  private readonly skillBundles: SkillBundleService;
   private readonly clientEventPipeline = new ClientEventPipeline();
 
   constructor(
@@ -113,6 +119,19 @@ export class SkillHubApplicationService {
       }
     });
     for (const provider of providers) this.providers.set(provider.type, provider);
+    this.skillBundleDatabase = openSkillHubDatabase(path.join(config.dataDir, "db", "team-skill-hub.sqlite3"));
+    this.skillBundles = new SkillBundleService({
+      storage: new SqliteSkillBundleRepository(this.skillBundleDatabase),
+      rules: this.rules,
+      materialize: async (repository) => {
+        const provider = this.providers.get(repository.provider);
+        if (!provider) throw new Error(`No provider registered for ${repository.provider}`);
+        return await provider.materialize(repository, this.config.dataDir);
+      },
+      authorize: (principal, repository) =>
+        this.allowedRepositories(principal).some((candidate) => candidate.id === repository.id) &&
+        Boolean(this.publishingRoute("skill", repository.id))
+    });
     for (const repo of config.repositories) {
       this.states.set(repo.id, {
         id: repo.id,
@@ -3134,6 +3153,232 @@ export class SkillHubApplicationService {
         suggestedPath: defaultCandidatePath(created)
       });
     }
+    return created;
+  }
+
+  private skillBundlePublishingRepository(principal: Principal, repositoryId?: string): RepositoryConfig {
+    const allowedRepositories = this.allowedRepositories(principal);
+    const targetId = repositoryId ?? this.defaultPublishingRepository("skill", allowedRepositories);
+    if (!targetId) throw new Error("Unable to determine Skill publishing repository; select a repository before submitting");
+    if (!allowedRepositories.some((repository) => repository.id === targetId)) throw new Error("Repository not found");
+    const route = this.requirePublishingRoute("skill", targetId);
+    return { ...route.targetRepository, skillPublishing: route.publishing };
+  }
+
+  private emitSkillBundleEvent(event: string, record: SkillBundleImport, extra: Record<string, unknown> = {}): void {
+    const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
+    this.events.emit(event, {
+      importId: record.id,
+      repository: record.repository,
+      namespace: record.namespace,
+      importType: record.importType,
+      replacementRoot: record.replacementRoot,
+      status: record.status,
+      snapshotId: record.snapshotId,
+      snapshotSha256: record.snapshotSha256,
+      skillCount: snapshot?.skills.length ?? 0,
+      fileCount: snapshot?.fileCount ?? 0,
+      submitter: record.submitter,
+      reviewer: record.review?.reviewer,
+      ...extra
+    });
+  }
+
+  async previewSkillBundle(
+    principal: Principal,
+    input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey"> & { repository?: string }
+  ) {
+    const repository = this.skillBundlePublishingRepository(principal, input.repository);
+    return await this.skillBundles.preview(principal, repository, {
+      namespace: input.namespace,
+      importType: input.importType,
+      skillPath: input.skillPath,
+      files: input.files
+    });
+  }
+
+  async submitSkillBundle(
+    principal: Principal,
+    input: SubmitSkillBundleServiceInput & { repository?: string }
+  ): Promise<SkillBundleImport> {
+    const repository = this.skillBundlePublishingRepository(principal, input.repository);
+    try {
+      const result = await this.skillBundles.submitDetailed(principal, repository, {
+        namespace: input.namespace,
+        importType: input.importType,
+        skillPath: input.skillPath,
+        files: input.files,
+        sourceType: input.sourceType,
+        sourceMetadata: input.sourceMetadata,
+        submissionKey: input.submissionKey
+      });
+      this.emitSkillBundleEvent(result.created ? "skill_bundle.import.created" : "skill_bundle.import.reused", result.import);
+      return result.import;
+    } catch (error) {
+      this.events.emit("skill_bundle.import.failed", {
+        repository: repository.id,
+        namespace: input.namespace,
+        importType: input.importType,
+        skillPath: input.skillPath,
+        sourceType: input.sourceType,
+        submitter: principal.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  async submitSkillCandidateCompat(
+    principal: Principal,
+    input: {
+      traceId?: string;
+      title: string;
+      content: string;
+      skillCollection: "rd-skills" | "custom-skills";
+      repository?: string;
+      suggestedPath: string;
+    }
+  ) {
+    if (input.skillCollection === "rd-skills") {
+      const mapped = legacyRdSkillPathToTarget(input.suggestedPath);
+      if (mapped) {
+        return await this.submitSkillBundle(principal, {
+          namespace: mapped.namespace,
+          importType: "skill",
+          skillPath: mapped.skillPath,
+          files: [{ path: "SKILL.md", content: input.content }],
+          sourceType: "mcp",
+          repository: input.repository
+        });
+      }
+    }
+    return await this.submitKnowledgeCandidate(principal, {
+      traceId: input.traceId,
+      title: input.title,
+      content: input.content,
+      sourceType: "mcp-session",
+      suggestedType: "skill",
+      skillCollection: input.skillCollection,
+      repository: input.repository ?? "rd-skills",
+      suggestedPath: input.suggestedPath
+    });
+  }
+
+  listSkillBundleImports(limit = 500, filters?: { status?: string; repository?: string; namespace?: string; importType?: string }) {
+    return this.skillBundles.listImports(Math.max(limit * 2, limit))
+      .filter((item) => !filters?.status || item.status === filters.status)
+      .filter((item) => !filters?.repository || item.repository === filters.repository)
+      .filter((item) => !filters?.namespace || item.namespace === filters.namespace)
+      .filter((item) => !filters?.importType || item.importType === filters.importType)
+      .slice(0, limit);
+  }
+
+  skillBundleImportsPage(query: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; namespace?: string; importType?: string }) {
+    return this.skillBundles.listImportsPage(query);
+  }
+
+  getSkillBundleImport(id: string) { return this.skillBundles.getImport(id); }
+  getSkillBundleSnapshot(id: string) { return this.skillBundles.getSnapshot(id); }
+  getSkillBundleHistory(id: string) { return this.skillBundles.getHistory(id); }
+
+  async getSkillBundlePreview(principal: Principal, id: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) throw new Error("Skill Bundle import not found");
+    const repository = this.skillBundlePublishingRepository(principal, record.repository);
+    return await this.skillBundles.previewImport(principal, repository, id);
+  }
+
+  async reviewSkillBundle(principal: Principal, id: string, status: "approved" | "rejected", reason?: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) throw new Error("Skill Bundle import not found");
+    const repository = this.skillBundlePublishingRepository(principal, record.repository);
+    const reviewed = await this.skillBundles.review(principal, repository, id, status, reason);
+    this.emitSkillBundleEvent(status === "approved" ? "skill_bundle.approved" : "skill_bundle.rejected", reviewed, {
+      targetRevision: reviewed.review?.targetRevision,
+      targetTreeSha256: reviewed.review?.targetTreeSha256,
+      diffSha256: reviewed.review?.diffSha256,
+      added: reviewed.review?.added,
+      modified: reviewed.review?.modified,
+      deleted: reviewed.review?.deleted
+    });
+    return reviewed;
+  }
+
+  async publishSkillBundle(principal: Principal, id: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) throw new Error("Skill Bundle import not found");
+    const repository = this.skillBundlePublishingRepository(principal, record.repository);
+    try {
+      const published = await this.skillBundles.publish(principal, repository, id);
+      if (published.status === "review_stale") {
+        this.emitSkillBundleEvent("skill_bundle.review.stale", published);
+      } else if (published.publication?.kind === "no-op") {
+        this.emitSkillBundleEvent("skill_bundle.published.noop", published, {
+          expectedTreeSha256: published.publication.expectedTreeSha256
+        });
+      } else if (published.publication?.kind === "pull-request") {
+        this.emitSkillBundleEvent("skill_bundle.change_request.created", published, {
+          provider: published.publication.provider,
+          mergeRequestIid: published.publication.mergeRequestIid,
+          mergeRequestUrl: published.publication.mergeRequestUrl,
+          added: published.publication.added,
+          modified: published.publication.modified,
+          deleted: published.publication.deleted
+        });
+      }
+      return published;
+    } catch (error) {
+      const failed = this.skillBundles.getImport(id);
+      if (failed) this.emitSkillBundleEvent("skill_bundle.publish.failed", failed, { error: failed.publishError });
+      throw error;
+    }
+  }
+
+  async reconcileSkillBundle(principal: Principal, id: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) throw new Error("Skill Bundle import not found");
+    const repository = this.skillBundlePublishingRepository(principal, record.repository);
+    try {
+      const reconciled = await this.skillBundles.reconcile(principal, repository, id);
+      if (reconciled.status === "published") {
+        this.emitSkillBundleEvent("skill_bundle.published", reconciled, {
+          finalTreeSha256: reconciled.publication?.kind === "pull-request" ? reconciled.publication.finalTreeSha256 : undefined
+        });
+      } else if (reconciled.status === "published_drifted") {
+        this.emitSkillBundleEvent("skill_bundle.published.drifted", reconciled, {
+          finalTreeSha256: reconciled.publication?.kind === "pull-request" ? reconciled.publication.finalTreeSha256 : undefined,
+          driftAdded: reconciled.driftSummary?.added.length,
+          driftModified: reconciled.driftSummary?.modified.length,
+          driftDeleted: reconciled.driftSummary?.deleted.length
+        });
+      } else if (reconciled.status === "publish_failed") {
+        this.emitSkillBundleEvent("skill_bundle.remote.closed", reconciled, { error: reconciled.publishError });
+      }
+      return reconciled;
+    } catch (error) {
+      const failed = this.skillBundles.getImport(id);
+      if (failed) this.emitSkillBundleEvent("skill_bundle.reconcile.failed", failed, { error: failed.publishError });
+      throw error;
+    }
+  }
+
+  async reimportSkillBundle(principal: Principal, id: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) throw new Error("Skill Bundle import not found");
+    if (record.status !== "published_drifted") throw new Error("Only published_drifted imports can be re-imported");
+    const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
+    if (!snapshot) throw new Error("Skill Bundle snapshot not found");
+    if (!principal.roles.includes("admin")) throw new Error("administrator role is required for Skill Bundle re-import");
+    const created = await this.submitSkillBundle(principal, {
+      namespace: record.namespace,
+      importType: record.importType,
+      skillPath: record.skillPath,
+      files: snapshot.files.map((file) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }), mode: file.mode })),
+      sourceType: record.sourceType,
+      sourceMetadata: { ...(record.sourceMetadata ?? {}), reimport_of: record.id },
+      repository: record.repository
+    });
+    this.emitSkillBundleEvent("skill_bundle.reimport.created", created, { reimportOf: record.id });
     return created;
   }
 

@@ -166,6 +166,14 @@ test("candidate global history is a filterable second-level page", () => {
 
 test("governance is a direct page and dashboard no longer embeds repository governance", () => {
   assertContainsAll(ADMIN_GOVERNANCE_HTML, ["仓库治理", "同步全部仓库", "/admin/api/repository-governance"]);
+  assert.ok(
+    ADMIN_GOVERNANCE_HTML.includes("<thead><tr><th>操作</th><th>仓库</th><th>Owner</th><th>状态</th>"),
+    "repository governance table should keep 操作 as the first column"
+  );
+  assert.ok(
+    ADMIN_GOVERNANCE_HTML.includes("row.appendChild(action);for(const value of values)"),
+    "repository governance rows should append the action cell before data cells"
+  );
   assert.ok(!ADMIN_HTML.includes('id="repositoryGovernanceTable"'));
   assert.ok(!ADMIN_HTML.includes('id="repositoryGovernanceSummary"'));
   assert.ok(!ADMIN_HTML.includes('id="syncAllRepositories"'));

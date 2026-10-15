@@ -58,6 +58,62 @@ CREATE TABLE knowledge_gap_management_history(
 );
 CREATE INDEX idx_gap_management_latest ON knowledge_gap_management_history(gap_key,updated_at DESC,seq DESC);
 CREATE INDEX idx_gap_management_status ON knowledge_gap_management_history(status,updated_at DESC,seq DESC);
+` }, { version: 3, name: "skill-bundle-import", sql: `
+CREATE TABLE skill_bundle_snapshot(
+  id TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  file_count INTEGER NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  skills_json TEXT NOT NULL
+);
+CREATE TABLE skill_bundle_file(
+  snapshot_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  PRIMARY KEY(snapshot_id,path),
+  FOREIGN KEY(snapshot_id) REFERENCES skill_bundle_snapshot(id) ON DELETE CASCADE
+);
+CREATE TABLE skill_bundle_import(
+  id TEXT PRIMARY KEY,
+  updated_at INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  repository TEXT NOT NULL,
+  namespace TEXT NOT NULL,
+  import_type TEXT NOT NULL,
+  skill_path TEXT,
+  replacement_root TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL,
+  snapshot_sha256 TEXT NOT NULL,
+  submission_principal TEXT,
+  submission_key TEXT,
+  request_semantics_sha256 TEXT,
+  record_json TEXT NOT NULL,
+  FOREIGN KEY(snapshot_id) REFERENCES skill_bundle_snapshot(id)
+);
+CREATE UNIQUE INDEX idx_skill_bundle_submission_key ON skill_bundle_import(submission_principal,submission_key) WHERE submission_key IS NOT NULL;
+CREATE INDEX idx_skill_bundle_import_status ON skill_bundle_import(status,updated_at DESC,id DESC);
+CREATE INDEX idx_skill_bundle_import_repository ON skill_bundle_import(repository,updated_at DESC,id DESC);
+CREATE TABLE skill_bundle_import_history(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL,
+  snapshot_sha256 TEXT NOT NULL,
+  record_json TEXT NOT NULL,
+  UNIQUE(import_id,updated_at,record_json),
+  FOREIGN KEY(snapshot_id) REFERENCES skill_bundle_snapshot(id)
+);
+CREATE INDEX idx_skill_bundle_import_history_import ON skill_bundle_import_history(import_id,updated_at,seq);
+` }, { version: 4, name: "skill-bundle-import-revision", sql: `
+ALTER TABLE skill_bundle_import ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE skill_bundle_import_history ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+` }, { version: 5, name: "skill-bundle-binary-files", sql: `
+ALTER TABLE skill_bundle_file ADD COLUMN encoding TEXT NOT NULL DEFAULT 'utf8';
 ` }] as const;
 
 export class SkillHubDatabase {

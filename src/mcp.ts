@@ -862,6 +862,66 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     );
 
     registerTool(
+      "submit_skill_bundle",
+      {
+        description: "Submit one complete Skill root or one complete Skill collection snapshot for administrator review. The Bundle is validated against the target repository and is never published directly.",
+        inputSchema: z.discriminatedUnion("import_type", [
+          z.object({
+            trace_id: z.string().min(1).optional(),
+            namespace: z.string().min(1).max(200),
+            import_type: z.literal("skill"),
+            skill_path: z.string().min(1).max(500),
+            skill_collection: z.literal("rd-skills"),
+            repository: z.string().min(1).optional(),
+            files: z.array(z.object({
+              path: z.string().min(1).max(1000),
+              content: z.string().max(512 * 1024).optional(),
+              content_base64: z.string().max(700 * 1024).optional(),
+              mode: z.enum(["0644", "0755"]).optional()
+            }).refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), { message: "file must contain exactly one of content or content_base64" })).min(1).max(500),
+            source: z.object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() }).optional(),
+            note: z.string().max(4000).optional(),
+            submission_key: z.string().min(1).max(500).optional()
+          }),
+          z.object({
+            trace_id: z.string().min(1).optional(),
+            namespace: z.string().min(1).max(200),
+            import_type: z.literal("collection"),
+            skill_collection: z.literal("rd-skills"),
+            repository: z.string().min(1).optional(),
+            files: z.array(z.object({
+              path: z.string().min(1).max(1000),
+              content: z.string().max(512 * 1024).optional(),
+              content_base64: z.string().max(700 * 1024).optional(),
+              mode: z.enum(["0644", "0755"]).optional()
+            }).refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), { message: "file must contain exactly one of content or content_base64" })).min(1).max(500),
+            source: z.object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() }).optional(),
+            note: z.string().max(4000).optional(),
+            submission_key: z.string().min(1).max(500).optional()
+          })
+        ])
+      },
+      async (input) =>
+        toolResult({
+          import: await appService.submitSkillBundle(principal, {
+            namespace: input.namespace,
+            importType: input.import_type,
+            ...(input.import_type === "skill" ? { skillPath: input.skill_path } : {}),
+            files: input.files.map((file: { path: string; content?: string; content_base64?: string; mode?: "0644" | "0755" }) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.content_base64 }), mode: file.mode })),
+            sourceType: "mcp",
+            sourceMetadata: {
+              ...(input.source?.repository_url ? { repository_url: input.source.repository_url } : {}),
+              ...(input.source?.revision ? { revision: input.source.revision } : {}),
+              ...(input.note ? { note: input.note } : {}),
+              ...(input.trace_id ? { trace_id: input.trace_id } : {})
+            },
+            submissionKey: input.submission_key,
+            repository: input.repository
+          })
+        })
+    );
+
+    registerTool(
       "submit_skill_candidate",
       {
         description: "Submit a complete generated SKILL.md to Team Skill Hub for administrator review. The Skill is not pushed directly; approval is required before a PR/MR can be created.",
@@ -876,14 +936,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       },
       async ({ trace_id, title, content, skill_collection, repository, suggested_path }) =>
         toolResult({
-          candidate: await appService.submitKnowledgeCandidate(principal, {
+          candidate: await appService.submitSkillCandidateCompat(principal, {
             traceId: trace_id,
             title,
             content,
-            sourceType: "mcp-session",
-            suggestedType: "skill",
             skillCollection: skill_collection,
-            repository: repository ?? "rd-skills",
+            repository,
             suggestedPath: suggested_path
           })
         })
