@@ -61,7 +61,10 @@ import {
   resolveClientEventSchemaVersion
 } from "./client-events.js";
 import { resolveProjectContext } from "./project-context.js";
-import { listDataGovernanceRules } from "./data-governance.js";import { normalizeKnowledgeCandidateSummary, parseKnowledgeSummary } from "./knowledge-summary.js";
+import { listDataGovernanceRules } from "./data-governance.js";
+import { parseKnowledgeSummary } from "./knowledge-summary.js";
+import { KnowledgeSubmissionSpecStore } from "./knowledge-submission-spec.js";
+import { KnowledgeSubmissionService } from "./knowledge-submission.js";
 import { openSkillHubDatabase, type SkillHubDatabase } from "./storage/database.js";
 import { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundleService, type SubmitSkillBundleServiceInput } from "./skill-bundle-service.js";
@@ -107,6 +110,8 @@ export class SkillHubApplicationService {
   private readonly observability: McpObservabilityStore;
   private readonly skillBundleDatabase: SkillHubDatabase;
   private readonly skillBundles: SkillBundleService;
+  private readonly knowledgeSubmissionSpecStore: KnowledgeSubmissionSpecStore;
+  private readonly knowledgeSubmission: KnowledgeSubmissionService;
   private readonly clientEventPipeline = new ClientEventPipeline();
 
   constructor(
@@ -123,6 +128,8 @@ export class SkillHubApplicationService {
     this.analytics = new UsageAnalyticsStore(config.dataDir);
     this.evaluations = new EvaluationRunStore(config.dataDir);
     this.observability = new McpObservabilityStore(config.dataDir);
+    this.knowledgeSubmissionSpecStore = new KnowledgeSubmissionSpecStore(config.dataDir);
+    this.knowledgeSubmission = new KnowledgeSubmissionService(this.knowledgeSubmissionSpecStore);
     this.clientEventPipeline.register({
       id: "stop-knowledge-candidate-detector-v2",
       events: ["Stop"],
@@ -3219,14 +3226,18 @@ export class SkillHubApplicationService {
     return await this.observability.listFeedback(limit);
   }
 
+  async getKnowledgeSubmissionSpec() {
+    return await this.knowledgeSubmission.currentSpec();
+  }
+
   async submitKnowledgeCandidate(
     principal: Principal,
     input: Pick<
       KnowledgeCandidate,
       "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"
-    >
+    > & { submittedSpecVersion?: number; submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]> }
   ) {
-    let candidateInput = input;
+    let candidateInput: Parameters<McpObservabilityStore["createCandidate"]>[1] = input;
     if (input.suggestedType === "skill") {
       const body = input.content.trim();
       if (!body.startsWith("---") || !/\bschema_version:\s*1\b/.test(body) || !/\bname:\s*[^\s]+/.test(body) || !/\bmetadata:\s*$/m.test(body)) {
@@ -3237,16 +3248,19 @@ export class SkillHubApplicationService {
         skillCollection: input.skillCollection ?? "custom-skills"
       };
     } else if (input.sourceType === "manual" || input.sourceType === "mcp-session") {
-      const normalizedSummary = normalizeKnowledgeCandidateSummary(input.content);
-      if (!normalizedSummary.ok) {
-        throw new Error(
-          `Knowledge candidate content must use the fixed summary format (${normalizedSummary.reason})`
-        );
-      }
+      const normalized = await this.knowledgeSubmission.normalize({
+        title: input.title,
+        content: input.content,
+        submittedSpecVersion: input.submittedSpecVersion
+      });
       candidateInput = {
         ...input,
-        title: normalizedSummary.title,
-        content: normalizedSummary.content
+        title: normalized.title,
+        content: normalized.content,
+        ...(normalized.submittedSpecVersion !== undefined ? { submittedSpecVersion: normalized.submittedSpecVersion } : {}),
+        submissionSpecVersion: normalized.appliedSpecVersion,
+        submissionSpecSchemaVersion: normalized.schemaVersion,
+        submissionMode: input.submissionMode ?? (input.sourceType === "mcp-session" ? "mcp" : "admin")
       };
     }
     const publishingType = candidateInput.suggestedType === "skill" ? "skill" : "knowledge";

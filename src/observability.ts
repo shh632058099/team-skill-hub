@@ -181,6 +181,10 @@ export interface KnowledgeCandidate {
   sourceSessionId?: string;
   sourceTurnId?: string;
   sourceGapKey?: string;
+  submittedSpecVersion?: number;
+  submissionSpecVersion?: number;
+  submissionSpecSchemaVersion?: number;
+  submissionMode?: "mcp" | "admin" | "automatic" | "gap" | "curator" | "server";
   automation?: {
     detector: string;
     classification: "root-cause" | "verified-fix" | "workaround" | "reusable-constraint";
@@ -904,7 +908,7 @@ export class McpObservabilityStore {
     title: string,
     content: string
   ): Promise<KnowledgeCandidate | undefined> {
-    const fingerprint = candidateFingerprint(redactText(title, 200), redactText(content, 10000));
+    const fingerprint = candidateFingerprint(redactText(title, 200), redactText(content, 50_000));
     return (await this.listCandidates(this.maxEntries)).find(
       (item) =>
         (item.fingerprint ?? candidateFingerprint(item.title, item.content)) === fingerprint &&
@@ -933,11 +937,11 @@ export class McpObservabilityStore {
   async createCandidate(
     principal: Principal,
     input: Pick<KnowledgeCandidate, "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"> &
-      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "automation" | "relatedKnowledge" | "relationHint">>
+      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "submittedSpecVersion" | "submissionSpecVersion" | "submissionSpecSchemaVersion" | "submissionMode" | "automation" | "relatedKnowledge" | "relationHint">>
   ): Promise<KnowledgeCandidate> {
     const ts = new Date().toISOString();
     const title = redactText(input.title, 200);
-    const content = redactText(input.content, 10000);
+    const content = redactText(input.content, 50_000);
     const fingerprint = candidateFingerprint(title, content);
     const duplicate = (await this.listCandidates(this.maxEntries)).find(
       (item) =>
@@ -1035,7 +1039,7 @@ export class McpObservabilityStore {
       throw new Error("Knowledge candidate cannot be edited in its current state");
     }
     const nextTitle = input.title !== undefined ? redactText(input.title, 200) : current.title;
-    const nextContent = input.content !== undefined ? redactText(input.content, 10000) : current.content;
+    const nextContent = input.content !== undefined ? redactText(input.content, 50_000) : current.content;
     const fingerprint = candidateFingerprint(nextTitle, nextContent);
     const duplicate = (await this.listCandidates(this.maxEntries)).find(
       (item) =>

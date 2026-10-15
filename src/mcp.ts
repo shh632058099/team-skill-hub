@@ -836,18 +836,28 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     );
 
     registerTool(
+      "get_knowledge_submission_spec",
+      {
+        description: "Return the current server-managed Knowledge submission specification. Call this immediately before submit_knowledge_candidate and follow the returned template and spec_version.",
+        inputSchema: z.object({ repository: z.string().min(1).optional() })
+      },
+      async () => toolResult(await appService.getKnowledgeSubmissionSpec())
+    );
+
+    registerTool(
       "submit_knowledge_candidate",
       {
-        description: "Knowledge ONLY. Submit a candidate team Knowledge item for human review using the fixed summary format. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
+        description: "Knowledge ONLY. Submit a candidate team Knowledge item for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
+          spec_version: z.number().int().min(1),
           title: z.string().min(1).max(200),
-          content: z.string().min(1).max(10000),
+          content: z.string().min(1).max(50_000),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
           repository: z.string().min(1).optional()
         })
       },
-      async ({ trace_id, title, content, source_type, repository }) =>
+      async ({ trace_id, spec_version, title, content, source_type, repository }) =>
         toolResult({
           candidate: await appService.submitKnowledgeCandidate(principal, {
             traceId: trace_id,
@@ -855,7 +865,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             content,
             sourceType: source_type ?? "mcp-session",
             suggestedType: "knowledge",
-            repository
+            repository,
+            submittedSpecVersion: spec_version,
+            submissionMode: "mcp"
           })
         })
     );
