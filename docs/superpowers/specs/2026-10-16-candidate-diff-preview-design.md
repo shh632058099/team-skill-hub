@@ -56,9 +56,9 @@ If a target branch changes between approval and later publication, the resulting
 
 ### 4.1 Pending Candidate
 
-For `status=pending`, Candidate detail keeps the existing information and adds a **变更预览** section before the approval buttons.
+For `status=pending`, Candidate detail keeps the existing information and adds a compact **查看变更 Diff** control before the approval buttons. The Diff is collapsed by default.
 
-Recommended layout:
+Recommended default layout:
 
 ```text
 候选详情
@@ -73,7 +73,16 @@ ID              kc_...
 候选正文
 ...
 
-变更预览
+[查看变更 Diff]
+
+[批准] [拒绝] [删除 Candidate]
+```
+
+Only after the reviewer clicks **查看变更 Diff** does the page call `/publish-preview` and expand the preview inline:
+
+```text
+[收起变更 Diff]
+
 Repository       rd-knowledges
 Target branch    main
 Path             knowledge/example.md
@@ -86,11 +95,9 @@ Summary          +12 -4
 +replacement sentence
 +new detail
  existing context
-
-[批准] [拒绝] [删除 Candidate]
 ```
 
-There is no separate Diff tab in the first version. Keeping Diff on the pending Candidate detail page makes the approval workflow direct and avoids adding another route solely for one review step.
+There is no separate Diff tab in the first version. The collapsed inline control keeps the Candidate page visually compact while still making Diff available immediately before approval. Loading is lazy: merely opening a pending Candidate must not trigger a remote repository read.
 
 ### 4.2 New file
 
@@ -163,7 +170,7 @@ Add:
 GET /admin/api/knowledge-candidates/:id/publish-preview
 ```
 
-The Admin UI calls this endpoint only for a `pending` Candidate.
+The Admin UI calls this endpoint only for a `pending` Candidate, and only after the reviewer explicitly expands **查看变更 Diff**. Opening the Candidate detail page alone must not call the endpoint.
 
 Recommended response:
 
@@ -251,7 +258,7 @@ The UI renders a Git-style unified Diff with escaped text and simple added/remov
 
 Diff preview failure must not make the Candidate detail unusable.
 
-If the preview cannot be generated, the page still shows the Candidate and approval controls, with a focused message in the preview section such as:
+Because preview is lazy, a failure appears only after the reviewer clicks **查看变更 Diff**. The page still shows the Candidate and approval controls, with a focused message in the expanded preview area such as:
 
 ```text
 无法加载变更预览：读取目标仓库文件失败。
@@ -267,10 +274,11 @@ The main UI change stays inside the existing Candidate detail renderer.
 
 For `pending` Candidate detail:
 
-1. load Candidate detail;
-2. separately request `/publish-preview`;
-3. render the **变更预览** section;
-4. keep existing approval/rejection buttons.
+1. load Candidate detail normally;
+2. render a collapsed **查看变更 Diff** control without calling `/publish-preview`;
+3. when the reviewer clicks it, request `/publish-preview` and expand the result inline;
+4. allow the reviewer to collapse and re-expand the already loaded result without another request during the same page instance;
+5. keep existing approval/rejection buttons unchanged.
 
 For every other Candidate status:
 
@@ -311,7 +319,10 @@ Cover:
 
 Cover:
 
-- pending Candidate loads and renders **变更预览**
+- pending Candidate renders a collapsed **查看变更 Diff** control
+- opening the Candidate detail page does not call `/publish-preview`
+- clicking **查看变更 Diff** calls `/publish-preview` once and expands the result inline
+- collapsing the Diff does not require another remote read; re-expanding may reuse the already loaded result for that page instance
 - added/removed lines are escaped and styled correctly
 - preview failure does not hide approval controls
 - non-pending Candidate does not call `/publish-preview`
@@ -340,16 +351,17 @@ No changes should be required to:
 
 The feature is complete when:
 
-1. A `pending` Candidate detail page shows a line-level repository Diff before approval.
-2. The preview clearly shows repository, target branch, path, create/update/no-change state, and added/removed counts.
-3. Preview reads the current target branch and performs no remote or Candidate mutation.
-4. Approval and rejection continue to work even if preview fails.
-5. After approval, Team Skill Hub stops showing its own Candidate Diff preview.
-6. After publish, the existing publication PR/MR link is the review surface for the actual publication Diff.
-7. After delete publication is created, the existing deletion PR/MR link is the review surface for the actual deletion Diff.
-8. Existing Candidate publishing and deletion behavior remains unchanged.
-9. Existing semantic `/preview` behavior remains backward-compatible.
-10. GitHub and GitLab preview paths have focused tests.
+1. A `pending` Candidate detail page shows a collapsed **查看变更 Diff** control before approval.
+2. The Diff is not fetched or rendered until the reviewer clicks that control, then it expands inline on the same page.
+3. The preview clearly shows repository, target branch, path, create/update/no-change state, and added/removed counts.
+4. Preview reads the current target branch and performs no remote or Candidate mutation.
+5. Approval and rejection continue to work even if preview fails.
+6. After approval, Team Skill Hub stops showing its own Candidate Diff preview.
+7. After publish, the existing publication PR/MR link is the review surface for the actual publication Diff.
+8. After delete publication is created, the existing deletion PR/MR link is the review surface for the actual deletion Diff.
+9. Existing Candidate publishing and deletion behavior remains unchanged.
+10. Existing semantic `/preview` behavior remains backward-compatible.
+11. GitHub and GitLab preview paths have focused tests.
 
 ## 13. Future extensions
 
