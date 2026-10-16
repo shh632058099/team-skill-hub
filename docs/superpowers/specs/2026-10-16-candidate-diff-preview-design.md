@@ -78,7 +78,7 @@ ID              kc_...
 [批准] [拒绝] [删除 Candidate]
 ```
 
-Only after the reviewer clicks **查看变更 Diff** does the page call `/publish-preview` and expand the preview inline:
+Only after the reviewer clicks **查看变更 Diff** does the page call `/diff` and expand the preview inline:
 
 ```text
 [收起变更 Diff]
@@ -162,12 +162,12 @@ GET /admin/api/knowledge-candidates/:id/preview
 
 It continues to describe the Candidate in relation to indexed Knowledge content.
 
-### 6.2 Add one publish-oriented preview endpoint
+### 6.2 Add one repository Diff endpoint
 
 Add:
 
 ```text
-GET /admin/api/knowledge-candidates/:id/publish-preview
+GET /admin/api/knowledge-candidates/:id/diff
 ```
 
 The Admin UI calls this endpoint only for a `pending` Candidate, and only after the reviewer explicitly expands **查看变更 Diff**. Opening the Candidate detail page alone must not call the endpoint.
@@ -175,7 +175,7 @@ The Admin UI calls this endpoint only for a `pending` Candidate, and only after 
 Recommended response:
 
 ```ts
-interface CandidatePublishPreview {
+interface CandidateDiffPreview {
   target: {
     repositoryId: string;
     targetBranch: string;
@@ -275,14 +275,14 @@ The main UI change stays inside the existing Candidate detail renderer.
 For `pending` Candidate detail:
 
 1. load Candidate detail normally;
-2. render a collapsed **查看变更 Diff** control without calling `/publish-preview`;
-3. when the reviewer clicks it, request `/publish-preview` and expand the result inline;
+2. render a collapsed **查看变更 Diff** control without calling `/diff`;
+3. when the reviewer clicks it, request `/diff` and expand the result inline;
 4. allow the reviewer to collapse and re-expand the already loaded result without another request during the same page instance;
 5. keep existing approval/rejection buttons unchanged.
 
 For every other Candidate status:
 
-- do not request `/publish-preview`;
+- do not request `/diff`;
 - retain existing Candidate detail behavior;
 - retain publication and deletion PR/MR links.
 
@@ -320,12 +320,12 @@ Cover:
 Cover:
 
 - pending Candidate renders a collapsed **查看变更 Diff** control
-- opening the Candidate detail page does not call `/publish-preview`
-- clicking **查看变更 Diff** calls `/publish-preview` once and expands the result inline
+- opening the Candidate detail page does not call `/diff`
+- clicking **查看变更 Diff** calls `/diff` once and expands the result inline
 - collapsing the Diff does not require another remote read; re-expanding may reuse the already loaded result for that page instance
 - added/removed lines are escaped and styled correctly
 - preview failure does not hide approval controls
-- non-pending Candidate does not call `/publish-preview`
+- non-pending Candidate does not call `/diff`
 - publishing/published states still show publication PR/MR link
 - deletion states still show deletion PR/MR link
 
