@@ -101,7 +101,7 @@ export async function scanPrompts(root: string, repositoryId: string, revision: 
       keywords: metadata.keywords ?? [],
       category: metadata.category ?? [],
       owner: metadata.owner,
-      compatibility: metadata.compatibility ?? {}
+      compatibility: metadata.compatibility ?? {},
     });
   }
   return result;
@@ -129,7 +129,7 @@ export async function scanAgents(root: string, repositoryId: string, revision: s
       skills: data.skills ?? [],
       prompts: data.prompts ?? [],
       tools: data.tools ?? [],
-      compatibility: metadata.compatibility ?? {}
+      compatibility: metadata.compatibility ?? {},
     });
   }
   return result;
@@ -145,7 +145,9 @@ export async function scanTools(root: string, repositoryId: string, revision: st
     }
     const authReference = data.authentication?.reference;
     if (authReference && /(?:token|password|secret|key)=/i.test(authReference)) {
-      throw new Error(`Tool ${data.name}: authentication.reference must name a credential reference, not contain a secret`);
+      throw new Error(
+        `Tool ${data.name}: authentication.reference must name a credential reference, not contain a secret`,
+      );
     }
     result.push({
       key: `${repositoryId}:${data.name}`,
@@ -168,7 +170,7 @@ export async function scanTools(root: string, repositoryId: string, revision: st
       authentication: data.authentication?.type
         ? { type: data.authentication.type, reference: authReference }
         : undefined,
-      compatibility: metadata.compatibility ?? {}
+      compatibility: metadata.compatibility ?? {},
     });
   }
   return result;
@@ -179,7 +181,7 @@ export function validateArtifactPolicies(
   prompts: PromptArtifact[],
   agents: AgentArtifact[],
   skillNames: string[],
-  tools: ToolArtifact[] = []
+  tools: ToolArtifact[] = [],
 ): string[] {
   const issues: string[] = [];
   const checkVisibility = (kind: string, name: string, visibility: string[]) => {
@@ -218,7 +220,7 @@ export function validateAgentBindings(
   agents: AgentArtifact[],
   prompts: PromptArtifact[],
   skillNames: string[],
-  tools: ToolArtifact[] = []
+  tools: ToolArtifact[] = [],
 ): string[] {
   const promptNames = new Set(prompts.map((prompt) => prompt.name));
   const skills = new Set(skillNames);
@@ -254,9 +256,35 @@ function visible(repository: RepositoryConfig, visibility: string[], roles: stri
 export function searchArtifacts<T extends PromptArtifact | AgentArtifact | ToolArtifact>(
   query: string,
   artifacts: T[],
-  limit: number
+  limit: number,
 ): ArtifactSearchResult<T>[] {
-  const stopWords = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with", "使用", "实现", "问题", "相关", "如何", "怎么", "帮我", "当前", "项目", "配置", "规则", "的", "和", "与"]);
+  const stopWords = new Set([
+    "a",
+    "an",
+    "and",
+    "for",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+    "使用",
+    "实现",
+    "问题",
+    "相关",
+    "如何",
+    "怎么",
+    "帮我",
+    "当前",
+    "项目",
+    "配置",
+    "规则",
+    "的",
+    "和",
+    "与",
+  ]);
   const tokens = (text: string) => {
     const result = new Set<string>();
     const raw = text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
@@ -285,25 +313,35 @@ export function searchArtifacts<T extends PromptArtifact | AgentArtifact | ToolA
       const matched = new Set<string>();
       for (const term of terms) {
         let hit = false;
-        if (name.has(term)) { score += 4; hit = true; }
-        if (keywords.has(term)) { score += 3; hit = true; }
-        if (description.has(term)) { score += 1; hit = true; }
+        if (name.has(term)) {
+          score += 4;
+          hit = true;
+        }
+        if (keywords.has(term)) {
+          score += 3;
+          hit = true;
+        }
+        if (description.has(term)) {
+          score += 1;
+          hit = true;
+        }
         if (hit) matched.add(term);
       }
       const coverage = terms.length ? matched.size / terms.length : 0;
       if (score > 0) score *= 0.4 + coverage * 0.6;
-      return { artifact, score, coverage, reason: `exact lexical coverage=${coverage.toFixed(2)}; score=${score.toFixed(2)}` };
+      return {
+        artifact,
+        score,
+        coverage,
+        reason: `exact lexical coverage=${coverage.toFixed(2)}; score=${score.toFixed(2)}`,
+      };
     })
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
 
-export function canReadArtifact(
-  repository: RepositoryConfig,
-  visibility: string[],
-  roles: string[]
-): boolean {
+export function canReadArtifact(repository: RepositoryConfig, visibility: string[], roles: string[]): boolean {
   return visible(repository, visibility, roles);
 }
 
@@ -317,7 +355,7 @@ export interface AgentToolResolution {
 export function resolveAgentToolBindings(
   agent: AgentArtifact,
   visibleTools: ToolArtifact[],
-  environment?: string
+  environment?: string,
 ): AgentToolResolution[] {
   return agent.tools.map((reference) => {
     const qualified = reference.includes(":");
@@ -333,14 +371,14 @@ export function resolveAgentToolBindings(
       return {
         reference,
         status: "not-visible",
-        reason: "tool is missing or not visible to the current caller"
+        reason: "tool is missing or not visible to the current caller",
       };
     }
     if (matches.length > 1) {
       return {
         reference,
         status: "ambiguous",
-        reason: "multiple visible tools match; qualify the binding as repository:name"
+        reason: "multiple visible tools match; qualify the binding as repository:name",
       };
     }
     const tool = matches[0]!;
@@ -349,7 +387,7 @@ export function resolveAgentToolBindings(
         reference,
         status: "environment-mismatch",
         tool,
-        reason: `tool does not declare environment ${environment}`
+        reason: `tool does not declare environment ${environment}`,
       };
     }
     return {
@@ -360,7 +398,7 @@ export function resolveAgentToolBindings(
         ? "resolved explicit repository-qualified tool"
         : tool.repositoryId === agent.repositoryId
           ? "resolved same-repository tool"
-          : "resolved unique visible tool"
+          : "resolved unique visible tool",
     };
   });
 }

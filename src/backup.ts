@@ -1,16 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { backup as sqliteBackup, DatabaseSync } from "node:sqlite";
-import {
-  copyFile,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  writeFile
-} from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface DataBackupFile {
@@ -48,9 +38,15 @@ async function sha256File(filePath: string): Promise<string> {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function isSqliteDatabase(filePath:string):Promise<boolean>{
-  const handle=await open(filePath,"r");
-  try{const header=Buffer.alloc(16);const {bytesRead}=await handle.read(header,0,16,0);return bytesRead===16&&header.toString("binary")==="SQLite format 3\u0000"}finally{await handle.close()}
+async function isSqliteDatabase(filePath: string): Promise<boolean> {
+  const handle = await open(filePath, "r");
+  try {
+    const header = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(header, 0, 16, 0);
+    return bytesRead === 16 && header.toString("binary") === "SQLite format 3\u0000";
+  } finally {
+    await handle.close();
+  }
 }
 
 async function walkFiles(root: string, current = root): Promise<string[]> {
@@ -68,7 +64,7 @@ async function walkFiles(root: string, current = root): Promise<string[]> {
       throw new Error("Backup refuses symbolic links: " + portablePath(path.relative(root, absolute)));
     }
     if (entry.isDirectory()) {
-      result.push(...await walkFiles(root, absolute));
+      result.push(...(await walkFiles(root, absolute)));
     } else if (entry.isFile()) {
       result.push(absolute);
     }
@@ -95,11 +91,16 @@ async function directoryHasEntries(target: string): Promise<boolean> {
   }
 }
 
-export async function createDataBackup(dataDir: string, destination: string, options?:{sqlitePath?:string}): Promise<DataBackupManifest> {
+export async function createDataBackup(
+  dataDir: string,
+  destination: string,
+  options?: { sqlitePath?: string },
+): Promise<DataBackupManifest> {
   const source = path.resolve(dataDir);
   const output = path.resolve(destination);
-  const configuredSqlite=options?.sqlitePath?path.resolve(options.sqlitePath):undefined;
-  if(configuredSqlite&&!isPathInside(source,configuredSqlite))throw new Error("SQLite database must be inside DATA_DIR to be included in backup");
+  const configuredSqlite = options?.sqlitePath ? path.resolve(options.sqlitePath) : undefined;
+  if (configuredSqlite && !isPathInside(source, configuredSqlite))
+    throw new Error("SQLite database must be inside DATA_DIR to be included in backup");
   if (isPathInside(source, output)) {
     throw new Error("Backup destination must be outside DATA_DIR");
   }
@@ -115,11 +116,9 @@ export async function createDataBackup(dataDir: string, destination: string, opt
     const sqliteDatabases = new Set<string>();
     for (const absolute of files) {
       if (absolute.endsWith("-wal") || absolute.endsWith("-shm")) continue;
-      if (absolute === configuredSqlite || await isSqliteDatabase(absolute)) sqliteDatabases.add(absolute);
+      if (absolute === configuredSqlite || (await isSqliteDatabase(absolute))) sqliteDatabases.add(absolute);
     }
-    const sqliteSidecars = new Set(
-      [...sqliteDatabases].flatMap((database) => [database + "-wal", database + "-shm"])
-    );
+    const sqliteSidecars = new Set([...sqliteDatabases].flatMap((database) => [database + "-wal", database + "-shm"]));
     const manifestFiles: DataBackupFile[] = [];
     for (const absolute of files) {
       const relative = portablePath(path.relative(source, absolute));
@@ -128,7 +127,11 @@ export async function createDataBackup(dataDir: string, destination: string, opt
       await mkdir(path.dirname(destinationFile), { recursive: true });
       if (sqliteDatabases.has(absolute)) {
         const database = new DatabaseSync(absolute, { readOnly: true });
-        try { await sqliteBackup(database, destinationFile); } finally { database.close(); }
+        try {
+          await sqliteBackup(database, destinationFile);
+        } finally {
+          database.close();
+        }
       } else {
         await copyFile(absolute, destinationFile);
       }
@@ -136,20 +139,19 @@ export async function createDataBackup(dataDir: string, destination: string, opt
       manifestFiles.push({
         path: relative,
         size: info.size,
-        sha256: await sha256File(destinationFile)
+        sha256: await sha256File(destinationFile),
       });
     }
     manifestFiles.sort((a, b) => a.path.localeCompare(b.path));
     const manifest: DataBackupManifest = {
       schemaVersion: 1,
       createdAt: new Date().toISOString(),
-      files: manifestFiles
+      files: manifestFiles,
     };
-    await writeFile(
-      path.join(temp, "backup-manifest.json"),
-      JSON.stringify(manifest, null, 2) + "\n",
-      { encoding: "utf8", mode: 0o600 }
-    );
+    await writeFile(path.join(temp, "backup-manifest.json"), JSON.stringify(manifest, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     await rename(temp, output);
     return manifest;
   } catch (error) {
@@ -189,7 +191,7 @@ export async function verifyDataBackup(backupDir: string): Promise<DataBackupMan
 export async function restoreDataBackup(
   backupDir: string,
   dataDir: string,
-  options?: { force?: boolean; verifyOnly?: boolean }
+  options?: { force?: boolean; verifyOnly?: boolean },
 ): Promise<RestoreResult> {
   const manifest = await verifyDataBackup(backupDir);
   if (options?.verifyOnly) return { restoredFiles: manifest.files.length };
@@ -200,7 +202,7 @@ export async function restoreDataBackup(
     throw new Error("Backup source must be outside target DATA_DIR");
   }
   const targetExists = await pathExists(target);
-  const targetHasEntries = targetExists && await directoryHasEntries(target);
+  const targetHasEntries = targetExists && (await directoryHasEntries(target));
   if (targetHasEntries && !options?.force) {
     throw new Error("Target DATA_DIR is not empty; pass --force to preserve and replace it");
   }
@@ -215,7 +217,7 @@ export async function restoreDataBackup(
       const destination = path.join(temp, nativePath(file.path));
       await mkdir(path.dirname(destination), { recursive: true });
       await copyFile(source, destination);
-      if (await sha256File(destination) !== file.sha256) {
+      if ((await sha256File(destination)) !== file.sha256) {
         throw new Error("Restored file checksum mismatch: " + file.path);
       }
     }

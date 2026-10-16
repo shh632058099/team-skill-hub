@@ -1,9 +1,6 @@
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import {
-  CURRENT_HOOK_RUNTIME_VERSION,
-  CURRENT_HOOK_SCHEMA_VERSION
-} from "../client-events.js";
+import { CURRENT_HOOK_RUNTIME_VERSION, CURRENT_HOOK_SCHEMA_VERSION } from "../client-events.js";
 
 interface Options {
   url: string;
@@ -34,7 +31,7 @@ function options(): Options {
     apiKeyEnv,
     out: path.resolve(argument("--out") ?? "dist/plugins/team-skill-hub"),
     ...(marketplaceRoot ? { marketplaceRoot: path.resolve(marketplaceRoot) } : {}),
-    marketplaceName: argument("--marketplace-name") ?? "team-skill-hub"
+    marketplaceName: argument("--marketplace-name") ?? "team-skill-hub",
   };
 }
 
@@ -45,9 +42,7 @@ function json(value: unknown): string {
 async function main(): Promise<void> {
   const root = process.cwd();
   const opts = options();
-  const packageJson = JSON.parse(
-    await readFile(path.join(root, "package.json"), "utf8")
-  ) as { version: string };
+  const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as { version: string };
   const version = packageJson.version;
   const eventUrl = opts.url.replace(/\/mcp$/, "/client-events");
 
@@ -78,12 +73,12 @@ async function main(): Promise<void> {
             capabilities: ["Read", "Write"],
             defaultPrompt: [
               "Use Team Skill Hub to find relevant internal guidance before implementing this task.",
-              "Search Team Skill Hub for verified prior solutions related to this issue."
-            ]
-          }
-        }
-      }
-    })
+              "Search Team Skill Hub for verified prior solutions related to this issue.",
+            ],
+          },
+        },
+      },
+    }),
   );
 
   await writeFile(
@@ -94,10 +89,10 @@ async function main(): Promise<void> {
         teamSkillHub: {
           type: "streamable-http",
           url: opts.url,
-          bearer_token_env_var: opts.apiKeyEnv
-        }
-      }
-    })
+          bearer_token_env_var: opts.apiKeyEnv,
+        },
+      },
+    }),
   );
 
   const hooks: Record<string, unknown[]> = {};
@@ -108,7 +103,7 @@ async function main(): Promise<void> {
       commandWindows:
         'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& \\"$env:PLUGIN_ROOT\\\\hooks\\\\team-skill-hub-hook.ps1\\""',
       async: !["SessionStart", "PostToolUse", "Stop", "SessionEnd"].includes(event),
-      timeout: 2
+      timeout: 2,
     };
     hooks[event] = [{ hooks: [handler] }];
   }
@@ -119,7 +114,7 @@ async function main(): Promise<void> {
       commandWindows:
         'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& \\"$env:PLUGIN_ROOT\\\\hooks\\\\team-skill-hub-hook.ps1\\""',
       async: true,
-      timeout: 2
+      timeout: 2,
     };
     hooks[event] = [{ matcher: "^__team_skill_hub_reserved__$", hooks: [handler] }];
   }
@@ -127,17 +122,17 @@ async function main(): Promise<void> {
     path.join(opts.out, "hooks", "hooks.json"),
     json({
       description: "Team Skill Hub lifecycle telemetry and knowledge feedback hooks.",
-      hooks
-    })
+      hooks,
+    }),
   );
 
   await cp(
     path.join(root, "scripts", "team-skill-hub-hook.sh"),
-    path.join(opts.out, "hooks", "team-skill-hub-hook.sh")
+    path.join(opts.out, "hooks", "team-skill-hub-hook.sh"),
   );
   await cp(
     path.join(root, "scripts", "team-skill-hub-hook.ps1"),
-    path.join(opts.out, "hooks", "team-skill-hub-hook.ps1")
+    path.join(opts.out, "hooks", "team-skill-hub-hook.ps1"),
   );
   await writeFile(
     path.join(opts.out, "hooks", "team-skill-hub.conf"),
@@ -148,8 +143,8 @@ async function main(): Promise<void> {
       "capture_stop_message=true",
       "runtime_version=" + CURRENT_HOOK_RUNTIME_VERSION,
       "hook_schema_version=" + CURRENT_HOOK_SCHEMA_VERSION,
-      ""
-    ].join("\n")
+      "",
+    ].join("\n"),
   );
 
   const skill = [
@@ -168,7 +163,7 @@ async function main(): Promise<void> {
     "4. Submit concise evidence-based feedback when retrieved guidance is clearly outdated or incorrect.",
     "5. Submit a Knowledge Candidate for durable verified team-specific knowledge that is missing. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.",
     "6. Do not invoke repository sync, rollback, or administrative operations unless the user explicitly asks for that operational action.",
-    ""
+    "",
   ].join("\n");
   await writeFile(path.join(opts.out, "skills", "team-skill-hub", "SKILL.md"), skill);
 
@@ -189,10 +184,10 @@ async function main(): Promise<void> {
             name: "team-skill-hub",
             source: { source: "local", path: "./plugins/team-skill-hub" },
             policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-            category: "Productivity"
-          }
-        ]
-      })
+            category: "Productivity",
+          },
+        ],
+      }),
     );
   }
 
@@ -205,8 +200,8 @@ async function main(): Promise<void> {
       hookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION,
       mcpUrl: opts.url,
       apiKeyEnv: opts.apiKeyEnv,
-      marketplaceRoot: opts.marketplaceRoot ?? null
-    }).trim()
+      marketplaceRoot: opts.marketplaceRoot ?? null,
+    }).trim(),
   );
 }
 

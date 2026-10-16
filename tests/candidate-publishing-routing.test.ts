@@ -26,7 +26,7 @@ function repository(id: string, webhookAliases: string[] = []): RepositoryConfig
     visibility: ["internal"],
     pollingIntervalSeconds: 0,
     readRoles: ["developer", "internal"],
-    syncRoles: ["admin"]
+    syncRoles: ["admin"],
   };
 }
 
@@ -39,7 +39,7 @@ async function createService(dataDir: string) {
     projectPath: "acme/knowledge-destination",
     tokenEnv: "TEST_GITHUB_TOKEN",
     targetBranch: "main",
-    branchPrefix: "knowledge-candidate"
+    branchPrefix: "knowledge-candidate",
   };
   routing.skillPublishing = {
     enabled: true,
@@ -48,7 +48,7 @@ async function createService(dataDir: string) {
     projectPath: "acme/skill-destination",
     tokenEnv: "TEST_GITHUB_TOKEN",
     targetBranch: "main",
-    branchPrefix: "skill-candidate"
+    branchPrefix: "skill-candidate",
   };
   const config: AppConfig = {
     host: "127.0.0.1",
@@ -59,8 +59,8 @@ async function createService(dataDir: string) {
     repositories: [
       routing,
       repository("knowledge-destination", ["acme/knowledge-destination"]),
-      repository("skill-destination", ["acme/skill-destination"])
-    ]
+      repository("skill-destination", ["acme/skill-destination"]),
+    ],
   };
   const search = new SqliteFtsSearchBackend();
   return new SkillHubApplicationService(
@@ -72,7 +72,7 @@ async function createService(dataDir: string) {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 }
 
@@ -85,7 +85,7 @@ async function createGitLabService(dataDir: string) {
     projectPath: "acme/knowledge-destination",
     tokenEnv: "TEST_GITLAB_WRITE_TOKEN",
     targetBranch: "main",
-    branchPrefix: "knowledge-candidate"
+    branchPrefix: "knowledge-candidate",
   };
   const target = repository("knowledge-destination", ["acme/knowledge-destination"]);
   const config: AppConfig = {
@@ -94,7 +94,7 @@ async function createGitLabService(dataDir: string) {
     dataDir,
     defaultRoles: ["developer", "internal"],
     authentication: { mode: "development", apiKeys: {} },
-    repositories: [routing, target]
+    repositories: [routing, target],
   };
   const search = new SqliteFtsSearchBackend();
   return new SkillHubApplicationService(
@@ -106,7 +106,7 @@ async function createGitLabService(dataDir: string) {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 }
 
@@ -118,57 +118,73 @@ test("candidate repository defaults come from publishing project_path and reject
       title: "Knowledge routing",
       content: [
         "# Knowledge routing",
-        "", "## 问题", "Knowledge publishing requires deterministic routing.",
-        "", "## 根因", "The publishing target is derived from configured knowledge_publishing project paths.",
-        "", "## 解决方案", "Resolve the configured Knowledge publishing destination before Candidate persistence.",
-        "", "## 验证结果", "The routing test verifies the selected repository.",
-        "", "## 适用范围", "Knowledge Candidate publishing routing.",
-        "", "## 约束/限制", "The target must be a configured Knowledge publishing repository."
+        "",
+        "## 问题",
+        "Knowledge publishing requires deterministic routing.",
+        "",
+        "## 根因",
+        "The publishing target is derived from configured knowledge_publishing project paths.",
+        "",
+        "## 解决方案",
+        "Resolve the configured Knowledge publishing destination before Candidate persistence.",
+        "",
+        "## 验证结果",
+        "The routing test verifies the selected repository.",
+        "",
+        "## 适用范围",
+        "Knowledge Candidate publishing routing.",
+        "",
+        "## 约束/限制",
+        "The target must be a configured Knowledge publishing repository.",
       ].join("\n"),
       sourceType: "review",
-      suggestedType: "knowledge"
+      suggestedType: "knowledge",
     });
     assert.equal(knowledge.repository, "knowledge-destination");
 
     const skill = await service.submitKnowledgeCandidate(principal, {
       title: "Skill routing",
-      content: "---\nschema_version: 1\nname: routing-skill\nmetadata:\n  audience: [developer]\n---\n\n# Routing skill\n",
+      content:
+        "---\nschema_version: 1\nname: routing-skill\nmetadata:\n  audience: [developer]\n---\n\n# Routing skill\n",
       sourceType: "review",
-      suggestedType: "skill"
+      suggestedType: "skill",
     });
     assert.equal(skill.repository, "skill-destination");
 
     await assert.rejects(
-      () => service.submitKnowledgeCandidate(principal, {
-        title: "Wrong Knowledge target",
-        content: "Must not route to a Skill repository.",
-        sourceType: "review",
-        suggestedType: "knowledge",
-        repository: "skill-destination"
-      }),
-      /not a configured Knowledge publishing target/
+      () =>
+        service.submitKnowledgeCandidate(principal, {
+          title: "Wrong Knowledge target",
+          content: "Must not route to a Skill repository.",
+          sourceType: "review",
+          suggestedType: "knowledge",
+          repository: "skill-destination",
+        }),
+      /not a configured Knowledge publishing target/,
     );
     await assert.rejects(
-      () => service.submitKnowledgeCandidate(principal, {
-        title: "Wrong Skill target",
-        content: "---\nschema_version: 1\nname: wrong-skill\nmetadata:\n  audience: [developer]\n---\n\n# Wrong target\n",
-        sourceType: "review",
-        suggestedType: "skill",
-        repository: "knowledge-destination"
-      }),
-      /not a configured Skill publishing target/
+      () =>
+        service.submitKnowledgeCandidate(principal, {
+          title: "Wrong Skill target",
+          content:
+            "---\nschema_version: 1\nname: wrong-skill\nmetadata:\n  audience: [developer]\n---\n\n# Wrong target\n",
+          sourceType: "review",
+          suggestedType: "skill",
+          repository: "knowledge-destination",
+        }),
+      /not a configured Skill publishing target/,
     );
     const bypassed = await (service as any).observability.createCandidate(principal, {
       title: "Persisted wrong route",
       content: "Legacy or internal data must still be checked at publish time.",
       sourceType: "review",
       suggestedType: "knowledge",
-      repository: "skill-destination"
+      repository: "skill-destination",
     });
     await (service as any).observability.reviewCandidate(bypassed.id, "approved", "reviewer", "verified", "useful");
     await assert.rejects(
       () => service.publishKnowledgeCandidate(bypassed.id),
-      /not a configured Knowledge publishing target/
+      /not a configured Knowledge publishing target/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -184,10 +200,13 @@ test("delete published candidate corrects legacy false-published state before cr
     const url = String(input);
     calls.push({ url, method: init?.method ?? "GET" });
     if (/\/pulls\/41$/.test(url)) {
-      return new Response(JSON.stringify({ state: "open", merged_at: null, closed_at: null, mergeable: true, mergeable_state: "clean" }), {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      });
+      return new Response(
+        JSON.stringify({ state: "open", merged_at: null, closed_at: null, mergeable: true, mergeable_state: "clean" }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }
     if (/\/git\/ref\/heads\//.test(url)) return new Response("{}", { status: 200 });
     throw new Error("unexpected request: " + (init?.method ?? "GET") + " " + url);
@@ -200,7 +219,7 @@ test("delete published candidate corrects legacy false-published state before cr
       sourceType: "review",
       suggestedType: "knowledge",
       repository: "knowledge-destination",
-      suggestedPath: "knowledge/legacy-false-published.md"
+      suggestedPath: "knowledge/legacy-false-published.md",
     });
     await (service as any).observability.reviewCandidate(created.id, "approved", "reviewer", "verified", "useful");
     await (service as any).observability.markCandidatePublishing(created.id);
@@ -216,14 +235,17 @@ test("delete published candidate corrects legacy false-published state before cr
       publishedAt: "2026-10-10T00:00:00.000Z",
       mergeRequestState: "merged",
       lastCheckedAt: "2026-10-10T00:00:00.000Z",
-      mergedAt: "2026-10-10T00:00:00.000Z"
+      mergedAt: "2026-10-10T00:00:00.000Z",
     });
 
     const corrected = await service.deletePublishedKnowledgeCandidate(created.id);
     assert.equal(corrected.status, "publishing");
     assert.equal(corrected.publication?.mergeRequestState, "opened");
     assert.equal((corrected as any).deletionPublication, undefined);
-    assert.deepEqual(calls.map((call) => call.method), ["GET", "GET"]);
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["GET", "GET"],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.TEST_GITHUB_TOKEN;
@@ -238,10 +260,13 @@ test("reconcile corrects a legacy published candidate whose remote PR is still o
   globalThis.fetch = async (input) => {
     const url = String(input);
     if (/\/pulls\/42$/.test(url)) {
-      return new Response(JSON.stringify({ state: "open", merged_at: null, closed_at: null, mergeable: true, mergeable_state: "clean" }), {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      });
+      return new Response(
+        JSON.stringify({ state: "open", merged_at: null, closed_at: null, mergeable: true, mergeable_state: "clean" }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }
     if (/\/git\/ref\/heads\//.test(url)) return new Response("{}", { status: 200 });
     throw new Error("unexpected request: " + url);
@@ -254,7 +279,7 @@ test("reconcile corrects a legacy published candidate whose remote PR is still o
       sourceType: "review",
       suggestedType: "knowledge",
       repository: "knowledge-destination",
-      suggestedPath: "knowledge/legacy-reconcile.md"
+      suggestedPath: "knowledge/legacy-reconcile.md",
     });
     await (service as any).observability.reviewCandidate(created.id, "approved", "reviewer", "verified", "useful");
     await (service as any).observability.markCandidatePublishing(created.id);
@@ -270,7 +295,7 @@ test("reconcile corrects a legacy published candidate whose remote PR is still o
       publishedAt: "2026-10-10T00:00:00.000Z",
       mergeRequestState: "merged",
       lastCheckedAt: "2026-10-10T00:00:00.000Z",
-      mergedAt: "2026-10-10T00:00:00.000Z"
+      mergedAt: "2026-10-10T00:00:00.000Z",
     });
 
     const corrected = await service.reconcileKnowledgeCandidatePublication(created.id);
@@ -288,13 +313,29 @@ test("delete_failed published asset can retry deletion after original publicatio
   const originalFetch = globalThis.fetch;
   process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
   const responses = [
-    new Response(JSON.stringify({ state: "merged", merged_at: "2026-10-10T00:00:00.000Z", merge_commit_sha: "merge-1" }), { status: 200, headers: { "content-type": "application/json" } }),
+    new Response(
+      JSON.stringify({ state: "merged", merged_at: "2026-10-10T00:00:00.000Z", merge_commit_sha: "merge-1" }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
     new Response("", { status: 404 }),
     new Response(null, { status: 404 }),
     new Response(null, { status: 200 }),
-    new Response(JSON.stringify({ file_path: "knowledge/delete-retry.md" }), { status: 200, headers: { "content-type": "application/json" } }),
-    new Response(JSON.stringify({ id: "delete-commit" }), { status: 200, headers: { "content-type": "application/json" } }),
-    new Response(JSON.stringify({ iid: 52, web_url: "https://gitlab.example.com/acme/knowledge-destination/-/merge_requests/52", state: "opened" }), { status: 201, headers: { "content-type": "application/json" } })
+    new Response(JSON.stringify({ file_path: "knowledge/delete-retry.md" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    new Response(JSON.stringify({ id: "delete-commit" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    new Response(
+      JSON.stringify({
+        iid: 52,
+        web_url: "https://gitlab.example.com/acme/knowledge-destination/-/merge_requests/52",
+        state: "opened",
+      }),
+      { status: 201, headers: { "content-type": "application/json" } },
+    ),
   ];
   globalThis.fetch = async () => {
     const response = responses.shift();
@@ -309,16 +350,23 @@ test("delete_failed published asset can retry deletion after original publicatio
       sourceType: "review",
       suggestedType: "knowledge",
       repository: "knowledge-destination",
-      suggestedPath: "knowledge/delete-retry.md"
+      suggestedPath: "knowledge/delete-retry.md",
     });
     await (service as any).observability.reviewCandidate(created.id, "approved", "reviewer", "verified", "useful");
     await (service as any).observability.markCandidatePublishing(created.id);
     await (service as any).observability.markCandidatePublished(created.id, {
-      provider: "gitlab", projectPath: "acme/knowledge-destination", branch: "knowledge-candidate-original",
-      targetBranch: "main", filePath: "knowledge/delete-retry.md", action: "create", mergeRequestIid: 51,
+      provider: "gitlab",
+      projectPath: "acme/knowledge-destination",
+      branch: "knowledge-candidate-original",
+      targetBranch: "main",
+      filePath: "knowledge/delete-retry.md",
+      action: "create",
+      mergeRequestIid: 51,
       mergeRequestUrl: "https://gitlab.example.com/acme/knowledge-destination/-/merge_requests/51",
-      publishedAt: "2026-10-10T00:00:00.000Z", mergeRequestState: "merged", lastCheckedAt: "2026-10-10T00:00:00.000Z",
-      mergedAt: "2026-10-10T00:00:00.000Z"
+      publishedAt: "2026-10-10T00:00:00.000Z",
+      mergeRequestState: "merged",
+      lastCheckedAt: "2026-10-10T00:00:00.000Z",
+      mergedAt: "2026-10-10T00:00:00.000Z",
     });
     await (service as any).observability.markCandidateDeleting(created.id);
     await (service as any).observability.markCandidateDeleteFailed(created.id, "temporary failure");

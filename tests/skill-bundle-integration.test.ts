@@ -74,8 +74,8 @@ test("real application flow keeps ota/design when later submitting ota/usage and
       projectPath: "acme/rd-skills",
       tokenEnv: "TEST_UNUSED_SKILL_TOKEN",
       targetBranch: "master",
-      branchPrefix: "skill-hub-skill"
-    }
+      branchPrefix: "skill-hub-skill",
+    },
   };
   const config: AppConfig = {
     host: "127.0.0.1",
@@ -83,7 +83,7 @@ test("real application flow keeps ota/design when later submitting ota/usage and
     dataDir,
     defaultRoles: ["developer", "internal"],
     authentication: { mode: "development", apiKeys: {} },
-    repositories: [repository]
+    repositories: [repository],
   };
   const search = new SqliteFtsSearchBackend();
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
@@ -96,7 +96,7 @@ test("real application flow keeps ota/design when later submitting ota/usage and
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new SkillDependencyRule(), new RepositoryVisibilityRule()],
-    { emit: (event, payload) => emitted.push({ event, payload }) }
+    { emit: (event, payload) => emitted.push({ event, payload }) },
   );
   try {
     await service.initialize();
@@ -105,7 +105,7 @@ test("real application flow keeps ota/design when later submitting ota/usage and
       content: skill("ota-design"),
       skillCollection: "rd-skills",
       repository: "rd-skills",
-      suggestedPath: "ota/design/SKILL.md"
+      suggestedPath: "ota/design/SKILL.md",
     });
     assert.match(design.id, /^sbi_/);
     assert.equal((design as any).replacementRoot, "skills/ota/design");
@@ -119,7 +119,7 @@ test("real application flow keeps ota/design when later submitting ota/usage and
       files: [{ path: "SKILL.md", content: skill("ota-usage") }],
       sourceType: "mcp",
       submissionKey: "usage-once",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     const usageAgain = await service.submitSkillBundle(principal, {
       namespace: "ota",
@@ -128,28 +128,44 @@ test("real application flow keeps ota/design when later submitting ota/usage and
       files: [{ path: "SKILL.md", content: skill("ota-usage") }],
       sourceType: "mcp",
       submissionKey: "usage-once",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     assert.equal(usageAgain.id, usage.id);
-    assert.equal(emitted.filter((item) => item.event === "skill_bundle.import.created" && item.payload.importId === usage.id).length, 1);
-    assert.equal(emitted.filter((item) => item.event === "skill_bundle.import.reused" && item.payload.importId === usage.id).length, 1);
+    assert.equal(
+      emitted.filter((item) => item.event === "skill_bundle.import.created" && item.payload.importId === usage.id)
+        .length,
+      1,
+    );
+    assert.equal(
+      emitted.filter((item) => item.event === "skill_bundle.import.reused" && item.payload.importId === usage.id)
+        .length,
+      1,
+    );
     const preview = await service.getSkillBundlePreview(principal, usage.id);
     assert.deepEqual(preview.diff.added, ["SKILL.md"]);
     assert.deepEqual(preview.diff.deleted, []);
     assert.deepEqual(preview.skills.map((item) => item.name).sort(), ["ota-design", "ota-usage"]);
-    await assert.rejects(() => service.submitSkillBundle(principal, {
-      namespace: "ota",
-      importType: "skill",
-      skillPath: "another",
-      files: [{ path: "SKILL.md", content: skill("ota-another") }],
-      sourceType: "mcp",
-      submissionKey: "usage-once",
-      repository: "rd-skills"
-    }), /submission_key conflicts/i);
+    await assert.rejects(
+      () =>
+        service.submitSkillBundle(principal, {
+          namespace: "ota",
+          importType: "skill",
+          skillPath: "another",
+          files: [{ path: "SKILL.md", content: skill("ota-another") }],
+          sourceType: "mcp",
+          submissionKey: "usage-once",
+          repository: "rd-skills",
+        }),
+      /submission_key conflicts/i,
+    );
     const admin: Principal = { id: "bundle-admin", tenantId: "rd", roles: ["admin", "developer", "internal"] };
     assert.equal(await service.deleteSkillBundle(admin, usage.id), true);
     assert.equal(service.getSkillBundleImport(usage.id), undefined);
-    assert.equal(emitted.filter((item) => item.event === "skill_bundle.import.deleted" && item.payload.importId === usage.id).length, 1);
+    assert.equal(
+      emitted.filter((item) => item.event === "skill_bundle.import.deleted" && item.payload.importId === usage.id)
+        .length,
+      1,
+    );
   } finally {
     search.close();
     await rm(root, { recursive: true, force: true });

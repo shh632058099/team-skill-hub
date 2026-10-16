@@ -5,9 +5,14 @@ import path from "node:path";
 import {
   SkillBundleReviewStaleError,
   SkillBundlePublisher,
-  type SkillBundleGitRun
+  type SkillBundleGitRun,
 } from "../src/skill-bundle-publishing.js";
-import { canonicalTreeHash, createSkillBundleSnapshot, normalizeSkillBundleInput, type SkillBundleImport } from "../src/skill-bundles.js";
+import {
+  canonicalTreeHash,
+  createSkillBundleSnapshot,
+  normalizeSkillBundleInput,
+  type SkillBundleImport,
+} from "../src/skill-bundles.js";
 import type { RepositoryConfig } from "../src/types.js";
 
 const repository: RepositoryConfig = {
@@ -31,8 +36,8 @@ const repository: RepositoryConfig = {
     projectPath: "example/rd-skills",
     tokenEnv: "TEST_SKILL_BUNDLE_TOKEN",
     targetBranch: "master",
-    branchPrefix: "skill-hub-skill"
-  }
+    branchPrefix: "skill-hub-skill",
+  },
 };
 
 function bundle() {
@@ -42,8 +47,8 @@ function bundle() {
     skillPath: "design",
     files: [
       { path: "SKILL.md", content: "new skill\n" },
-      { path: "scripts/run.sh", content: "#!/bin/sh\n", mode: "0755" }
-    ]
+      { path: "scripts/run.sh", content: "#!/bin/sh\n", mode: "0755" },
+    ],
   });
   const snapshot = createSkillBundleSnapshot(normalized, "2026-10-14T00:00:00.000Z");
   const record: SkillBundleImport = {
@@ -60,12 +65,15 @@ function bundle() {
     snapshotSha256: snapshot.sha256,
     status: "approved",
     createdAt: "2026-10-14T00:00:00.000Z",
-    updatedAt: "2026-10-14T00:00:00.000Z"
+    updatedAt: "2026-10-14T00:00:00.000Z",
   };
   return { snapshot, record };
 }
 
-function approvedAgainst(record: SkillBundleImport, files: Array<{ path: string; content?: string; contentBase64?: string; mode?: "0644" | "0755" }>): SkillBundleImport {
+function approvedAgainst(
+  record: SkillBundleImport,
+  files: Array<{ path: string; content?: string; contentBase64?: string; mode?: "0644" | "0755" }>,
+): SkillBundleImport {
   return {
     ...record,
     review: {
@@ -76,8 +84,8 @@ function approvedAgainst(record: SkillBundleImport, files: Array<{ path: string;
       diffSha256: "reviewed-diff",
       added: 0,
       modified: 0,
-      deleted: 0
-    }
+      deleted: 0,
+    },
   };
 }
 
@@ -108,13 +116,16 @@ test("publisher rebuilds replacementRoot snapshot, deletes stale files and creat
   const { snapshot, record: rawRecord } = bundle();
   const record = approvedAgainst(rawRecord, [
     { path: "SKILL.md", content: "old skill\n" },
-    { path: "old.txt", content: "stale\n" }
+    { path: "old.txt", content: "stale\n" },
   ]);
-  const git = fakeGit({
-    "skills/ota/design/SKILL.md": "old skill\n",
-    "skills/ota/design/old.txt": "stale\n",
-    "skills/ota/usage/SKILL.md": "sibling\n"
-  }, true);
+  const git = fakeGit(
+    {
+      "skills/ota/design/SKILL.md": "old skill\n",
+      "skills/ota/design/old.txt": "stale\n",
+      "skills/ota/usage/SKILL.md": "sibling\n",
+    },
+    true,
+  );
   let captured: { skill?: string; oldMissing?: boolean; sibling?: string } = {};
   const run: SkillBundleGitRun = async (args, cwd) => {
     const result = await git.run(args, cwd);
@@ -133,7 +144,10 @@ test("publisher rebuilds replacementRoot snapshot, deletes stale files and creat
   const fetchMock: typeof fetch = async (input, init) => {
     assert.equal(String(input), "https://api.github.com/repos/example/rd-skills/pulls");
     assert.equal(init?.method, "POST");
-    return new Response(JSON.stringify({ number: 7, html_url: "https://github.com/example/rd-skills/pull/7", state: "open" }), { status: 201, headers: { "content-type": "application/json" } });
+    return new Response(
+      JSON.stringify({ number: 7, html_url: "https://github.com/example/rd-skills/pull/7", state: "open" }),
+      { status: 201, headers: { "content-type": "application/json" } },
+    );
   };
   try {
     const result = await new SkillBundlePublisher(fetchMock, run).publish(record, snapshot, repository);
@@ -143,7 +157,12 @@ test("publisher rebuilds replacementRoot snapshot, deletes stale files and creat
     assert.equal(captured.oldMissing, true);
     assert.equal(captured.sibling, "sibling\n");
     assert.ok(git.calls.some(({ args }) => args[0] === "add" && args.includes("skills/ota/design")));
-    assert.ok(git.calls.some(({ args }) => args[0] === "push" && args.includes("--force-with-lease=refs/heads/skill-hub-skill-1234567890ab:abc")));
+    assert.ok(
+      git.calls.some(
+        ({ args }) =>
+          args[0] === "push" && args.includes("--force-with-lease=refs/heads/skill-hub-skill-1234567890ab:abc"),
+      ),
+    );
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }
@@ -157,8 +176,8 @@ test("publisher preserves binary asset bytes from snapshot", async () => {
     importType: "skill",
     files: [
       { path: "SKILL.md", content: "---\nname: skill-creator\n---\n\n# Skill Creator\n" },
-      { path: "assets/skill-creator.png", contentBase64: png.toString("base64") }
-    ]
+      { path: "assets/skill-creator.png", contentBase64: png.toString("base64") },
+    ],
   });
   const snapshot = createSkillBundleSnapshot(normalized, "2026-10-14T00:00:00.000Z");
   const rawRecord: SkillBundleImport = {
@@ -174,17 +193,22 @@ test("publisher preserves binary asset bytes from snapshot", async () => {
     snapshotSha256: snapshot.sha256,
     status: "approved",
     createdAt: "2026-10-14T00:00:00.000Z",
-    updatedAt: "2026-10-14T00:00:00.000Z"
+    updatedAt: "2026-10-14T00:00:00.000Z",
   };
   const record = approvedAgainst(rawRecord, []);
   const git = fakeGit({});
   let publishedBytes: Buffer | undefined;
   const run: SkillBundleGitRun = async (args, cwd) => {
     const result = await git.run(args, cwd);
-    if (args[0] === "commit" && cwd) publishedBytes = await readFile(path.join(cwd, "skills/skill-creator/assets/skill-creator.png"));
+    if (args[0] === "commit" && cwd)
+      publishedBytes = await readFile(path.join(cwd, "skills/skill-creator/assets/skill-creator.png"));
     return result;
   };
-  const fetchMock: typeof fetch = async () => new Response(JSON.stringify({ number: 8, html_url: "https://github.com/example/rd-skills/pull/8", state: "open" }), { status: 201, headers: { "content-type": "application/json" } });
+  const fetchMock: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({ number: 8, html_url: "https://github.com/example/rd-skills/pull/8", state: "open" }),
+      { status: 201, headers: { "content-type": "application/json" } },
+    );
   try {
     const result = await new SkillBundlePublisher(fetchMock, run).publish(record, snapshot, repository);
     assert.equal(result.kind, "pull-request");
@@ -200,12 +224,17 @@ test("publisher returns no-op when replacementRoot already equals snapshot", asy
   const record = approvedAgainst(rawRecord, snapshot.files);
   const git = fakeGit({
     "skills/ota/design/SKILL.md": "new skill\n",
-    "skills/ota/design/scripts/run.sh": { content: "#!/bin/sh\n", mode: 0o755 }
+    "skills/ota/design/scripts/run.sh": { content: "#!/bin/sh\n", mode: 0o755 },
   });
   try {
-    const result = await new SkillBundlePublisher(async () => { throw new Error("PR should not be called"); }, git.run).publish(record, snapshot, repository);
+    const result = await new SkillBundlePublisher(async () => {
+      throw new Error("PR should not be called");
+    }, git.run).publish(record, snapshot, repository);
     assert.equal(result.kind, "no-op");
-    assert.equal(git.calls.some(({ args }) => args[0] === "commit"), false);
+    assert.equal(
+      git.calls.some(({ args }) => args[0] === "commit"),
+      false,
+    );
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }
@@ -218,10 +247,16 @@ test("publisher rejects when target replacementRoot changes after service review
   const git = fakeGit({ "skills/ota/design/SKILL.md": "concurrent change\n" });
   try {
     await assert.rejects(
-      () => new SkillBundlePublisher(async () => { throw new Error("PR should not be called"); }, git.run).publish(record, snapshot, repository),
-      SkillBundleReviewStaleError
+      () =>
+        new SkillBundlePublisher(async () => {
+          throw new Error("PR should not be called");
+        }, git.run).publish(record, snapshot, repository),
+      SkillBundleReviewStaleError,
     );
-    assert.equal(git.calls.some(({ args }) => args[0] === "commit"), false);
+    assert.equal(
+      git.calls.some(({ args }) => args[0] === "commit"),
+      false,
+    );
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }
@@ -231,32 +266,40 @@ test("merged reconciliation verifies the final replacementRoot tree", async () =
   process.env.TEST_SKILL_BUNDLE_TOKEN = "token";
   const { snapshot, record } = bundle();
   const git = fakeGit({
-    "skills/ota/design/SKILL.md": "concurrent different skill\n"
+    "skills/ota/design/SKILL.md": "concurrent different skill\n",
   });
-  const fetchMock: typeof fetch = async () => new Response(JSON.stringify({
-    state: "closed",
-    merged_at: "2026-10-14T01:00:00.000Z",
-    closed_at: "2026-10-14T01:00:00.000Z",
-    merge_commit_sha: "deadbeef"
-  }), { status: 200, headers: { "content-type": "application/json" } });
+  const fetchMock: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({
+        state: "closed",
+        merged_at: "2026-10-14T01:00:00.000Z",
+        closed_at: "2026-10-14T01:00:00.000Z",
+        merge_commit_sha: "deadbeef",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
   try {
-    const result = await new SkillBundlePublisher(fetchMock, git.run).reconcile({
-      kind: "pull-request",
-      provider: "github",
-      projectPath: "example/rd-skills",
-      branch: "skill-hub-skill-1234567890ab",
-      targetBranch: "master",
-      targetRoot: record.replacementRoot,
-      mergeRequestIid: 7,
-      mergeRequestUrl: "https://github.com/example/rd-skills/pull/7",
-      mergeRequestState: "opened",
-      added: 1,
-      modified: 0,
-      deleted: 0,
-      expectedTreeSha256: snapshot.sha256,
-      pullRequestCreatedAt: "2026-10-14T00:30:00.000Z",
-      lastCheckedAt: "2026-10-14T00:30:00.000Z"
-    }, snapshot, repository);
+    const result = await new SkillBundlePublisher(fetchMock, git.run).reconcile(
+      {
+        kind: "pull-request",
+        provider: "github",
+        projectPath: "example/rd-skills",
+        branch: "skill-hub-skill-1234567890ab",
+        targetBranch: "master",
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: 7,
+        mergeRequestUrl: "https://github.com/example/rd-skills/pull/7",
+        mergeRequestState: "opened",
+        added: 1,
+        modified: 0,
+        deleted: 0,
+        expectedTreeSha256: snapshot.sha256,
+        pullRequestCreatedAt: "2026-10-14T00:30:00.000Z",
+        lastCheckedAt: "2026-10-14T00:30:00.000Z",
+      },
+      snapshot,
+      repository,
+    );
     assert.equal(result.publication.mergeRequestState, "merged");
     assert.equal(result.finalTreeMatches, false);
     assert.notEqual(result.publication.finalTreeSha256, snapshot.sha256);

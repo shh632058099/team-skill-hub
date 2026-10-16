@@ -18,7 +18,7 @@ async function listen(server: http.Server): Promise<number> {
 }
 
 async function close(server: http.Server): Promise<void> {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 }
 
 test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webhook/sync/RAG", async () => {
@@ -32,13 +32,13 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
     mergeRequestIid: 17,
     mergeRequestUrl: "https://gitlab.example.test/ai/rd-skills/-/merge_requests/17",
     mergeRequestState: "opened",
-    publishedAt: "2026-10-04T00:00:00.000Z"
+    publishedAt: "2026-10-04T00:00:00.000Z",
   };
   const mergedPublication = {
     ...openedPublication,
     mergeRequestState: "merged",
     mergedAt: "2026-10-04T00:05:00.000Z",
-    mergeCommitSha: "abcdef0123456789"
+    mergeCommitSha: "abcdef0123456789",
   };
 
   const server = http.createServer(async (request, response) => {
@@ -46,7 +46,11 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
     let bodyText = "";
     for await (const chunk of request) bodyText += chunk;
     const body = bodyText ? JSON.parse(bodyText) : undefined;
-    requests.push({ method: request.method ?? "GET", path: url.pathname + url.search, ...(body !== undefined ? { body } : {}) });
+    requests.push({
+      method: request.method ?? "GET",
+      path: url.pathname + url.search,
+      ...(body !== undefined ? { body } : {}),
+    });
 
     const send = (status: number, payload: unknown) => {
       response.statusCode = status;
@@ -70,18 +74,18 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
             { id: "solution", heading: "Dynamic Solution", description: "solution", required: true },
             { id: "verification", heading: "Dynamic Verification", description: "verification", required: true },
             { id: "applicability", heading: "Dynamic Scope", description: "scope", required: true },
-            { id: "constraints", heading: "Dynamic Constraints", description: "constraints", required: true }
+            { id: "constraints", heading: "Dynamic Constraints", description: "constraints", required: true },
           ],
           requirements: {
             durable_verified_team_specific: true,
             no_raw_transcript: true,
             no_secrets: true,
             no_customer_sensitive_data: true,
-            no_speculation: true
-          }
+            no_speculation: true,
+          },
         },
         template: "dynamic template",
-        instruction: "dynamic instruction"
+        instruction: "dynamic instruction",
       });
     }
     if (url.pathname === "/admin/api/knowledge-candidates" && request.method === "POST") {
@@ -91,19 +95,25 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
       return send(200, { candidate: { id: candidateId, status: "approved", repository } });
     }
     if (url.pathname === `/admin/api/knowledge-candidates/${candidateId}/publish`) {
-      return send(200, { candidate: { id: candidateId, status: "published", repository, publication: openedPublication } });
+      return send(200, {
+        candidate: { id: candidateId, status: "published", repository, publication: openedPublication },
+      });
     }
     if (url.pathname === `/admin/api/knowledge-candidates/${candidateId}/reconcile`) {
-      return send(200, { candidate: { id: candidateId, status: "published", repository, publication: mergedPublication } });
+      return send(200, {
+        candidate: { id: candidateId, status: "published", repository, publication: mergedPublication },
+      });
     }
     if (url.pathname === "/audit") {
       return send(200, {
-        events: [{
-          ts: "2026-10-04T00:05:02.000Z",
-          action: "repository.sync.completed",
-          repositoryId: repository,
-          trigger: "webhook"
-        }]
+        events: [
+          {
+            ts: "2026-10-04T00:05:02.000Z",
+            action: "repository.sync.completed",
+            repositoryId: repository,
+            trigger: "webhook",
+          },
+        ],
       });
     }
     if (url.pathname === `/repositories/${repository}/sync`) {
@@ -111,18 +121,20 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
     }
     if (url.pathname === "/admin/api/knowledge/search") {
       return send(200, {
-        results: [{
-          repository,
-          path: `knowledge/sandbox-acceptance-${marker}.md`,
-          title: `Team Skill Hub Sandbox Acceptance ${marker}`,
-          content: `Sandbox acceptance marker: ${marker}`
-        }]
+        results: [
+          {
+            repository,
+            path: `knowledge/sandbox-acceptance-${marker}.md`,
+            title: `Team Skill Hub Sandbox Acceptance ${marker}`,
+            content: `Sandbox acceptance marker: ${marker}`,
+          },
+        ],
       });
     }
     if (url.pathname === "/admin/api/knowledge-candidates" && request.method === "GET") {
       return send(200, {
         candidates: [{ id: candidateId, status: "published", repository, publication: mergedPublication }],
-        page: { total: 1, limit: 10, cursor: "0" }
+        page: { total: 1, limit: 10, cursor: "0" },
       });
     }
     return send(404, { error: "not found" });
@@ -132,14 +144,25 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
   const hubUrl = `http://127.0.0.1:${port}`;
   const env = { ...process.env, SANDBOX_ADMIN_KEY: "sandbox-admin-key" };
   try {
-    const prepare = await execFileAsync(process.execPath, [
-      "--import", "tsx", "src/cli/gitlab-sandbox-acceptance.ts",
-      "--phase", "prepare",
-      "--hub-url", hubUrl,
-      "--repository", repository,
-      "--admin-key-env", "SANDBOX_ADMIN_KEY",
-      "--marker", marker
-    ], { cwd: process.cwd(), env });
+    const prepare = await execFileAsync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/cli/gitlab-sandbox-acceptance.ts",
+        "--phase",
+        "prepare",
+        "--hub-url",
+        hubUrl,
+        "--repository",
+        repository,
+        "--admin-key-env",
+        "SANDBOX_ADMIN_KEY",
+        "--marker",
+        marker,
+      ],
+      { cwd: process.cwd(), env },
+    );
     const prepared = JSON.parse(prepare.stdout);
     assert.equal(prepared.ok, true);
     assert.equal(prepared.phase, "prepare");
@@ -156,19 +179,38 @@ test("GitLab sandbox acceptance CLI keeps human merge boundary and verifies webh
     assert.match(submittedContent, /## Dynamic Problem/);
     assert.match(submittedContent, /## Dynamic Constraints/);
     assert.doesNotMatch(submittedContent, /## 问题/);
-    const specIndex = requests.findIndex((item) => item.method === "GET" && item.path === "/admin/api/knowledge-submission-spec");
-    const submitIndex = requests.findIndex((item) => item.method === "POST" && item.path === "/admin/api/knowledge-candidates");
-    assert.ok(specIndex >= 0 && submitIndex > specIndex, "sandbox acceptance must fetch the current Knowledge submission spec before creating a Candidate");
+    const specIndex = requests.findIndex(
+      (item) => item.method === "GET" && item.path === "/admin/api/knowledge-submission-spec",
+    );
+    const submitIndex = requests.findIndex(
+      (item) => item.method === "POST" && item.path === "/admin/api/knowledge-candidates",
+    );
+    assert.ok(
+      specIndex >= 0 && submitIndex > specIndex,
+      "sandbox acceptance must fetch the current Knowledge submission spec before creating a Candidate",
+    );
 
-    const verify = await execFileAsync(process.execPath, [
-      "--import", "tsx", "src/cli/gitlab-sandbox-acceptance.ts",
-      "--phase", "verify",
-      "--hub-url", hubUrl,
-      "--repository", repository,
-      "--admin-key-env", "SANDBOX_ADMIN_KEY",
-      "--candidate-id", candidateId,
-      "--marker", marker
-    ], { cwd: process.cwd(), env });
+    const verify = await execFileAsync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/cli/gitlab-sandbox-acceptance.ts",
+        "--phase",
+        "verify",
+        "--hub-url",
+        hubUrl,
+        "--repository",
+        repository,
+        "--admin-key-env",
+        "SANDBOX_ADMIN_KEY",
+        "--candidate-id",
+        candidateId,
+        "--marker",
+        marker,
+      ],
+      { cwd: process.cwd(), env },
+    );
     const verified = JSON.parse(verify.stdout);
     assert.equal(verified.ok, true);
     assert.equal(verified.phase, "verify");

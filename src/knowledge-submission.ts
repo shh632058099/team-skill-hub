@@ -30,8 +30,14 @@ export interface NormalizedKnowledgeSubmission {
 
 export class KnowledgeSpecOutdatedError extends Error {
   readonly code = "KNOWLEDGE_SPEC_OUTDATED" as const;
-  constructor(readonly submittedSpecVersion: number, readonly currentSpecVersion: number, readonly reason: string) {
-    super(`KNOWLEDGE_SPEC_OUTDATED: submitted spec v${submittedSpecVersion} no longer satisfies current spec v${currentSpecVersion} (${reason}). Call get_knowledge_submission_spec and retry.`);
+  constructor(
+    readonly submittedSpecVersion: number,
+    readonly currentSpecVersion: number,
+    readonly reason: string,
+  ) {
+    super(
+      `KNOWLEDGE_SPEC_OUTDATED: submitted spec v${submittedSpecVersion} no longer satisfies current spec v${currentSpecVersion} (${reason}). Call get_knowledge_submission_spec and retry.`,
+    );
     this.name = "KnowledgeSpecOutdatedError";
   }
 }
@@ -42,7 +48,7 @@ const DRAFT_FIELD_BY_ID: Record<KnowledgeSectionId, keyof KnowledgeSubmissionDra
   solution: "solution",
   verification: "verification",
   applicability: "applicability",
-  constraints: "constraints"
+  constraints: "constraints",
 };
 const PLACEHOLDERS = new Set(["unknown", "n/a", "na", "none", "tbd", "todo", "未知", "不详", "待确认"]);
 
@@ -60,7 +66,7 @@ export class KnowledgeSubmissionService {
       schema_version: spec.schema_version,
       rules: spec,
       template: this.template(spec),
-      instruction: `Create durable, verified team Knowledge using this specification. Use the template, satisfy every required section, and submit with spec_version=${spec.spec_version}. Never include secrets, credentials, customer-sensitive data, or unverified speculation.`
+      instruction: `Create durable, verified team Knowledge using this specification. Use the template, satisfy every required section, and submit with spec_version=${spec.spec_version}. Never include secrets, credentials, customer-sensitive data, or unverified speculation.`,
     };
   }
 
@@ -72,7 +78,11 @@ export class KnowledgeSubmissionService {
     return lines.join("\n");
   }
 
-  async normalize(input: { title: string; content: string; submittedSpecVersion?: number }): Promise<NormalizedKnowledgeSubmission> {
+  async normalize(input: {
+    title: string;
+    content: string;
+    submittedSpecVersion?: number;
+  }): Promise<NormalizedKnowledgeSubmission> {
     const spec = await this.store.loadCurrent();
     const submitted = input.submittedSpecVersion;
     if (submitted !== undefined && (!Number.isInteger(submitted) || submitted < 1 || submitted > spec.spec_version)) {
@@ -90,7 +100,7 @@ export class KnowledgeSubmissionService {
       content: normalized.content,
       ...(submitted !== undefined ? { submittedSpecVersion: submitted } : {}),
       appliedSpecVersion: spec.spec_version,
-      schemaVersion: spec.schema_version
+      schemaVersion: spec.schema_version,
     };
   }
 
@@ -101,7 +111,8 @@ export class KnowledgeSubmissionService {
     for (const section of spec.sections) {
       const field = DRAFT_FIELD_BY_ID[section.id];
       const value = String(draft[field] ?? "").trim();
-      if (section.required && (!value || isPlaceholder(value))) throw new Error(`missing-required-knowledge-field: ${section.id}`);
+      if (section.required && (!value || isPlaceholder(value)))
+        throw new Error(`missing-required-knowledge-field: ${section.id}`);
       if (!value) continue;
       lines.push("", `## ${section.heading}`, value);
     }

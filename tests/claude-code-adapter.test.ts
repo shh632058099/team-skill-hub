@@ -10,7 +10,7 @@ test("Claude Code SessionStart maps to shared ClientEvent without transcript con
     permission_mode: "default",
     hook_event_name: "SessionStart",
     source: "startup",
-    model: "claude-sonnet"
+    model: "claude-sonnet",
   });
   assert.equal(event.client, "claude_code");
   assert.equal(event.event, "SessionStart");
@@ -27,7 +27,7 @@ test("Claude Code prompt stores only bounded metadata, not raw prompt", () => {
     prompt_id: "prompt-7",
     cwd: "/workspace/ota",
     hook_event_name: "UserPromptSubmit",
-    prompt: "customer secret source code request"
+    prompt: "customer secret source code request",
   });
   assert.equal(event.turnId, "prompt-7");
   assert.equal(event.metadata.prompt_length, 35);
@@ -44,7 +44,7 @@ test("Claude Code PostToolUse extracts test evidence without persisting tool pay
     tool_use_id: "tool-8",
     tool_input: { command: "npm test -- --token super-secret" },
     tool_response: "ℹ tests 12\nℹ suites 0\nℹ pass 12\nℹ fail 0\n",
-    duration_ms: 840
+    duration_ms: 840,
   });
   assert.equal(event.metadata.tool_name, "Bash");
   assert.equal(event.metadata.tool_use_id, "tool-8");
@@ -54,7 +54,7 @@ test("Claude Code PostToolUse extracts test evidence without persisting tool pay
     tests_run: 12,
     tests_passed: 12,
     tests_failed: 0,
-    duration_ms: 840
+    duration_ms: 840,
   });
   assert.equal(event.metadata.tool_input, undefined);
   assert.equal(event.metadata.tool_response, undefined);
@@ -67,7 +67,7 @@ test("Claude Code Stop maps final assistant message for existing Candidate detec
     cwd: "/workspace/ota",
     hook_event_name: "Stop",
     stop_hook_active: false,
-    last_assistant_message: "Verified OTA recovery result."
+    last_assistant_message: "Verified OTA recovery result.",
   });
   assert.equal(event.event, "Stop");
   assert.equal(event.metadata.stop_hook_active, false);
@@ -79,8 +79,8 @@ test("Claude Code adapter rejects unsupported lifecycle events", () => {
     () =>
       translateClaudeCodeHook({
         session_id: "claude-session",
-        hook_event_name: "Notification"
+        hook_event_name: "Notification",
       }),
-    /Unsupported Claude Code hook event/
+    /Unsupported Claude Code hook event/,
   );
 });

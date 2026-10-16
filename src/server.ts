@@ -8,8 +8,23 @@ import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from
 import type { KnowledgeSubmissionSpec } from "./knowledge-submission-spec.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler } from "./mcp.js";
-import { ADMIN_GOVERNANCE_HTML, ADMIN_HTML, ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML, ADMIN_LOGIN_HTML, ADMIN_OBSERVABILITY_HTML, ADMIN_OBSERVABILITY_INDEX_HTML, ADMIN_MODULE_HTML, ADMIN_MODULE_INDEX_HTML, ADMIN_SKILL_BUNDLES_HTML } from "./admin-ui.js";
-import { applyAdminConfig, editableConfigFromApp, type AdminConfigStore, type AdminEditableConfig } from "./admin-config.js";
+import {
+  ADMIN_GOVERNANCE_HTML,
+  ADMIN_HTML,
+  ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML,
+  ADMIN_LOGIN_HTML,
+  ADMIN_OBSERVABILITY_HTML,
+  ADMIN_OBSERVABILITY_INDEX_HTML,
+  ADMIN_MODULE_HTML,
+  ADMIN_MODULE_INDEX_HTML,
+  ADMIN_SKILL_BUNDLES_HTML,
+} from "./admin-ui.js";
+import {
+  applyAdminConfig,
+  editableConfigFromApp,
+  type AdminConfigStore,
+  type AdminEditableConfig,
+} from "./admin-config.js";
 import { type ManagedApiKeyStore, type ManagedApiKeyCreateInput, type ManagedApiKeyUpdateInput } from "./api-keys.js";
 import { ApiKeyAuthenticationProvider } from "./security.js";
 import { normalizeKnowledgeConfig } from "./knowledge.js";
@@ -18,22 +33,37 @@ import {
   AGENT_ADAPTER_CONTRACT_VERSION,
   CURRENT_HOOK_SCHEMA_VERSION,
   GENERIC_AGENT_EVENTS,
-  MIN_SUPPORTED_HOOK_SCHEMA_VERSION
+  MIN_SUPPORTED_HOOK_SCHEMA_VERSION,
 } from "./client-events.js";
 import { translateClaudeCodeHook } from "./claude-code-adapter.js";
 import { normalizeAdminLimit, paginateAdminRows } from "./admin-routes.js";
 import { isCandidateReviewReasonValid, isReuseMcpTool } from "./observability.js";
-import { AdminLoginAttemptLimiter, AdminSessionManager, adminSessionTokenFromCookie, clearAdminSessionCookie, safeAdminNextPath, serializeAdminSessionCookie } from "./admin-auth.js";
+import {
+  AdminLoginAttemptLimiter,
+  AdminSessionManager,
+  adminSessionTokenFromCookie,
+  clearAdminSessionCookie,
+  safeAdminNextPath,
+  serializeAdminSessionCookie,
+} from "./admin-auth.js";
 import { extractSkillBundleZip, importSkillBundleGit, selectSkillBundleFiles } from "./skill-bundle-sources.js";
 
-const skillBundleWebFileSchema = z.object({
-  path: z.string().min(1).max(1000),
-  content: z.string().max(512 * 1024).optional(),
-  content_base64: z.string().max(700 * 1024).optional(),
-  mode: z.enum(["0644", "0755"]).optional()
-}).refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), {
-  message: "file must contain exactly one of content or content_base64"
-});
+const skillBundleWebFileSchema = z
+  .object({
+    path: z.string().min(1).max(1000),
+    content: z
+      .string()
+      .max(512 * 1024)
+      .optional(),
+    content_base64: z
+      .string()
+      .max(700 * 1024)
+      .optional(),
+    mode: z.enum(["0644", "0755"]).optional(),
+  })
+  .refine((file) => (file.content !== undefined) !== (file.content_base64 !== undefined), {
+    message: "file must contain exactly one of content or content_base64",
+  });
 
 const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
   z.object({
@@ -48,7 +78,7 @@ const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
     files: z.array(skillBundleWebFileSchema).max(500).optional(),
     zip_base64: z.string().optional(),
     git_url: z.string().max(2000).optional(),
-    revision: z.string().max(500).optional()
+    revision: z.string().max(500).optional(),
   }),
   z.object({
     namespace: z.string().min(1).max(200),
@@ -62,8 +92,8 @@ const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
     files: z.array(skillBundleWebFileSchema).max(500).optional(),
     zip_base64: z.string().optional(),
     git_url: z.string().max(2000).optional(),
-    revision: z.string().max(500).optional()
-  })
+    revision: z.string().max(500).optional(),
+  }),
 ]);
 
 type SkillBundleWebBody = z.infer<typeof skillBundleWebBodySchema>;
@@ -88,13 +118,13 @@ export async function startServer(
   service: SkillHubApplicationService,
   adminConfigStore?: AdminConfigStore,
   apiKeyStore?: ManagedApiKeyStore,
-  apiKeyAuth?: ApiKeyAuthenticationProvider
+  apiKeyAuth?: ApiKeyAuthenticationProvider,
 ) {
   const restApiVersion = "1";
   const adminPrincipal = {
     id: "admin-http",
     roles: ["admin", "developer", "internal", "customer"],
-    tenantId: "default"
+    tenantId: "default",
   };
   const configuredAllowedHosts = (process.env.SKILL_HUB_ALLOWED_HOSTS ?? "")
     .split(",")
@@ -108,9 +138,11 @@ export async function startServer(
         : undefined;
   const app = createMcpFastifyApp({
     host: config.host,
-    ...(allowedHosts ? { allowedHosts } : {})
+    ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const clientIntegrationDir = path.resolve(process.env.CLIENT_INTEGRATION_DIR ?? path.join(process.cwd(), "dist", "client-integration"));
+  const clientIntegrationDir = path.resolve(
+    process.env.CLIENT_INTEGRATION_DIR ?? path.join(process.cwd(), "dist", "client-integration"),
+  );
   const clientReleaseFiles = new Set(["linux.tar.gz", "windows.zip", "checksums.json"]);
   app.get("/client-integration/manifest.json", async (_request, reply) => {
     try {
@@ -118,47 +150,64 @@ export async function startServer(
       reply.header("cache-control", "no-cache, max-age=0").type("application/json; charset=utf-8");
       return reply.send(body);
     } catch (error: any) {
-      if (error?.code === "ENOENT") { reply.code(404); return { error: "client integration manifest not found" }; }
+      if (error?.code === "ENOENT") {
+        reply.code(404);
+        return { error: "client integration manifest not found" };
+      }
       throw error;
     }
   });
-  app.get<{ Params: { version: string; file: string } }>("/client-integration/releases/:version/:file", async (request, reply) => {
-    const { version, file } = request.params;
-    if (!/^\d+$/.test(version) || !clientReleaseFiles.has(file)) { reply.code(404); return { error: "client integration release not found" }; }
-    try {
-      const body = await readFile(path.join(clientIntegrationDir, "releases", version, file));
-      reply.header("cache-control", "public, max-age=31536000, immutable");
-      if (file.endsWith(".zip")) reply.type("application/zip");
-      else if (file.endsWith(".tar.gz")) reply.type("application/gzip");
-      else reply.type("application/json; charset=utf-8");
-      return reply.send(body);
-    } catch (error: any) {
-      if (error?.code === "ENOENT") { reply.code(404); return { error: "client integration release not found" }; }
-      throw error;
-    }
-  });
+  app.get<{ Params: { version: string; file: string } }>(
+    "/client-integration/releases/:version/:file",
+    async (request, reply) => {
+      const { version, file } = request.params;
+      if (!/^\d+$/.test(version) || !clientReleaseFiles.has(file)) {
+        reply.code(404);
+        return { error: "client integration release not found" };
+      }
+      try {
+        const body = await readFile(path.join(clientIntegrationDir, "releases", version, file));
+        reply.header("cache-control", "public, max-age=31536000, immutable");
+        if (file.endsWith(".zip")) reply.type("application/zip");
+        else if (file.endsWith(".tar.gz")) reply.type("application/gzip");
+        else reply.type("application/json; charset=utf-8");
+        return reply.send(body);
+      } catch (error: any) {
+        if (error?.code === "ENOENT") {
+          reply.code(404);
+          return { error: "client integration release not found" };
+        }
+        throw error;
+      }
+    },
+  );
   const mcpHandler = createSkillHubMcpHandler(service);
   const nodeHandler = toNodeHandler(mcpHandler);
 
   const adminLoginRequired = process.env.ADMIN_LOGIN_REQUIRED === "true";
   const adminSessionCookieSecure = process.env.ADMIN_SESSION_COOKIE_SECURE === "true";
-  const adminSessionTtlSeconds = Math.max(300, Math.min(Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 28800) || 28800, 604800));
+  const adminSessionTtlSeconds = Math.max(
+    300,
+    Math.min(Number(process.env.ADMIN_SESSION_TTL_SECONDS ?? 28800) || 28800, 604800),
+  );
   const adminSessions = new AdminSessionManager({
     username: process.env.ADMIN_USERNAME ?? "admin",
     password: process.env.ADMIN_PASSWORD,
     apiKey: process.env.ADMIN_API_KEY,
     ttlSeconds: adminSessionTtlSeconds,
-    maxSessions: Math.max(1, Math.min(Number(process.env.ADMIN_MAX_SESSIONS ?? 20) || 20, 100))
+    maxSessions: Math.max(1, Math.min(Number(process.env.ADMIN_MAX_SESSIONS ?? 20) || 20, 100)),
   });
   const adminLoginLimiter = new AdminLoginAttemptLimiter({
     maxFailures: Math.max(1, Math.min(Number(process.env.ADMIN_LOGIN_MAX_FAILURES ?? 5) || 5, 100)),
-    windowMs: Math.max(1000, Math.min(Number(process.env.ADMIN_LOGIN_WINDOW_SECONDS ?? 300) || 300, 3600) * 1000)
+    windowMs: Math.max(1000, Math.min(Number(process.env.ADMIN_LOGIN_WINDOW_SECONDS ?? 300) || 300, 3600) * 1000),
   });
   const adminAuthContext = (request: any) => {
     if (!adminLoginRequired && process.env.AUTH_MODE === "development") return { type: "development" as const };
     const adminKey = process.env.ADMIN_API_KEY;
     if (adminKey && request.headers?.["x-skill-hub-admin-key"] === adminKey) return { type: "api-key" as const };
-    const token = adminSessionTokenFromCookie(typeof request.headers?.cookie === "string" ? request.headers.cookie : undefined);
+    const token = adminSessionTokenFromCookie(
+      typeof request.headers?.cookie === "string" ? request.headers.cookie : undefined,
+    );
     const session = adminSessions.authenticateToken(token);
     return session ? { type: "session" as const, token, session } : undefined;
   };
@@ -167,11 +216,15 @@ export async function startServer(
     if (!auth) return false;
     if (auth.type !== "session") return true;
     const method = String(request.method ?? "GET").toUpperCase();
-    if (["GET","HEAD","OPTIONS"].includes(method)) return true;
+    if (["GET", "HEAD", "OPTIONS"].includes(method)) return true;
     const origin = typeof request.headers?.origin === "string" ? request.headers.origin : undefined;
     if (!origin) return true;
     const host = typeof request.headers?.host === "string" ? request.headers.host : undefined;
-    try { return Boolean(host && new URL(origin).host === host); } catch { return false; }
+    try {
+      return Boolean(host && new URL(origin).host === host);
+    } catch {
+      return false;
+    }
   };
   const requireAdminPage = (request: any, reply: any) => {
     if (!adminLoginRequired || adminAuthContext(request)) return true;
@@ -183,10 +236,19 @@ export async function startServer(
     const sourceType = body?.source_type ?? "files";
     if (sourceType === "files") {
       if (!Array.isArray(body?.files)) throw new Error("files is required for files source");
-      return { files: body.files.map((file: any) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.content_base64 }), mode: file.mode })), sourceType: "web-files" as const, sourceMetadata: { source: "files" } };
+      return {
+        files: body.files.map((file: any) => ({
+          path: file.path,
+          ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.content_base64 }),
+          mode: file.mode,
+        })),
+        sourceType: "web-files" as const,
+        sourceMetadata: { source: "files" },
+      };
     }
     if (sourceType === "zip") {
-      if (typeof body?.zip_base64 !== "string" || !body.zip_base64) throw new Error("zip_base64 is required for ZIP source");
+      if (typeof body?.zip_base64 !== "string" || !body.zip_base64)
+        throw new Error("zip_base64 is required for ZIP source");
       const extracted = await extractSkillBundleZip(body.zip_base64, body.source_root);
       return {
         files: body.source_root ? extracted : selectSkillBundleFiles(extracted, body.import_type),
@@ -194,8 +256,8 @@ export async function startServer(
         sourceMetadata: {
           source: "zip",
           ...(body.source_root ? { source_root: String(body.source_root) } : {}),
-          archive_sha256: createHash("sha256").update(Buffer.from(body.zip_base64, "base64")).digest("hex")
-        }
+          archive_sha256: createHash("sha256").update(Buffer.from(body.zip_base64, "base64")).digest("hex"),
+        },
       };
     }
     if (sourceType === "git") {
@@ -208,7 +270,7 @@ export async function startServer(
         repositoryUrl: body.git_url,
         revision: typeof body.revision === "string" ? body.revision : undefined,
         sourceRoot: typeof body.source_root === "string" ? body.source_root : undefined,
-        allowedHosts
+        allowedHosts,
       });
       return {
         files: body.source_root ? imported.files : selectSkillBundleFiles(imported.files, body.import_type),
@@ -218,8 +280,8 @@ export async function startServer(
           repository_url: body.git_url,
           ...(body.revision ? { requested_revision: String(body.revision) } : {}),
           resolved_revision: imported.resolvedRevision,
-          ...(body.source_root ? { source_root: String(body.source_root) } : {})
-        }
+          ...(body.source_root ? { source_root: String(body.source_root) } : {}),
+        },
       };
     }
     throw new Error("source_type must be files, zip, or git");
@@ -241,7 +303,7 @@ export async function startServer(
       title: "Team Skill Hub REST API",
       version: "1.0.0",
       description:
-        "Versioned REST surface for health and platform administration. Legacy endpoints remain available for compatibility."
+        "Versioned REST surface for health and platform administration. Legacy endpoints remain available for compatibility.",
     },
     servers: [{ url: "/api/v1" }],
     components: {
@@ -249,37 +311,37 @@ export async function startServer(
         AdminKey: {
           type: "apiKey",
           in: "header",
-          name: "x-skill-hub-admin-key"
-        }
-      }
+          name: "x-skill-hub-admin-key",
+        },
+      },
     },
     paths: {
       "/meta": {
         get: {
           summary: "REST API metadata",
-          responses: { "200": { description: "API metadata" } }
-        }
+          responses: { "200": { description: "API metadata" } },
+        },
       },
       "/health/live": {
         get: {
           summary: "Liveness probe",
-          responses: { "200": { description: "Process is live" } }
-        }
+          responses: { "200": { description: "Process is live" } },
+        },
       },
       "/health/ready": {
         get: {
           summary: "Readiness probe",
           responses: {
             "200": { description: "Service is ready" },
-            "503": { description: "Service is not ready" }
-          }
-        }
+            "503": { description: "Service is not ready" },
+          },
+        },
       },
       "/client-events/schema": {
         get: {
           summary: "Client event schema compatibility",
-          responses: { "200": { description: "Supported client event schema range" } }
-        }
+          responses: { "200": { description: "Supported client event schema range" } },
+        },
       },
       "/client-events/claude-code": {
         post: {
@@ -289,9 +351,9 @@ export async function startServer(
           responses: {
             "204": { description: "Hook accepted" },
             "400": { description: "Unsupported or invalid hook payload" },
-            "401": { description: "Client authentication failed" }
-          }
-        }
+            "401": { description: "Client authentication failed" },
+          },
+        },
       },
       "/admin/health": {
         get: {
@@ -299,9 +361,9 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Operational health summary" },
-            "403": { description: "Admin access denied" }
-          }
-        }
+            "403": { description: "Admin access denied" },
+          },
+        },
       },
       "/admin/alerts": {
         get: {
@@ -309,9 +371,9 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Active alert set" },
-            "403": { description: "Admin access denied" }
-          }
-        }
+            "403": { description: "Admin access denied" },
+          },
+        },
       },
       "/admin/kpis": {
         get: {
@@ -319,9 +381,9 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Platform KPI summary" },
-            "403": { description: "Admin access denied" }
-          }
-        }
+            "403": { description: "Admin access denied" },
+          },
+        },
       },
       "/admin/content-quality": {
         get: {
@@ -329,9 +391,9 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Content quality metrics" },
-            "403": { description: "Admin access denied" }
-          }
-        }
+            "403": { description: "Admin access denied" },
+          },
+        },
       },
       "/admin/artifact-governance": {
         get: {
@@ -339,9 +401,9 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Artifact governance status" },
-            "403": { description: "Admin access denied" }
-          }
-        }
+            "403": { description: "Admin access denied" },
+          },
+        },
       },
       "/admin/repository-governance": {
         get: {
@@ -349,9 +411,9 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Repository governance status" },
-            "403": { description: "Admin access denied" }
-          }
-        }
+            "403": { description: "Admin access denied" },
+          },
+        },
       },
       "/admin/knowledge-gaps": {
         get: {
@@ -359,11 +421,11 @@ export async function startServer(
           security: [{ AdminKey: [] }],
           responses: {
             "200": { description: "Knowledge gap list" },
-            "403": { description: "Admin access denied" }
-          }
-        }
-      }
-    }
+            "403": { description: "Admin access denied" },
+          },
+        },
+      },
+    },
   } as const;
 
   app.get("/openapi.json", async (_request, reply) => {
@@ -377,8 +439,8 @@ export async function startServer(
       apiVersion: restApiVersion,
       openapi: "/openapi.json",
       compatibility: {
-        legacyRoutes: true
-      }
+        legacyRoutes: true,
+      },
     };
   });
 
@@ -394,8 +456,8 @@ export async function startServer(
       clientIdPolicy: "stable-non-secret-string",
       events: GENERIC_AGENT_EVENTS,
       metadataPolicy: "allowlisted-sanitized",
-      evidenceField: "metadata.evidence"
-    }
+      evidenceField: "metadata.evidence",
+    },
   });
 
   app.get("/client-events/schema", async () => clientEventSchemaInfo());
@@ -406,56 +468,111 @@ export async function startServer(
 
   app.get<{ Querystring: { next?: string } }>("/admin/login", async (request, reply) => {
     const next = safeAdminNextPath(request.query.next);
-    if (adminLoginRequired && adminAuthContext(request)) { reply.code(302).header("location", next); return ""; }
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    if (adminLoginRequired && adminAuthContext(request)) {
+      reply.code(302).header("location", next);
+      return "";
+    }
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_LOGIN_HTML;
   });
 
-  app.post<{ Body: { username?: string; password?: string; next?: string } }>("/admin/api/auth/login", async (request, reply) => {
-    if (!adminSessions.credentialsConfigured) { reply.code(503); return { error: "admin login credential is not configured" }; }
-    const username = typeof request.body?.username === "string" ? request.body.username : "";
-    const password = typeof request.body?.password === "string" ? request.body.password : "";
-    if (!username || !password) { reply.code(400); return { error: "username and password are required" }; }
-    const loginKey = request.ip || "unknown";
-    if (!adminLoginLimiter.canAttempt(loginKey)) {
-      const retryAfter = adminLoginLimiter.retryAfterSeconds(loginKey);
-      reply.code(429).header("retry-after", String(retryAfter));
-      return { error: "too many failed login attempts", retryAfterSeconds: retryAfter };
-    }
-    if (!adminSessions.verifyCredentials(username, password)) { adminLoginLimiter.recordFailure(loginKey); reply.code(401); return { error: "invalid username or password" }; }
-    adminLoginLimiter.recordSuccess(loginKey);
-    const created = adminSessions.createSession({ userAgent: typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined, remoteAddress: request.ip });
-    reply.header("set-cookie", serializeAdminSessionCookie(created.token, adminSessionTtlSeconds, adminSessionCookieSecure)).header("cache-control", "no-store");
-    return { authenticated: true, next: safeAdminNextPath(request.body?.next), session: created.session };
-  });
+  app.post<{ Body: { username?: string; password?: string; next?: string } }>(
+    "/admin/api/auth/login",
+    async (request, reply) => {
+      if (!adminSessions.credentialsConfigured) {
+        reply.code(503);
+        return { error: "admin login credential is not configured" };
+      }
+      const username = typeof request.body?.username === "string" ? request.body.username : "";
+      const password = typeof request.body?.password === "string" ? request.body.password : "";
+      if (!username || !password) {
+        reply.code(400);
+        return { error: "username and password are required" };
+      }
+      const loginKey = request.ip || "unknown";
+      if (!adminLoginLimiter.canAttempt(loginKey)) {
+        const retryAfter = adminLoginLimiter.retryAfterSeconds(loginKey);
+        reply.code(429).header("retry-after", String(retryAfter));
+        return { error: "too many failed login attempts", retryAfterSeconds: retryAfter };
+      }
+      if (!adminSessions.verifyCredentials(username, password)) {
+        adminLoginLimiter.recordFailure(loginKey);
+        reply.code(401);
+        return { error: "invalid username or password" };
+      }
+      adminLoginLimiter.recordSuccess(loginKey);
+      const created = adminSessions.createSession({
+        userAgent: typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined,
+        remoteAddress: request.ip,
+      });
+      reply
+        .header(
+          "set-cookie",
+          serializeAdminSessionCookie(created.token, adminSessionTtlSeconds, adminSessionCookieSecure),
+        )
+        .header("cache-control", "no-store");
+      return { authenticated: true, next: safeAdminNextPath(request.body?.next), session: created.session };
+    },
+  );
 
   app.post("/admin/api/auth/logout", async (request, reply) => {
-    adminSessions.revokeToken(adminSessionTokenFromCookie(typeof request.headers.cookie === "string" ? request.headers.cookie : undefined));
+    adminSessions.revokeToken(
+      adminSessionTokenFromCookie(typeof request.headers.cookie === "string" ? request.headers.cookie : undefined),
+    );
     reply.header("set-cookie", clearAdminSessionCookie(adminSessionCookieSecure)).header("cache-control", "no-store");
     return { loggedOut: true };
   });
 
   app.get("/admin/api/auth/session", async (request, reply) => {
-    const auth = adminAuthContext(request); if (!auth) { reply.code(401); return { error: "admin login required" }; }
-    return { authenticated: true, authType: auth.type, username: adminSessions.username, session: auth.type === "session" ? auth.session : undefined };
+    const auth = adminAuthContext(request);
+    if (!auth) {
+      reply.code(401);
+      return { error: "admin login required" };
+    }
+    return {
+      authenticated: true,
+      authType: auth.type,
+      username: adminSessions.username,
+      session: auth.type === "session" ? auth.session : undefined,
+    };
   });
 
   app.get("/admin/api/auth/sessions", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    const token = adminSessionTokenFromCookie(typeof request.headers.cookie === "string" ? request.headers.cookie : undefined);
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const token = adminSessionTokenFromCookie(
+      typeof request.headers.cookie === "string" ? request.headers.cookie : undefined,
+    );
     return { sessions: adminSessions.listSessions(token) };
   });
 
   app.delete<{ Params: { id: string } }>("/admin/api/auth/sessions/:id", async (request, reply) => {
-    const auth = adminAuthContext(request); if (!auth || !hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const auth = adminAuthContext(request);
+    if (!auth || !hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const current = auth.type === "session" && auth.session.id === request.params.id;
-    if (!adminSessions.revokeSession(request.params.id)) { reply.code(404); return { error: "admin session not found" }; }
+    if (!adminSessions.revokeSession(request.params.id)) {
+      reply.code(404);
+      return { error: "admin session not found" };
+    }
     if (current) reply.header("set-cookie", clearAdminSessionCookie(adminSessionCookieSecure));
     return { revoked: true, current };
   });
 
   app.post("/admin/api/auth/sessions/revoke-others", async (request, reply) => {
-    const auth = adminAuthContext(request); if (!auth || !hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const auth = adminAuthContext(request);
+    if (!auth || !hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     return { revoked: adminSessions.revokeOtherSessions(auth.type === "session" ? auth.token : undefined) };
   });
 
@@ -471,35 +588,53 @@ export async function startServer(
 
   app.get("/admin/observability", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_OBSERVABILITY_INDEX_HTML;
   });
 
   app.get("/admin/observability/*", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_OBSERVABILITY_HTML;
   });
 
   app.get("/admin/skill-bundles", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_SKILL_BUNDLES_HTML;
   });
 
   app.get("/admin/skill-bundles/*", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_SKILL_BUNDLES_HTML;
   });
 
   const moduleShell = (request: { url: string; headers?: Record<string, unknown>; method?: string }, reply: any) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     const pathname = new URL(request.url, "http://admin.local").pathname.replace(/\/+$/, "") || "/";
-    return /^\/admin\/(review|gaps)$/.test(pathname)
-      ? ADMIN_MODULE_INDEX_HTML
-      : ADMIN_MODULE_HTML;
+    return /^\/admin\/(review|gaps)$/.test(pathname) ? ADMIN_MODULE_INDEX_HTML : ADMIN_MODULE_HTML;
   };
   app.get("/admin/review", moduleShell);
   app.get("/admin/review/*", moduleShell);
@@ -507,7 +642,11 @@ export async function startServer(
   app.get("/admin/gaps/*", moduleShell);
   app.get("/admin/governance", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_GOVERNANCE_HTML;
   });
   app.get("/admin/governance/*", async (request, reply) => {
@@ -518,18 +657,28 @@ export async function startServer(
 
   app.get("/admin/knowledge-submission-spec", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";
-    reply.header("cache-control", "no-store, no-cache, must-revalidate").header("pragma", "no-cache").header("expires", "0").type("text/html; charset=utf-8");
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
     return ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML;
   });
 
   app.get("/admin/api/knowledge-submission-spec", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const view = await service.getKnowledgeSubmissionSpec();
     return { spec: view.rules, template: view.template, instruction: view.instruction };
   });
 
   app.put<{ Body: KnowledgeSubmissionSpec }>("/admin/api/knowledge-submission-spec", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     try {
       const spec = await service.saveKnowledgeSubmissionSpec(request.body);
       const view = await service.getKnowledgeSubmissionSpec();
@@ -541,14 +690,23 @@ export async function startServer(
   });
 
   app.get("/admin/api/knowledge-submission-spec/history", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     return { specs: await service.getKnowledgeSubmissionSpecHistory() };
   });
 
   app.post<{ Body: { version?: number } }>("/admin/api/knowledge-submission-spec/rollback", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const version = Number(request.body?.version);
-    if (!Number.isInteger(version) || version < 1) { reply.code(400); return { error: "version must be a positive integer" }; }
+    if (!Number.isInteger(version) || version < 1) {
+      reply.code(400);
+      return { error: "version must be a positive integer" };
+    }
     try {
       return { spec: await service.rollbackKnowledgeSubmissionSpec(version) };
     } catch (error) {
@@ -571,21 +729,53 @@ export async function startServer(
   // Stable resource aliases keep the History API surface readable while the
   // legacy event endpoint remains available for existing clients.
   app.get("/admin/api/hooks", async (request, reply) => {
-    const query = request.query as { limit?: string; cursor?: string; q?: string; event?: string; user?: string; session?: string; from?: string; until?: string };
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    const query = request.query as {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      event?: string;
+      user?: string;
+      session?: string;
+      from?: string;
+      until?: string;
+    };
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const dateError = adminDateQueryError(query, ["from", "until"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     const direct = service.adminClientEventsPage(query);
     if (direct) return { events: direct.items, page: direct.page };
-    const rows = (await service.listClientEvents(1000)).filter((item) => (!query.event || item.event === query.event) && (!query.user || item.actorId === query.user) && (!query.session || item.sessionId === query.session) && (!query.from || item.ts >= query.from) && (!query.until || item.ts <= query.until));
-    const result = paginateAdminRows(rows, query, (item) => [item.event, item.actorId, item.sessionId, item.turnId, item.client, JSON.stringify(item.metadata ?? {})].filter(Boolean).join(" "));
+    const rows = (await service.listClientEvents(1000)).filter(
+      (item) =>
+        (!query.event || item.event === query.event) &&
+        (!query.user || item.actorId === query.user) &&
+        (!query.session || item.sessionId === query.session) &&
+        (!query.from || item.ts >= query.from) &&
+        (!query.until || item.ts <= query.until),
+    );
+    const result = paginateAdminRows(rows, query, (item) =>
+      [item.event, item.actorId, item.sessionId, item.turnId, item.client, JSON.stringify(item.metadata ?? {})]
+        .filter(Boolean)
+        .join(" "),
+    );
     return { events: result.items, page: result.page };
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/hooks/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const event = await service.getClientEvent(request.params.id);
-    if (!event) { reply.code(404); return { error: "hook event not found" }; }
+    if (!event) {
+      reply.code(404);
+      return { error: "hook event not found" };
+    }
     return { event };
   });
 
@@ -611,8 +801,8 @@ export async function startServer(
       bootstrap: {
         adminKeyConfigured: Boolean(process.env.ADMIN_API_KEY),
         webhookSecretConfigured: Boolean(process.env.GITLAB_WEBHOOK_TOKEN ?? process.env.WEBHOOK_SECRET),
-        gitlabTokenConfigured: Boolean(process.env.GITLAB_TOKEN)
-      }
+        gitlabTokenConfigured: Boolean(process.env.GITLAB_TOKEN),
+      },
     };
   });
 
@@ -631,7 +821,7 @@ export async function startServer(
         ...config,
         defaultRoles: [...config.defaultRoles],
         authentication: config.authentication,
-        repositories: config.repositories
+        repositories: config.repositories,
       };
       applyAdminConfig(next, normalized);
       service.applyRuntimeConfig(next);
@@ -644,10 +834,10 @@ export async function startServer(
             return {
               repository: repositoryId,
               ok: false,
-              error: error instanceof Error ? error.message : String(error)
+              error: error instanceof Error ? error.message : String(error),
             };
           }
-        })
+        }),
       );
       return { saved: true, config: editableConfigFromApp(config), syncResults };
     } catch (error) {
@@ -671,7 +861,7 @@ export async function startServer(
         repository: document.repositoryId,
         documents: 0,
         chunks: 0,
-        paths: []
+        paths: [],
       };
       current.documents += 1;
       current.chunks += document.chunkCount;
@@ -692,25 +882,22 @@ export async function startServer(
           publishing: repository.knowledgePublishing
             ? {
                 config: repository.knowledgePublishing,
-                tokenConfigured: Boolean(process.env[repository.knowledgePublishing.tokenEnv])
+                tokenConfigured: Boolean(process.env[repository.knowledgePublishing.tokenEnv]),
               }
-            : undefined
+            : undefined,
         };
-      })
+      }),
     };
   });
 
-  app.get<{ Querystring: { repository?: string } }>(
-    "/admin/api/knowledge/lifecycle-audit",
-    async (request, reply) => {
-      if (!hasAdminAccess(request)) {
-        reply.code(403);
-        return { error: "admin API access denied" };
-      }
-      const repositories = request.query.repository ? [request.query.repository] : undefined;
-      return service.getKnowledgeLifecycleAudit(adminPrincipal, repositories);
+  app.get<{ Querystring: { repository?: string } }>("/admin/api/knowledge/lifecycle-audit", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
     }
-  );
+    const repositories = request.query.repository ? [request.query.repository] : undefined;
+    return service.getKnowledgeLifecycleAudit(adminPrincipal, repositories);
+  });
 
   app.post<{
     Body: { repositoryId: string; path: string; kind: string };
@@ -730,8 +917,8 @@ export async function startServer(
           request.body.repositoryId,
           request.body.path,
           request.body.kind,
-          adminPrincipal
-        )
+          adminPrincipal,
+        ),
       };
     } catch (error) {
       reply.code(400);
@@ -759,14 +946,14 @@ export async function startServer(
       try {
         repository.knowledge = normalizeKnowledgeConfig({
           ...repository.knowledge,
-          ...request.body
+          ...request.body,
         });
         const normalized = await adminConfigStore.save(editable);
         const next: AppConfig = {
           ...config,
           defaultRoles: [...config.defaultRoles],
           authentication: config.authentication,
-          repositories: config.repositories
+          repositories: config.repositories,
         };
         applyAdminConfig(next, normalized);
         service.applyRuntimeConfig(next);
@@ -775,15 +962,15 @@ export async function startServer(
           saved: true,
           repository: request.params.repository,
           config: normalizeKnowledgeConfig(
-            config.repositories.find((item) => item.id === request.params.repository)?.knowledge
+            config.repositories.find((item) => item.id === request.params.repository)?.knowledge,
           ),
-          state
+          state,
         };
       } catch (error) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : String(error) };
       }
-    }
+    },
   );
 
   app.put<{ Params: { repository: string }; Body: Partial<KnowledgePublishingConfig> }>(
@@ -809,38 +996,33 @@ export async function startServer(
           provider: "gitlab" as const,
           tokenEnv: "GITLAB_WRITE_TOKEN",
           targetBranch: repository.branch ?? "main",
-          branchPrefix: "skill-hub-knowledge"
+          branchPrefix: "skill-hub-knowledge",
         };
         const provider = request.body.provider ?? current.provider;
         repository.knowledgePublishing = {
           enabled: request.body.enabled ?? current.enabled,
           provider,
-          baseUrl:
-            request.body.baseUrl !== undefined
-              ? request.body.baseUrl.trim() || undefined
-              : current.baseUrl,
+          baseUrl: request.body.baseUrl !== undefined ? request.body.baseUrl.trim() || undefined : current.baseUrl,
           projectPath:
-            request.body.projectPath !== undefined
-              ? request.body.projectPath.trim() || undefined
-              : current.projectPath,
+            request.body.projectPath !== undefined ? request.body.projectPath.trim() || undefined : current.projectPath,
           tokenEnv:
             request.body.tokenEnv?.trim() ||
             current.tokenEnv ||
             (provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
           targetBranch: request.body.targetBranch?.trim() || current.targetBranch,
-          branchPrefix: request.body.branchPrefix?.trim() || current.branchPrefix
+          branchPrefix: request.body.branchPrefix?.trim() || current.branchPrefix,
         };
         const normalized = await adminConfigStore.save(editable);
         const next: AppConfig = {
           ...config,
           defaultRoles: [...config.defaultRoles],
           authentication: config.authentication,
-          repositories: config.repositories
+          repositories: config.repositories,
         };
         applyAdminConfig(next, normalized);
         service.applyRuntimeConfig(next);
         const publishing = config.repositories.find(
-          (item) => item.id === request.params.repository
+          (item) => item.id === request.params.repository,
         )?.knowledgePublishing;
         return {
           saved: true,
@@ -848,15 +1030,15 @@ export async function startServer(
           publishing: publishing
             ? {
                 config: publishing,
-                tokenConfigured: Boolean(process.env[publishing.tokenEnv])
+                tokenConfigured: Boolean(process.env[publishing.tokenEnv]),
               }
-            : undefined
+            : undefined,
         };
       } catch (error) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : String(error) };
       }
-    }
+    },
   );
 
   app.get<{ Querystring: { q?: string; repository?: string; limit?: string } }>(
@@ -882,10 +1064,10 @@ export async function startServer(
           metadata: result.chunk.metadata,
           chunkIndex: result.chunk.chunkIndex,
           score: result.score,
-          content: result.chunk.content
-        }))
+          content: result.chunk.content,
+        })),
       };
-    }
+    },
   );
 
   app.get<{
@@ -901,7 +1083,7 @@ export async function startServer(
       ? service.searchTools(query, limit, request.query.client, adminPrincipal).map((item) => ({
           ...item.artifact,
           score: item.score,
-          reason: item.reason
+          reason: item.reason,
         }))
       : service.listTools(request.query.client, adminPrincipal).slice(0, limit);
     return { tools };
@@ -915,7 +1097,7 @@ export async function startServer(
     const limit = normalizeAdminLimit(request.query.limit);
     return {
       summary: await service.getMcpObservabilitySummary(),
-      calls: await service.listMcpCalls(limit)
+      calls: await service.listMcpCalls(limit),
     };
   });
 
@@ -928,50 +1110,80 @@ export async function startServer(
     return { traces: await service.listMcpTraces(limit) };
   });
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; event?: string; user?: string; session?: string; from?: string; until?: string } }>("/admin/api/client-events", async (request, reply) => {
+  app.get<{
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      event?: string;
+      user?: string;
+      session?: string;
+      from?: string;
+      until?: string;
+    };
+  }>("/admin/api/client-events", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
     const dateError = adminDateQueryError(request.query, ["from", "until"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     const direct = service.adminClientEventsPage(request.query);
     if (direct) return { events: direct.items, page: direct.page };
-    const rows = (await service.listClientEvents(1000)).filter((item) =>
-      (!request.query.event || item.event === request.query.event) &&
-      (!request.query.user || item.actorId === request.query.user) &&
-      (!request.query.session || item.sessionId === request.query.session) &&
-      (!request.query.from || item.ts >= request.query.from) &&
-      (!request.query.until || item.ts <= request.query.until)
+    const rows = (await service.listClientEvents(1000)).filter(
+      (item) =>
+        (!request.query.event || item.event === request.query.event) &&
+        (!request.query.user || item.actorId === request.query.user) &&
+        (!request.query.session || item.sessionId === request.query.session) &&
+        (!request.query.from || item.ts >= request.query.from) &&
+        (!request.query.until || item.ts <= request.query.until),
     );
     const result = paginateAdminRows(rows, request.query, (item) =>
       [item.event, item.actorId, item.sessionId, item.turnId, item.client, JSON.stringify(item.metadata ?? {})]
         .filter(Boolean)
-        .join(" ")
+        .join(" "),
     );
     return { events: result.items, page: result.page };
   });
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; outcome?: string; user?: string; session?: string; from?: string; until?: string } }>("/admin/api/candidate-detections", async (request, reply) => {
+  app.get<{
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      outcome?: string;
+      user?: string;
+      session?: string;
+      from?: string;
+      until?: string;
+    };
+  }>("/admin/api/candidate-detections", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
     const dateError = adminDateQueryError(request.query, ["from", "until"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     const direct = service.adminCandidateDetectionsPage(request.query);
     if (direct) return { detections: direct.items, page: direct.page };
-    const rows = (await service.listCandidateDetections(1000)).filter((item) =>
-      (!request.query.outcome || item.outcome === request.query.outcome) &&
-      (!request.query.user || item.actorId === request.query.user) &&
-      (!request.query.session || item.sessionId === request.query.session) &&
-      (!request.query.from || item.ts >= request.query.from) &&
-      (!request.query.until || item.ts <= request.query.until)
+    const rows = (await service.listCandidateDetections(1000)).filter(
+      (item) =>
+        (!request.query.outcome || item.outcome === request.query.outcome) &&
+        (!request.query.user || item.actorId === request.query.user) &&
+        (!request.query.session || item.sessionId === request.query.session) &&
+        (!request.query.from || item.ts >= request.query.from) &&
+        (!request.query.until || item.ts <= request.query.until),
     );
     const result = paginateAdminRows(rows, request.query, (item) =>
       [item.outcome, item.reason, item.actorId, item.sessionId, item.turnId, item.detector, item.candidateId]
         .filter(Boolean)
-        .join(" ")
+        .join(" "),
     );
     return { detections: result.items, page: result.page };
   });
@@ -1038,24 +1250,37 @@ export async function startServer(
       return { error: "admin API access denied" };
     }
     const dateError = adminDateQueryError(request.query, ["from", "to"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     const direct = service.adminSessionsPage(request.query);
     if (direct) return { sessions: direct.items, page: direct.page };
     const rows = await service.listClientSessions(1000, {
-        actorId: request.query.actorId,
-        repositoryId: request.query.repositoryId,
-        event: request.query.event,
-        runtimeStatus: request.query.runtimeStatus,
-        status: request.query.status,
-        q: request.query.q,
-        hasMcp: request.query.hasMcp === undefined ? undefined : request.query.hasMcp === "true",
-        hasEvidence: request.query.hasEvidence === undefined ? undefined : request.query.hasEvidence === "true",
-        hasReuse: request.query.hasReuse === undefined ? undefined : request.query.hasReuse === "true",
-        from: request.query.from,
-        to: request.query.to
-      });
+      actorId: request.query.actorId,
+      repositoryId: request.query.repositoryId,
+      event: request.query.event,
+      runtimeStatus: request.query.runtimeStatus,
+      status: request.query.status,
+      q: request.query.q,
+      hasMcp: request.query.hasMcp === undefined ? undefined : request.query.hasMcp === "true",
+      hasEvidence: request.query.hasEvidence === undefined ? undefined : request.query.hasEvidence === "true",
+      hasReuse: request.query.hasReuse === undefined ? undefined : request.query.hasReuse === "true",
+      from: request.query.from,
+      to: request.query.to,
+    });
     const result = paginateAdminRows(rows, request.query, (item) =>
-      [item.sessionId, item.actorId, item.tenantId, item.repositoryId, item.client, item.events.join(" "), item.tools.join(" ")].filter(Boolean).join(" ")
+      [
+        item.sessionId,
+        item.actorId,
+        item.tenantId,
+        item.repositoryId,
+        item.client,
+        item.events.join(" "),
+        item.tools.join(" "),
+      ]
+        .filter(Boolean)
+        .join(" "),
     );
     return { sessions: result.items, page: result.page };
   });
@@ -1084,16 +1309,27 @@ export async function startServer(
       return { error: "actorId and tenantId must be provided together" };
     }
     if (!actorId && !tenantId) {
-      const matches = (await service.listClientSessions(1000)).filter((item) => item.sessionId === request.params.sessionId);
-      if (!matches.length) { reply.code(404); return { error: "session not found" }; }
-      if (matches.length > 1) { reply.code(409); return { error: "session id is ambiguous; actorId and tenantId are required" }; }
+      const matches = (await service.listClientSessions(1000)).filter(
+        (item) => item.sessionId === request.params.sessionId,
+      );
+      if (!matches.length) {
+        reply.code(404);
+        return { error: "session not found" };
+      }
+      if (matches.length > 1) {
+        reply.code(409);
+        return { error: "session id is ambiguous; actorId and tenantId are required" };
+      }
       actorId = matches[0]!.actorId;
       tenantId = matches[0]!.tenantId;
     }
     const resolvedActorId = actorId!;
     const resolvedTenantId = tenantId!;
     const detail = await service.getClientSessionDetail(resolvedActorId, resolvedTenantId, request.params.sessionId);
-    if (!detail.timeline.length) { reply.code(404); return { error: "session not found" }; }
+    if (!detail.timeline.length) {
+      reply.code(404);
+      return { error: "session not found" };
+    }
     return { ...detail, session: detail };
   });
 
@@ -1106,99 +1342,242 @@ export async function startServer(
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/mcp-calls/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const call = await service.getMcpCall(request.params.id);
-    if (!call) { reply.code(404); return { error: "MCP call not found" }; }
+    if (!call) {
+      reply.code(404);
+      return { error: "MCP call not found" };
+    }
     return { call };
   });
 
-  const derivedMcpRows = async (request: { query: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }, failures: boolean) => {
+  const derivedMcpRows = async (
+    request: {
+      query: {
+        limit?: string;
+        cursor?: string;
+        q?: string;
+        tool?: string;
+        actorId?: string;
+        sessionId?: string;
+        from?: string;
+        to?: string;
+      };
+    },
+    failures: boolean,
+  ) => {
     const direct = service.adminMcpCallsPage(request.query, failures ? "failures" : "reuse");
     if (direct) return { rows: direct.items, page: direct.page };
-    const rows = (await service.listMcpCalls(1000)).filter((item) =>
-      (failures ? !item.success : isReuseMcpTool(item.tool)) &&
-      (!request.query.tool || item.tool === request.query.tool) &&
-      (!request.query.actorId || item.actorId === request.query.actorId) &&
-      (!request.query.sessionId || item.sessionId === request.query.sessionId) &&
-      (!request.query.from || item.ts >= request.query.from) &&
-      (!request.query.to || item.ts <= request.query.to)
+    const rows = (await service.listMcpCalls(1000)).filter(
+      (item) =>
+        (failures ? !item.success : isReuseMcpTool(item.tool)) &&
+        (!request.query.tool || item.tool === request.query.tool) &&
+        (!request.query.actorId || item.actorId === request.query.actorId) &&
+        (!request.query.sessionId || item.sessionId === request.query.sessionId) &&
+        (!request.query.from || item.ts >= request.query.from) &&
+        (!request.query.to || item.ts <= request.query.to),
     );
-    const result = paginateAdminRows(rows, request.query, (item) => [item.id, item.tool, item.actorId, item.sessionId, item.client, item.error, JSON.stringify(item.args ?? {})].filter(Boolean).join(" "));
+    const result = paginateAdminRows(rows, request.query, (item) =>
+      [item.id, item.tool, item.actorId, item.sessionId, item.client, item.error, JSON.stringify(item.args ?? {})]
+        .filter(Boolean)
+        .join(" "),
+    );
     return { rows: result.items, page: result.page };
   };
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/reuse", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+  app.get<{
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      tool?: string;
+      actorId?: string;
+      sessionId?: string;
+      from?: string;
+      to?: string;
+    };
+  }>("/admin/api/reuse", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const dateError = adminDateQueryError(request.query, ["from", "to"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     return derivedMcpRows(request, false);
   });
   app.get<{ Params: { id: string } }>("/admin/api/reuse/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const call = await service.getMcpCall(request.params.id);
-    if (!call || !isReuseMcpTool(call.tool)) { reply.code(404); return { error: "reuse record not found" }; }
+    if (!call || !isReuseMcpTool(call.tool)) {
+      reply.code(404);
+      return { error: "reuse record not found" };
+    }
     return { call };
   });
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/failures", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+  app.get<{
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      tool?: string;
+      actorId?: string;
+      sessionId?: string;
+      from?: string;
+      to?: string;
+    };
+  }>("/admin/api/failures", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const dateError = adminDateQueryError(request.query, ["from", "to"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     return derivedMcpRows(request, true);
   });
   app.get<{ Params: { id: string } }>("/admin/api/failures/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const call = await service.getMcpCall(request.params.id);
-    if (!call || call.success) { reply.code(404); return { error: "failure record not found" }; }
+    if (!call || call.success) {
+      reply.code(404);
+      return { error: "failure record not found" };
+    }
     return { call };
   });
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; tool?: string; success?: string; actorId?: string; sessionId?: string; from?: string; to?: string } }>("/admin/api/mcp-calls", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+  app.get<{
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      tool?: string;
+      success?: string;
+      actorId?: string;
+      sessionId?: string;
+      from?: string;
+      to?: string;
+    };
+  }>("/admin/api/mcp-calls", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const dateError = adminDateQueryError(request.query, ["from", "to"]);
-    if (dateError) { reply.code(400); return { error: dateError }; }
+    if (dateError) {
+      reply.code(400);
+      return { error: dateError };
+    }
     const direct = service.adminMcpCallsPage(request.query, "all");
     if (direct) return { calls: direct.items, page: direct.page };
-    const rows = (await service.listMcpCalls(1000)).filter((item) =>
-      (!request.query.tool || item.tool === request.query.tool) &&
-      (!request.query.success || String(item.success) === request.query.success) &&
-      (!request.query.actorId || item.actorId === request.query.actorId) &&
-      (!request.query.sessionId || item.sessionId === request.query.sessionId) &&
-      (!request.query.from || item.ts >= request.query.from) &&
-      (!request.query.to || item.ts <= request.query.to)
+    const rows = (await service.listMcpCalls(1000)).filter(
+      (item) =>
+        (!request.query.tool || item.tool === request.query.tool) &&
+        (!request.query.success || String(item.success) === request.query.success) &&
+        (!request.query.actorId || item.actorId === request.query.actorId) &&
+        (!request.query.sessionId || item.sessionId === request.query.sessionId) &&
+        (!request.query.from || item.ts >= request.query.from) &&
+        (!request.query.to || item.ts <= request.query.to),
     );
-    const result = paginateAdminRows(rows, request.query, (item) => [item.id, item.tool, item.traceId, item.actorId, item.sessionId, item.client, item.error].filter(Boolean).join(" "));
+    const result = paginateAdminRows(rows, request.query, (item) =>
+      [item.id, item.tool, item.traceId, item.actorId, item.sessionId, item.client, item.error]
+        .filter(Boolean)
+        .join(" "),
+    );
     return { calls: result.items, page: result.page };
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/client-events/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const event = await service.getClientEvent(request.params.id);
-    if (!event) { reply.code(404); return { error: "client event not found" }; }
+    if (!event) {
+      reply.code(404);
+      return { error: "client event not found" };
+    }
     return { event };
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/candidate-detections/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const detection = await service.getCandidateDetection(request.params.id);
-    if (!detection) { reply.code(404); return { error: "candidate detection not found" }; }
+    if (!detection) {
+      reply.code(404);
+      return { error: "candidate detection not found" };
+    }
     return { detection };
   });
 
   app.get<{
     Querystring: {
-      limit?: string; cursor?: string; q?: string; status?: string; kind?: string; type?: string;
-      repository?: string; sourceType?: string; reviewer?: string; submitter?: string;
-      namespace?: string; skillCollection?: string; importType?: string;
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      status?: string;
+      kind?: string;
+      type?: string;
+      repository?: string;
+      sourceType?: string;
+      reviewer?: string;
+      submitter?: string;
+      namespace?: string;
+      skillCollection?: string;
+      importType?: string;
     };
   }>("/admin/api/review-items", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const kinds = new Set(["candidate", "skill-bundle"]);
     const types = new Set(["knowledge", "legacy-skill", "skill-bundle-skill", "skill-bundle-collection"]);
-    const statuses = new Set(["pending", "approved", "publishing", "rejected", "publish_failed", "published", "deleting", "delete_failed", "deleted", "review_stale", "published_drifted"]);
-    if (request.query.kind && !kinds.has(request.query.kind)) { reply.code(400); return { error: "invalid review kind" }; }
-    if (request.query.type && !types.has(request.query.type)) { reply.code(400); return { error: "invalid review type" }; }
-    if (request.query.status && !statuses.has(request.query.status)) { reply.code(400); return { error: "invalid review status" }; }
-    if (request.query.importType && !["skill", "collection"].includes(request.query.importType)) { reply.code(400); return { error: "invalid review importType" }; }
+    const statuses = new Set([
+      "pending",
+      "approved",
+      "publishing",
+      "rejected",
+      "publish_failed",
+      "published",
+      "deleting",
+      "delete_failed",
+      "deleted",
+      "review_stale",
+      "published_drifted",
+    ]);
+    if (request.query.kind && !kinds.has(request.query.kind)) {
+      reply.code(400);
+      return { error: "invalid review kind" };
+    }
+    if (request.query.type && !types.has(request.query.type)) {
+      reply.code(400);
+      return { error: "invalid review type" };
+    }
+    if (request.query.status && !statuses.has(request.query.status)) {
+      reply.code(400);
+      return { error: "invalid review status" };
+    }
+    if (request.query.importType && !["skill", "collection"].includes(request.query.importType)) {
+      reply.code(400);
+      return { error: "invalid review importType" };
+    }
     try {
       return await service.adminReviewItemsPage(request.query);
     } catch (error) {
@@ -1208,7 +1587,10 @@ export async function startServer(
   });
 
   app.get("/admin/api/review-summary", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     try {
       return await service.adminReviewSummary();
     } catch (error) {
@@ -1217,8 +1599,21 @@ export async function startServer(
     }
   });
 
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; namespace?: string; importType?: string } }>("/admin/api/skill-bundles", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+  app.get<{
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      status?: string;
+      repository?: string;
+      namespace?: string;
+      importType?: string;
+    };
+  }>("/admin/api/skill-bundles", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const result = service.skillBundleImportsPage(request.query);
     return {
       imports: result.items.map((item) => {
@@ -1227,7 +1622,7 @@ export async function startServer(
           ...item,
           skillCount: snapshot?.skills.length ?? 0,
           fileCount: snapshot?.fileCount ?? 0,
-          totalBytes: snapshot?.totalBytes ?? 0
+          totalBytes: snapshot?.totalBytes ?? 0,
         };
       }),
       page: {
@@ -1235,58 +1630,78 @@ export async function startServer(
         limit: result.limit,
         cursor: result.cursor,
         nextCursor: result.nextCursor,
-        previousCursor: result.previousCursor
-      }
+        previousCursor: result.previousCursor,
+      },
     };
   });
 
-  app.post<{ Body: unknown }>("/admin/api/skill-bundles/preview", { bodyLimit: 64 * 1024 * 1024 }, async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try {
-      const body = skillBundleWebBodySchema.parse(request.body);
-      const target = resolveSkillBundleWebTarget(body);
-      const source = await resolveSkillBundleSource(body);
-      return await service.previewSkillBundle(adminPrincipal, {
-        namespace: target.namespace,
-        importType: body.import_type,
-        skillPath: target.skillPath,
-        files: source.files,
-        repository: body.repository
-      });
-    } catch (error) {
-      reply.code(400);
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
-  });
+  app.post<{ Body: unknown }>(
+    "/admin/api/skill-bundles/preview",
+    { bodyLimit: 64 * 1024 * 1024 },
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      try {
+        const body = skillBundleWebBodySchema.parse(request.body);
+        const target = resolveSkillBundleWebTarget(body);
+        const source = await resolveSkillBundleSource(body);
+        return await service.previewSkillBundle(adminPrincipal, {
+          namespace: target.namespace,
+          importType: body.import_type,
+          skillPath: target.skillPath,
+          files: source.files,
+          repository: body.repository,
+        });
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
 
-  app.post<{ Body: unknown }>("/admin/api/skill-bundles/import", { bodyLimit: 64 * 1024 * 1024 }, async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try {
-      const body = skillBundleWebBodySchema.parse(request.body);
-      const target = resolveSkillBundleWebTarget(body);
-      const source = await resolveSkillBundleSource(body);
-      const created = await service.submitSkillBundle(adminPrincipal, {
-        namespace: target.namespace,
-        importType: body.import_type,
-        skillPath: target.skillPath,
-        files: source.files,
-        sourceType: source.sourceType,
-        sourceMetadata: source.sourceMetadata,
-        repository: body.repository,
-        submissionKey: body.submission_key
-      });
-      reply.code(201);
-      return { import: created };
-    } catch (error) {
-      reply.code(400);
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
-  });
+  app.post<{ Body: unknown }>(
+    "/admin/api/skill-bundles/import",
+    { bodyLimit: 64 * 1024 * 1024 },
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      try {
+        const body = skillBundleWebBodySchema.parse(request.body);
+        const target = resolveSkillBundleWebTarget(body);
+        const source = await resolveSkillBundleSource(body);
+        const created = await service.submitSkillBundle(adminPrincipal, {
+          namespace: target.namespace,
+          importType: body.import_type,
+          skillPath: target.skillPath,
+          files: source.files,
+          sourceType: source.sourceType,
+          sourceMetadata: source.sourceMetadata,
+          repository: body.repository,
+          submissionKey: body.submission_key,
+        });
+        reply.code(201);
+        return { import: created };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
 
   app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const record = service.getSkillBundleImport(request.params.id);
-    if (!record) { reply.code(404); return { error: "Skill Bundle import not found" }; }
+    if (!record) {
+      reply.code(404);
+      return { error: "Skill Bundle import not found" };
+    }
     const snapshot = service.getSkillBundleSnapshot(record.snapshotId);
     return {
       import: {
@@ -1294,16 +1709,22 @@ export async function startServer(
         skillCount: snapshot?.skills.length ?? 0,
         fileCount: snapshot?.fileCount ?? 0,
         totalBytes: snapshot?.totalBytes ?? 0,
-        skills: snapshot?.skills ?? []
-      }
+        skills: snapshot?.skills ?? [],
+      },
     };
   });
 
   app.delete<{ Params: { id: string } }>("/admin/api/skill-bundles/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     try {
       const deleted = await service.deleteSkillBundle(adminPrincipal, request.params.id);
-      if (!deleted) { reply.code(404); return { error: "Skill Bundle import not found" }; }
+      if (!deleted) {
+        reply.code(404);
+        return { error: "Skill Bundle import not found" };
+      }
       return { deleted: true };
     } catch (error) {
       reply.code(400);
@@ -1312,70 +1733,136 @@ export async function startServer(
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/preview", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try { return await service.getSkillBundlePreview(adminPrincipal, request.params.id); }
-    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
-  });
-
-  app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/history", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    const history = service.getSkillBundleHistory(request.params.id);
-    if (!history.length) { reply.code(404); return { error: "Skill Bundle import not found" }; }
-    return { importId: request.params.id, history };
-  });
-
-  app.post<{ Params: { id: string }; Body: { reason?: string } }>("/admin/api/skill-bundles/:id/approve", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try { return { import: await service.reviewSkillBundle(adminPrincipal, request.params.id, "approved", request.body?.reason) }; }
-    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
-  });
-
-  app.post<{ Params: { id: string }; Body: { reason?: string } }>("/admin/api/skill-bundles/:id/reject", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try { return { import: await service.reviewSkillBundle(adminPrincipal, request.params.id, "rejected", request.body?.reason) }; }
-    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
-  });
-
-  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/publish", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try { return { import: await service.publishSkillBundle(adminPrincipal, request.params.id) }; }
-    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
-  });
-
-  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reconcile", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try { return { import: await service.reconcileSkillBundle(adminPrincipal, request.params.id) }; }
-    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
-  });
-
-  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reimport", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    try { reply.code(201); return { import: await service.reimportSkillBundle(adminPrincipal, request.params.id) }; }
-    catch (error) { reply.code(400); return { error: error instanceof Error ? error.message : String(error) }; }
-  });
-
-  app.get<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
-    const candidate = await service.getKnowledgeCandidate(request.params.id);
-    if (!candidate) { reply.code(404); return { error: "knowledge candidate not found" }; }
-    return { candidate };
-  });
-
-  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>("/admin/api/feedback", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
     }
-    const direct = service.adminFeedbackPage(request.query);
-    if (direct) return { feedback: direct.items, page: direct.page };
-    const rows = await service.listFeedback(5000);
-    const result = paginateAdminRows(rows, request.query, (item) =>
-      [item.actorId, item.rating, item.targetType, item.target, item.reason, item.traceId]
-        .filter(Boolean)
-        .join(" ")
-    );
-    return { feedback: result.items, page: result.page };
+    try {
+      return await service.getSkillBundlePreview(adminPrincipal, request.params.id);
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
   });
+
+  app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/history", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const history = service.getSkillBundleHistory(request.params.id);
+    if (!history.length) {
+      reply.code(404);
+      return { error: "Skill Bundle import not found" };
+    }
+    return { importId: request.params.id, history };
+  });
+
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+    "/admin/api/skill-bundles/:id/approve",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      try {
+        return {
+          import: await service.reviewSkillBundle(adminPrincipal, request.params.id, "approved", request.body?.reason),
+        };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+    "/admin/api/skill-bundles/:id/reject",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      try {
+        return {
+          import: await service.reviewSkillBundle(adminPrincipal, request.params.id, "rejected", request.body?.reason),
+        };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/publish", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { import: await service.publishSkillBundle(adminPrincipal, request.params.id) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reconcile", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { import: await service.reconcileSkillBundle(adminPrincipal, request.params.id) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reimport", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      reply.code(201);
+      return { import: await service.reimportSkillBundle(adminPrincipal, request.params.id) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const candidate = await service.getKnowledgeCandidate(request.params.id);
+    if (!candidate) {
+      reply.code(404);
+      return { error: "knowledge candidate not found" };
+    }
+    return { candidate };
+  });
+
+  app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>(
+    "/admin/api/feedback",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const direct = service.adminFeedbackPage(request.query);
+      if (direct) return { feedback: direct.items, page: direct.page };
+      const rows = await service.listFeedback(5000);
+      const result = paginateAdminRows(rows, request.query, (item) =>
+        [item.actorId, item.rating, item.targetType, item.target, item.reason, item.traceId].filter(Boolean).join(" "),
+      );
+      return { feedback: result.items, page: result.page };
+    },
+  );
 
   app.get<{
     Querystring: {
@@ -1399,11 +1886,7 @@ export async function startServer(
     const direct = service.adminKnowledgeCandidatesPage(request.query);
     if (direct) return { candidates: direct.items.map(({ content: _content, ...item }) => item), page: direct.page };
     const automatic =
-      request.query.automatic === "true"
-        ? true
-        : request.query.automatic === "false"
-          ? false
-          : undefined;
+      request.query.automatic === "true" ? true : request.query.automatic === "false" ? false : undefined;
     const rows = await service.listKnowledgeCandidates(5000, {
       id: request.query.id,
       status: request.query.status,
@@ -1412,12 +1895,23 @@ export async function startServer(
       reviewer: request.query.reviewer,
       automatic,
       suggestedType: request.query.suggestedType,
-      skillCollection: request.query.skillCollection
+      skillCollection: request.query.skillCollection,
     });
     const result = paginateAdminRows(rows, request.query, (item) =>
-      [item.id, item.title, item.content, item.repository, item.status, item.sourceType, item.suggestedType, item.skillCollection, item.reviewer, item.reviewReason]
+      [
+        item.id,
+        item.title,
+        item.content,
+        item.repository,
+        item.status,
+        item.sourceType,
+        item.suggestedType,
+        item.skillCollection,
+        item.reviewer,
+        item.reviewReason,
+      ]
         .filter(Boolean)
-        .join(" ")
+        .join(" "),
     );
     // Keep list responses compact: full candidate content is only available from the detail API.
     return { candidates: result.items.map(({ content: _content, ...item }) => item), page: result.page };
@@ -1453,13 +1947,21 @@ export async function startServer(
         request.body.status,
         adminPrincipal.id,
         request.body.reviewReason,
-        request.body.reviewNote
-      )
+        request.body.reviewNote,
+      ),
     };
   });
 
   app.get<{
-    Querystring: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; sourceType?: string; reviewer?: string };
+    Querystring: {
+      limit?: string;
+      cursor?: string;
+      q?: string;
+      status?: string;
+      repository?: string;
+      sourceType?: string;
+      reviewer?: string;
+    };
   }>("/admin/api/knowledge-candidates/history", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
@@ -1473,7 +1975,9 @@ export async function startServer(
       .filter((item) => !request.query.sourceType || item.sourceType === request.query.sourceType)
       .filter((item) => !request.query.reviewer || item.reviewer === request.query.reviewer);
     const result = paginateAdminRows(rows, request.query, (item) =>
-      [item.id, item.title, item.status, item.repository, item.sourceType, item.reviewer, item.reviewReason].filter(Boolean).join(" ")
+      [item.id, item.title, item.status, item.repository, item.sourceType, item.reviewer, item.reviewReason]
+        .filter(Boolean)
+        .join(" "),
     );
     return { history: result.items.map(({ content: _content, ...item }) => item), page: result.page };
   });
@@ -1492,7 +1996,7 @@ export async function startServer(
         return { error: "knowledge candidate not found" };
       }
       return { candidateId: request.params.id, history };
-    }
+    },
   );
 
   app.delete<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id", async (request, reply) => {
@@ -1534,8 +2038,8 @@ export async function startServer(
           skillCollection: request.body.skillCollection,
           repository: request.body.repository,
           suggestedPath: request.body.suggestedPath,
-          traceId: request.body.traceId
-        })
+          traceId: request.body.traceId,
+        }),
       };
     } catch (error) {
       reply.code(400);
@@ -1631,8 +2135,8 @@ export async function startServer(
           request.body.status,
           adminPrincipal.id,
           request.body.reviewNote,
-          request.body.reviewReason
-        )
+          request.body.reviewReason,
+        ),
       };
     } catch (error) {
       reply.code(400);
@@ -1666,18 +2170,21 @@ export async function startServer(
     }
   });
 
-  app.post<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id/delete-published", async (request, reply) => {
-    if (!hasAdminAccess(request)) {
-      reply.code(403);
-      return { error: "admin API access denied" };
-    }
-    try {
-      return { candidate: await service.deletePublishedKnowledgeCandidate(request.params.id) };
-    } catch (error) {
-      reply.code(400);
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
-  });
+  app.post<{ Params: { id: string } }>(
+    "/admin/api/knowledge-candidates/:id/delete-published",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      try {
+        return { candidate: await service.deletePublishedKnowledgeCandidate(request.params.id) };
+      } catch (error) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
 
   app.get("/admin/api/knowledge-gaps", async (request, reply) => {
     if (!hasAdminAccess(request)) {
@@ -1688,15 +2195,30 @@ export async function startServer(
     const status = ["active", "resolved", "ignored"].includes(query.status ?? "") ? query.status : undefined;
     const rows = (await service.listKnowledgeGaps())
       .filter((item) => !status || (item.management?.status ?? "active") === status)
-      .filter((item) => !query.q || [item.key, item.query, item.source, ...(item.members ?? [])].join(" ").toLowerCase().includes(query.q.toLowerCase()));
-    const result = paginateAdminRows(rows, query, (item) => [item.key, item.query, item.source, ...(item.members ?? [])].join(" "));
+      .filter(
+        (item) =>
+          !query.q ||
+          [item.key, item.query, item.source, ...(item.members ?? [])]
+            .join(" ")
+            .toLowerCase()
+            .includes(query.q.toLowerCase()),
+      );
+    const result = paginateAdminRows(rows, query, (item) =>
+      [item.key, item.query, item.source, ...(item.members ?? [])].join(" "),
+    );
     return { gaps: result.items, page: result.page };
   });
 
   app.get<{ Params: { key: string } }>("/admin/api/knowledge-gaps/:key", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const gap = await service.getKnowledgeGap(request.params.key);
-    if (!gap) { reply.code(404); return { error: "knowledge gap not found" }; }
+    if (!gap) {
+      reply.code(404);
+      return { error: "knowledge gap not found" };
+    }
     return { gap };
   });
 
@@ -1743,8 +2265,8 @@ export async function startServer(
         candidate: await service.createKnowledgeCandidateFromGap(
           request.params.key,
           adminPrincipal,
-          request.body ?? {}
-        )
+          request.body ?? {},
+        ),
       };
     } catch (error) {
       reply.code(400);
@@ -1786,7 +2308,7 @@ export async function startServer(
       return {
         key: created.record,
         apiKey: created.apiKey,
-        warning: "Administrators can reveal this API key again from the admin console."
+        warning: "Administrators can reveal this API key again from the admin console.",
       };
     } catch (error) {
       reply.code(400);
@@ -1813,7 +2335,7 @@ export async function startServer(
         reply.code(400);
         return { error: error instanceof Error ? error.message : String(error) };
       }
-    }
+    },
   );
 
   app.get<{ Params: { id: string } }>("/admin/api/api-keys/:id/reveal", async (request, reply) => {
@@ -1849,7 +2371,8 @@ export async function startServer(
       return {
         key: rotated.record,
         apiKey: rotated.apiKey,
-        warning: "The previous API key is now invalid. Administrators can reveal the new key again from the admin console."
+        warning:
+          "The previous API key is now invalid. Administrators can reveal the new key again from the admin console.",
       };
     } catch (error) {
       reply.code(error instanceof Error && error.message === "API key not found" ? 404 : 400);
@@ -1920,55 +2443,48 @@ export async function startServer(
         cwd: body.cwd,
         model: body.model,
         permissionMode: body.permission_mode,
-        metadata: body.metadata
+        metadata: body.metadata,
       });
-      reply
-        .header("x-skill-hub-hook-schema-version", String(CURRENT_HOOK_SCHEMA_VERSION))
-        .code(202);
+      reply.header("x-skill-hub-hook-schema-version", String(CURRENT_HOOK_SCHEMA_VERSION)).code(202);
       return { accepted: true, event_id: record.id };
     } catch (error) {
-      reply
-        .header("x-skill-hub-hook-schema-version", String(CURRENT_HOOK_SCHEMA_VERSION))
-        .code(400);
+      reply.header("x-skill-hub-hook-schema-version", String(CURRENT_HOOK_SCHEMA_VERSION)).code(400);
       return {
         error: error instanceof Error ? error.message : String(error),
         supported_schema: {
           min: MIN_SUPPORTED_HOOK_SCHEMA_VERSION,
-          max: CURRENT_HOOK_SCHEMA_VERSION
-        }
+          max: CURRENT_HOOK_SCHEMA_VERSION,
+        },
       };
     }
   });
 
-  app.post<{ Body: Record<string, unknown> }>(
-    "/client-events/claude-code",
-    async (request, reply) => {
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) {
-        if (Array.isArray(value)) for (const item of value) headers.append(name, item);
-        else if (value !== undefined) headers.set(name, String(value));
-      }
-      let principal;
-      try {
-        principal = service.authenticateRequest(headers);
-      } catch (error) {
-        reply.code(401);
-        return { error: error instanceof Error ? error.message : "Authentication failed" };
-      }
-      try {
-        const translated = translateClaudeCodeHook(request.body);
-        const record = await service.recordClientEvent(principal, translated);
-        reply
-          .header("x-skill-hub-event-id", record.id)
-          .header("x-skill-hub-hook-schema-version", String(CURRENT_HOOK_SCHEMA_VERSION))
-          .code(204);
-        return reply.send();
-      } catch (error) {
-        reply.code(400);
-        return { error: error instanceof Error ? error.message : String(error) };
-      }
+  app.post<{ Body: Record<string, unknown> }>("/client-events/claude-code", async (request, reply) => {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (Array.isArray(value)) for (const item of value) headers.append(name, item);
+      else if (value !== undefined) headers.set(name, String(value));
     }
-  );
+    let principal;
+    try {
+      principal = service.authenticateRequest(headers);
+    } catch (error) {
+      reply.code(401);
+      return { error: error instanceof Error ? error.message : "Authentication failed" };
+    }
+    try {
+      const translated = translateClaudeCodeHook(request.body);
+      const record = await service.recordClientEvent(principal, translated);
+      reply
+        .header("x-skill-hub-event-id", record.id)
+        .header("x-skill-hub-hook-schema-version", String(CURRENT_HOOK_SCHEMA_VERSION))
+        .code(204);
+      return reply.send();
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
 
   app.all("/mcp", async (request, reply) => {
     const headers = new Headers();
@@ -1988,7 +2504,7 @@ export async function startServer(
 
   app.get("/health/live", async () => ({ status: "live" }));
   app.get("/health/ready", async (_request, reply) => {
-    const ready = service.isReady() && await service.isObservabilityStorageReady();
+    const ready = service.isReady() && (await service.isObservabilityStorageReady());
     if (!ready) reply.code(503);
     const states = service.listRepositoryStates();
     return {
@@ -1998,8 +2514,8 @@ export async function startServer(
         healthy: states.filter((state) => state.status === "healthy").length,
         error: states.filter((state) => state.status === "error").length,
         syncing: states.filter((state) => state.status === "syncing").length,
-        disabled: states.filter((state) => state.status === "disabled").length
-      }
+        disabled: states.filter((state) => state.status === "disabled").length,
+      },
     };
   });
 
@@ -2037,15 +2553,21 @@ export async function startServer(
     const result = paginateAdminRows(
       governance.repositories.filter((item) => !query.status || item.status === query.status),
       query,
-      (item) => [item.id, item.name, item.provider, item.status, ...item.owners, ...item.issues].join(" ")
+      (item) => [item.id, item.name, item.provider, item.status, ...item.owners, ...item.issues].join(" "),
     );
     return { ...governance, repositories: result.items, page: result.page };
   });
 
   app.get<{ Params: { id: string } }>("/admin/api/repository-governance/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
     const repository = await service.getRepositoryGovernanceById(request.params.id, adminPrincipal);
-    if (!repository) { reply.code(404); return { error: "repository governance record not found" }; }
+    if (!repository) {
+      reply.code(404);
+      return { error: "repository governance record not found" };
+    }
     return { repository };
   });
 
@@ -2072,8 +2594,7 @@ export async function startServer(
 
   app.post<{ Body: Record<string, unknown> }>("/webhooks/git", async (request, reply) => {
     const expectedSecret = process.env.GITLAB_WEBHOOK_TOKEN ?? process.env.WEBHOOK_SECRET;
-    const providedSecret =
-      request.headers["x-gitlab-token"] ?? request.headers["x-skill-hub-secret"];
+    const providedSecret = request.headers["x-gitlab-token"] ?? request.headers["x-skill-hub-secret"];
     if (!expectedSecret) {
       reply.code(503);
       return { error: "git webhook is disabled; configure GITLAB_WEBHOOK_TOKEN or WEBHOOK_SECRET" };
@@ -2090,16 +2611,14 @@ export async function startServer(
         ? (body.repository as Record<string, unknown>)
         : undefined;
     const project =
-      typeof body.project === "object" && body.project !== null
-        ? (body.project as Record<string, unknown>)
-        : undefined;
+      typeof body.project === "object" && body.project !== null ? (body.project as Record<string, unknown>) : undefined;
     const references = [
       typeof repositoryHeader === "string" ? repositoryHeader : "",
       typeof body.repository_id === "string" ? body.repository_id : "",
       typeof repository?.name === "string" ? repository.name : "",
       typeof project?.name === "string" ? project.name : "",
       typeof project?.path_with_namespace === "string" ? project.path_with_namespace : "",
-      typeof project?.web_url === "string" ? project.web_url : ""
+      typeof project?.web_url === "string" ? project.web_url : "",
     ];
     const repositoryId = service.resolveRepositoryWebhookReference(references);
     const eventId =
@@ -2114,7 +2633,7 @@ export async function startServer(
       reply.code(400);
       return {
         error: "unknown repository",
-        hint: "Set x-skill-hub-repository to a configured repository id."
+        hint: "Set x-skill-hub-repository to a configured repository id.",
       };
     }
 
@@ -2131,76 +2650,60 @@ export async function startServer(
       return {
         accepted: false,
         repository: repositoryId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       };
     }
   });
 
-  app.get<{ Querystring: { repository?: string; limit?: string } }>(
-    "/audit",
-    async (request, reply) => {
+  app.get<{ Querystring: { repository?: string; limit?: string } }>("/audit", async (request, reply) => {
     if (!hasAdminAccess(request)) {
-        reply.code(403);
-        return { error: "admin API access denied" };
-      }
-      return {
-        events: await service.listAuditEvents(
-          Number(request.query.limit ?? 100),
-          request.query.repository,
-          adminPrincipal
-        )
-      };
+      reply.code(403);
+      return { error: "admin API access denied" };
     }
-  );
+    return {
+      events: await service.listAuditEvents(
+        Number(request.query.limit ?? 100),
+        request.query.repository,
+        adminPrincipal,
+      ),
+    };
+  });
 
-  app.get<{ Querystring: { limit?: string; unmatched?: string } }>(
-    "/analytics/usage",
-    async (request, reply) => {
+  app.get<{ Querystring: { limit?: string; unmatched?: string } }>("/analytics/usage", async (request, reply) => {
     if (!hasAdminAccess(request)) {
-        reply.code(403);
-        return { error: "admin API access denied" };
-      }
-      return {
-        events: await service.listUsageAnalytics(
-          Number(request.query.limit ?? 200),
-          request.query.unmatched === "true"
-        )
-      };
+      reply.code(403);
+      return { error: "admin API access denied" };
     }
-  );
+    return {
+      events: await service.listUsageAnalytics(Number(request.query.limit ?? 200), request.query.unmatched === "true"),
+    };
+  });
 
-  app.get<{ Querystring: { limit?: string } }>(
-    "/analytics/summary",
-    async (request, reply) => {
+  app.get<{ Querystring: { limit?: string } }>("/analytics/summary", async (request, reply) => {
     if (!hasAdminAccess(request)) {
-        reply.code(403);
-        return { error: "admin API access denied" };
-      }
-      return await service.getUsageSummary(Number(request.query.limit ?? 10));
+      reply.code(403);
+      return { error: "admin API access denied" };
     }
-  );
+    return await service.getUsageSummary(Number(request.query.limit ?? 10));
+  });
 
   app.get<{ Params: { id: string }; Querystring: { revision?: string } }>(
     "/repositories/:id/evaluations/suites",
     async (request, reply) => {
-    if (!hasAdminAccess(request)) {
+      if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
       try {
         return {
           repository: request.params.id,
-          suites: await service.listEvaluationSuites(
-            request.params.id,
-            request.query.revision,
-            adminPrincipal
-          )
+          suites: await service.listEvaluationSuites(request.params.id, request.query.revision, adminPrincipal),
         };
       } catch (error) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : String(error) };
       }
-    }
+    },
   );
 
   app.post<{
@@ -2221,7 +2724,7 @@ export async function startServer(
         request.body.suite,
         request.body.revision,
         request.body.baseline_revision,
-        adminPrincipal
+        adminPrincipal,
       );
     } catch (error) {
       reply.code(400);
@@ -2241,8 +2744,8 @@ export async function startServer(
         Number(request.query.limit ?? 100),
         request.query.repository,
         request.query.suite,
-        adminPrincipal
-      )
+        adminPrincipal,
+      ),
     };
   });
 
@@ -2272,7 +2775,7 @@ export async function startServer(
     try {
       return {
         repository: request.params.id,
-        revisions: await service.listRepositoryRevisions(request.params.id, adminPrincipal)
+        revisions: await service.listRepositoryRevisions(request.params.id, adminPrincipal),
       };
     } catch (error) {
       reply.code(404);
@@ -2283,7 +2786,7 @@ export async function startServer(
   app.post<{ Params: { id: string }; Body: { revision?: string } }>(
     "/repositories/:id/rollback",
     async (request, reply) => {
-    if (!hasAdminAccess(request)) {
+      if (!hasAdminAccess(request)) {
         reply.code(403);
         return { error: "admin API access denied" };
       }
@@ -2292,16 +2795,12 @@ export async function startServer(
         return { error: "revision is required" };
       }
       try {
-        return await service.rollbackRepositoryRevision(
-          request.params.id,
-          request.body.revision,
-          adminPrincipal
-        );
+        return await service.rollbackRepositoryRevision(request.params.id, request.body.revision, adminPrincipal);
       } catch (error) {
         reply.code(400);
         return { error: error instanceof Error ? error.message : String(error) };
       }
-    }
+    },
   );
 
   app.get("/api/v1/health/live", async (_request, reply) => {
@@ -2311,7 +2810,7 @@ export async function startServer(
 
   app.get("/api/v1/health/ready", async (_request, reply) => {
     reply.header("x-skill-hub-api-version", restApiVersion);
-    const ready = service.isReady() && await service.isObservabilityStorageReady();
+    const ready = service.isReady() && (await service.isObservabilityStorageReady());
     if (!ready) reply.code(503);
     const states = service.listRepositoryStates();
     return {
@@ -2321,8 +2820,8 @@ export async function startServer(
         healthy: states.filter((state) => state.status === "healthy").length,
         error: states.filter((state) => state.status === "error").length,
         syncing: states.filter((state) => state.status === "syncing").length,
-        disabled: states.filter((state) => state.status === "disabled").length
-      }
+        disabled: states.filter((state) => state.status === "disabled").length,
+      },
     };
   });
 

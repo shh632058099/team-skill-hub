@@ -1,7 +1,4 @@
-import {
-  CURRENT_HOOK_RUNTIME_VERSION,
-  CURRENT_HOOK_SCHEMA_VERSION
-} from "./client-events.js";
+import { CURRENT_HOOK_RUNTIME_VERSION, CURRENT_HOOK_SCHEMA_VERSION } from "./client-events.js";
 
 export const CLAUDE_CODE_ADAPTER_VERSION = "1.0.0";
 
@@ -17,13 +14,7 @@ export interface ClaudeCodeClientEvent {
   metadata: Record<string, unknown>;
 }
 
-const SUPPORTED_EVENTS = new Set([
-  "SessionStart",
-  "UserPromptSubmit",
-  "PostToolUse",
-  "Stop",
-  "SessionEnd"
-]);
+const SUPPORTED_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]);
 
 function boundedText(value: unknown, max = 32_000): string {
   if (typeof value === "string") return value.slice(0, max);
@@ -70,7 +61,7 @@ function testCounts(text: string): { run?: number; passed?: number; failed?: num
     return {
       ...(run !== undefined ? { run } : {}),
       ...(passed !== undefined ? { passed } : {}),
-      ...(failed !== undefined ? { failed } : {})
+      ...(failed !== undefined ? { failed } : {}),
     };
   }
   return {};
@@ -84,7 +75,7 @@ function postToolEvidence(input: Record<string, unknown>): Record<string, unknow
     ...(counts.run !== undefined ? { tests_run: counts.run } : {}),
     ...(counts.passed !== undefined ? { tests_passed: counts.passed } : {}),
     ...(counts.failed !== undefined ? { tests_failed: counts.failed } : {}),
-    ...(typeof input.duration_ms === "number" ? { duration_ms: input.duration_ms } : {})
+    ...(typeof input.duration_ms === "number" ? { duration_ms: input.duration_ms } : {}),
   };
 }
 
@@ -103,7 +94,7 @@ export function translateClaudeCodeHook(raw: unknown): ClaudeCodeClientEvent {
     hook_schema_version: CURRENT_HOOK_SCHEMA_VERSION,
     adapter: "claude-code-http",
     adapter_version: CLAUDE_CODE_ADAPTER_VERSION,
-    claude_hook_event: event
+    claude_hook_event: event,
   };
   for (const key of ["source", "reason", "agent_id", "agent_type"]) {
     const value = input[key];
@@ -132,6 +123,6 @@ export function translateClaudeCodeHook(raw: unknown): ClaudeCodeClientEvent {
     ...(typeof input.cwd === "string" && input.cwd ? { cwd: input.cwd } : {}),
     ...(event === "SessionStart" && typeof input.model === "string" ? { model: input.model } : {}),
     ...(typeof input.permission_mode === "string" ? { permissionMode: input.permission_mode } : {}),
-    metadata
+    metadata,
   };
 }

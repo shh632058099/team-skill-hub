@@ -59,7 +59,7 @@ function toView(record: ManagedApiKeyRecord): ManagedApiKeyView {
     principal: { ...record.principal, roles: [...record.principal.roles] },
     enabled: record.enabled,
     createdAt: record.createdAt,
-    updatedAt: record.updatedAt
+    updatedAt: record.updatedAt,
   };
 }
 
@@ -82,7 +82,7 @@ export class ManagedApiKeyStore {
         ...record,
         label: record.label?.trim() || record.principal?.id || "API Key",
         principal: normalizePrincipal(record.principal),
-        enabled: record.enabled !== false
+        enabled: record.enabled !== false,
       }));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -98,7 +98,7 @@ export class ManagedApiKeyStore {
   snapshot(): ManagedApiKeyRecord[] {
     return this.records.map((record) => ({
       ...record,
-      principal: { ...record.principal, roles: [...record.principal.roles] }
+      principal: { ...record.principal, roles: [...record.principal.roles] },
     }));
   }
 
@@ -118,7 +118,7 @@ export class ManagedApiKeyStore {
       principal,
       enabled: true,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
     };
     this.records.push(record);
     await this.persist();
@@ -214,7 +214,7 @@ export class ManagedApiKeyStore {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await writeFile(this.filePath, JSON.stringify(records, null, 2), {
       encoding: "utf8",
-      mode: 0o600
+      mode: 0o600,
     });
   }
 }

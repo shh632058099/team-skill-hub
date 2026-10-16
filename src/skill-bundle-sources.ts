@@ -26,15 +26,19 @@ function normalizeSourceRoot(value?: string): string {
 function decodeUtf8(bytes: Uint8Array, label: string): string {
   if (bytes.byteLength > MAX_FILE_BYTES) throw new Error(`file exceeds size limit: ${label}`);
   let content: string;
-  try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-  catch { throw new Error(`file must be UTF-8 text: ${label}`); }
+  try {
+    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`file must be UTF-8 text: ${label}`);
+  }
   if (content.includes("\0")) throw new Error(`file must be UTF-8 text: ${label}`);
   return content;
 }
 
 function sourceFileFromBytes(bytes: Uint8Array, label: string, mode: "0644" | "0755"): SkillBundleInputFile {
   if (bytes.byteLength > MAX_FILE_BYTES) throw new Error(`file exceeds size limit: ${label}`);
-  if (label === "SKILL.md" || label.endsWith("/SKILL.md")) return { path: label, content: decodeUtf8(bytes, label), mode };
+  if (label === "SKILL.md" || label.endsWith("/SKILL.md"))
+    return { path: label, content: decodeUtf8(bytes, label), mode };
   try {
     const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     if (!content.includes("\0")) return { path: label, content, mode };
@@ -77,7 +81,14 @@ async function readZipEntryLimited(entry: JSZip.JSZipObject, label: string): Pro
 function assertFileSetLimits(files: SkillBundleInputFile[]): SkillBundleInputFile[] {
   if (files.length === 0) throw new Error("import source contains no files");
   if (files.length > MAX_FILES) throw new Error("bundle file count exceeds limit");
-  const bytes = files.reduce((sum, file) => sum + (file.content !== undefined ? Buffer.byteLength(file.content, "utf8") : Buffer.from(file.contentBase64 ?? "", "base64").byteLength), 0);
+  const bytes = files.reduce(
+    (sum, file) =>
+      sum +
+      (file.content !== undefined
+        ? Buffer.byteLength(file.content, "utf8")
+        : Buffer.from(file.contentBase64 ?? "", "base64").byteLength),
+    0,
+  );
   if (bytes > MAX_TOTAL_BYTES) throw new Error("bundle total size exceeds limit");
   return files;
 }
@@ -85,7 +96,7 @@ function assertFileSetLimits(files: SkillBundleInputFile[]): SkillBundleInputFil
 function skillRoots(files: SkillBundleInputFile[]): string[] {
   return files
     .filter((file) => file.path === "SKILL.md" || file.path.endsWith("/SKILL.md"))
-    .map((file) => file.path === "SKILL.md" ? "" : file.path.slice(0, -"/SKILL.md".length))
+    .map((file) => (file.path === "SKILL.md" ? "" : file.path.slice(0, -"/SKILL.md".length)))
     .sort();
 }
 
@@ -103,7 +114,10 @@ function commonParent(roots: string[]): string {
   return first.slice(0, length).join("/");
 }
 
-export function selectSkillBundleFiles(files: SkillBundleInputFile[], importType: SkillBundleImportType): SkillBundleInputFile[] {
+export function selectSkillBundleFiles(
+  files: SkillBundleInputFile[],
+  importType: SkillBundleImportType,
+): SkillBundleInputFile[] {
   const roots = skillRoots(files);
   if (!roots.length) return files;
   if (importType === "skill") {
@@ -124,14 +138,23 @@ export function selectSkillBundleFiles(files: SkillBundleInputFile[], importType
   const stripPrefix = packagingRoot ? packagingRoot + "/" : "";
   return files
     .filter((file) => prefixes.some((prefix) => file.path.startsWith(prefix)))
-    .map((file) => ({ ...file, path: stripPrefix && file.path.startsWith(stripPrefix) ? file.path.slice(stripPrefix.length) : file.path }))
+    .map((file) => ({
+      ...file,
+      path: stripPrefix && file.path.startsWith(stripPrefix) ? file.path.slice(stripPrefix.length) : file.path,
+    }))
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function normalizeRevision(value?: string): string | undefined {
   const revision = value?.trim();
   if (!revision) return undefined;
-  if (revision.startsWith("-") || revision.includes("..") || revision.includes("@{") || revision.includes("\\") || !/^[A-Za-z0-9._/-]{1,200}$/.test(revision)) {
+  if (
+    revision.startsWith("-") ||
+    revision.includes("..") ||
+    revision.includes("@{") ||
+    revision.includes("\\") ||
+    !/^[A-Za-z0-9._/-]{1,200}$/.test(revision)
+  ) {
     throw new Error("Git revision is invalid");
   }
   return revision;
@@ -163,7 +186,11 @@ async function directoryBytes(root: string, maxBytes = MAX_GIT_TEMP_BYTES): Prom
   return total;
 }
 
-export async function readSkillBundleTextFile(fullPath: string, label: string, mode = 0o644): Promise<SkillBundleInputFile> {
+export async function readSkillBundleTextFile(
+  fullPath: string,
+  label: string,
+  mode = 0o644,
+): Promise<SkillBundleInputFile> {
   const info = await lstat(fullPath);
   if (!info.isFile()) throw new Error(`Git source special file is not allowed: ${label}`);
   if (info.size > MAX_FILE_BYTES) throw new Error(`file exceeds size limit: ${label}`);
@@ -189,7 +216,7 @@ export async function runGitCommandWithDirectoryQuota(input: {
       windowsHide: true,
       detached: useProcessGroup,
       env: input.env ?? process.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
     });
     const outputLimit = 1024 * 1024;
     let stdout = "";
@@ -202,8 +229,12 @@ export async function runGitCommandWithDirectoryQuota(input: {
       if (current.length >= outputLimit) return current;
       return (current + chunk.toString()).slice(0, outputLimit);
     };
-    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
-    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    child.stdout?.on("data", (chunk) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = append(stderr, chunk);
+    });
 
     const stop = () => {
       clearInterval(monitor);
@@ -219,23 +250,29 @@ export async function runGitCommandWithDirectoryQuota(input: {
       if (settled || quotaError) return;
       quotaError = error;
       if (useProcessGroup && child.pid) {
-        try { process.kill(-child.pid, "SIGKILL"); }
-        catch { child.kill("SIGKILL"); }
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
       } else {
         child.kill("SIGKILL");
       }
     };
-    const monitor = setInterval(async () => {
-      if (settled || checking) return;
-      checking = true;
-      try {
-        await directoryBytes(input.monitorRoot, input.maxBytes ?? MAX_GIT_TEMP_BYTES);
-      } catch (error) {
-        kill(error instanceof Error ? error : new Error(String(error)));
-      } finally {
-        checking = false;
-      }
-    }, Math.max(10, input.pollIntervalMs ?? 100));
+    const monitor = setInterval(
+      async () => {
+        if (settled || checking) return;
+        checking = true;
+        try {
+          await directoryBytes(input.monitorRoot, input.maxBytes ?? MAX_GIT_TEMP_BYTES);
+        } catch (error) {
+          kill(error instanceof Error ? error : new Error(String(error)));
+        } finally {
+          checking = false;
+        }
+      },
+      Math.max(10, input.pollIntervalMs ?? 100),
+    );
     const timeout = setTimeout(() => kill(new Error("Git import command timed out")), input.timeoutMs);
 
     child.once("error", (error) => finishError(error));
@@ -267,18 +304,22 @@ export async function extractSkillBundleZip(zipBase64: string, sourceRoot?: stri
     if (entry.dir) continue;
     const normalized = entryPath.replaceAll("\\", "/");
     const parts = normalized.split("/");
-    if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || parts.some((part) => part === ".." || part === "." || !part)) {
+    if (
+      normalized.startsWith("/") ||
+      /^[A-Za-z]:/.test(normalized) ||
+      parts.some((part) => part === ".." || part === "." || !part)
+    ) {
       throw new Error(`unsafe ZIP path: ${entryPath}`);
     }
     if (prefix && !normalized.startsWith(prefix)) continue;
     const relative = prefix ? normalized.slice(prefix.length) : normalized;
     if (!relative) continue;
-    const unixPermissions = typeof entry.unixPermissions === "string"
-      ? Number.parseInt(entry.unixPermissions, 8)
-      : entry.unixPermissions;
+    const unixPermissions =
+      typeof entry.unixPermissions === "string" ? Number.parseInt(entry.unixPermissions, 8) : entry.unixPermissions;
     if (typeof unixPermissions === "number") {
       const fileType = unixPermissions & 0o170000;
-      if (fileType && fileType !== 0o100000) throw new Error(`ZIP special file or symlink is not allowed: ${entryPath}`);
+      if (fileType && fileType !== 0o100000)
+        throw new Error(`ZIP special file or symlink is not allowed: ${entryPath}`);
     }
     const bytes = await readZipEntryLimited(entry, relative);
     const executable = typeof unixPermissions === "number" && (unixPermissions & 0o111) !== 0;
@@ -291,7 +332,15 @@ function privateIpv4(address: string): boolean {
   const parts = address.split(".").map(Number);
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
   const [a, b] = parts as [number, number, number, number];
-  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
 }
 
 function privateIpv6(address: string): boolean {
@@ -301,12 +350,22 @@ function privateIpv6(address: string): boolean {
     if (isIP(mapped) === 4) return privateIpv4(mapped);
     return true;
   }
-  return value === "::" || value === "::1" || value.startsWith("fe8") || value.startsWith("fe9") || value.startsWith("fea") || value.startsWith("feb") || value.startsWith("fc") || value.startsWith("fd") || value.startsWith("ff");
+  return (
+    value === "::" ||
+    value === "::1" ||
+    value.startsWith("fe8") ||
+    value.startsWith("fe9") ||
+    value.startsWith("fea") ||
+    value.startsWith("feb") ||
+    value.startsWith("fc") ||
+    value.startsWith("fd") ||
+    value.startsWith("ff")
+  );
 }
 
 export function buildSkillBundleGitCurlResolve(url: URL, addresses: string[]): string {
   const port = url.port || "443";
-  const formattedAddresses = addresses.map((address) => isIP(address) === 6 ? `[${address}]` : address);
+  const formattedAddresses = addresses.map((address) => (isIP(address) === 6 ? `[${address}]` : address));
   return `${url.hostname}:${port}:${formattedAddresses.join(",")}`;
 }
 
@@ -322,21 +381,27 @@ export function buildSkillBundleGitEnvironment(base: NodeJS.ProcessEnv, host: st
     NO_PROXY: mergedNoProxy,
     no_proxy: mergedNoProxy,
     GIT_TERMINAL_PROMPT: "0",
-    GIT_LFS_SKIP_SMUDGE: "1"
+    GIT_LFS_SKIP_SMUDGE: "1",
   };
 }
 
 export async function validateSkillBundleGitUrl(
   value: string,
   allowedHosts: string[],
-  resolveAddresses: (host: string) => Promise<string[]> = async (host) => (await lookup(host, { all: true })).map((item) => item.address)
+  resolveAddresses: (host: string) => Promise<string[]> = async (host) =>
+    (await lookup(host, { all: true })).map((item) => item.address),
 ): Promise<{ url: URL; addresses: string[] }> {
   let url: URL;
-  try { url = new URL(value); } catch { throw new Error("Git URL is invalid"); }
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Git URL is invalid");
+  }
   if (url.protocol !== "https:") throw new Error("Git URL must use https");
   if (url.username || url.password) throw new Error("Git URL must not contain credentials");
   const host = url.hostname.toLowerCase();
-  if (!allowedHosts.map((item) => item.toLowerCase()).includes(host)) throw new Error(`Git host is not allowed: ${host}`);
+  if (!allowedHosts.map((item) => item.toLowerCase()).includes(host))
+    throw new Error(`Git host is not allowed: ${host}`);
   const addresses = await resolveAddresses(host);
   if (!addresses.length) throw new Error("Git host did not resolve");
   for (const address of addresses) {
@@ -358,7 +423,10 @@ async function scanTextFiles(root: string): Promise<SkillBundleInputFile[]> {
       const rel = relative ? `${relative}/${entry.name}` : entry.name;
       const info = await lstat(full);
       if (info.isSymbolicLink()) throw new Error(`Git source symlink is not allowed: ${rel}`);
-      if (info.isDirectory()) { await walk(full, rel); continue; }
+      if (info.isDirectory()) {
+        await walk(full, rel);
+        continue;
+      }
       if (!info.isFile()) throw new Error(`Git source special file is not allowed: ${rel}`);
       if (files.length >= MAX_FILES) throw new Error("bundle file count exceeds limit");
       files.push(await readSkillBundleTextFile(full, rel, info.mode));
@@ -381,21 +449,35 @@ export async function importSkillBundleGit(input: {
   const temp = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-git-"));
   const checkout = path.join(temp, "repo");
   const gitEnv = buildSkillBundleGitEnvironment(process.env, url.hostname);
-  const run = async (args: string[]) => await runGitCommandWithDirectoryQuota({
-    args,
-    cwd: temp,
-    monitorRoot: temp,
-    timeoutMs: input.timeoutMs ?? 60_000,
-    maxBytes: MAX_GIT_TEMP_BYTES,
-    env: gitEnv
-  });
+  const run = async (args: string[]) =>
+    await runGitCommandWithDirectoryQuota({
+      args,
+      cwd: temp,
+      monitorRoot: temp,
+      timeoutMs: input.timeoutMs ?? 60_000,
+      maxBytes: MAX_GIT_TEMP_BYTES,
+      env: gitEnv,
+    });
   const networkArgs = [
-    "-c", "protocol.file.allow=never",
-    "-c", "http.followRedirects=false",
-    "-c", `http.curloptResolve=${buildSkillBundleGitCurlResolve(url, addresses)}`
+    "-c",
+    "protocol.file.allow=never",
+    "-c",
+    "http.followRedirects=false",
+    "-c",
+    `http.curloptResolve=${buildSkillBundleGitCurlResolve(url, addresses)}`,
   ];
   try {
-    await run([...networkArgs, "clone", "--depth", "1", "--no-tags", "--no-recurse-submodules", "--no-checkout", url.href, checkout]);
+    await run([
+      ...networkArgs,
+      "clone",
+      "--depth",
+      "1",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--no-checkout",
+      url.href,
+      checkout,
+    ]);
     await directoryBytes(checkout);
     if (revision) {
       await runGitCommandWithDirectoryQuota({
@@ -404,7 +486,7 @@ export async function importSkillBundleGit(input: {
         monitorRoot: temp,
         timeoutMs: input.timeoutMs ?? 60_000,
         maxBytes: MAX_GIT_TEMP_BYTES,
-        env: gitEnv
+        env: gitEnv,
       });
       await runGitCommandWithDirectoryQuota({
         args: ["checkout", "--detach", "FETCH_HEAD"],
@@ -412,7 +494,7 @@ export async function importSkillBundleGit(input: {
         monitorRoot: temp,
         timeoutMs: input.timeoutMs ?? 60_000,
         maxBytes: MAX_GIT_TEMP_BYTES,
-        env: gitEnv
+        env: gitEnv,
       });
     } else {
       await runGitCommandWithDirectoryQuota({
@@ -421,11 +503,15 @@ export async function importSkillBundleGit(input: {
         monitorRoot: temp,
         timeoutMs: input.timeoutMs ?? 60_000,
         maxBytes: MAX_GIT_TEMP_BYTES,
-        env: gitEnv
+        env: gitEnv,
       });
     }
     await directoryBytes(checkout);
-    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: checkout, timeout: 10_000, windowsHide: true });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: checkout,
+      timeout: 10_000,
+      windowsHide: true,
+    });
     const selected = sourceRoot ? path.join(checkout, ...sourceRoot.split("/")) : checkout;
     const info = await lstat(selected).catch(() => undefined);
     if (!info?.isDirectory()) throw new Error("source_root does not exist or is not a directory");

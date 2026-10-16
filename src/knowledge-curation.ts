@@ -54,7 +54,12 @@ function safeSuggestedPath(value: unknown): string | undefined {
   const path = cleanText(value, "suggestedPath", 240);
   if (!path) return undefined;
   const normalized = path.replaceAll("\\", "/");
-  if (normalized.startsWith("/") || normalized.includes("../") || normalized === ".." || /^[A-Za-z]:\//.test(normalized)) {
+  if (
+    normalized.startsWith("/") ||
+    normalized.includes("../") ||
+    normalized === ".." ||
+    /^[A-Za-z]:\//.test(normalized)
+  ) {
     throw new Error("Curator proposal suggestedPath is unsafe");
   }
   if (!/\.(md|txt)$/i.test(normalized)) throw new Error("Curator proposal suggestedPath must end in .md or .txt");
@@ -76,9 +81,11 @@ export function validateCandidateCurationProposal(raw: unknown): CandidateCurati
     const hint = value.conflictHint as Record<string, unknown>;
     conflictHint = {
       reason: cleanText(hint.reason, "conflictHint.reason", 500, true)!,
-      ...(cleanText(hint.targetKey, "conflictHint.targetKey", 240) ? {
-        targetKey: cleanText(hint.targetKey, "conflictHint.targetKey", 240)
-      } : {})
+      ...(cleanText(hint.targetKey, "conflictHint.targetKey", 240)
+        ? {
+            targetKey: cleanText(hint.targetKey, "conflictHint.targetKey", 240),
+          }
+        : {}),
     };
   }
   return {
@@ -87,7 +94,7 @@ export function validateCandidateCurationProposal(raw: unknown): CandidateCurati
     ...(cleanText(value.category, "category", 80) ? { category: cleanText(value.category, "category", 80) } : {}),
     ...(safeSuggestedPath(value.suggestedPath) ? { suggestedPath: safeSuggestedPath(value.suggestedPath) } : {}),
     suggestedType,
-    ...(conflictHint ? { conflictHint } : {})
+    ...(conflictHint ? { conflictHint } : {}),
   };
 }
 
@@ -96,7 +103,8 @@ export function validateGapClusters(raw: unknown, gaps: GapCurationInput[]): Gap
   const known = new Set(gaps.map((item) => item.key));
   const used = new Set<string>();
   return raw.slice(0, 50).map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Curator gap cluster " + index + " must be an object");
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      throw new Error("Curator gap cluster " + index + " must be an object");
     const value = item as Record<string, unknown>;
     if (!Array.isArray(value.memberKeys)) throw new Error("Curator gap cluster memberKeys must be an array");
     const memberKeys = [...new Set(value.memberKeys.filter((key): key is string => typeof key === "string"))];
@@ -109,9 +117,13 @@ export function validateGapClusters(raw: unknown, gaps: GapCurationInput[]): Gap
     return {
       label: cleanText(value.label, "cluster.label", 120, true)!,
       memberKeys,
-      ...(cleanText(value.suggestedTitle, "cluster.suggestedTitle", 160) ? { suggestedTitle: cleanText(value.suggestedTitle, "cluster.suggestedTitle", 160) } : {}),
+      ...(cleanText(value.suggestedTitle, "cluster.suggestedTitle", 160)
+        ? { suggestedTitle: cleanText(value.suggestedTitle, "cluster.suggestedTitle", 160) }
+        : {}),
       ...(safeSuggestedPath(value.suggestedPath) ? { suggestedPath: safeSuggestedPath(value.suggestedPath) } : {}),
-      ...(cleanText(value.category, "cluster.category", 80) ? { category: cleanText(value.category, "cluster.category", 80) } : {})
+      ...(cleanText(value.category, "cluster.category", 80)
+        ? { category: cleanText(value.category, "cluster.category", 80) }
+        : {}),
     };
   });
 }
@@ -129,7 +141,7 @@ export class HttpKnowledgeCurator {
       tokenEnv,
       tokenConfigured: Boolean(process.env[tokenEnv]),
       humanReviewRequired: true,
-      directKnowledgeWrite: false
+      directKnowledgeWrite: false,
     };
   }
 
@@ -142,7 +154,7 @@ export class HttpKnowledgeCurator {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(token ? { authorization: "Bearer " + token } : {})
+        ...(token ? { authorization: "Bearer " + token } : {}),
       },
       body: JSON.stringify({
         schema_version: 1,
@@ -151,16 +163,16 @@ export class HttpKnowledgeCurator {
         constraints: {
           human_review_required: true,
           direct_knowledge_write: false,
-          deterministic_guard_required: true
-        }
+          deterministic_guard_required: true,
+        },
       }),
-      signal: AbortSignal.timeout(15000)
+      signal: AbortSignal.timeout(15000),
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       throw new Error("Knowledge curator request failed (" + response.status + "): " + detail.slice(0, 500));
     }
-    const body = await response.json() as { schema_version?: number; proposal?: unknown; clusters?: unknown };
+    const body = (await response.json()) as { schema_version?: number; proposal?: unknown; clusters?: unknown };
     if (body.schema_version !== 1) throw new Error("Knowledge curator response schema_version must be 1");
     return action === "curate_candidate" ? body.proposal : body.clusters;
   }
@@ -174,23 +186,28 @@ export class HttpKnowledgeCurator {
       repository: candidate.repository,
       suggestedPath: candidate.suggestedPath,
       suggestedType: candidate.suggestedType,
-      automation: candidate.automation ? {
-        classification: candidate.automation.classification,
-        reasons: candidate.automation.reasons,
-        evidenceCount: candidate.automation.evidenceCount
-      } : undefined
+      automation: candidate.automation
+        ? {
+            classification: candidate.automation.classification,
+            reasons: candidate.automation.reasons,
+            evidenceCount: candidate.automation.evidenceCount,
+          }
+        : undefined,
     });
     return validateCandidateCurationProposal(raw);
   }
 
   async clusterGaps(gaps: GapCurationInput[]): Promise<GapClusterProposal[]> {
-    const raw = await this.request("cluster_gaps", gaps.slice(0, 200).map((item) => ({
-      key: item.key,
-      query: item.query.slice(0, 500),
-      occurrences: item.occurrences,
-      source: item.source,
-      members: item.members?.slice(0, 20)
-    })));
+    const raw = await this.request(
+      "cluster_gaps",
+      gaps.slice(0, 200).map((item) => ({
+        key: item.key,
+        query: item.query.slice(0, 500),
+        occurrences: item.occurrences,
+        source: item.source,
+        members: item.members?.slice(0, 20),
+      })),
+    );
     return validateGapClusters(raw, gaps);
   }
 }

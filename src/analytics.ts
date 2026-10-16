@@ -16,7 +16,7 @@ export interface UsageEvent {
 export class UsageAnalyticsStore {
   constructor(
     private readonly dataDir: string,
-    private readonly maxEntries = 5000
+    private readonly maxEntries = 5000,
   ) {}
 
   private file(): string {
@@ -126,8 +126,8 @@ export class UsageAnalyticsStore {
         p50: percentile(0.5),
         p75: percentile(0.75),
         p90: percentile(0.9),
-        max: knowledgeTopScores.at(-1)
-      }
+        max: knowledgeTopScores.at(-1),
+      },
     };
   }
 

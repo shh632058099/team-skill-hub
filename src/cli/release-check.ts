@@ -49,32 +49,49 @@ async function main(): Promise<void> {
     throw new Error("docker workflow does not publish immutable SHA references");
   }
 
-  const clientRelease = JSON.parse(await readFile(path.join(root, "client-integration", "release.json"), "utf8")) as { version?: number; minimumSupportedVersion?: number };
-  const clientManifest = JSON.parse(await readFile(path.join(root, "dist", "client-integration", "manifest.json"), "utf8")) as {
+  const clientRelease = JSON.parse(await readFile(path.join(root, "client-integration", "release.json"), "utf8")) as {
+    version?: number;
+    minimumSupportedVersion?: number;
+  };
+  const clientManifest = JSON.parse(
+    await readFile(path.join(root, "dist", "client-integration", "manifest.json"), "utf8"),
+  ) as {
     version?: number;
     minimum_supported_version?: number;
     packages?: { linux?: { path?: string; sha256?: string }; windows?: { path?: string; sha256?: string } };
   };
-  if (clientManifest.version !== clientRelease.version || clientManifest.minimum_supported_version !== clientRelease.minimumSupportedVersion) {
+  if (
+    clientManifest.version !== clientRelease.version ||
+    clientManifest.minimum_supported_version !== clientRelease.minimumSupportedVersion
+  ) {
     throw new Error("client integration manifest does not match client-integration/release.json");
   }
   for (const platform of ["linux", "windows"] as const) {
     const entry = clientManifest.packages?.[platform];
     if (!entry?.path || !entry.sha256) throw new Error(`client integration ${platform} package metadata is missing`);
     const packagePath = path.join(root, "dist", "client-integration", ...entry.path.split("/"));
-    const actual = createHash("sha256").update(await readFile(packagePath)).digest("hex");
-    if (actual !== entry.sha256) throw new Error(`client integration ${platform} package checksum does not match manifest`);
+    const actual = createHash("sha256")
+      .update(await readFile(packagePath))
+      .digest("hex");
+    if (actual !== entry.sha256)
+      throw new Error(`client integration ${platform} package checksum does not match manifest`);
   }
 
-  console.log(JSON.stringify({
-    ok: true,
-    package: packageJson.name,
-    version: packageJson.version,
-    tag: tag ?? null,
-    changelog: "CHANGELOG.md",
-    migrationNote: path.relative(root, migrationPath).replaceAll("\\", "/"),
-    immutableImageTags: ["git-tag", "git-sha"]
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        package: packageJson.name,
+        version: packageJson.version,
+        tag: tag ?? null,
+        changelog: "CHANGELOG.md",
+        migrationNote: path.relative(root, migrationPath).replaceAll("\\", "/"),
+        immutableImageTags: ["git-tag", "git-sha"],
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 main().catch((error) => {

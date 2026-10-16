@@ -7,7 +7,7 @@ test("30-user capacity harness preserves concurrent observability writes", async
     users: 30,
     chunks: 1500,
     searchesPerUser: 3,
-    writesPerUser: 2
+    writesPerUser: 2,
   });
   assert.equal(result.users, 30);
   assert.equal(result.totalSearches, 90);

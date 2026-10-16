@@ -13,7 +13,7 @@ async function callResolve() {
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
-      "x-skill-hub-api-key": apiKey
+      "x-skill-hub-api-key": apiKey,
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -21,9 +21,9 @@ async function callResolve() {
       method: "tools/call",
       params: {
         name: "resolve_skill",
-        arguments: { query, top_k: 3 }
-      }
-    })
+        arguments: { query, top_k: 3 },
+      },
+    }),
   });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${await response.text()}`);
@@ -37,14 +37,14 @@ async function assertInvalidKeyRejected() {
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
-      "x-skill-hub-api-key": `${apiKey}-invalid`
+      "x-skill-hub-api-key": `${apiKey}-invalid`,
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       method: "tools/list",
-      params: {}
-    })
+      params: {},
+    }),
   });
   if (response.status !== 401) {
     throw new Error(`Invalid API key was not rejected: HTTP ${response.status}`);
@@ -68,19 +68,14 @@ async function worker() {
   }
 }
 
-await Promise.all(
-  Array.from({ length: Math.min(concurrency, iterations) }, () => worker())
-);
+await Promise.all(Array.from({ length: Math.min(concurrency, iterations) }, () => worker()));
 
 const elapsed = performance.now() - started;
 latencies.sort((a, b) => a - b);
 
 function percentile(p) {
   if (latencies.length === 0) return 0;
-  const index = Math.min(
-    latencies.length - 1,
-    Math.ceil(latencies.length * p) - 1
-  );
+  const index = Math.min(latencies.length - 1, Math.ceil(latencies.length * p) - 1);
   return latencies[index];
 }
 
@@ -99,10 +94,10 @@ console.log(
         p50: Number(percentile(0.5).toFixed(2)),
         p95: Number(percentile(0.95).toFixed(2)),
         p99: Number(percentile(0.99).toFixed(2)),
-        max: Number((latencies.at(-1) ?? 0).toFixed(2))
-      }
+        max: Number((latencies.at(-1) ?? 0).toFixed(2)),
+      },
     },
     null,
-    2
-  )
+    2,
+  ),
 );

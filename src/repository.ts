@@ -3,27 +3,19 @@ import { execFile } from "node:child_process";
 import { chmod, cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type {
-  MaterializedRepository,
-  RepositoryConfig,
-  SkillRepositoryProvider
-} from "./types.js";
+import type { MaterializedRepository, RepositoryConfig, SkillRepositoryProvider } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
 const GIT_TIMEOUT_MS = 60_000;
 
-async function runGit(
-  args: string[],
-  cwd?: string,
-  extraEnv: NodeJS.ProcessEnv = {}
-): Promise<string> {
+async function runGit(args: string[], cwd?: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
   try {
     const { stdout } = await execFileAsync("git", args, {
       ...(cwd ? { cwd } : {}),
       windowsHide: true,
       timeout: GIT_TIMEOUT_MS,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...extraEnv }
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...extraEnv },
     });
     return stdout.trim();
   } catch (error) {
@@ -58,15 +50,15 @@ async function gitAuthEnv(config: RepositoryConfig, dataDir: string): Promise<No
     await mkdir(helperDir, { recursive: true });
     await writeFile(
       helperPath,
-      "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$SKILL_HUB_GIT_USERNAME\" ;;\n  *) printf '%s\\n' \"$SKILL_HUB_GIT_TOKEN\" ;;\nesac\n",
-      { encoding: "utf8", mode: 0o700 }
+      '#!/bin/sh\ncase "$1" in\n  *Username*) printf \'%s\\n\' "$SKILL_HUB_GIT_USERNAME" ;;\n  *) printf \'%s\\n\' "$SKILL_HUB_GIT_TOKEN" ;;\nesac\n',
+      { encoding: "utf8", mode: 0o700 },
     );
     await chmod(helperPath, 0o700);
     return {
       GIT_ASKPASS: helperPath,
       GIT_ASKPASS_REQUIRE: "force",
       SKILL_HUB_GIT_USERNAME: username,
-      SKILL_HUB_GIT_TOKEN: token
+      SKILL_HUB_GIT_TOKEN: token,
     };
   }
 
@@ -78,7 +70,7 @@ async function gitAuthEnv(config: RepositoryConfig, dataDir: string): Promise<No
   await stat(keyPath);
   await stat(knownHostsPath);
   return {
-    GIT_SSH_COMMAND: `ssh -i ${shellQuote(keyPath)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${shellQuote(knownHostsPath)}`
+    GIT_SSH_COMMAND: `ssh -i ${shellQuote(keyPath)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${shellQuote(knownHostsPath)}`,
   };
 }
 
@@ -113,11 +105,7 @@ export class LocalRepositoryProvider implements SkillRepositoryProvider {
     const head = await tryGit(sourceRoot, ["rev-parse", "HEAD"]);
     const dirty = await tryGit(sourceRoot, ["status", "--porcelain"]);
     const digest = await digestTree(sourceRoot);
-    const revision = head
-      ? dirty
-        ? `${head.slice(0, 12)}-dirty-${digest}`
-        : head
-      : `local-${digest}`;
+    const revision = head ? (dirty ? `${head.slice(0, 12)}-dirty-${digest}` : head) : `local-${digest}`;
     return { config, sourceRoot, revision };
   }
 }
@@ -140,26 +128,13 @@ export class GitRepositoryProvider implements SkillRepositoryProvider {
     if (!exists) {
       await rm(sourceRoot, { recursive: true, force: true });
       await runGit(
-        [
-          "clone",
-          "--depth",
-          "1",
-          "--no-tags",
-          "--branch",
-          config.branch ?? "main",
-          config.gitUrl!,
-          sourceRoot
-        ],
+        ["clone", "--depth", "1", "--no-tags", "--branch", config.branch ?? "main", config.gitUrl!, sourceRoot],
         undefined,
-        authEnv
+        authEnv,
       );
     } else {
       await runGit(["remote", "set-url", "origin", config.gitUrl!], sourceRoot, authEnv);
-      await runGit(
-        ["fetch", "--depth", "1", "--no-tags", "origin", config.branch ?? "main"],
-        sourceRoot,
-        authEnv
-      );
+      await runGit(["fetch", "--depth", "1", "--no-tags", "origin", config.branch ?? "main"], sourceRoot, authEnv);
       await runGit(["reset", "--hard", "FETCH_HEAD"], sourceRoot, authEnv);
       await runGit(["clean", "-ffdx"], sourceRoot, authEnv);
     }
@@ -173,7 +148,7 @@ export async function createValidatedSnapshot(
   sourceRoot: string,
   dataDir: string,
   repositoryId: string,
-  revision: string
+  revision: string,
 ): Promise<string> {
   const safeRevision = revision.replace(/[^A-Za-z0-9._-]/g, "_");
   const destination = path.join(dataDir, "revisions", repositoryId, safeRevision);
@@ -189,7 +164,7 @@ export async function createValidatedSnapshot(
     filter(source) {
       const rel = path.relative(sourceRoot, source);
       return !rel.split(path.sep).includes(".git");
-    }
+    },
   });
   return destination;
 }

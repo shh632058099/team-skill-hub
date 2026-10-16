@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultCandidatePath, GitHubKnowledgePublisher, GitLabKnowledgePublisher } from "../src/knowledge-publishing.js";
+import {
+  defaultCandidatePath,
+  GitHubKnowledgePublisher,
+  GitLabKnowledgePublisher,
+} from "../src/knowledge-publishing.js";
 import type { RepositoryConfig } from "../src/types.js";
 import type { KnowledgeCandidate } from "../src/observability.js";
 
@@ -24,8 +28,8 @@ function repository(): RepositoryConfig {
       provider: "gitlab",
       tokenEnv: "TEST_GITLAB_WRITE_TOKEN",
       targetBranch: "master",
-      branchPrefix: "skill-hub-knowledge"
-    }
+      branchPrefix: "skill-hub-knowledge",
+    },
   };
 }
 
@@ -40,8 +44,8 @@ function githubRepository(): RepositoryConfig {
       projectPath: "shh632058099/rd-knowledges",
       tokenEnv: "TEST_GITHUB_TOKEN",
       targetBranch: "main",
-      branchPrefix: "skill-hub-knowledge"
-    }
+      branchPrefix: "skill-hub-knowledge",
+    },
   };
 }
 
@@ -62,25 +66,25 @@ function candidate(overrides: Partial<KnowledgeCandidate> = {}): KnowledgeCandid
     status: "approved",
     reviewer: "admin-http",
     reviewNote: "verified",
-    ...overrides
+    ...overrides,
   };
 }
 
 test("default Knowledge path is stable and unique per candidate", () => {
   assert.equal(
     defaultCandidatePath(candidate({ suggestedPath: undefined, title: "OTA 断电恢复修复" })),
-    "knowledge/ota-1234567890ab.md"
+    "knowledge/ota-1234567890ab.md",
   );
   assert.equal(
     defaultCandidatePath(candidate({ id: "kc_abcdef1234567890", suggestedPath: undefined, title: "纯中文知识" })),
-    "knowledge/knowledge-abcdef123456.md"
+    "knowledge/knowledge-abcdef123456.md",
   );
 });
 
 function responseJson(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: { "content-type": "application/json" },
   });
 }
 
@@ -91,13 +95,13 @@ test("GitLab publisher creates a new file branch and merge request", async () =>
     new Response(null, { status: 404 }),
     new Response(null, { status: 404 }),
     responseJson({ file_path: "docs/ota/recovery-note.md", branch: "skill-hub-knowledge-1234567890ab" }, 201),
-    responseJson({ iid: 12, web_url: "https://gitlab.example.com/ai/rd-skills/-/merge_requests/12" }, 201)
+    responseJson({ iid: 12, web_url: "https://gitlab.example.com/ai/rd-skills/-/merge_requests/12" }, 201),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
     calls.push({
       url: String(input),
       method: init?.method ?? "GET",
-      body: typeof init?.body === "string" ? init.body : undefined
+      body: typeof init?.body === "string" ? init.body : undefined,
     });
     const response = responses.shift();
     if (!response) throw new Error("unexpected request");
@@ -127,7 +131,7 @@ test("GitLab publisher updates an existing target file", async () => {
     new Response(null, { status: 404 }),
     new Response(null, { status: 200 }),
     responseJson({ file_path: "docs/ota/recovery-note.md" }, 200),
-    responseJson({ iid: 13, web_url: "https://gitlab.example.com/mr/13" }, 201)
+    responseJson({ iid: 13, web_url: "https://gitlab.example.com/mr/13" }, 201),
   ];
   const fetchMock: typeof fetch = async (_input, init) => {
     calls.push({ method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
@@ -155,7 +159,7 @@ test("GitLab publisher retry skips identical branch content and reuses open MR",
     new Response(null, { status: 404 }),
     responseJson({ content: Buffer.from(desired).toString("base64"), encoding: "base64" }, 200),
     responseJson({ message: "Another open merge request already exists" }, 409),
-    responseJson([{ iid: 14, web_url: "https://gitlab.example.com/mr/14" }], 200)
+    responseJson([{ iid: 14, web_url: "https://gitlab.example.com/mr/14" }], 200),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
     calls.push({ url: String(input), method: init?.method ?? "GET" });
@@ -167,10 +171,13 @@ test("GitLab publisher retry skips identical branch content and reuses open MR",
   try {
     const result = await new GitLabKnowledgePublisher(fetchMock).publish(
       candidate({ status: "publish_failed" }),
-      repository()
+      repository(),
     );
     assert.equal(result.mergeRequestIid, 14);
-    assert.deepEqual(calls.map((call) => call.method), ["GET", "HEAD", "GET", "POST", "GET"]);
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["GET", "HEAD", "GET", "POST", "GET"],
+    );
     assert.match(calls[4]?.url ?? "", /source_branch=skill-hub-knowledge-1234567890ab/);
     assert.match(calls[4]?.url ?? "", /state=all/);
   } finally {
@@ -186,7 +193,7 @@ test("GitLab publisher refuses to silently reuse a closed merge request", async 
     new Response(null, { status: 404 }),
     responseJson({ content: Buffer.from(desired).toString("base64"), encoding: "base64" }, 200),
     responseJson({ message: "merge request already exists" }, 409),
-    responseJson([{ iid: 15, web_url: "https://gitlab.example.com/mr/15", state: "closed" }], 200)
+    responseJson([{ iid: 15, web_url: "https://gitlab.example.com/mr/15", state: "closed" }], 200),
   ];
   const fetchMock: typeof fetch = async () => {
     const response = responses.shift();
@@ -195,12 +202,8 @@ test("GitLab publisher refuses to silently reuse a closed merge request", async 
   };
   try {
     await assert.rejects(
-      () =>
-        new GitLabKnowledgePublisher(fetchMock).publish(
-          candidate({ status: "publish_failed" }),
-          repository()
-        ),
-      /merge request !15.*is closed/
+      () => new GitLabKnowledgePublisher(fetchMock).publish(candidate({ status: "publish_failed" }), repository()),
+      /merge request !15.*is closed/,
     );
   } finally {
     delete process.env.TEST_GITLAB_WRITE_TOKEN;
@@ -213,16 +216,13 @@ test("GitLab publisher rejects missing token and unsafe target paths", async () 
     throw new Error("network should not be called");
   });
 
-  await assert.rejects(
-    () => publisher.publish(candidate(), repository()),
-    /Missing GitLab publishing token/
-  );
+  await assert.rejects(() => publisher.publish(candidate(), repository()), /Missing GitLab publishing token/);
 
   process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
   try {
     await assert.rejects(
       () => publisher.publish(candidate({ suggestedPath: "../secret.md" }), repository()),
-      /suggestedPath is invalid/
+      /suggestedPath is invalid/,
     );
   } finally {
     delete process.env.TEST_GITLAB_WRITE_TOKEN;
@@ -241,7 +241,7 @@ test("GitLab publisher reconciles merge request state", async () => {
         merge_commit_sha: "abc123",
         has_conflicts: false,
         detailed_merge_status: "merged",
-        head_pipeline: { status: "success" }
+        head_pipeline: { status: "success" },
       });
     }
     if (/repository\/branches\/skill-hub-knowledge-1234567890ab$/.test(url)) {
@@ -262,9 +262,9 @@ test("GitLab publisher reconciles merge request state", async () => {
         mergeRequestUrl: "https://gitlab.example.com/ai/rd-skills/-/merge_requests/12",
         publishedAt: "2026-09-29T00:00:00.000Z",
         mergeRequestState: "opened",
-        lastCheckedAt: "2026-09-29T00:00:00.000Z"
+        lastCheckedAt: "2026-09-29T00:00:00.000Z",
       },
-      repository()
+      repository(),
     );
     assert.equal(result.mergeRequestState, "merged");
     assert.equal(result.mergedAt, "2026-09-30T03:30:00.000Z");
@@ -293,11 +293,14 @@ test("GitHub publisher pushes candidate content over SSH and creates a pull requ
     const body = JSON.parse(String(init?.body ?? "{}"));
     assert.equal(body.head, "skill-hub-knowledge-1234567890ab");
     assert.equal(body.base, "main");
-    return responseJson({
-      number: 21,
-      html_url: "https://github.com/shh632058099/rd-knowledges/pull/21",
-      state: "open"
-    }, 201);
+    return responseJson(
+      {
+        number: 21,
+        html_url: "https://github.com/shh632058099/rd-knowledges/pull/21",
+        state: "open",
+      },
+      201,
+    );
   };
 
   try {
@@ -321,12 +324,17 @@ test("GitHub publisher recovers when PR creation returns 200 without PR details"
   const calls: Array<{ url: string; method: string }> = [];
   const responses = [
     responseJson({}, 200),
-    responseJson([{
-      number: 22,
-      html_url: "https://github.com/shh632058099/rd-knowledges/pull/22",
-      state: "open",
-      merged_at: null
-    }], 200)
+    responseJson(
+      [
+        {
+          number: 22,
+          html_url: "https://github.com/shh632058099/rd-knowledges/pull/22",
+          state: "open",
+          merged_at: null,
+        },
+      ],
+      200,
+    ),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
     calls.push({ url: String(input), method: init?.method ?? "GET" });
@@ -355,24 +363,26 @@ test("GitHub publisher reopens an existing closed pull request when retrying a c
   const calls: Array<{ url: string; method: string; body?: string }> = [];
   const responses = [
     responseJson({ message: "A pull request already exists" }, 422),
-    responseJson([{
-      number: 2,
-      html_url: "https://github.com/shh632058099/rd-knowledges/pull/2",
-      state: "closed",
-      merged_at: null
-    }]),
+    responseJson([
+      {
+        number: 2,
+        html_url: "https://github.com/shh632058099/rd-knowledges/pull/2",
+        state: "closed",
+        merged_at: null,
+      },
+    ]),
     responseJson({
       number: 2,
       html_url: "https://github.com/shh632058099/rd-knowledges/pull/2",
       state: "open",
-      merged_at: null
-    })
+      merged_at: null,
+    }),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
     calls.push({
       url: String(input),
       method: init?.method ?? "GET",
-      body: typeof init?.body === "string" ? init.body : undefined
+      body: typeof init?.body === "string" ? init.body : undefined,
     });
     const response = responses.shift();
     if (!response) throw new Error("unexpected request");
@@ -385,7 +395,7 @@ test("GitHub publisher reopens an existing closed pull request when retrying a c
   try {
     const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).publish(
       candidate({ status: "publish_failed" }),
-      githubRepository()
+      githubRepository(),
     );
     assert.equal(result.mergeRequestIid, 2);
     assert.equal(result.mergeRequestState, "opened");
@@ -413,15 +423,16 @@ test("GitHub publisher publishes a Skill candidate to the skill repository", asy
       projectPath: "shh632058099/rd-skills",
       tokenEnv: "TEST_GITHUB_TOKEN",
       targetBranch: "master",
-      branchPrefix: "skill-hub-skill"
-    }
+      branchPrefix: "skill-hub-skill",
+    },
   };
   const skill = candidate({
     suggestedType: "skill",
     skillCollection: "rd-skills",
     title: "OTA deployment helper",
     suggestedPath: "ota/deployment-helper/SKILL.md",
-    content: "---\nschema_version: 1\nname: ota-deployment-helper\ndescription: deploy OTA\nmetadata:\n  audience: [developer]\n---\n\n# OTA deployment helper\n"
+    content:
+      "---\nschema_version: 1\nname: ota-deployment-helper\ndescription: deploy OTA\nmetadata:\n  audience: [developer]\n---\n\n# OTA deployment helper\n",
   });
   const fetchMock: typeof fetch = async (input, init) => {
     assert.equal(String(input), "https://api.github.com/repos/shh632058099/rd-skills/pulls");
@@ -431,7 +442,10 @@ test("GitHub publisher publishes a Skill candidate to the skill repository", asy
     assert.equal(body.base, "master");
     assert.equal(body.title, "Skill: OTA deployment helper");
     assert.match(body.body, /Collection: rd-skills/);
-    return responseJson({ number: 22, html_url: "https://github.com/shh632058099/rd-skills/pull/22", state: "open" }, 201);
+    return responseJson(
+      { number: 22, html_url: "https://github.com/shh632058099/rd-skills/pull/22", state: "open" },
+      201,
+    );
   };
   const gitRun = async (args: string[]) => {
     gitCalls.push(args);
@@ -458,9 +472,9 @@ test("GitHub publisher reconciles pull request state", async () => {
       closed_at: "2026-10-12T08:00:00.000Z",
       merge_commit_sha: "def456",
       mergeable: true,
-      mergeable_state: "clean"
+      mergeable_state: "clean",
     }),
-    new Response("", { status: 404 })
+    new Response("", { status: 404 }),
   ];
   const fetchMock: typeof fetch = async () => {
     const response = responses.shift();
@@ -480,9 +494,9 @@ test("GitHub publisher reconciles pull request state", async () => {
         mergeRequestUrl: "https://github.com/shh632058099/rd-knowledges/pull/21",
         publishedAt: "2026-10-12T07:00:00.000Z",
         mergeRequestState: "opened",
-        lastCheckedAt: "2026-10-12T07:00:00.000Z"
+        lastCheckedAt: "2026-10-12T07:00:00.000Z",
       },
-      githubRepository()
+      githubRepository(),
     );
     assert.equal(result.mergeRequestState, "merged");
     assert.equal(result.mergeCommitSha, "def456");
@@ -501,10 +515,14 @@ test("GitLab publisher creates a deletion merge request for a merged publication
     new Response(null, { status: 200 }),
     responseJson({ file_path: "docs/ota/recovery-note.md" }, 200),
     responseJson({ id: "commit-1" }, 200),
-    responseJson({ iid: 31, web_url: "https://gitlab.example.com/mr/31", state: "opened" }, 201)
+    responseJson({ iid: 31, web_url: "https://gitlab.example.com/mr/31", state: "opened" }, 201),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
-    calls.push({ url: String(input), method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : undefined,
+    });
     const response = responses.shift();
     if (!response) throw new Error("unexpected request");
     return response;
@@ -513,13 +531,25 @@ test("GitLab publisher creates a deletion merge request for a merged publication
     const published = candidate({
       status: "published",
       publication: {
-        provider: "gitlab", projectPath: "ai/rd-skills", branch: "skill-hub-knowledge-1234567890ab",
-        targetBranch: "master", filePath: "docs/ota/recovery-note.md", action: "create", mergeRequestIid: 12,
-        mergeRequestUrl: "https://gitlab.example.com/mr/12", publishedAt: "2026-09-29T00:00:00.000Z",
-        mergeRequestState: "merged", lastCheckedAt: "2026-09-30T00:00:00.000Z", mergedAt: "2026-09-30T00:00:00.000Z"
-      }
+        provider: "gitlab",
+        projectPath: "ai/rd-skills",
+        branch: "skill-hub-knowledge-1234567890ab",
+        targetBranch: "master",
+        filePath: "docs/ota/recovery-note.md",
+        action: "create",
+        mergeRequestIid: 12,
+        mergeRequestUrl: "https://gitlab.example.com/mr/12",
+        publishedAt: "2026-09-29T00:00:00.000Z",
+        mergeRequestState: "merged",
+        lastCheckedAt: "2026-09-30T00:00:00.000Z",
+        mergedAt: "2026-09-30T00:00:00.000Z",
+      },
     });
-    const result = await new GitLabKnowledgePublisher(fetchMock).deletePublished(published, published.publication!, repository());
+    const result = await new GitLabKnowledgePublisher(fetchMock).deletePublished(
+      published,
+      published.publication!,
+      repository(),
+    );
     assert.equal(result.action, "delete");
     assert.equal(result.mergeRequestIid, 31);
     assert.match(result.branch, /delete/);
@@ -535,20 +565,38 @@ test("GitHub publisher creates a deletion pull request for a merged publication"
   const gitCalls: string[][] = [];
   const fetchMock: typeof fetch = async (_input, init) => {
     assert.equal(init?.method, "POST");
-    return responseJson({ number: 32, html_url: "https://github.com/shh632058099/rd-knowledges/pull/32", state: "open" }, 201);
+    return responseJson(
+      { number: 32, html_url: "https://github.com/shh632058099/rd-knowledges/pull/32", state: "open" },
+      201,
+    );
   };
-  const gitRun = async (args: string[]) => { gitCalls.push(args); return args[0] === "ls-remote" ? "" : ""; };
+  const gitRun = async (args: string[]) => {
+    gitCalls.push(args);
+    return args[0] === "ls-remote" ? "" : "";
+  };
   try {
     const published = candidate({
       status: "published",
       publication: {
-        provider: "github", projectPath: "shh632058099/rd-knowledges", branch: "skill-hub-knowledge-1234567890ab",
-        targetBranch: "main", filePath: "docs/ota/recovery-note.md", action: "create", mergeRequestIid: 21,
-        mergeRequestUrl: "https://github.com/shh632058099/rd-knowledges/pull/21", publishedAt: "2026-10-12T07:00:00.000Z",
-        mergeRequestState: "merged", lastCheckedAt: "2026-10-12T08:00:00.000Z", mergedAt: "2026-10-12T08:00:00.000Z"
-      }
+        provider: "github",
+        projectPath: "shh632058099/rd-knowledges",
+        branch: "skill-hub-knowledge-1234567890ab",
+        targetBranch: "main",
+        filePath: "docs/ota/recovery-note.md",
+        action: "create",
+        mergeRequestIid: 21,
+        mergeRequestUrl: "https://github.com/shh632058099/rd-knowledges/pull/21",
+        publishedAt: "2026-10-12T07:00:00.000Z",
+        mergeRequestState: "merged",
+        lastCheckedAt: "2026-10-12T08:00:00.000Z",
+        mergedAt: "2026-10-12T08:00:00.000Z",
+      },
     });
-    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).deletePublished(published, published.publication!, githubRepository());
+    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).deletePublished(
+      published,
+      published.publication!,
+      githubRepository(),
+    );
     assert.equal(result.action, "delete");
     assert.equal(result.mergeRequestIid, 32);
     assert.ok(gitCalls.some((call) => call[0] === "rm" && call.includes("docs/ota/recovery-note.md")));
@@ -566,7 +614,7 @@ test("GitLab deletion retry reuses the existing deletion branch and open merge r
     new Response(null, { status: 200 }),
     new Response(null, { status: 404 }),
     responseJson({ message: "merge request already exists" }, 409),
-    responseJson([{ iid: 33, web_url: "https://gitlab.example.com/mr/33", state: "opened" }], 200)
+    responseJson([{ iid: 33, web_url: "https://gitlab.example.com/mr/33", state: "opened" }], 200),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
     calls.push({ url: String(input), method: init?.method ?? "GET" });
@@ -578,13 +626,25 @@ test("GitLab deletion retry reuses the existing deletion branch and open merge r
     const published = candidate({
       status: "published",
       publication: {
-        provider: "gitlab", projectPath: "ai/rd-skills", branch: "skill-hub-knowledge-1234567890ab",
-        targetBranch: "master", filePath: "docs/ota/recovery-note.md", action: "create", mergeRequestIid: 12,
-        mergeRequestUrl: "https://gitlab.example.com/mr/12", publishedAt: "2026-09-29T00:00:00.000Z",
-        mergeRequestState: "merged", lastCheckedAt: "2026-09-30T00:00:00.000Z", mergedAt: "2026-09-30T00:00:00.000Z"
-      }
+        provider: "gitlab",
+        projectPath: "ai/rd-skills",
+        branch: "skill-hub-knowledge-1234567890ab",
+        targetBranch: "master",
+        filePath: "docs/ota/recovery-note.md",
+        action: "create",
+        mergeRequestIid: 12,
+        mergeRequestUrl: "https://gitlab.example.com/mr/12",
+        publishedAt: "2026-09-29T00:00:00.000Z",
+        mergeRequestState: "merged",
+        lastCheckedAt: "2026-09-30T00:00:00.000Z",
+        mergedAt: "2026-09-30T00:00:00.000Z",
+      },
     });
-    const result = await new GitLabKnowledgePublisher(fetchMock).deletePublished(published, published.publication!, repository());
+    const result = await new GitLabKnowledgePublisher(fetchMock).deletePublished(
+      published,
+      published.publication!,
+      repository(),
+    );
     assert.equal(result.mergeRequestIid, 33);
     assert.equal(calls.filter((call) => call.method === "DELETE").length, 0);
     assert.match(calls.at(-1)?.url ?? "", /source_branch=skill-hub-knowledge-delete-1234567890ab/);
@@ -599,7 +659,17 @@ test("GitHub deletion retry reuses an existing deletion branch and open pull req
   const gitCalls: string[][] = [];
   const responses = [
     responseJson({ message: "A pull request already exists" }, 422),
-    responseJson([{ number: 34, html_url: "https://github.com/shh632058099/rd-knowledges/pull/34", state: "open", merged_at: null }], 200)
+    responseJson(
+      [
+        {
+          number: 34,
+          html_url: "https://github.com/shh632058099/rd-knowledges/pull/34",
+          state: "open",
+          merged_at: null,
+        },
+      ],
+      200,
+    ),
   ];
   const fetchMock: typeof fetch = async (input, init) => {
     calls.push({ url: String(input), method: init?.method ?? "GET" });
@@ -617,13 +687,25 @@ test("GitHub deletion retry reuses an existing deletion branch and open pull req
     const published = candidate({
       status: "published",
       publication: {
-        provider: "github", projectPath: "shh632058099/rd-knowledges", branch: "skill-hub-knowledge-1234567890ab",
-        targetBranch: "main", filePath: "docs/ota/recovery-note.md", action: "create", mergeRequestIid: 21,
-        mergeRequestUrl: "https://github.com/shh632058099/rd-knowledges/pull/21", publishedAt: "2026-10-12T07:00:00.000Z",
-        mergeRequestState: "merged", lastCheckedAt: "2026-10-12T08:00:00.000Z", mergedAt: "2026-10-12T08:00:00.000Z"
-      }
+        provider: "github",
+        projectPath: "shh632058099/rd-knowledges",
+        branch: "skill-hub-knowledge-1234567890ab",
+        targetBranch: "main",
+        filePath: "docs/ota/recovery-note.md",
+        action: "create",
+        mergeRequestIid: 21,
+        mergeRequestUrl: "https://github.com/shh632058099/rd-knowledges/pull/21",
+        publishedAt: "2026-10-12T07:00:00.000Z",
+        mergeRequestState: "merged",
+        lastCheckedAt: "2026-10-12T08:00:00.000Z",
+        mergedAt: "2026-10-12T08:00:00.000Z",
+      },
     });
-    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).deletePublished(published, published.publication!, githubRepository());
+    const result = await new GitHubKnowledgePublisher(fetchMock, gitRun).deletePublished(
+      published,
+      published.publication!,
+      githubRepository(),
+    );
     assert.equal(result.mergeRequestIid, 34);
     assert.equal(calls[0]?.method, "POST");
     assert.equal(calls[1]?.method, "GET");

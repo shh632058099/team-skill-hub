@@ -24,7 +24,14 @@ test("admin observability index stays an index instead of embedding legacy lists
     "/admin/observability/reuse",
     "/admin/observability/failures",
   ]);
-  for (const legacyId of ["sessionsTable", "clientEventsTable", "candidateDetectionsTable", "callsTable", "operationalHealth", "sessionAnalytics"]) {
+  for (const legacyId of [
+    "sessionsTable",
+    "clientEventsTable",
+    "candidateDetectionsTable",
+    "callsTable",
+    "operationalHealth",
+    "sessionAnalytics",
+  ]) {
     assert.ok(!ADMIN_OBSERVABILITY_INDEX_HTML.includes(legacyId), `observability index should not contain ${legacyId}`);
   }
 });
@@ -42,13 +49,18 @@ test("legacy admin tabs route migrated modules to stable pages", () => {
   ]);
 });
 
-
 test("migrated admin modules are removed from the legacy dashboard payload", () => {
   for (const legacyView of ["observability", "review", "gaps", "governance"]) {
-    assert.ok(!ADMIN_HTML.includes(`data-view="${legacyView}"`), `legacy ${legacyView} view should be removed from ADMIN_HTML`);
+    assert.ok(
+      !ADMIN_HTML.includes(`data-view="${legacyView}"`),
+      `legacy ${legacyView} view should be removed from ADMIN_HTML`,
+    );
   }
   for (const legacyLoader of ["loadObservability", "loadCandidates", "loadGaps", "loadArtifactGovernance"]) {
-    assert.ok(!ADMIN_HTML.includes(`function ${legacyLoader}`), `legacy ${legacyLoader} implementation should be removed from ADMIN_HTML`);
+    assert.ok(
+      !ADMIN_HTML.includes(`function ${legacyLoader}`),
+      `legacy ${legacyLoader} implementation should be removed from ADMIN_HTML`,
+    );
   }
 });
 
@@ -153,7 +165,7 @@ test("candidate and bundle details share the unified review shell with clickable
     "/admin/api/skill-bundles/",
     "/admin/api/knowledge-candidates/",
   ]);
-  assertContainsAll(ADMIN_MODULE_HTML, ["target=\"_blank\"", "rel=\"noopener noreferrer\""]);
+  assertContainsAll(ADMIN_MODULE_HTML, ['target="_blank"', 'rel="noopener noreferrer"']);
 });
 
 test("review landing cards remain categories but all statuses target one list", () => {
@@ -213,21 +225,33 @@ test("governance is a direct page and dashboard no longer embeds repository gove
   assertContainsAll(ADMIN_GOVERNANCE_HTML, ["仓库治理", "同步全部仓库", "/admin/api/repository-governance"]);
   assert.ok(
     ADMIN_GOVERNANCE_HTML.includes("<thead><tr><th>操作</th><th>仓库</th><th>Owner</th><th>状态</th>"),
-    "repository governance table should keep 操作 as the first column"
+    "repository governance table should keep 操作 as the first column",
   );
   assert.ok(
     ADMIN_GOVERNANCE_HTML.includes("row.appendChild(action);for(const value of values)"),
-    "repository governance rows should append the action cell before data cells"
+    "repository governance rows should append the action cell before data cells",
   );
   assert.ok(!ADMIN_HTML.includes('id="repositoryGovernanceTable"'));
   assert.ok(!ADMIN_HTML.includes('id="repositoryGovernanceSummary"'));
   assert.ok(!ADMIN_HTML.includes('id="syncAllRepositories"'));
 });
 
-
 test("admin login page and access tab expose browser session management", () => {
-  assertContainsAll(ADMIN_LOGIN_HTML, ["管理员登录", "username", "password", "/admin/api/auth/login", "HttpOnly Session Cookie"]);
-  assertContainsAll(ADMIN_HTML, ["adminLoginStatus", "adminSessionsTable", "adminLogout", "reloadAdminSessions", "revokeOtherAdminSessions", "/admin/api/auth/sessions"]);
+  assertContainsAll(ADMIN_LOGIN_HTML, [
+    "管理员登录",
+    "username",
+    "password",
+    "/admin/api/auth/login",
+    "HttpOnly Session Cookie",
+  ]);
+  assertContainsAll(ADMIN_HTML, [
+    "adminLoginStatus",
+    "adminSessionsTable",
+    "adminLogout",
+    "reloadAdminSessions",
+    "revokeOtherAdminSessions",
+    "/admin/api/auth/sessions",
+  ]);
 });
 
 test("governance page exposes Knowledge submission spec as a first-class action", () => {
@@ -237,7 +261,11 @@ test("governance page exposes Knowledge submission spec as a first-class action"
     'class="governance-spec-action"',
     ".governance-spec-action{",
   ]);
-  assert.ok(!ADMIN_HTML.includes('<div class="view" data-view="governance"><div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>'));
+  assert.ok(
+    !ADMIN_HTML.includes(
+      '<div class="view" data-view="governance"><div class="card"><div class="actions"><a class="link" href="/admin/knowledge-submission-spec">Knowledge 回流规范 →</a></div>',
+    ),
+  );
 });
 
 test("knowledge submission spec admin page exposes editable rules, preview, history and rollback", async () => {
@@ -259,7 +287,9 @@ test("knowledge submission spec admin page exposes editable rules, preview, hist
 
 test("knowledge submission spec inline script is valid browser JavaScript", async () => {
   const { ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML } = await import("../src/admin-ui.js");
-  const scripts = [...ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!);
+  const scripts = [...ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1]!,
+  );
   assert.ok(scripts.length > 0, "spec page should contain an inline script");
   for (const script of scripts) {
     assert.doesNotThrow(() => new Function(script), "generated spec page inline script should parse");

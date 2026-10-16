@@ -11,7 +11,7 @@ import type {
   KnowledgeDocument,
   KnowledgeLifecycleMetadata,
   KnowledgeSearchResult,
-  KnowledgeSourceConfig
+  KnowledgeSourceConfig,
 } from "./types.js";
 
 export const DEFAULT_KNOWLEDGE_CONFIG: KnowledgeSourceConfig = {
@@ -20,30 +20,22 @@ export const DEFAULT_KNOWLEDGE_CONFIG: KnowledgeSourceConfig = {
   exclude: [],
   maxDocumentBytes: 2 * 1024 * 1024,
   chunkSizeChars: 1400,
-  chunkOverlapChars: 180
+  chunkOverlapChars: 180,
 };
 
-export function normalizeKnowledgeConfig(
-  config?: Partial<KnowledgeSourceConfig>
-): KnowledgeSourceConfig {
+export function normalizeKnowledgeConfig(config?: Partial<KnowledgeSourceConfig>): KnowledgeSourceConfig {
   const chunkSizeChars = Math.max(200, Number(config?.chunkSizeChars ?? DEFAULT_KNOWLEDGE_CONFIG.chunkSizeChars));
   const chunkOverlapChars = Math.max(
     0,
-    Math.min(
-      chunkSizeChars - 1,
-      Number(config?.chunkOverlapChars ?? DEFAULT_KNOWLEDGE_CONFIG.chunkOverlapChars)
-    )
+    Math.min(chunkSizeChars - 1, Number(config?.chunkOverlapChars ?? DEFAULT_KNOWLEDGE_CONFIG.chunkOverlapChars)),
   );
   return {
     enabled: config?.enabled ?? DEFAULT_KNOWLEDGE_CONFIG.enabled,
     include: config?.include?.length ? [...config.include] : [...DEFAULT_KNOWLEDGE_CONFIG.include],
     exclude: [...(config?.exclude ?? DEFAULT_KNOWLEDGE_CONFIG.exclude)],
-    maxDocumentBytes: Math.max(
-      1024,
-      Number(config?.maxDocumentBytes ?? DEFAULT_KNOWLEDGE_CONFIG.maxDocumentBytes)
-    ),
+    maxDocumentBytes: Math.max(1024, Number(config?.maxDocumentBytes ?? DEFAULT_KNOWLEDGE_CONFIG.maxDocumentBytes)),
     chunkSizeChars,
-    chunkOverlapChars
+    chunkOverlapChars,
   };
 }
 const SKIP_DIRECTORIES = new Set([".git", "node_modules", "dist", "build", "data", "revisions"]);
@@ -172,16 +164,19 @@ function chunkText(content: string, chunkSizeChars: number, chunkOverlapChars: n
   if (!normalized) return [];
   const sections = splitMarkdownSections(normalized);
   if (sections.length <= 1) return chunkParagraphs(normalized, chunkSizeChars, chunkOverlapChars);
-  return sections.flatMap((section) => {
-    const heading = section.match(/^(#{1,6}\s+[^\n]+)\n+([\s\S]*)$/);
-    if (!heading) return chunkParagraphs(section, chunkSizeChars, chunkOverlapChars);
-    const headingText = heading[1]!.trim();
-    const body = heading[2]!.trim();
-    if (!body) return [headingText];
-    const bodySize = Math.max(80, chunkSizeChars - headingText.length - 2);
-    return chunkParagraphs(body, bodySize, Math.min(chunkOverlapChars, Math.max(0, bodySize - 1)))
-      .map((item) => `${headingText}\n\n${item}`);
-  }).filter(Boolean);
+  return sections
+    .flatMap((section) => {
+      const heading = section.match(/^(#{1,6}\s+[^\n]+)\n+([\s\S]*)$/);
+      if (!heading) return chunkParagraphs(section, chunkSizeChars, chunkOverlapChars);
+      const headingText = heading[1]!.trim();
+      const body = heading[2]!.trim();
+      if (!body) return [headingText];
+      const bodySize = Math.max(80, chunkSizeChars - headingText.length - 2);
+      return chunkParagraphs(body, bodySize, Math.min(chunkOverlapChars, Math.max(0, bodySize - 1))).map(
+        (item) => `${headingText}\n\n${item}`,
+      );
+    })
+    .filter(Boolean);
 }
 
 function globToRegExp(pattern: string): RegExp {
@@ -257,14 +252,8 @@ function lifecycleReviewCycleDays(value: unknown): number | undefined {
 }
 
 function lifecycleStringList(value: unknown): string[] | undefined {
-  const values = Array.isArray(value)
-    ? value
-    : value === undefined || value === null
-      ? []
-      : String(value).split(",");
-  const normalized = values
-    .map((item) => lifecycleString(item))
-    .filter((item): item is string => Boolean(item));
+  const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : String(value).split(",");
+  const normalized = values.map((item) => lifecycleString(item)).filter((item): item is string => Boolean(item));
   return normalized.length ? [...new Set(normalized)] : undefined;
 }
 
@@ -279,7 +268,7 @@ function parseKnowledgeApplicability(value: unknown): KnowledgeApplicability | u
     kernelVersion: lifecycleStringList(raw.kernel_version ?? raw.kernelVersion),
     apiVersion: lifecycleStringList(raw.api_version ?? raw.apiVersion),
     hardwareRevision: lifecycleStringList(raw.hardware_revision ?? raw.hardwareRevision),
-    variant: lifecycleStringList(raw.variant ?? raw.customer_variant ?? raw.customerVariant)
+    variant: lifecycleStringList(raw.variant ?? raw.customer_variant ?? raw.customerVariant),
   };
   return Object.values(result).some(Boolean) ? result : undefined;
 }
@@ -304,7 +293,10 @@ function parseMarkdownKnowledge(content: string): {
     const tags = Array.isArray(raw.tags)
       ? raw.tags.map((item) => lifecycleString(item)).filter((item): item is string => Boolean(item))
       : lifecycleString(raw.tags)
-        ? lifecycleString(raw.tags)!.split(",").map((item) => item.trim()).filter(Boolean)
+        ? lifecycleString(raw.tags)!
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
         : undefined;
     return {
       content: content.slice(match[0].length),
@@ -319,10 +311,10 @@ function parseMarkdownKnowledge(content: string): {
         source: lifecycleString(raw.source),
         supersedes: lifecycleString(raw.supersedes),
         reviewCycleDays: lifecycleReviewCycleDays(
-          raw.review_cycle_days ?? raw.reviewCycleDays ?? raw.review_cycle ?? raw.reviewCycle
+          raw.review_cycle_days ?? raw.reviewCycleDays ?? raw.review_cycle ?? raw.reviewCycle,
         ),
-        applicability: parseKnowledgeApplicability(raw.applicability)
-      }
+        applicability: parseKnowledgeApplicability(raw.applicability),
+      },
     };
   } catch {
     return { content };
@@ -358,7 +350,7 @@ export async function scanKnowledge(
   root: string,
   repositoryId: string,
   revision: string,
-  sourceConfig?: Partial<KnowledgeSourceConfig>
+  sourceConfig?: Partial<KnowledgeSourceConfig>,
 ): Promise<KnowledgeDocument[]> {
   const config = normalizeKnowledgeConfig(sourceConfig);
   if (!config.enabled) return [];
@@ -380,8 +372,8 @@ export async function scanKnowledge(
           event: "knowledge.document.skipped",
           repository: repositoryId,
           path: relativePath,
-          error: error instanceof Error ? error.message : String(error)
-        })
+          error: error instanceof Error ? error.message : String(error),
+        }),
       );
       continue;
     }
@@ -397,7 +389,7 @@ export async function scanKnowledge(
       chunkCount: chunks.length,
       chunkSizeChars: config.chunkSizeChars,
       chunkOverlapChars: config.chunkOverlapChars,
-      metadata
+      metadata,
     });
   }
   return documents;
@@ -408,9 +400,13 @@ export function chunksForDocuments(documents: KnowledgeDocument[]): KnowledgeChu
   for (const document of documents) {
     const config = normalizeKnowledgeConfig({
       chunkSizeChars: document.chunkSizeChars,
-      chunkOverlapChars: document.chunkOverlapChars
+      chunkOverlapChars: document.chunkOverlapChars,
     });
-    for (const [chunkIndex, content] of chunkText(document.content, config.chunkSizeChars, config.chunkOverlapChars).entries()) {
+    for (const [chunkIndex, content] of chunkText(
+      document.content,
+      config.chunkSizeChars,
+      config.chunkOverlapChars,
+    ).entries()) {
       chunks.push({
         key: `${document.key}#${chunkIndex}`,
         documentKey: document.key,
@@ -420,7 +416,7 @@ export function chunksForDocuments(documents: KnowledgeDocument[]): KnowledgeChu
         title: document.title,
         chunkIndex,
         content,
-        metadata: document.metadata
+        metadata: document.metadata,
       });
     }
   }
@@ -450,10 +446,7 @@ export interface KnowledgeLifecycleIssue {
   message: string;
 }
 
-export function auditKnowledgeLifecycle(
-  documents: KnowledgeDocument[],
-  now = new Date()
-): KnowledgeLifecycleIssue[] {
+export function auditKnowledgeLifecycle(documents: KnowledgeDocument[], now = new Date()): KnowledgeLifecycleIssue[] {
   const issues: KnowledgeLifecycleIssue[] = [];
   for (const document of documents) {
     const metadata = document.metadata;
@@ -474,7 +467,7 @@ export function auditKnowledgeLifecycle(
                 ? new Date(reviewedAt + metadata.reviewCycleDays * 24 * 60 * 60 * 1000).toISOString()
                 : undefined;
             })()
-          : undefined
+          : undefined,
     };
     if (!metadata?.owner) {
       issues.push({ ...base, kind: "missing-owner", message: "Knowledge has no owner." });
@@ -497,7 +490,7 @@ export function auditKnowledgeLifecycle(
         issues.push({
           ...base,
           kind: "invalid-updated-at",
-          message: "Knowledge updated_at/created_at is not a valid date for review-cycle calculation."
+          message: "Knowledge updated_at/created_at is not a valid date for review-cycle calculation.",
         });
       } else {
         const dueAt = reviewedAt.getTime() + metadata.reviewCycleDays * 24 * 60 * 60 * 1000;
@@ -505,7 +498,7 @@ export function auditKnowledgeLifecycle(
           issues.push({
             ...base,
             kind: "review-overdue",
-            message: `Knowledge review is overdue (cycle ${metadata.reviewCycleDays} days, last reviewed ${reviewedAtRaw}).`
+            message: `Knowledge review is overdue (cycle ${metadata.reviewCycleDays} days, last reviewed ${reviewedAtRaw}).`,
           });
         }
       }
@@ -516,13 +509,13 @@ export function auditKnowledgeLifecycle(
         issues.push({
           ...base,
           kind: "invalid-valid-until",
-          message: "Knowledge valid_until is not a valid date."
+          message: "Knowledge valid_until is not a valid date.",
         });
       } else if (validUntil.getTime() < now.getTime()) {
         issues.push({
           ...base,
           kind: "expired",
-          message: `Knowledge expired at ${metadata.validUntil}.`
+          message: `Knowledge expired at ${metadata.validUntil}.`,
         });
       }
     }
@@ -536,18 +529,44 @@ export function auditKnowledgeLifecycle(
     "invalid-updated-at": 5,
     "review-overdue": 6,
     draft: 7,
-    "missing-owner": 8
+    "missing-owner": 8,
   };
   return issues.sort(
     (a, b) =>
       severity[a.kind] - severity[b.kind] ||
       a.repositoryId.localeCompare(b.repositoryId) ||
-      a.path.localeCompare(b.path)
+      a.path.localeCompare(b.path),
   );
 }
 
 function queryTerms(query: string): string[] {
-  const stopWords = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with", "使用", "实现", "问题", "相关", "如何", "怎么", "帮我", "当前", "项目", "配置", "规则", "的", "和", "与"]);
+  const stopWords = new Set([
+    "a",
+    "an",
+    "and",
+    "for",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+    "使用",
+    "实现",
+    "问题",
+    "相关",
+    "如何",
+    "怎么",
+    "帮我",
+    "当前",
+    "项目",
+    "配置",
+    "规则",
+    "的",
+    "和",
+    "与",
+  ]);
   const raw = query.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
   const terms = new Set<string>();
   const addToken = (token: string) => {
@@ -583,7 +602,7 @@ function applicabilityPatternMatches(pattern: string, value: string): boolean {
 
 export function knowledgeApplicabilityMatches(
   applicability: KnowledgeApplicability | undefined,
-  context: KnowledgeApplicabilityContext | undefined
+  context: KnowledgeApplicabilityContext | undefined,
 ): boolean {
   if (!applicability || !context) return true;
   const checks: Array<[string[] | undefined, string | undefined]> = [
@@ -594,7 +613,7 @@ export function knowledgeApplicabilityMatches(
     [applicability.kernelVersion, context.kernelVersion],
     [applicability.apiVersion, context.apiVersion],
     [applicability.hardwareRevision, context.hardwareRevision],
-    [applicability.variant, context.variant]
+    [applicability.variant, context.variant],
   ];
   return checks.every(([patterns, value]) => {
     if (!patterns?.length || !value) return true;
@@ -634,7 +653,7 @@ export class KnowledgeIndex {
       chunkCount: this.chunks.size,
       sqlitePageCount,
       sqlitePageSize,
-      sqliteApproxBytes: sqlitePageCount * sqlitePageSize
+      sqliteApproxBytes: sqlitePageCount * sqlitePageSize,
     };
   }
 
@@ -642,7 +661,7 @@ export class KnowledgeIndex {
     this.chunks = new Map(chunks.map((chunk) => [chunk.key, chunk]));
     this.db.exec("DELETE FROM knowledge_fts");
     const insert = this.db.prepare(
-      "INSERT INTO knowledge_fts(chunk_key,repository_id,lifecycle_status,path,title,content) VALUES(?,?,?,?,?,?)"
+      "INSERT INTO knowledge_fts(chunk_key,repository_id,lifecycle_status,path,title,content) VALUES(?,?,?,?,?,?)",
     );
     for (const chunk of chunks) {
       insert.run(
@@ -651,7 +670,7 @@ export class KnowledgeIndex {
         chunk.metadata?.status ?? "",
         chunk.relativePath,
         chunk.title,
-        chunk.content
+        chunk.content,
       );
     }
   }
@@ -661,12 +680,12 @@ export class KnowledgeIndex {
     allowedRepositoryIds: string[],
     limit: number,
     requestedRepositories?: string[],
-    applicabilityContext?: KnowledgeApplicabilityContext
+    applicabilityContext?: KnowledgeApplicabilityContext,
   ): KnowledgeSearchResult[] {
     const allowed = new Set(
       requestedRepositories?.length
         ? requestedRepositories.filter((id) => allowedRepositoryIds.includes(id))
-        : allowedRepositoryIds
+        : allowedRepositoryIds,
     );
     if (allowed.size === 0) return [];
     const terms = queryTerms(query);
@@ -686,12 +705,12 @@ export class KnowledgeIndex {
                WHERE knowledge_fts MATCH ?
                  AND repository_id IN (${placeholders})
                  AND lifecycle_status NOT IN ('deprecated','superseded','expired','archived')
-               LIMIT ?`
+               LIMIT ?`,
             )
             .all(match, ...repositoryIds, Math.max(limit * 8, 40)) as Array<{
-              chunk_key: string;
-              rank: number;
-            }>;
+            chunk_key: string;
+            rank: number;
+          }>;
           for (const row of rows) {
             ftsCandidates.set(row.chunk_key, 1 / (1 + Math.abs(row.rank)));
           }
@@ -711,7 +730,8 @@ export class KnowledgeIndex {
         lifecycle?.status === "superseded" ||
         lifecycle?.status === "expired" ||
         lifecycle?.status === "archived"
-      ) continue;
+      )
+        continue;
       if (lifecycle?.validFrom) {
         const validFrom = new Date(lifecycle.validFrom);
         if (!Number.isNaN(validFrom.getTime()) && validFrom.getTime() > now.getTime()) continue;
@@ -739,10 +759,22 @@ export class KnowledgeIndex {
       const matchedTerms = new Set<string>();
       for (const term of terms) {
         let hit = false;
-        if (titleTerms.has(term)) { titleScore += 4; hit = true; }
-        if (pathTerms.has(term)) { pathScore += 2; hit = true; }
-        if (contentTerms.has(term)) { contentScore += 1.5; hit = true; }
-        if (tagTerms.has(term)) { tagScore += 3; hit = true; }
+        if (titleTerms.has(term)) {
+          titleScore += 4;
+          hit = true;
+        }
+        if (pathTerms.has(term)) {
+          pathScore += 2;
+          hit = true;
+        }
+        if (contentTerms.has(term)) {
+          contentScore += 1.5;
+          hit = true;
+        }
+        if (tagTerms.has(term)) {
+          tagScore += 3;
+          hit = true;
+        }
         if (hit) matchedTerms.add(term);
       }
       score += titleScore + pathScore + contentScore + tagScore;
@@ -773,7 +805,7 @@ export class KnowledgeIndex {
         chunk,
         score,
         coverage,
-        reason: `${reasons.join("; ")}${lifecycle?.applicability && applicabilityContext ? "; applicability matched" : ""}; coverage=${coverage.toFixed(2)}; score=${score.toFixed(2)}`
+        reason: `${reasons.join("; ")}${lifecycle?.applicability && applicabilityContext ? "; applicability matched" : ""}; coverage=${coverage.toFixed(2)}; score=${score.toFixed(2)}`,
       });
     }
     return results.sort((a, b) => b.score - a.score).slice(0, limit);

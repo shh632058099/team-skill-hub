@@ -34,23 +34,25 @@ export interface KnowledgePublisher {
   deletePublished(
     candidate: KnowledgeCandidate,
     publication: NonNullable<KnowledgeCandidate["publication"]>,
-    repository: RepositoryConfig
+    repository: RepositoryConfig,
   ): Promise<KnowledgePublicationResult>;
   reconcile(
     publication: NonNullable<KnowledgeCandidate["publication"]>,
-    repository: RepositoryConfig
-  ): Promise<Pick<
-    KnowledgePublicationResult,
-    | "mergeRequestState"
-    | "lastCheckedAt"
-    | "mergedAt"
-    | "closedAt"
-    | "mergeCommitSha"
-    | "pipelineStatus"
-    | "hasConflicts"
-    | "detailedMergeStatus"
-    | "sourceBranchExists"
-  >>;
+    repository: RepositoryConfig,
+  ): Promise<
+    Pick<
+      KnowledgePublicationResult,
+      | "mergeRequestState"
+      | "lastCheckedAt"
+      | "mergedAt"
+      | "closedAt"
+      | "mergeCommitSha"
+      | "pipelineStatus"
+      | "hasConflicts"
+      | "detailedMergeStatus"
+      | "sourceBranchExists"
+    >
+  >;
 }
 
 type FetchLike = typeof fetch;
@@ -62,7 +64,7 @@ async function runGit(args: string[], cwd?: string): Promise<string> {
       ...(cwd ? { cwd } : {}),
       windowsHide: true,
       timeout: 60_000,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
     return stdout.trim();
   } catch (error) {
@@ -100,7 +102,7 @@ function inferGitLabLocation(gitUrl?: string): { baseUrl?: string; projectPath?:
       const url = new URL(trimmed);
       return {
         baseUrl: url.origin,
-        projectPath: url.pathname.replace(/^\/+/, "").replace(/\.git$/i, "")
+        projectPath: url.pathname.replace(/^\/+/, "").replace(/\.git$/i, ""),
       };
     } catch {
       return {};
@@ -112,7 +114,7 @@ function inferGitLabLocation(gitUrl?: string): { baseUrl?: string; projectPath?:
       const url = new URL(trimmed);
       return {
         baseUrl: "https://" + url.hostname,
-        projectPath: url.pathname.replace(/^\/+/, "").replace(/\.git$/i, "")
+        projectPath: url.pathname.replace(/^\/+/, "").replace(/\.git$/i, ""),
       };
     } catch {
       return {};
@@ -123,7 +125,7 @@ function inferGitLabLocation(gitUrl?: string): { baseUrl?: string; projectPath?:
   if (scp) {
     return {
       baseUrl: "https://" + scp[1],
-      projectPath: scp[2]!.replace(/^\/+/, "").replace(/\.git$/i, "")
+      projectPath: scp[2]!.replace(/^\/+/, "").replace(/\.git$/i, ""),
     };
   }
   return {};
@@ -156,7 +158,12 @@ export function defaultCandidatePath(candidate: KnowledgeCandidate): string {
     const root = candidate.skillCollection === "custom-skills" ? "custom" : "skills";
     return `${root}/${slugify(candidate.title)}/SKILL.md`;
   }
-  const idSuffix = candidate.id.replace(/^kc_/, "").replace(/[^A-Za-z0-9]+/g, "").slice(0, 12).toLowerCase() || "candidate";
+  const idSuffix =
+    candidate.id
+      .replace(/^kc_/, "")
+      .replace(/[^A-Za-z0-9]+/g, "")
+      .slice(0, 12)
+      .toLowerCase() || "candidate";
   return `knowledge/${slugify(candidate.title)}-${idSuffix}.md`;
 }
 
@@ -184,18 +191,14 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     return { config, baseUrl, projectPath, token };
   }
 
-  private async request(
-    url: string,
-    token: string,
-    init: RequestInit
-  ): Promise<Response> {
+  private async request(url: string, token: string, init: RequestInit): Promise<Response> {
     return await this.fetchImpl(url, {
       ...init,
       headers: {
         "private-token": token,
         "content-type": "application/json",
-        ...(init.headers ?? {})
-      }
+        ...(init.headers ?? {}),
+      },
     });
   }
 
@@ -206,9 +209,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
 
     const { config, baseUrl, projectPath, token } = this.resolve(repository);
     const project = encodeURIComponent(projectPath);
-    const filePath = assertSafePath(
-      candidate.suggestedPath ?? defaultCandidatePath(candidate)
-    );
+    const filePath = assertSafePath(candidate.suggestedPath ?? defaultCandidatePath(candidate));
     const encodedFile = encodeURIComponent(filePath);
     const targetBranch = config.targetBranch || repository.branch || "main";
     const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
@@ -224,11 +225,9 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     }
     const branchExists = branchResponse.status === 200;
 
-    const targetExistsResponse = await this.request(
-      fileUrl + "?ref=" + encodeURIComponent(targetBranch),
-      token,
-      { method: "HEAD" }
-    );
+    const targetExistsResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, {
+      method: "HEAD",
+    });
     if (![200, 404].includes(targetExistsResponse.status)) {
       const detail = await targetExistsResponse.text().catch(() => "");
       throw new Error(`GitLab file lookup failed (${targetExistsResponse.status}): ${detail.slice(0, 500)}`);
@@ -237,18 +236,16 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     let branchFileExists = false;
     let branchFileMatches = false;
     if (branchExists) {
-      const branchFileResponse = await this.request(
-        fileUrl + "?ref=" + encodeURIComponent(branch),
-        token,
-        { method: "GET" }
-      );
+      const branchFileResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(branch), token, {
+        method: "GET",
+      });
       if (![200, 404].includes(branchFileResponse.status)) {
         const detail = await branchFileResponse.text().catch(() => "");
         throw new Error(`GitLab branch file lookup failed (${branchFileResponse.status}): ${detail.slice(0, 500)}`);
       }
       branchFileExists = branchFileResponse.status === 200;
       if (branchFileExists) {
-        const existingFile = await branchFileResponse.json() as { content?: string; encoding?: string };
+        const existingFile = (await branchFileResponse.json()) as { content?: string; encoding?: string };
         if (existingFile.content && existingFile.encoding === "base64") {
           branchFileMatches = Buffer.from(existingFile.content, "base64").toString("utf8") === desiredContent;
         }
@@ -260,15 +257,14 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       const payload: Record<string, unknown> = {
         branch,
         content: desiredContent,
-        commit_message: `${candidate.suggestedType === "skill" ? "feat" : "docs"}: add ${candidate.suggestedType} from ${candidate.id}`
+        commit_message: `${candidate.suggestedType === "skill" ? "feat" : "docs"}: add ${candidate.suggestedType} from ${candidate.id}`,
       };
       if (!branchExists) payload.start_branch = targetBranch;
 
-      const fileMethod =
-        branchExists ? (branchFileExists ? "PUT" : "POST") : action === "create" ? "POST" : "PUT";
+      const fileMethod = branchExists ? (branchFileExists ? "PUT" : "POST") : action === "create" ? "POST" : "PUT";
       const fileResponse = await this.request(fileUrl, token, {
         method: fileMethod,
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       });
       if (!fileResponse.ok) {
         const detail = await fileResponse.text().catch(() => "");
@@ -276,42 +272,51 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       }
     }
 
-    let mr: { iid?: number; web_url?: string; state?: string; merged_at?: string; closed_at?: string; merge_commit_sha?: string } | undefined;
-    const mrResponse = await this.request(
-      `${baseUrl}/api/v4/projects/${project}/merge_requests`,
-      token,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          source_branch: branch,
-          target_branch: targetBranch,
-          title: `${candidateLabel(candidate)}: ${candidate.title}`,
-          description: [
-            `Created by Team Skill Hub ${candidate.suggestedType} review workflow.`,
-            "",
-            `Candidate: ${candidate.id}`,
-            candidate.suggestedType === "skill" ? `Collection: ${candidate.skillCollection ?? "custom-skills"}` : undefined,
-            candidate.traceId ? `Trace: ${candidate.traceId}` : undefined,
-            candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined
-          ].filter(Boolean).join("\n")
-        })
-      }
-    );
+    let mr:
+      | {
+          iid?: number;
+          web_url?: string;
+          state?: string;
+          merged_at?: string;
+          closed_at?: string;
+          merge_commit_sha?: string;
+        }
+      | undefined;
+    const mrResponse = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        source_branch: branch,
+        target_branch: targetBranch,
+        title: `${candidateLabel(candidate)}: ${candidate.title}`,
+        description: [
+          `Created by Team Skill Hub ${candidate.suggestedType} review workflow.`,
+          "",
+          `Candidate: ${candidate.id}`,
+          candidate.suggestedType === "skill"
+            ? `Collection: ${candidate.skillCollection ?? "custom-skills"}`
+            : undefined,
+          candidate.traceId ? `Trace: ${candidate.traceId}` : undefined,
+          candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      }),
+    });
     if (mrResponse.ok) {
-      mr = await mrResponse.json() as { iid?: number; web_url?: string };
+      mr = (await mrResponse.json()) as { iid?: number; web_url?: string };
     } else if (mrResponse.status === 409) {
       const query = new URLSearchParams({
         state: "all",
         source_branch: branch,
-        target_branch: targetBranch
+        target_branch: targetBranch,
       });
       const existing = await this.request(
         `${baseUrl}/api/v4/projects/${project}/merge_requests?${query.toString()}`,
         token,
-        { method: "GET" }
+        { method: "GET" },
       );
       if (existing.ok) {
-        const rows = await existing.json() as Array<{
+        const rows = (await existing.json()) as Array<{
           iid?: number;
           web_url?: string;
           state?: string;
@@ -322,7 +327,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
         const existingMr = rows[0];
         if (existingMr?.state === "closed") {
           throw new Error(
-            `Existing GitLab merge request !${existingMr.iid ?? "?"} for branch ${branch} is closed; create a new candidate revision or branch before publishing again`
+            `Existing GitLab merge request !${existingMr.iid ?? "?"} for branch ${branch} is closed; create a new candidate revision or branch before publishing again`,
           );
         }
         mr = existingMr;
@@ -351,14 +356,14 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       lastCheckedAt: publishedAt,
       ...(mr.merged_at ? { mergedAt: mr.merged_at } : {}),
       ...(mr.closed_at ? { closedAt: mr.closed_at } : {}),
-      ...(mr.merge_commit_sha ? { mergeCommitSha: mr.merge_commit_sha } : {})
+      ...(mr.merge_commit_sha ? { mergeCommitSha: mr.merge_commit_sha } : {}),
     };
   }
 
   async deletePublished(
     candidate: KnowledgeCandidate,
     publication: NonNullable<KnowledgeCandidate["publication"]>,
-    repository: RepositoryConfig
+    repository: RepositoryConfig,
   ): Promise<KnowledgePublicationResult> {
     if (candidate.status !== "published" || publication.mergeRequestState !== "merged") {
       throw new Error("Candidate must be genuinely published before deletion");
@@ -377,28 +382,36 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     const branchResponse = await this.request(
       `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(branch)}`,
       token,
-      { method: "GET" }
+      { method: "GET" },
     );
-    if (![200, 404].includes(branchResponse.status)) throw new Error(`GitLab deletion branch lookup failed (${branchResponse.status})`);
+    if (![200, 404].includes(branchResponse.status))
+      throw new Error(`GitLab deletion branch lookup failed (${branchResponse.status})`);
     const branchExists = branchResponse.status === 200;
-    const targetResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, { method: "HEAD" });
+    const targetResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, {
+      method: "HEAD",
+    });
     if (targetResponse.status === 404) throw new Error("Published asset is already absent from the target branch");
-    if (targetResponse.status !== 200) throw new Error(`GitLab published file lookup failed (${targetResponse.status})`);
+    if (targetResponse.status !== 200)
+      throw new Error(`GitLab published file lookup failed (${targetResponse.status})`);
     let deletionAlreadyCommitted = false;
     if (branchExists) {
-      const branchFileResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(branch), token, { method: "GET" });
+      const branchFileResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(branch), token, {
+        method: "GET",
+      });
       if (![200, 404].includes(branchFileResponse.status)) {
         throw new Error(`GitLab deletion branch file lookup failed (${branchFileResponse.status})`);
       }
       deletionAlreadyCommitted = branchFileResponse.status === 404;
     } else {
-      const verifyResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, { method: "GET" });
+      const verifyResponse = await this.request(fileUrl + "?ref=" + encodeURIComponent(targetBranch), token, {
+        method: "GET",
+      });
       if (!verifyResponse.ok) throw new Error(`GitLab published file read failed (${verifyResponse.status})`);
     }
     if (!deletionAlreadyCommitted) {
       const payload: Record<string, unknown> = {
         branch,
-        commit_message: `chore: remove ${candidate.suggestedType} from ${candidate.id}`
+        commit_message: `chore: remove ${candidate.suggestedType} from ${candidate.id}`,
       };
       if (!branchExists) payload.start_branch = targetBranch;
       const deleteResponse = await this.request(fileUrl, token, { method: "DELETE", body: JSON.stringify(payload) });
@@ -413,17 +426,21 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
         source_branch: branch,
         target_branch: targetBranch,
         title: `Delete ${candidateLabel(candidate)}: ${candidate.title}`,
-        description: `Delete published Team Skill Hub ${candidate.suggestedType} from ${filePath}.\n\nCandidate: ${candidate.id}`
-      })
+        description: `Delete published Team Skill Hub ${candidate.suggestedType} from ${filePath}.\n\nCandidate: ${candidate.id}`,
+      }),
     });
     let mr: { iid?: number; web_url?: string; state?: string } | undefined;
     if (mrResponse.ok) {
-      mr = await mrResponse.json() as typeof mr;
+      mr = (await mrResponse.json()) as typeof mr;
     } else if (mrResponse.status === 409) {
       const query = new URLSearchParams({ state: "all", source_branch: branch, target_branch: targetBranch });
-      const existingResponse = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests?${query.toString()}`, token, { method: "GET" });
+      const existingResponse = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/merge_requests?${query.toString()}`,
+        token,
+        { method: "GET" },
+      );
       if (existingResponse.ok) {
-        const rows = await existingResponse.json() as Array<NonNullable<typeof mr>>;
+        const rows = (await existingResponse.json()) as Array<NonNullable<typeof mr>>;
         const existing = rows[0];
         if (existing?.state === "closed") {
           throw new Error(`Existing GitLab deletion merge request !${existing.iid ?? "?"} is closed`);
@@ -448,25 +465,27 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       mergeRequestUrl: mr.web_url,
       publishedAt,
       mergeRequestState: mr.state === "closed" || mr.state === "locked" ? mr.state : "opened",
-      lastCheckedAt: publishedAt
+      lastCheckedAt: publishedAt,
     };
   }
 
   async reconcile(
     publication: NonNullable<KnowledgeCandidate["publication"]>,
-    repository: RepositoryConfig
-  ): Promise<Pick<
-    KnowledgePublicationResult,
-    | "mergeRequestState"
-    | "lastCheckedAt"
-    | "mergedAt"
-    | "closedAt"
-    | "mergeCommitSha"
-    | "pipelineStatus"
-    | "hasConflicts"
-    | "detailedMergeStatus"
-    | "sourceBranchExists"
-  >> {
+    repository: RepositoryConfig,
+  ): Promise<
+    Pick<
+      KnowledgePublicationResult,
+      | "mergeRequestState"
+      | "lastCheckedAt"
+      | "mergedAt"
+      | "closedAt"
+      | "mergeCommitSha"
+      | "pipelineStatus"
+      | "hasConflicts"
+      | "detailedMergeStatus"
+      | "sourceBranchExists"
+    >
+  > {
     const { baseUrl, projectPath, token } = this.resolve(repository);
     if (publication.projectPath !== projectPath) {
       throw new Error("Knowledge publication project does not match repository publishing configuration");
@@ -475,13 +494,13 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     const response = await this.request(
       `${baseUrl}/api/v4/projects/${project}/merge_requests/${publication.mergeRequestIid}`,
       token,
-      { method: "GET" }
+      { method: "GET" },
     );
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       throw new Error(`GitLab merge request lookup failed (${response.status}): ${detail.slice(0, 1000)}`);
     }
-    const mr = await response.json() as {
+    const mr = (await response.json()) as {
       state?: string;
       merged_at?: string | null;
       closed_at?: string | null;
@@ -497,7 +516,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       const branchResponse = await this.request(
         `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(publication.branch)}`,
         token,
-        { method: "GET" }
+        { method: "GET" },
       );
       if (branchResponse.status === 200) sourceBranchExists = true;
       else if (branchResponse.status === 404) sourceBranchExists = false;
@@ -513,7 +532,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
       ...(mr.head_pipeline?.status ? { pipelineStatus: mr.head_pipeline.status } : {}),
       ...(mr.has_conflicts !== undefined ? { hasConflicts: mr.has_conflicts } : {}),
       ...(mr.detailed_merge_status ? { detailedMergeStatus: mr.detailed_merge_status } : {}),
-      ...(sourceBranchExists !== undefined ? { sourceBranchExists } : {})
+      ...(sourceBranchExists !== undefined ? { sourceBranchExists } : {}),
     };
   }
 }
@@ -521,7 +540,7 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
 export class GitHubKnowledgePublisher implements KnowledgePublisher {
   constructor(
     private readonly fetchImpl: FetchLike = fetch,
-    private readonly gitRun: GitRun = runGit
+    private readonly gitRun: GitRun = runGit,
   ) {}
 
   private resolve(repository: RepositoryConfig): {
@@ -544,7 +563,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
       apiBase: githubApiBase(baseUrl),
       projectPath,
       token,
-      sshUrl: githubSshUrl(baseUrl, projectPath)
+      sshUrl: githubSshUrl(baseUrl, projectPath),
     };
   }
 
@@ -556,8 +575,8 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
         "x-github-api-version": "2022-11-28",
-        ...(init.headers ?? {})
-      }
+        ...(init.headers ?? {}),
+      },
     });
   }
 
@@ -605,7 +624,14 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         await this.gitRun(["add", "--", filePath], worktree);
         await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
         await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
-        await this.gitRun(["commit", "-m", `${candidate.suggestedType === "skill" ? "feat" : "docs"}: add ${candidate.suggestedType} from ${candidate.id}`], worktree);
+        await this.gitRun(
+          [
+            "commit",
+            "-m",
+            `${candidate.suggestedType === "skill" ? "feat" : "docs"}: add ${candidate.suggestedType} from ${candidate.id}`,
+          ],
+          worktree,
+        );
         await this.gitRun(["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], worktree);
       }
 
@@ -620,45 +646,53 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
             `Created by Team Skill Hub ${candidate.suggestedType} review workflow.`,
             "",
             `Candidate: ${candidate.id}`,
-            candidate.suggestedType === "skill" ? `Collection: ${candidate.skillCollection ?? "custom-skills"}` : undefined,
+            candidate.suggestedType === "skill"
+              ? `Collection: ${candidate.skillCollection ?? "custom-skills"}`
+              : undefined,
             candidate.traceId ? `Trace: ${candidate.traceId}` : undefined,
-            candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined
-          ].filter(Boolean).join("\n")
-        })
+            candidate.reviewNote ? `Review note: ${candidate.reviewNote}` : undefined,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        }),
       });
-      let pr: {
-        number?: number;
-        html_url?: string;
-        state?: string;
-        merged_at?: string | null;
-        closed_at?: string | null;
-        merge_commit_sha?: string | null;
-        mergeable?: boolean | null;
-        mergeable_state?: string;
-      } | undefined;
+      let pr:
+        | {
+            number?: number;
+            html_url?: string;
+            state?: string;
+            merged_at?: string | null;
+            closed_at?: string | null;
+            merge_commit_sha?: string | null;
+            mergeable?: boolean | null;
+            mergeable_state?: string;
+          }
+        | undefined;
       if (response.ok) {
-        pr = await response.json().catch(() => undefined) as typeof pr;
+        pr = (await response.json().catch(() => undefined)) as typeof pr;
       }
       if (response.status === 422 || !pr?.number || !pr.html_url) {
         const owner = projectPath.split("/")[0];
         const query = new URLSearchParams({ state: "all", head: `${owner}:${branch}`, base: targetBranch });
         response = await this.request(`${pullsUrl}?${query.toString()}`, token, { method: "GET" });
         if (response.ok) {
-          const rows = await response.json() as Array<NonNullable<typeof pr>>;
+          const rows = (await response.json()) as Array<NonNullable<typeof pr>>;
           pr = rows[0];
           if (pr?.state === "closed" && !pr.merged_at) {
             if (!pr.number) {
-              throw new Error(`Existing GitHub pull request for branch ${branch} is closed but has no pull request number`);
+              throw new Error(
+                `Existing GitHub pull request for branch ${branch} is closed but has no pull request number`,
+              );
             }
             const reopenResponse = await this.request(`${pullsUrl}/${pr.number}`, token, {
               method: "PATCH",
-              body: JSON.stringify({ state: "open" })
+              body: JSON.stringify({ state: "open" }),
             });
             if (!reopenResponse.ok) {
               const detail = await reopenResponse.text().catch(() => "");
               throw new Error(`GitHub pull request reopen failed (${reopenResponse.status}): ${detail.slice(0, 1000)}`);
             }
-            pr = await reopenResponse.json() as typeof pr;
+            pr = (await reopenResponse.json()) as typeof pr;
           }
         }
       }
@@ -684,7 +718,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         ...(pr.closed_at ? { closedAt: pr.closed_at } : {}),
         ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
         ...(pr.mergeable !== undefined && pr.mergeable !== null ? { hasConflicts: !pr.mergeable } : {}),
-        ...(pr.mergeable_state ? { detailedMergeStatus: pr.mergeable_state } : {})
+        ...(pr.mergeable_state ? { detailedMergeStatus: pr.mergeable_state } : {}),
       };
     } finally {
       await rm(worktree, { recursive: true, force: true });
@@ -694,7 +728,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
   async deletePublished(
     candidate: KnowledgeCandidate,
     publication: NonNullable<KnowledgeCandidate["publication"]>,
-    repository: RepositoryConfig
+    repository: RepositoryConfig,
   ): Promise<KnowledgePublicationResult> {
     if (candidate.status !== "published" || publication.mergeRequestState !== "merged") {
       throw new Error("Candidate must be genuinely published before deletion");
@@ -734,19 +768,19 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
           title: `Delete ${candidateLabel(candidate)}: ${candidate.title}`,
           head: branch,
           base: targetBranch,
-          body: `Delete published Team Skill Hub ${candidate.suggestedType} from ${filePath}.\n\nCandidate: ${candidate.id}`
-        })
+          body: `Delete published Team Skill Hub ${candidate.suggestedType} from ${filePath}.\n\nCandidate: ${candidate.id}`,
+        }),
       });
       let pr: { number?: number; html_url?: string; state?: string; merged_at?: string | null } | undefined;
       if (response.ok) {
-        pr = await response.json().catch(() => undefined) as typeof pr;
+        pr = (await response.json().catch(() => undefined)) as typeof pr;
       }
       if (response.status === 422 || !pr?.number || !pr.html_url) {
         const owner = projectPath.split("/")[0];
         const query = new URLSearchParams({ state: "all", head: `${owner}:${branch}`, base: targetBranch });
         response = await this.request(`${pullsUrl}?${query.toString()}`, token, { method: "GET" });
         if (response.ok) {
-          const rows = await response.json() as Array<NonNullable<typeof pr>>;
+          const rows = (await response.json()) as Array<NonNullable<typeof pr>>;
           pr = rows[0];
           if (pr?.state === "closed" && !pr.merged_at) {
             throw new Error(`Existing GitHub deletion pull request #${pr.number ?? "?"} is closed`);
@@ -770,7 +804,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
         mergeRequestUrl: pr.html_url,
         publishedAt,
         mergeRequestState: pr.state === "closed" ? "closed" : "opened",
-        lastCheckedAt: publishedAt
+        lastCheckedAt: publishedAt,
       };
     } finally {
       await rm(worktree, { recursive: true, force: true });
@@ -779,31 +813,33 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
 
   async reconcile(
     publication: NonNullable<KnowledgeCandidate["publication"]>,
-    repository: RepositoryConfig
-  ): Promise<Pick<
-    KnowledgePublicationResult,
-    | "mergeRequestState"
-    | "lastCheckedAt"
-    | "mergedAt"
-    | "closedAt"
-    | "mergeCommitSha"
-    | "pipelineStatus"
-    | "hasConflicts"
-    | "detailedMergeStatus"
-    | "sourceBranchExists"
-  >> {
+    repository: RepositoryConfig,
+  ): Promise<
+    Pick<
+      KnowledgePublicationResult,
+      | "mergeRequestState"
+      | "lastCheckedAt"
+      | "mergedAt"
+      | "closedAt"
+      | "mergeCommitSha"
+      | "pipelineStatus"
+      | "hasConflicts"
+      | "detailedMergeStatus"
+      | "sourceBranchExists"
+    >
+  > {
     const { apiBase, projectPath, token } = this.resolve(repository);
     if (publication.projectPath !== projectPath) {
       throw new Error("Knowledge publication project does not match repository publishing configuration");
     }
     const response = await this.request(`${apiBase}/repos/${projectPath}/pulls/${publication.mergeRequestIid}`, token, {
-      method: "GET"
+      method: "GET",
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       throw new Error(`GitHub pull request lookup failed (${response.status}): ${detail.slice(0, 1000)}`);
     }
-    const pr = await response.json() as {
+    const pr = (await response.json()) as {
       state?: string;
       merged_at?: string | null;
       closed_at?: string | null;
@@ -814,7 +850,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
     const refResponse = await this.request(
       `${apiBase}/repos/${projectPath}/git/ref/heads/${encodeURIComponent(publication.branch)}`,
       token,
-      { method: "GET" }
+      { method: "GET" },
     );
     const sourceBranchExists = refResponse.status === 200 ? true : refResponse.status === 404 ? false : undefined;
     return {
@@ -825,7 +861,7 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
       ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
       ...(pr.mergeable !== undefined && pr.mergeable !== null ? { hasConflicts: !pr.mergeable } : {}),
       ...(pr.mergeable_state ? { detailedMergeStatus: pr.mergeable_state } : {}),
-      ...(sourceBranchExists !== undefined ? { sourceBranchExists } : {})
+      ...(sourceBranchExists !== undefined ? { sourceBranchExists } : {}),
     };
   }
 }

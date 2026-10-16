@@ -15,7 +15,10 @@ function normalize(value: string): string {
 }
 
 function slug(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 function canonicalGitRemote(value: string | undefined): string | undefined {
@@ -25,20 +28,22 @@ function canonicalGitRemote(value: string | undefined): string | undefined {
   const scp = remote.match(/^(?:[^@]+@)?([^:]+):(.+)$/);
   if (scp && !remote.includes("://")) remote = scp[1] + "/" + scp[2];
   else remote = remote.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
-  remote = remote.replace(/^\/+/,"").replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
+  remote = remote
+    .replace(/^\/+/, "")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
   return remote || undefined;
 }
 
 export function resolveProjectContext(
   cwd: string | undefined,
   repositories: RepositoryConfig[],
-  git?: { remote?: string; root?: string; branch?: string }
+  git?: { remote?: string; root?: string; branch?: string },
 ): ProjectContextMatch | undefined {
   const gitRemote = canonicalGitRemote(git?.remote);
   if (gitRemote) {
-    const remoteMatches = repositories.filter(
-      (repository) => canonicalGitRemote(repository.gitUrl) === gitRemote
-    );
+    const remoteMatches = repositories.filter((repository) => canonicalGitRemote(repository.gitUrl) === gitRemote);
     if (remoteMatches.length === 1) {
       const repository = remoteMatches[0]!;
       return {
@@ -47,7 +52,7 @@ export function resolveProjectContext(
         source: "git-remote",
         gitRemote,
         ...(git?.root ? { gitRoot: git.root } : {}),
-        ...(git?.branch ? { gitBranch: git.branch } : {})
+        ...(git?.branch ? { gitBranch: git.branch } : {}),
       };
     }
   }
@@ -60,17 +65,14 @@ export function resolveProjectContext(
   for (const repository of repositories) {
     if (repository.path) {
       const repositoryPath = normalize(repository.path);
-      if (
-        normalizedCwd === repositoryPath ||
-        normalizedCwd.startsWith(repositoryPath + "/")
-      ) {
+      if (normalizedCwd === repositoryPath || normalizedCwd.startsWith(repositoryPath + "/")) {
         matches.push({
           repositoryId: repository.id,
           repositoryName: repository.name,
           source: "local-path",
           ...(gitRemote ? { gitRemote } : {}),
           ...(git?.root ? { gitRoot: git.root } : {}),
-          ...(git?.branch ? { gitBranch: git.branch } : {})
+          ...(git?.branch ? { gitBranch: git.branch } : {}),
         });
         continue;
       }
@@ -85,7 +87,7 @@ export function resolveProjectContext(
         source: "cwd-basename",
         ...(gitRemote ? { gitRemote } : {}),
         ...(git?.root ? { gitRoot: git.root } : {}),
-        ...(git?.branch ? { gitBranch: git.branch } : {})
+        ...(git?.branch ? { gitBranch: git.branch } : {}),
       });
       continue;
     }
@@ -96,7 +98,7 @@ export function resolveProjectContext(
         source: "cwd-segment",
         ...(gitRemote ? { gitRemote } : {}),
         ...(git?.root ? { gitRoot: git.root } : {}),
-        ...(git?.branch ? { gitBranch: git.branch } : {})
+        ...(git?.branch ? { gitBranch: git.branch } : {}),
       });
     }
   }

@@ -35,9 +35,9 @@ async function createService(dataDir: string) {
         visibility: ["internal"],
         pollingIntervalSeconds: 0,
         readRoles: ["developer", "internal"],
-        syncRoles: ["admin"]
-      }
-    ]
+        syncRoles: ["admin"],
+      },
+    ],
   };
   const service = new SkillHubApplicationService(
     config,
@@ -48,7 +48,7 @@ async function createService(dataDir: string) {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   return service;
@@ -64,20 +64,20 @@ test("admin session aggregation keeps actor/tenant isolation and derives failure
       event: "SessionStart",
       sessionId: "shared-session",
       client: "codex",
-      metadata: { project_context: { repositoryId: "rd-skills" }, runtime_version: "0.9.0", hook_schema_version: 1 }
+      metadata: { project_context: { repositoryId: "rd-skills" }, runtime_version: "0.9.0", hook_schema_version: 1 },
     });
     await service.recordClientEvent(principal, {
       event: "PostToolUse",
       sessionId: "shared-session",
       turnId: "turn-1",
       client: "codex",
-      metadata: { evidence: { success: true, tests_passed: 3 } }
+      metadata: { evidence: { success: true, tests_passed: 3 } },
     });
     await service.recordClientEvent(other, {
       event: "SessionStart",
       sessionId: "shared-session",
       client: "codex",
-      metadata: {}
+      metadata: {},
     });
 
     await service.recordMcpCall({
@@ -89,7 +89,7 @@ test("admin session aggregation keeps actor/tenant isolation and derives failure
       args: { query: "ota" },
       latencyMs: 2,
       success: true,
-      principal
+      principal,
     });
     await service.recordMcpCall({
       traceId: service.newMcpTraceId(),
@@ -101,7 +101,7 @@ test("admin session aggregation keeps actor/tenant isolation and derives failure
       latencyMs: 3,
       success: false,
       error: "failed",
-      principal
+      principal,
     });
     await service.recordMcpCall({
       traceId: service.newMcpTraceId(),
@@ -112,7 +112,7 @@ test("admin session aggregation keeps actor/tenant isolation and derives failure
       args: { query: "other" },
       latencyMs: 1,
       success: true,
-      principal: other
+      principal: other,
     });
 
     const sessions = await service.listClientSessions(100);
@@ -139,13 +139,13 @@ test("admin session filters compose with AND semantics and reuse classification 
       event: "SessionStart",
       sessionId: "reuse-session",
       client: "codex",
-      metadata: { project_context: { repositoryId: "rd-skills" } }
+      metadata: { project_context: { repositoryId: "rd-skills" } },
     });
     await service.recordClientEvent(principal, {
       event: "PostToolUse",
       sessionId: "reuse-session",
       client: "codex",
-      metadata: { evidence: { success: true } }
+      metadata: { evidence: { success: true } },
     });
     await service.recordMcpCall({
       traceId: service.newMcpTraceId(),
@@ -157,7 +157,7 @@ test("admin session filters compose with AND semantics and reuse classification 
       latencyMs: 1,
       success: false,
       error: "temporary",
-      principal
+      principal,
     });
 
     const combined = await service.listClientSessions(100, {
@@ -168,13 +168,22 @@ test("admin session filters compose with AND semantics and reuse classification 
       hasMcp: true,
       hasEvidence: true,
       hasReuse: true,
-      q: "reuse-session"
+      q: "reuse-session",
     });
-    assert.deepEqual(combined.map((item) => item.sessionId), ["reuse-session"]);
+    assert.deepEqual(
+      combined.map((item) => item.sessionId),
+      ["reuse-session"],
+    );
 
-    assert.equal((await service.listClientSessions(100, { hasReuse: false })).some((item) => item.sessionId === "reuse-session"), false);
+    assert.equal(
+      (await service.listClientSessions(100, { hasReuse: false })).some((item) => item.sessionId === "reuse-session"),
+      false,
+    );
     assert.equal((await service.listClientSessions(100, { repositoryId: "other" })).length, 0);
-    assert.equal((await service.listClientSessions(100, { status: "ended" })).some((item) => item.sessionId === "reuse-session"), false);
+    assert.equal(
+      (await service.listClientSessions(100, { status: "ended" })).some((item) => item.sessionId === "reuse-session"),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -189,16 +198,19 @@ test("candidate lifecycle rejects review and edit while publishing or after publ
       content: "Verified reusable behavior",
       sourceType: "manual",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     await store.reviewCandidate(candidate.id, "approved", "reviewer", "verified", "useful");
     await store.markCandidatePublishing(candidate.id);
 
     await assert.rejects(
       () => store.reviewCandidate(candidate.id, "rejected", "reviewer", "late rejection", "false_positive"),
-      /cannot be reviewed/
+      /cannot be reviewed/,
     );
-    await assert.rejects(() => store.updateCandidate(candidate.id, { title: "editing during publish" }), /cannot be edited/);
+    await assert.rejects(
+      () => store.updateCandidate(candidate.id, { title: "editing during publish" }),
+      /cannot be edited/,
+    );
 
     await store.markCandidatePublished(candidate.id, {
       provider: "gitlab",
@@ -209,11 +221,11 @@ test("candidate lifecycle rejects review and edit while publishing or after publ
       action: "create",
       mergeRequestIid: 7,
       mergeRequestUrl: "https://gitlab.example.test/mr/7",
-      publishedAt: new Date().toISOString()
+      publishedAt: new Date().toISOString(),
     });
     await assert.rejects(
       () => store.reviewCandidate(candidate.id, "approved", "reviewer", "too late", "useful"),
-      /cannot be reviewed/
+      /cannot be reviewed/,
     );
     await assert.rejects(() => store.updateCandidate(candidate.id, { content: "too late" }), /cannot be edited/);
   } finally {
@@ -230,7 +242,7 @@ test("candidate publication terminal transitions require publishing state", asyn
       content: "Verified reusable behavior",
       sourceType: "manual",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     const publication = {
       provider: "gitlab" as const,
@@ -241,7 +253,7 @@ test("candidate publication terminal transitions require publishing state", asyn
       action: "create" as const,
       mergeRequestIid: 9,
       mergeRequestUrl: "https://gitlab.example.test/mr/9",
-      publishedAt: new Date().toISOString()
+      publishedAt: new Date().toISOString(),
     };
 
     await assert.rejects(() => store.markCandidatePublished(pending.id, publication), /must be publishing/);
@@ -268,25 +280,31 @@ test("candidate review reasons are constrained by review outcome", async () => {
       title: "Approved reason guard",
       content: "Verified reusable behavior",
       sourceType: "manual",
-      suggestedType: "knowledge"
+      suggestedType: "knowledge",
     });
     await assert.rejects(
       () => store.reviewCandidate(approved.id, "approved", "reviewer", "wrong reason", "false_positive"),
-      /review reason is not valid/
+      /review reason is not valid/,
     );
-    assert.equal((await store.reviewCandidate(approved.id, "approved", "reviewer", "valid", "useful")).reviewReason, "useful");
+    assert.equal(
+      (await store.reviewCandidate(approved.id, "approved", "reviewer", "valid", "useful")).reviewReason,
+      "useful",
+    );
 
     const rejected = await store.createCandidate(principal, {
       title: "Rejected reason guard",
       content: "Another reusable behavior",
       sourceType: "manual",
-      suggestedType: "knowledge"
+      suggestedType: "knowledge",
     });
     await assert.rejects(
       () => store.reviewCandidate(rejected.id, "rejected", "reviewer", "wrong reason", "needs_edit"),
-      /review reason is not valid/
+      /review reason is not valid/,
     );
-    assert.equal((await store.reviewCandidate(rejected.id, "rejected", "reviewer", "valid", "duplicate")).reviewReason, "duplicate");
+    assert.equal(
+      (await store.reviewCandidate(rejected.id, "rejected", "reviewer", "valid", "duplicate")).reviewReason,
+      "duplicate",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -300,7 +318,7 @@ test("publication state can be updated while waiting for merge", async () => {
       title: "Reconcile state guard",
       content: "Verified reusable behavior",
       sourceType: "manual",
-      suggestedType: "knowledge"
+      suggestedType: "knowledge",
     });
     const publication = {
       provider: "gitlab" as const,
@@ -311,20 +329,27 @@ test("publication state can be updated while waiting for merge", async () => {
       action: "create" as const,
       mergeRequestIid: 11,
       mergeRequestUrl: "https://gitlab.example.test/mr/11",
-      publishedAt: new Date().toISOString()
+      publishedAt: new Date().toISOString(),
     };
     await assert.rejects(
       () => store.updateCandidatePublication(candidate.id, { ...publication, mergeRequestState: "merged" }),
-      /must be publishing or published/
+      /must be publishing or published/,
     );
     await store.reviewCandidate(candidate.id, "approved", "reviewer", "verified", "useful");
     await store.markCandidatePublishing(candidate.id);
-    const waiting = await store.updateCandidatePublication(candidate.id, { ...publication, mergeRequestState: "opened" });
+    const waiting = await store.updateCandidatePublication(candidate.id, {
+      ...publication,
+      mergeRequestState: "opened",
+    });
     assert.equal(waiting.status, "publishing");
     assert.equal(waiting.publication?.mergeRequestState, "opened");
     const published = await store.markCandidatePublished(candidate.id, { ...publication, mergeRequestState: "merged" });
     assert.equal(published.status, "published");
-    const refreshed = await store.updateCandidatePublication(candidate.id, { ...publication, mergeRequestState: "merged", pipelineStatus: "success" });
+    const refreshed = await store.updateCandidatePublication(candidate.id, {
+      ...publication,
+      mergeRequestState: "merged",
+      pipelineStatus: "success",
+    });
     assert.equal(refreshed.publication?.pipelineStatus, "success");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -335,15 +360,55 @@ test("session time filters use inclusive overlap boundaries", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-core-time-filter-"));
   try {
     const service = await createService(root);
-    await service.recordClientEvent(principal, { event: "SessionStart", sessionId: "time-session", client: "codex", metadata: {} });
-    await service.recordMcpCall({ traceId: service.newMcpTraceId(), traceExplicit: true, sessionId: "time-session", client: "codex", tool: "search_knowledge", args: { query: "time" }, latencyMs: 1, success: true, principal });
-    await service.recordClientEvent(principal, { event: "SessionEnd", sessionId: "time-session", client: "codex", metadata: {} });
+    await service.recordClientEvent(principal, {
+      event: "SessionStart",
+      sessionId: "time-session",
+      client: "codex",
+      metadata: {},
+    });
+    await service.recordMcpCall({
+      traceId: service.newMcpTraceId(),
+      traceExplicit: true,
+      sessionId: "time-session",
+      client: "codex",
+      tool: "search_knowledge",
+      args: { query: "time" },
+      latencyMs: 1,
+      success: true,
+      principal,
+    });
+    await service.recordClientEvent(principal, {
+      event: "SessionEnd",
+      sessionId: "time-session",
+      client: "codex",
+      metadata: {},
+    });
     const session = (await service.listClientSessions()).find((item) => item.sessionId === "time-session");
     assert.ok(session);
-    assert.equal((await service.listClientSessions(100, { from: session.endedAt })).some((item) => item.sessionId === "time-session"), true);
-    assert.equal((await service.listClientSessions(100, { to: session.startedAt })).some((item) => item.sessionId === "time-session"), true);
-    assert.equal((await service.listClientSessions(100, { from: new Date(Date.parse(session.endedAt) + 1).toISOString() })).some((item) => item.sessionId === "time-session"), false);
-    assert.equal((await service.listClientSessions(100, { to: new Date(Date.parse(session.startedAt) - 1).toISOString() })).some((item) => item.sessionId === "time-session"), false);
+    assert.equal(
+      (await service.listClientSessions(100, { from: session.endedAt })).some(
+        (item) => item.sessionId === "time-session",
+      ),
+      true,
+    );
+    assert.equal(
+      (await service.listClientSessions(100, { to: session.startedAt })).some(
+        (item) => item.sessionId === "time-session",
+      ),
+      true,
+    );
+    assert.equal(
+      (await service.listClientSessions(100, { from: new Date(Date.parse(session.endedAt) + 1).toISOString() })).some(
+        (item) => item.sessionId === "time-session",
+      ),
+      false,
+    );
+    assert.equal(
+      (await service.listClientSessions(100, { to: new Date(Date.parse(session.startedAt) - 1).toISOString() })).some(
+        (item) => item.sessionId === "time-session",
+      ),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -354,8 +419,16 @@ test("session list identity maps exactly to detail timeline", async () => {
   try {
     const service = await createService(root);
     const other: Principal = { id: "other-user", tenantId: "other-tenant", roles: ["developer", "internal"] };
-    for (const [who, tool] of [[principal, "search_knowledge"], [other, "get_skill"]] as const) {
-      await service.recordClientEvent(who, { event: "SessionStart", sessionId: "duplicate-id", client: "codex", metadata: {} });
+    for (const [who, tool] of [
+      [principal, "search_knowledge"],
+      [other, "get_skill"],
+    ] as const) {
+      await service.recordClientEvent(who, {
+        event: "SessionStart",
+        sessionId: "duplicate-id",
+        client: "codex",
+        metadata: {},
+      });
       await service.recordMcpCall({
         traceId: service.newMcpTraceId(),
         traceExplicit: true,
@@ -365,7 +438,7 @@ test("session list identity maps exactly to detail timeline", async () => {
         args: {},
         latencyMs: 1,
         success: true,
-        principal: who
+        principal: who,
       });
     }
     const rows = (await service.listClientSessions()).filter((item) => item.sessionId === "duplicate-id");
@@ -403,7 +476,7 @@ test("knowledge gap management clears terminal timestamps when reopened and pres
     const resolved = await store.updateKnowledgeGapManagement(gap.key, {
       status: "resolved",
       knowledge: { key: "rd:ota", repositoryId: "rd-skills", path: "knowledge/ota.md", title: "OTA" },
-      commit: { repositoryId: "rd-skills", sha: "abc123" }
+      commit: { repositoryId: "rd-skills", sha: "abc123" },
     });
     assert.ok(resolved.resolvedAt);
     const reopenedAgain = await store.updateKnowledgeGapManagement(gap.key, { status: "active" });
@@ -425,10 +498,10 @@ test("knowledge gap candidate creation is single-shot and terminal states reject
       occurrences: 3,
       lastSeenAt: new Date().toISOString(),
       source: "unmatched-query" as const,
-      members: ["How should OTA rollback recover?"]
+      members: ["How should OTA rollback recover?"],
     };
     (service as any).listKnowledgeGaps = async () => [
-      { ...gap, management: (await (service as any).observability.listKnowledgeGapManagement()).get(gap.key) }
+      { ...gap, management: (await (service as any).observability.listKnowledgeGapManagement()).get(gap.key) },
     ];
 
     const created = await service.createKnowledgeCandidateFromGap(gap.key, principal);
@@ -441,12 +514,12 @@ test("knowledge gap candidate creation is single-shot and terminal states reject
     assert.match(created.content, /## 问题/);
     assert.match(created.content, /## 验证结果/);
     assert.doesNotMatch(created.content, /TODO:/);
-    await assert.rejects(
-      () => service.createKnowledgeCandidateFromGap(gap.key, principal),
-      /already has a Candidate/
-    );
+    await assert.rejects(() => service.createKnowledgeCandidateFromGap(gap.key, principal), /already has a Candidate/);
 
-    await (service as any).observability.updateKnowledgeGapManagement(gap.key, { status: "ignored", candidateId: undefined });
+    await (service as any).observability.updateKnowledgeGapManagement(gap.key, {
+      status: "ignored",
+      candidateId: undefined,
+    });
     await assert.rejects(() => service.createKnowledgeCandidateFromGap(gap.key, principal), /Ignored Knowledge gap/);
     await (service as any).observability.updateKnowledgeGapManagement(gap.key, { status: "resolved" });
     await assert.rejects(() => service.createKnowledgeCandidateFromGap(gap.key, principal), /Resolved Knowledge gap/);

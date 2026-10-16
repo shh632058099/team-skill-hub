@@ -25,18 +25,18 @@ async function main(): Promise<void> {
       releaseImage: required("--release-image"),
       shaImage: required("--sha-image"),
       rollbackImage: required("--rollback-image"),
-      expectedVersion
+      expectedVersion,
     },
     {
       async run(args: string[]): Promise<string> {
         const result = await execFileAsync(dockerExecutable, args, {
           cwd: process.cwd(),
           env: process.env,
-          maxBuffer: 4 * 1024 * 1024
+          maxBuffer: 4 * 1024 * 1024,
         });
         return result.stdout;
-      }
-    }
+      },
+    },
   );
   console.log(JSON.stringify(report, null, 2));
 }

@@ -14,7 +14,10 @@
     "client-integration:version-check": "tsx src/cli/client-integration-version-check.ts",
     "start": "node dist/src/index.js",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
-    "check": "npm run build && npm test",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" eslint.config.js package.json tsconfig.json .prettierrc.json",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" eslint.config.js package.json tsconfig.json .prettierrc.json",
+    "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "check": "npm run format:check && npm run lint && npm run build && npm test",
     "benchmark": "node scripts/benchmark.mjs",
     "benchmark:capacity": "tsx src/cli/benchmark-capacity.ts",
     "validate:repo": "tsx src/cli/validate-repository.ts",
@@ -42,8 +45,13 @@
     "zod": "^4.1.11"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.7.2",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.10",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
   }
 }

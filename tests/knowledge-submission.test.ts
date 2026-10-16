@@ -26,7 +26,7 @@ const validSummary = [
   "OTA systems with checkpoint recovery.",
   "",
   "## Constraints / limitations",
-  "Target hardware timing still needs validation."
+  "Target hardware timing still needs validation.",
 ].join("\n");
 
 async function serviceWithStore() {
@@ -62,7 +62,7 @@ test("accepts summaries up to 50000 characters and rejects current invalid conte
   await service.normalize({ title: "ignored", content: padded, submittedSpecVersion: 1 });
   await assert.rejects(
     service.normalize({ title: "ignored", content: validSummary + "\n" + "A".repeat(50_000), submittedSpecVersion: 1 }),
-    /Knowledge candidate content does not satisfy current submission spec: too-long/
+    /Knowledge candidate content does not satisfy current submission spec: too-long/,
   );
 });
 
@@ -76,13 +76,19 @@ test("stale compatible content is accepted but stale incompatible content return
   const oversized = validSummary.replace("Power loss interrupts an update.", "A".repeat(700));
   await assert.rejects(
     service.normalize({ title: "ignored", content: oversized, submittedSpecVersion: 1 }),
-    (error: unknown) => error instanceof KnowledgeSpecOutdatedError && error.code === "KNOWLEDGE_SPEC_OUTDATED" && error.currentSpecVersion === 2
+    (error: unknown) =>
+      error instanceof KnowledgeSpecOutdatedError &&
+      error.code === "KNOWLEDGE_SPEC_OUTDATED" &&
+      error.currentSpecVersion === 2,
   );
 });
 
 test("future submitted spec versions fail as invalid input", async () => {
   const { service } = await serviceWithStore();
-  await assert.rejects(service.normalize({ title: "ignored", content: validSummary, submittedSpecVersion: 9 }), /Unknown knowledge submission spec version: 9/);
+  await assert.rejects(
+    service.normalize({ title: "ignored", content: validSummary, submittedSpecVersion: 9 }),
+    /Unknown knowledge submission spec version: 9/,
+  );
 });
 
 test("structured drafts render through the current spec and refuse missing or placeholder required values", async () => {
@@ -94,17 +100,20 @@ test("structured drafts render through the current spec and refuse missing or pl
     solution: "Validate and resume checkpoint.",
     verification: "Regression suite passed.",
     applicability: "Checkpoint based OTA.",
-    constraints: "Hardware timing remains platform-specific."
+    constraints: "Hardware timing remains platform-specific.",
   });
   assert.match(built.content, /# Verified recovery/);
   assert.match(built.content, /## 验证结果\nRegression suite passed\./);
-  await assert.rejects(service.buildFromStructuredDraft({
-    title: "Bad draft",
-    problem: "Problem",
-    rootCause: "unknown",
-    solution: "Solution",
-    verification: "Verified",
-    applicability: "Scope",
-    constraints: "Limits"
-  }), /missing-required-knowledge-field: root_cause/);
+  await assert.rejects(
+    service.buildFromStructuredDraft({
+      title: "Bad draft",
+      problem: "Problem",
+      rootCause: "unknown",
+      solution: "Solution",
+      verification: "Verified",
+      applicability: "Scope",
+      constraints: "Limits",
+    }),
+    /missing-required-knowledge-field: root_cause/,
+  );
 });

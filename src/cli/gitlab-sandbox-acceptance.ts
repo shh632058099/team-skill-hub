@@ -59,17 +59,23 @@ function parseOptions(): Options {
     adminKeyEnv,
     ...(candidateId ? { candidateId } : {}),
     ...(marker ? { marker } : {}),
-    ...(argument("--path")?.trim() ? { suggestedPath: argument("--path")!.trim() } : {})
+    ...(argument("--path")?.trim() ? { suggestedPath: argument("--path")!.trim() } : {}),
   };
 }
 
 function defaultMarker(): string {
-  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:.TZ]/g, "")
+    .slice(0, 14);
   return "skill-hub-sandbox-" + stamp + "-" + randomBytes(3).toString("hex");
 }
 
 function safeSlug(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 async function main(): Promise<void> {
@@ -83,8 +89,8 @@ async function main(): Promise<void> {
       headers: {
         "x-skill-hub-admin-key": adminKey,
         "content-type": "application/json",
-        ...(init.headers ?? {})
-      }
+        ...(init.headers ?? {}),
+      },
     });
     const text = await response.text();
     let payload: unknown = undefined;
@@ -120,7 +126,7 @@ async function main(): Promise<void> {
       solution: "通过 Team Skill Hub GitLab sandbox acceptance flow 创建并发布此候选。",
       verification: "候选审核、GitLab MR 发布、Webhook 同步和人工合并后的检索结果均应可验证。",
       applicability: "仅适用于 Team Skill Hub GitLab 沙盒验收。",
-      constraints: "不得将此沙盒条目当作生产知识；验收标记必须保持可检索。"
+      constraints: "不得将此沙盒条目当作生产知识；验收标记必须保持可检索。",
     };
     const contentLines = ["# " + title];
     for (const section of submissionSpec.spec.sections) {
@@ -139,8 +145,8 @@ async function main(): Promise<void> {
         content,
         suggestedType: "knowledge",
         repository: opts.repository,
-        suggestedPath
-      })
+        suggestedPath,
+      }),
     });
     const candidateId = submitted.candidate?.id;
     if (!candidateId) throw new Error("Candidate creation did not return an id");
@@ -150,33 +156,39 @@ async function main(): Promise<void> {
       body: JSON.stringify({
         status: "approved",
         reviewReason: "useful",
-        reviewNote: "GitLab sandbox acceptance"
-      })
+        reviewNote: "GitLab sandbox acceptance",
+      }),
     });
 
     const published = await request<{ candidate: CandidateView }>(
       "/admin/api/knowledge-candidates/" + encodeURIComponent(candidateId) + "/publish",
-      { method: "POST", body: "{}" }
+      { method: "POST", body: "{}" },
     );
     const publication = published.candidate?.publication;
     if (!publication?.mergeRequestUrl || !publication.branch || !publication.mergeRequestIid) {
       throw new Error("Publish completed without GitLab MR evidence");
     }
 
-    console.log(JSON.stringify({
-      ok: true,
-      phase: "prepare",
-      repository: opts.repository,
-      candidateId,
-      marker,
-      suggestedPath,
-      branch: publication.branch,
-      targetBranch: publication.targetBranch,
-      mergeRequestIid: publication.mergeRequestIid,
-      mergeRequestUrl: publication.mergeRequestUrl,
-      mergeRequestState: publication.mergeRequestState,
-      humanActionRequired: "Review and merge the sandbox MR, then run phase=verify with candidateId and marker."
-    }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          phase: "prepare",
+          repository: opts.repository,
+          candidateId,
+          marker,
+          suggestedPath,
+          branch: publication.branch,
+          targetBranch: publication.targetBranch,
+          mergeRequestIid: publication.mergeRequestIid,
+          mergeRequestUrl: publication.mergeRequestUrl,
+          mergeRequestState: publication.mergeRequestState,
+          humanActionRequired: "Review and merge the sandbox MR, then run phase=verify with candidateId and marker.",
+        },
+        null,
+        2,
+      ),
+    );
     return;
   }
 
@@ -184,25 +196,28 @@ async function main(): Promise<void> {
   const marker = opts.marker!;
   const reconciled = await request<{ candidate: CandidateView }>(
     "/admin/api/knowledge-candidates/" + encodeURIComponent(candidateId) + "/reconcile",
-    { method: "POST", body: "{}" }
+    { method: "POST", body: "{}" },
   );
   const candidate = reconciled.candidate;
   const publication = candidate?.publication;
   if (candidate?.status !== "published") throw new Error("Candidate is not in published state");
   if (publication?.mergeRequestState !== "merged") {
-    throw new Error("Merge Request is not merged; current state=" + String(publication?.mergeRequestState ?? "unknown"));
+    throw new Error(
+      "Merge Request is not merged; current state=" + String(publication?.mergeRequestState ?? "unknown"),
+    );
   }
   if (!publication.mergedAt) throw new Error("Merged publication is missing mergedAt evidence");
 
   const audit = await request<{ events: Array<{ ts: string; action: string; repositoryId: string; trigger: string }> }>(
-    "/audit?repository=" + encodeURIComponent(opts.repository) + "&limit=200"
+    "/audit?repository=" + encodeURIComponent(opts.repository) + "&limit=200",
   );
   const mergedAt = Date.parse(publication.mergedAt);
-  const webhookSync = audit.events?.find((event) =>
-    event.repositoryId === opts.repository &&
-    event.trigger === "webhook" &&
-    event.action === "repository.sync.completed" &&
-    Date.parse(event.ts) >= mergedAt
+  const webhookSync = audit.events?.find(
+    (event) =>
+      event.repositoryId === opts.repository &&
+      event.trigger === "webhook" &&
+      event.action === "repository.sync.completed" &&
+      Date.parse(event.ts) >= mergedAt,
   );
   if (!webhookSync) {
     throw new Error("No successful repository webhook sync was recorded after MR merge");
@@ -210,21 +225,27 @@ async function main(): Promise<void> {
 
   const syncResult = await request<Record<string, unknown>>(
     "/repositories/" + encodeURIComponent(opts.repository) + "/sync",
-    { method: "POST", body: "{}" }
+    { method: "POST", body: "{}" },
   );
 
-  const search = await request<{ results: Array<{ repository: string; path: string; title: string; content: string }> }>(
-    "/admin/api/knowledge/search?q=" + encodeURIComponent(marker) +
-      "&repository=" + encodeURIComponent(opts.repository) + "&limit=10"
+  const search = await request<{
+    results: Array<{ repository: string; path: string; title: string; content: string }>;
+  }>(
+    "/admin/api/knowledge/search?q=" +
+      encodeURIComponent(marker) +
+      "&repository=" +
+      encodeURIComponent(opts.repository) +
+      "&limit=10",
   );
-  const hit = search.results?.find((item) =>
-    item.repository === opts.repository &&
-    [item.path, item.title, item.content].some((value) => String(value ?? "").includes(marker))
+  const hit = search.results?.find(
+    (item) =>
+      item.repository === opts.repository &&
+      [item.path, item.title, item.content].some((value) => String(value ?? "").includes(marker)),
   );
   if (!hit) throw new Error("RAG search did not return the sandbox marker after merge/sync");
 
   const listed = await request<{ candidates: CandidateView[] }>(
-    "/admin/api/knowledge-candidates?id=" + encodeURIComponent(candidateId) + "&limit=10"
+    "/admin/api/knowledge-candidates?id=" + encodeURIComponent(candidateId) + "&limit=10",
   );
   const finalCandidate = listed.candidates?.find((item) => item.id === candidateId);
   if (!finalCandidate) throw new Error("Candidate status could not be read back after verification");
@@ -232,20 +253,26 @@ async function main(): Promise<void> {
     throw new Error("Candidate publication status did not retain merged state");
   }
 
-  console.log(JSON.stringify({
-    ok: true,
-    phase: "verify",
-    repository: opts.repository,
-    candidateId,
-    marker,
-    mergeRequestUrl: publication.mergeRequestUrl,
-    mergeCommitSha: publication.mergeCommitSha,
-    webhookSyncAt: webhookSync.ts,
-    manualSync: syncResult,
-    ragHit: { repository: hit.repository, path: hit.path, title: hit.title },
-    candidateStatus: finalCandidate.status,
-    mergeRequestState: finalCandidate.publication?.mergeRequestState
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        phase: "verify",
+        repository: opts.repository,
+        candidateId,
+        marker,
+        mergeRequestUrl: publication.mergeRequestUrl,
+        mergeCommitSha: publication.mergeCommitSha,
+        webhookSyncAt: webhookSync.ts,
+        manualSync: syncResult,
+        ragHit: { repository: hit.repository, path: hit.path, title: hit.title },
+        candidateStatus: finalCandidate.status,
+        mergeRequestState: finalCandidate.publication?.mergeRequestState,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 main().catch((error) => {

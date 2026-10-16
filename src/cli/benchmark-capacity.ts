@@ -11,7 +11,7 @@ const result = await runCapacityBenchmark({
   users: numberArg("--users"),
   chunks: numberArg("--chunks"),
   searchesPerUser: numberArg("--searches"),
-  writesPerUser: numberArg("--writes")
+  writesPerUser: numberArg("--writes"),
 });
 
 console.log(JSON.stringify(result, null, 2));

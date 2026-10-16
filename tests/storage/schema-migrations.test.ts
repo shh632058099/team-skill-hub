@@ -10,7 +10,10 @@ test("schema migrations are versioned and idempotent", async () => {
   try {
     const file = path.join(root, "db.sqlite3");
     let db = openSkillHubDatabase(file);
-    const first = db.raw.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all() as Array<{version:number;name:string}>;
+    const first = db.raw.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all() as Array<{
+      version: number;
+      name: string;
+    }>;
     assert.ok(first.length >= 1);
     assert.equal(first[0]?.version, 1);
     db.close();
@@ -22,7 +25,9 @@ test("schema migrations are versioned and idempotent", async () => {
       assert.ok(found, table + " should exist");
     }
     db.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("database refuses schema versions newer than this binary", async () => {
@@ -30,8 +35,12 @@ test("database refuses schema versions newer than this binary", async () => {
   try {
     const file = path.join(root, "db.sqlite3");
     const db = openSkillHubDatabase(file);
-    db.raw.prepare("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)").run(999, "future-schema", Date.now());
+    db.raw
+      .prepare("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)")
+      .run(999, "future-schema", Date.now());
     db.close();
     assert.throws(() => openSkillHubDatabase(file), /newer|unsupported|schema/i);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

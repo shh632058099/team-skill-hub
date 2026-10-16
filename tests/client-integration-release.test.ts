@@ -17,13 +17,16 @@ test("loads canonical client integration release metadata", async () => {
 test("rejects invalid version ordering", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-release-"));
   await mkdir(path.join(root, "client-integration"), { recursive: true });
-  await writeFile(path.join(root, "client-integration", "release.json"), JSON.stringify({
-    schemaVersion: 1,
-    version: 4,
-    minimumSupportedVersion: 5,
-    hookRuntimeVersion: "1.1.0",
-    hookSchemaVersion: 1
-  }));
+  await writeFile(
+    path.join(root, "client-integration", "release.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      version: 4,
+      minimumSupportedVersion: 5,
+      hookRuntimeVersion: "1.1.0",
+      hookSchemaVersion: 1,
+    }),
+  );
   await assert.rejects(() => loadClientIntegrationRelease(root), /minimumSupportedVersion/);
 });
 
@@ -33,7 +36,7 @@ test("renders relative package paths", async () => {
     releasedAt: "2026-10-15T11:30:00+08:00",
     serverVersion: "0.1.0",
     linuxSha256: "a".repeat(64),
-    windowsSha256: "b".repeat(64)
+    windowsSha256: "b".repeat(64),
   });
   assert.equal(manifest.packages.linux.path, `releases/${release.version}/linux.tar.gz`);
   assert.equal(manifest.packages.windows.path, `releases/${release.version}/windows.zip`);

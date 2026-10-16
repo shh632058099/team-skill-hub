@@ -36,14 +36,24 @@ test("expired cache fetches once and resolves decision", async () => {
   const r = await runtime(root);
   await r.writeManifestCache({ version: 1, minimum_supported_version: 1 }, Date.now() - 13 * 60 * 60 * 1000);
   let requests = 0;
-  const server = createServer((_req, res) => { requests++; res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ version: 3, minimum_supported_version: 2 })); });
+  const server = createServer((_req, res) => {
+    requests++;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ version: 3, minimum_supported_version: 2 }));
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
   try {
-    const result = await r.checkUpdateDecision({ installedVersion: 1, manifestUrl: `http://127.0.0.1:${address.port}/manifest.json` });
+    const result = await r.checkUpdateDecision({
+      installedVersion: 1,
+      manifestUrl: `http://127.0.0.1:${address.port}/manifest.json`,
+    });
     assert.equal(result.decision, "required_update");
     assert.equal(requests, 1);
-  } finally { server.close(); }
+  } finally {
+    server.close();
+  }
 });
 
 test("network timeout fails open within budget", async () => {
@@ -51,13 +61,21 @@ test("network timeout fails open within budget", async () => {
   const r = await runtime(root);
   const server = createServer((_req, _res) => {});
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
   const started = Date.now();
   try {
-    const result = await r.checkUpdateDecision({ installedVersion: 1, manifestUrl: `http://127.0.0.1:${address.port}/manifest.json`, budgetMs: 100 });
+    const result = await r.checkUpdateDecision({
+      installedVersion: 1,
+      manifestUrl: `http://127.0.0.1:${address.port}/manifest.json`,
+      budgetMs: 100,
+    });
     assert.equal(result.decision, "none");
     assert.ok(Date.now() - started < 500);
-  } finally { server.closeAllConnections(); server.close(); }
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });
 
 test("Codex and Claude use client-specific renderer contracts", async () => {
@@ -75,7 +93,6 @@ test("Codex and Claude use client-specific renderer contracts", async () => {
   assert.equal(renderClaudeTerminalNotice("none", { installed: 5, latest: 5, minimum: 4 }), "");
 });
 
-
 test("client guidance fetches server Knowledge submission spec instead of embedding the six-section policy", async () => {
   const files = [
     "client-integration/templates/codex-guidance.md",
@@ -85,7 +102,7 @@ test("client guidance fetches server Knowledge submission spec instead of embedd
     "scripts/setup-claude-code.sh",
     "scripts/setup-claude-code.ps1",
     "docs/developer/developer-guide.md",
-    "docs/developer/developer-guide.zh-CN.md"
+    "docs/developer/developer-guide.zh-CN.md",
   ];
   for (const file of files) {
     const source = await readFile(file, "utf8");

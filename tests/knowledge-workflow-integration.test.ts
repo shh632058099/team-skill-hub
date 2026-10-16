@@ -10,15 +10,8 @@ import { LoggingEventSink } from "../src/events.js";
 import { MemoryRegistryStore } from "../src/registry.js";
 import { GitRepositoryProvider } from "../src/repository.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
-import {
-  DevelopmentAuthenticationProvider,
-  StaticRolePermissionProvider
-} from "../src/security.js";
-import {
-  RequiredFieldsRule,
-  RepositoryVisibilityRule,
-  UniqueNameRule
-} from "../src/skills.js";
+import { DevelopmentAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
+import { RequiredFieldsRule, RepositoryVisibilityRule, UniqueNameRule } from "../src/skills.js";
 import type { AppConfig, Principal, RepositoryConfig } from "../src/types.js";
 
 const execFileAsync = promisify(execFile);
@@ -27,7 +20,7 @@ async function git(cwd: string, ...args: string[]) {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
     windowsHide: true,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
   return stdout.trim();
 }
@@ -66,13 +59,13 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       projectPath: "ai/rd-skills",
       tokenEnv: "TEST_GITLAB_WRITE_TOKEN",
       targetBranch: "master",
-      branchPrefix: "skill-hub-knowledge"
-    }
+      branchPrefix: "skill-hub-knowledge",
+    },
   };
   const principal: Principal = {
     id: "developer-integration",
     tenantId: "rd",
-    roles: ["developer", "internal"]
+    roles: ["developer", "internal"],
   };
   const search = new SqliteFtsSearchBackend();
   const appConfig: AppConfig = {
@@ -81,7 +74,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     dataDir,
     defaultRoles: ["developer", "internal"],
     authentication: { mode: "development", apiKeys: {} },
-    repositories: [repository]
+    repositories: [repository],
   };
   const service = new SkillHubApplicationService(
     appConfig,
@@ -92,7 +85,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   const originalFetch = globalThis.fetch;
@@ -115,7 +108,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     "适用于后续 OTA 项目的故障排查和恢复设计。",
     "",
     "## 约束/限制",
-    "仍需在目标硬件上验证掉电时序。"
+    "仍需在目标硬件上验证掉电时序。",
   ].join("\n");
   let publishedMarkdown = "";
   try {
@@ -127,7 +120,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       event: "SessionStart",
       sessionId: "workflow-session",
       cwd: upstream,
-      metadata: {}
+      metadata: {},
     });
     await service.recordClientEvent(principal, {
       schemaVersion: 1,
@@ -144,9 +137,9 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
           exit_code: 0,
           tests_run: 12,
           tests_passed: 12,
-          tests_failed: 0
-        }
-      }
+          tests_failed: 0,
+        },
+      },
     });
     await service.recordClientEvent(principal, {
       schemaVersion: 1,
@@ -157,14 +150,12 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       cwd: upstream,
       metadata: {
         stop_hook_active: false,
-        assistant_result_excerpt: assistantResult
-      }
+        assistant_result_excerpt: assistantResult,
+      },
     });
 
     const generated = (await service.listKnowledgeCandidates(100)).find(
-      (item) =>
-        item.sourceType === "codex-summary" &&
-        item.sourceSessionId === "workflow-session"
+      (item) => item.sourceType === "codex-summary" && item.sourceSessionId === "workflow-session",
     );
     assert.ok(generated, "automatic Candidate should be generated");
     assert.equal(generated.repository, "rd-skills");
@@ -174,7 +165,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     const autoPath = generated.suggestedPath!;
     const edited = await service.updateKnowledgeCandidate(generated.id, {
       repository: "",
-      suggestedPath: ""
+      suggestedPath: "",
     });
     assert.equal(edited.repository, undefined);
     assert.equal(edited.suggestedPath, undefined);
@@ -183,7 +174,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       "approved",
       "integration-reviewer",
       "Verified with regression evidence",
-      "useful"
+      "useful",
     );
     assert.equal(approved.status, "approved");
 
@@ -202,7 +193,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
         publishedMarkdown = body.content ?? "";
         return new Response(JSON.stringify({ file_path: autoPath }), {
           status: 201,
-          headers: { "content-type": "application/json" }
+          headers: { "content-type": "application/json" },
         });
       }
       if (/\/merge_requests$/.test(url) && method === "POST") {
@@ -210,9 +201,9 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
           JSON.stringify({
             iid: 12,
             web_url: "https://gitlab.example.test/ai/rd-skills/-/merge_requests/12",
-            state: "opened"
+            state: "opened",
           }),
-          { status: 201, headers: { "content-type": "application/json" } }
+          { status: 201, headers: { "content-type": "application/json" } },
         );
       }
       if (/\/merge_requests\/12$/.test(url) && method === "GET") {
@@ -223,9 +214,9 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
             merge_commit_sha: "merge123",
             has_conflicts: false,
             detailed_merge_status: "merged",
-            head_pipeline: { status: "success" }
+            head_pipeline: { status: "success" },
           }),
-          { status: 200, headers: { "content-type": "application/json" } }
+          { status: 200, headers: { "content-type": "application/json" } },
         );
       }
       throw new Error("unexpected mocked GitLab request: " + method + " " + url);
@@ -241,19 +232,13 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.match(publishedMarkdown, /^# OTA 断电恢复修复/m);
 
     await mkdir(path.dirname(path.join(upstream, autoPath)), { recursive: true });
-    await writeFile(
-      path.join(upstream, autoPath),
-      publishedMarkdown,
-      "utf8"
-    );
+    await writeFile(path.join(upstream, autoPath), publishedMarkdown, "utf8");
     await git(upstream, "add", autoPath);
     await git(upstream, "commit", "-m", "merge knowledge candidate");
 
     const synced = await service.pollRepository("rd-skills");
     assert.equal(synced.status, "healthy");
-    const reconciled = (await service.listKnowledgeCandidates(100)).find(
-      (item) => item.id === generated.id
-    );
+    const reconciled = (await service.listKnowledgeCandidates(100)).find((item) => item.id === generated.id);
     assert.ok(reconciled);
     assert.equal(reconciled.status, "published");
     assert.equal(reconciled.publication?.mergeRequestState, "merged");
@@ -262,12 +247,12 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     const results = service.searchKnowledge("OTA 断电 恢复 安全 检查点", 5, ["rd-skills"], principal);
     assert.ok(
       results.some((item) => item.chunk.relativePath === autoPath),
-      "merged Knowledge should be searchable after Repository Sync"
+      "merged Knowledge should be searchable after Repository Sync",
     );
     await new Promise((resolve) => setTimeout(resolve, 30));
     const usage = await service.listUsageAnalytics(20);
     const searchUsage = usage.find(
-      (item) => item.kind === "knowledge" && item.action === "search" && item.query === "OTA 断电 恢复 安全 检查点"
+      (item) => item.kind === "knowledge" && item.action === "search" && item.query === "OTA 断电 恢复 安全 检查点",
     );
     assert.ok(searchUsage);
     assert.equal(searchUsage.matched, true);
@@ -278,7 +263,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.ok(thresholdResults.length > 0, "threshold must not hide retrieval results");
     await new Promise((resolve) => setTimeout(resolve, 30));
     const thresholdUsage = (await service.listUsageAnalytics(20)).find(
-      (item) => item.kind === "knowledge" && item.action === "search" && item.query === thresholdQuery
+      (item) => item.kind === "knowledge" && item.action === "search" && item.query === thresholdQuery,
     );
     assert.ok(thresholdUsage);
     assert.equal(thresholdUsage.matched, false);
@@ -293,7 +278,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     for (let attempt = 0; attempt < 20 && !noHitUsage; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 25));
       noHitUsage = (await service.listUsageAnalytics(20)).find(
-        (item) => item.kind === "knowledge" && item.action === "search" && item.query === noHitQuery
+        (item) => item.kind === "knowledge" && item.action === "search" && item.query === noHitQuery,
       );
     }
     assert.ok(noHitUsage);
@@ -303,12 +288,7 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(usageSummary.knowledgeTopScore.count >= 1, true);
     assert.equal(usageSummary.knowledgeTopScore.max, results[0]?.score);
     assert.equal(usageSummary.knowledgeMatchMinScore, undefined);
-    const loaded = service.getKnowledge(
-      "rd-skills",
-      autoPath,
-      undefined,
-      principal
-    );
+    const loaded = service.getKnowledge("rd-skills", autoPath, undefined, principal);
     assert.match(loaded.document.content, /最后一个安全检查点/);
   } finally {
     globalThis.fetch = originalFetch;

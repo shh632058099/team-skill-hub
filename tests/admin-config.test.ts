@@ -3,12 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {
-  AdminConfigStore,
-  applyAdminConfig,
-  editableConfigFromApp,
-  validateAdminConfig
-} from "../src/admin-config.js";
+import { AdminConfigStore, applyAdminConfig, editableConfigFromApp, validateAdminConfig } from "../src/admin-config.js";
 import type { AppConfig } from "../src/types.js";
 
 function baseConfig(dataDir: string): AppConfig {
@@ -22,7 +17,7 @@ function baseConfig(dataDir: string): AppConfig {
     webhookDedupMaxEntries: 1000,
     webhookDedupTtlSeconds: 604800,
     repositories: [],
-    projects: []
+    projects: [],
   };
 }
 
@@ -50,8 +45,7 @@ test("admin config persists and overlays runtime configuration", async () => {
           visibility: ["internal"],
           pollingIntervalSeconds: 120,
           readRoles: ["developer"],
-          syncRoles: ["admin"]
-,
+          syncRoles: ["admin"],
           knowledgePublishing: {
             enabled: true,
             provider: "gitlab",
@@ -59,9 +53,9 @@ test("admin config persists and overlays runtime configuration", async () => {
             projectPath: "ai/rd-skills",
             tokenEnv: "GITLAB_WRITE_TOKEN",
             targetBranch: "master",
-            branchPrefix: "skill-hub-knowledge"
-          }
-        }
+            branchPrefix: "skill-hub-knowledge",
+          },
+        },
       ],
       projects: [
         {
@@ -74,9 +68,9 @@ test("admin config persists and overlays runtime configuration", async () => {
           tools: ["gitlab"],
           environments: ["dev", "prod"],
           product: "ota",
-          aliases: ["ota-runtime"]
-        }
-      ]
+          aliases: ["ota-runtime"],
+        },
+      ],
     });
     applyAdminConfig(config, saved);
 
@@ -84,9 +78,7 @@ test("admin config persists and overlays runtime configuration", async () => {
     assert.equal(await store.load(restarted), true);
     assert.deepEqual(editableConfigFromApp(restarted), editableConfigFromApp(config));
 
-    const persisted = JSON.parse(
-      await readFile(path.join(dir, "config", "admin-config.json"), "utf8")
-    );
+    const persisted = JSON.parse(await readFile(path.join(dir, "config", "admin-config.json"), "utf8"));
     assert.equal(persisted.repositories[0].id, "rd-skills");
     assert.equal(saved.repositories[0]?.knowledge?.enabled, true);
     assert.deepEqual(saved.repositories[0]?.knowledge?.include, ["**/*.md", "**/*.txt", "**/*.pdf", "**/*.docx"]);
@@ -118,11 +110,11 @@ test("admin config rejects unknown project preferred repositories", () => {
             preferredKnowledgeRepositories: [],
             tools: [],
             environments: [],
-            aliases: []
-          }
-        ]
+            aliases: [],
+          },
+        ],
       }),
-    /unknown preferred repository/
+    /unknown preferred repository/,
   );
 });
 
@@ -139,7 +131,7 @@ test("admin config rejects duplicate repository ids", () => {
     visibility: ["internal"],
     pollingIntervalSeconds: 60,
     readRoles: ["developer"],
-    syncRoles: ["admin"]
+    syncRoles: ["admin"],
   };
   assert.throws(
     () =>
@@ -149,8 +141,8 @@ test("admin config rejects duplicate repository ids", () => {
         webhookDedupMaxEntries: 1000,
         webhookDedupTtlSeconds: 604800,
         repositories: [repository, { ...repository }],
-        projects: []
+        projects: [],
       }),
-    /Duplicate repository id/
+    /Duplicate repository id/,
   );
 });

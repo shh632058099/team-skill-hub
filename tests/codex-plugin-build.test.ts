@@ -26,12 +26,12 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
         "--out",
         out,
         "--marketplace-root",
-        marketplace
+        marketplace,
       ],
       {
         cwd: process.cwd(),
-        env: { ...process.env, TEST_TEAM_HUB_TOKEN: "must-never-be-written" }
-      }
+        env: { ...process.env, TEST_TEAM_HUB_TOKEN: "must-never-be-written" },
+      },
     );
 
     const plugin = JSON.parse(await readFile(path.join(out, "plugin.json"), "utf8"));
@@ -43,7 +43,7 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.deepEqual(mcp.mcpServers.teamSkillHub, {
       type: "streamable-http",
       url: "https://hub.example.test/mcp",
-      bearer_token_env_var: "TEST_TEAM_HUB_TOKEN"
+      bearer_token_env_var: "TEST_TEAM_HUB_TOKEN",
     });
 
     const hooks = JSON.parse(await readFile(path.join(out, "hooks", "hooks.json"), "utf8"));
@@ -63,7 +63,7 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.match(conf, /hook_schema_version=1/);
 
     const catalog = JSON.parse(
-      await readFile(path.join(marketplace, ".agents", "plugins", "marketplace.json"), "utf8")
+      await readFile(path.join(marketplace, ".agents", "plugins", "marketplace.json"), "utf8"),
     );
     assert.equal(catalog.plugins[0].source.path, "./plugins/team-skill-hub");
 
@@ -71,7 +71,7 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
       await readFile(path.join(out, "plugin.json"), "utf8"),
       await readFile(path.join(out, "mcp.json"), "utf8"),
       await readFile(path.join(out, "hooks", "hooks.json"), "utf8"),
-      conf
+      conf,
     ].join("\n");
     assert.doesNotMatch(serialized, /must-never-be-written/);
   } finally {

@@ -14,7 +14,13 @@ async function runtime(root: string) {
 test("state round trip is atomic and stores no token values", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-runtime-"));
   const r = await runtime(root);
-  const state = { schema_version: 1, installed_version: 1, hub_base_url: "http://127.0.0.1:8080", api_key_env: "TEAM_SKILL_HUB_API_KEY", clients: {} };
+  const state = {
+    schema_version: 1,
+    installed_version: 1,
+    hub_base_url: "http://127.0.0.1:8080",
+    api_key_env: "TEAM_SKILL_HUB_API_KEY",
+    clients: {},
+  };
   await r.writeStateAtomic(state);
   assert.deepEqual(await r.readState(), state);
   assert.doesNotMatch(await readFile(path.join(root, "state.json"), "utf8"), /super-secret/);
@@ -31,7 +37,10 @@ test("malformed state fails closed for mutation readers", async () => {
 test("relative package URL preserves reverse proxy prefix", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-runtime-"));
   const r = await runtime(root);
-  assert.equal(r.resolvePackageUrl("releases/5/linux.tar.gz", "https://host/skill-hub/client-integration/manifest.json"), "https://host/skill-hub/client-integration/releases/5/linux.tar.gz");
+  assert.equal(
+    r.resolvePackageUrl("releases/5/linux.tar.gz", "https://host/skill-hub/client-integration/manifest.json"),
+    "https://host/skill-hub/client-integration/releases/5/linux.tar.gz",
+  );
 });
 
 test("manifest cache honors 1 hour TTL", async () => {
@@ -59,7 +68,10 @@ test("update-check lock is non-blocking and mutation lock is exclusive", async (
 test("stale lock is reclaimed", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-runtime-"));
   await mkdir(path.join(root, "locks"), { recursive: true });
-  await writeFile(path.join(root, "locks", "mutation.lock"), JSON.stringify({ pid: 99999999, created_at: new Date(0).toISOString(), command: "upgrade" }));
+  await writeFile(
+    path.join(root, "locks", "mutation.lock"),
+    JSON.stringify({ pid: 99999999, created_at: new Date(0).toISOString(), command: "upgrade" }),
+  );
   const r = await runtime(root);
   const lock = await r.acquireMutationLock("upgrade");
   assert.ok(lock);
@@ -73,7 +85,15 @@ test("incomplete applying transaction restores previous state and current", asyn
   await r.writeCurrentVersion(2);
   const tx = path.join(root, "transactions", "active.json");
   await mkdir(path.dirname(tx), { recursive: true });
-  await writeFile(tx, JSON.stringify({ state: "applying", previous_state: { schema_version: 1, installed_version: 1, clients: {} }, previous_current_version: 1, backups: [] }));
+  await writeFile(
+    tx,
+    JSON.stringify({
+      state: "applying",
+      previous_state: { schema_version: 1, installed_version: 1, clients: {} },
+      previous_current_version: 1,
+      backups: [],
+    }),
+  );
   assert.equal(await r.recoverIncompleteTransaction(), true);
   assert.equal((await r.readState()).installed_version, 1);
   assert.equal(await r.readCurrentVersion(), 1);

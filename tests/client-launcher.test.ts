@@ -30,8 +30,8 @@ test("linux client launcher resolves Node from NVM when hook PATH has no node", 
     env: {
       HOME: home,
       PATH: hookPath,
-      TEAM_SKILL_HUB_CLIENT_ROOT: clientRoot
-    }
+      TEAM_SKILL_HUB_CLIENT_ROOT: clientRoot,
+    },
   });
 
   assert.equal(stdout.trim(), process.execPath);

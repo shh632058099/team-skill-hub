@@ -2,7 +2,11 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const MIGRATIONS = [{ version: 1, name: "observability-foundation", sql: `
+const MIGRATIONS = [
+  {
+    version: 1,
+    name: "observability-foundation",
+    sql: `
 CREATE TABLE client_events(id TEXT PRIMARY KEY,ts INTEGER NOT NULL,tenant_id TEXT NOT NULL,actor_id TEXT NOT NULL,session_id TEXT NOT NULL,event TEXT NOT NULL,repository_id TEXT,record_json TEXT NOT NULL);
 CREATE INDEX idx_client_events_ts ON client_events(ts DESC,id DESC);
 CREATE INDEX idx_client_events_session ON client_events(tenant_id,actor_id,session_id,ts,id);
@@ -25,7 +29,12 @@ CREATE INDEX idx_sessions_activity ON sessions(last_activity_at DESC,session_id 
 CREATE INDEX idx_sessions_actor_activity ON sessions(tenant_id,actor_id,last_activity_at DESC);
 CREATE INDEX idx_sessions_repository_activity ON sessions(repository_id,last_activity_at DESC);
 CREATE INDEX idx_sessions_status_activity ON sessions(status,last_activity_at DESC);
-` }, { version: 2, name: "workflow-state", sql: `
+`,
+  },
+  {
+    version: 2,
+    name: "workflow-state",
+    sql: `
 CREATE TABLE feedback(
   id TEXT PRIMARY KEY,
   ts INTEGER NOT NULL,
@@ -58,7 +67,12 @@ CREATE TABLE knowledge_gap_management_history(
 );
 CREATE INDEX idx_gap_management_latest ON knowledge_gap_management_history(gap_key,updated_at DESC,seq DESC);
 CREATE INDEX idx_gap_management_status ON knowledge_gap_management_history(status,updated_at DESC,seq DESC);
-` }, { version: 3, name: "skill-bundle-import", sql: `
+`,
+  },
+  {
+    version: 3,
+    name: "skill-bundle-import",
+    sql: `
 CREATE TABLE skill_bundle_snapshot(
   id TEXT PRIMARY KEY,
   sha256 TEXT NOT NULL UNIQUE,
@@ -109,12 +123,24 @@ CREATE TABLE skill_bundle_import_history(
   FOREIGN KEY(snapshot_id) REFERENCES skill_bundle_snapshot(id)
 );
 CREATE INDEX idx_skill_bundle_import_history_import ON skill_bundle_import_history(import_id,updated_at,seq);
-` }, { version: 4, name: "skill-bundle-import-revision", sql: `
+`,
+  },
+  {
+    version: 4,
+    name: "skill-bundle-import-revision",
+    sql: `
 ALTER TABLE skill_bundle_import ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE skill_bundle_import_history ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
-` }, { version: 5, name: "skill-bundle-binary-files", sql: `
+`,
+  },
+  {
+    version: 5,
+    name: "skill-bundle-binary-files",
+    sql: `
 ALTER TABLE skill_bundle_file ADD COLUMN encoding TEXT NOT NULL DEFAULT 'utf8';
-` }] as const;
+`,
+  },
+] as const;
 
 export class SkillHubDatabase {
   readonly raw: DatabaseSync;
@@ -122,30 +148,85 @@ export class SkillHubDatabase {
     mkdirSync(path.dirname(filePath), { recursive: true });
     this.raw = new DatabaseSync(filePath);
     try {
-      this.raw.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
+      this.raw.exec(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
+      );
       this.migrate();
     } catch (error) {
-      try { this.raw.close(); } catch {}
+      try {
+        this.raw.close();
+      } catch {}
       throw error;
     }
   }
   private migrate(): void {
-    this.raw.exec("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at INTEGER NOT NULL)");
-    const rows = this.raw.prepare("SELECT version,name FROM schema_migrations ORDER BY version").all() as Array<{version:number|bigint;name:string}>;
+    this.raw.exec(
+      "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at INTEGER NOT NULL)",
+    );
+    const rows = this.raw.prepare("SELECT version,name FROM schema_migrations ORDER BY version").all() as Array<{
+      version: number | bigint;
+      name: string;
+    }>;
     const supported = new Map<number, string>(MIGRATIONS.map((migration) => [migration.version, migration.name]));
     const latestVersion = MIGRATIONS[MIGRATIONS.length - 1]!.version;
     for (const row of rows) {
       const version = Number(row.version);
-      if (version > latestVersion || !supported.has(version)) throw new Error("Database schema version " + version + " is unsupported; latest supported version is " + latestVersion);
-      if (supported.get(version) !== row.name) throw new Error("Database schema migration " + version + " metadata mismatch");
+      if (version > latestVersion || !supported.has(version))
+        throw new Error(
+          "Database schema version " + version + " is unsupported; latest supported version is " + latestVersion,
+        );
+      if (supported.get(version) !== row.name)
+        throw new Error("Database schema migration " + version + " metadata mismatch");
     }
     const applied = new Set(rows.map((row) => Number(row.version)));
-    for (const migration of MIGRATIONS) if (!applied.has(migration.version)) this.transaction(()=>{ this.raw.exec(migration.sql); this.raw.prepare("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)").run(migration.version,migration.name,Date.now()); });
+    for (const migration of MIGRATIONS)
+      if (!applied.has(migration.version))
+        this.transaction(() => {
+          this.raw.exec(migration.sql);
+          this.raw
+            .prepare("INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)")
+            .run(migration.version, migration.name, Date.now());
+        });
   }
-  transaction<T>(fn:()=>T):T { this.raw.exec("BEGIN IMMEDIATE"); try { const value=fn(); this.raw.exec("COMMIT"); return value; } catch(error) { try{this.raw.exec("ROLLBACK");}catch{} throw error; } }
-  pragmaValue(name:"journal_mode"|"synchronous"|"busy_timeout"|"foreign_keys"):string|number|bigint|undefined { const row=this.raw.prepare(`PRAGMA ${name}`).get() as Record<string,string|number|bigint>|undefined; return row?Object.values(row)[0]:undefined; }
-  quickCheck():boolean { const row=this.raw.prepare("PRAGMA quick_check").get() as Record<string,string>|undefined; return Boolean(row&&Object.values(row)[0]==="ok"); }
-  writableCheck():boolean { try{this.raw.exec("BEGIN IMMEDIATE");this.raw.exec("ROLLBACK");return true}catch{try{this.raw.exec("ROLLBACK")}catch{}return false} }
-  close():void { this.raw.close(); }
+  transaction<T>(fn: () => T): T {
+    this.raw.exec("BEGIN IMMEDIATE");
+    try {
+      const value = fn();
+      this.raw.exec("COMMIT");
+      return value;
+    } catch (error) {
+      try {
+        this.raw.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+  pragmaValue(
+    name: "journal_mode" | "synchronous" | "busy_timeout" | "foreign_keys",
+  ): string | number | bigint | undefined {
+    const row = this.raw.prepare(`PRAGMA ${name}`).get() as Record<string, string | number | bigint> | undefined;
+    return row ? Object.values(row)[0] : undefined;
+  }
+  quickCheck(): boolean {
+    const row = this.raw.prepare("PRAGMA quick_check").get() as Record<string, string> | undefined;
+    return Boolean(row && Object.values(row)[0] === "ok");
+  }
+  writableCheck(): boolean {
+    try {
+      this.raw.exec("BEGIN IMMEDIATE");
+      this.raw.exec("ROLLBACK");
+      return true;
+    } catch {
+      try {
+        this.raw.exec("ROLLBACK");
+      } catch {}
+      return false;
+    }
+  }
+  close(): void {
+    this.raw.close();
+  }
 }
-export function openSkillHubDatabase(filePath:string):SkillHubDatabase { return new SkillHubDatabase(filePath); }
+export function openSkillHubDatabase(filePath: string): SkillHubDatabase {
+  return new SkillHubDatabase(filePath);
+}

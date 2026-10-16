@@ -6,17 +6,10 @@ import test from "node:test";
 import { MemoryRegistryStore } from "../src/registry.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
 import { LocalRepositoryProvider } from "../src/repository.js";
-import {
-  ApiKeyAuthenticationProvider,
-  StaticRolePermissionProvider
-} from "../src/security.js";
+import { ApiKeyAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
 import { LoggingEventSink } from "../src/events.js";
 import { SkillHubApplicationService } from "../src/application.js";
-import {
-  RequiredFieldsRule,
-  RepositoryVisibilityRule,
-  UniqueNameRule
-} from "../src/skills.js";
+import { RequiredFieldsRule, RepositoryVisibilityRule, UniqueNameRule } from "../src/skills.js";
 import { startServer } from "../src/server.js";
 import type { RepositoryConfig } from "../src/types.js";
 
@@ -47,12 +40,12 @@ authentication:
   type: environment
   reference: GIT_CREDENTIAL_HELPER
 `,
-      "utf8"
+      "utf8",
     );
     await writeFile(
       path.join(root, "docs", "ota-recovery.md"),
       "# OTA 断电恢复\n\n升级过程中突然断电后，系统读取安全检查点并恢复升级状态机。\n\n回滚前会校验镜像完整性。\n",
-      "utf8"
+      "utf8",
     );
 
     const repository: RepositoryConfig = {
@@ -67,15 +60,15 @@ authentication:
       visibility: ["internal"],
       pollingIntervalSeconds: 0,
       readRoles: ["developer", "internal"],
-      syncRoles: ["developer", "admin"]
+      syncRoles: ["developer", "admin"],
     };
 
     const auth = new ApiKeyAuthenticationProvider({
       "rag-e2e-key": {
         id: "rag-e2e",
         roles: ["developer", "internal"],
-        tenantId: "rd"
-      }
+        tenantId: "rd",
+      },
     });
 
     const service = new SkillHubApplicationService(
@@ -85,7 +78,7 @@ authentication:
         dataDir,
         defaultRoles: [],
         authentication: { mode: "api-key", apiKeys: {} },
-        repositories: [repository]
+        repositories: [repository],
       },
       [new LocalRepositoryProvider()],
       new MemoryRegistryStore(),
@@ -94,7 +87,7 @@ authentication:
       auth,
       new StaticRolePermissionProvider(),
       [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-      new LoggingEventSink()
+      new LoggingEventSink(),
     );
 
     await service.initialize();
@@ -105,9 +98,9 @@ authentication:
         dataDir,
         defaultRoles: [],
         authentication: { mode: "api-key", apiKeys: {} },
-        repositories: [repository]
+        repositories: [repository],
       },
-      service
+      service,
     );
 
     try {
@@ -117,7 +110,7 @@ authentication:
       const headers = {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        "x-skill-hub-api-key": "rag-e2e-key"
+        "x-skill-hub-api-key": "rag-e2e-key",
       };
 
       const searchResponse = await fetch(base, {
@@ -129,9 +122,9 @@ authentication:
           method: "tools/call",
           params: {
             name: "search_knowledge",
-            arguments: { query: "断电恢复怎么处理", top_k: 3 }
-          }
-        })
+            arguments: { query: "断电恢复怎么处理", top_k: 3 },
+          },
+        }),
       });
       assert.equal(searchResponse.status, 200);
       const searchText = await searchResponse.text();
@@ -150,10 +143,10 @@ authentication:
             arguments: {
               repository: "rd-skills",
               path: "docs/ota-recovery.md",
-              chunk_index: 0
-            }
-          }
-        })
+              chunk_index: 0,
+            },
+          },
+        }),
       });
       assert.equal(getResponse.status, 200);
       const getText = await getResponse.text();
@@ -173,10 +166,10 @@ authentication:
               query: "OTA 断电恢复",
               repositories: ["rd-skills"],
               client: "codex",
-              top_k: 3
-            }
-          }
-        })
+              top_k: 3,
+            },
+          },
+        }),
       });
       assert.equal(discoverResponse.status, 200);
       const discoverText = await discoverResponse.text();
@@ -192,9 +185,9 @@ authentication:
           method: "tools/call",
           params: {
             name: "search_tools",
-            arguments: { query: "git repository", client: "codex", top_k: 3 }
-          }
-        })
+            arguments: { query: "git repository", client: "codex", top_k: 3 },
+          },
+        }),
       });
       assert.equal(toolSearchResponse.status, 200);
       const toolSearchText = await toolSearchResponse.text();
@@ -210,9 +203,9 @@ authentication:
           method: "tools/call",
           params: {
             name: "get_tool",
-            arguments: { repository: "rd-skills", name: "git" }
-          }
-        })
+            arguments: { repository: "rd-skills", name: "git" },
+          },
+        }),
       });
       assert.equal(getToolResponse.status, 200);
       assert.match(await getToolResponse.text(), /"capabilities"/);

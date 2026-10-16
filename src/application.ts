@@ -28,7 +28,7 @@ import type {
   SkillSearchBackend,
   ToolArtifact,
   ValidationRule,
-  RegistryStore
+  RegistryStore,
 } from "./types.js";
 import { createValidatedSnapshot } from "./repository.js";
 import { scanSkills, validateSkills } from "./skills.js";
@@ -40,25 +40,33 @@ import {
   scanPrompts,
   scanTools,
   searchArtifacts,
-  validateArtifactPolicies
+  validateArtifactPolicies,
 } from "./artifacts.js";
 import { UsageAnalyticsStore } from "./analytics.js";
 import { HttpKnowledgeCurator } from "./knowledge-curation.js";
+import { EvaluationRunStore, loadEvaluationSnapshot, runEvaluationSuite, scanEvaluationSuites } from "./evaluation.js";
 import {
-  EvaluationRunStore,
-  loadEvaluationSnapshot,
-  runEvaluationSuite,
-  scanEvaluationSuites
-} from "./evaluation.js";
-import { auditKnowledgeLifecycle, chunksForDocuments, KnowledgeIndex, normalizeKnowledgeConfig, scanKnowledge } from "./knowledge.js";
-import { isReuseMcpTool, McpObservabilityStore, type CandidateReviewReason, type ClientEventRecord, type FeedbackRecord, type KnowledgeCandidate } from "./observability.js";
+  auditKnowledgeLifecycle,
+  chunksForDocuments,
+  KnowledgeIndex,
+  normalizeKnowledgeConfig,
+  scanKnowledge,
+} from "./knowledge.js";
+import {
+  isReuseMcpTool,
+  McpObservabilityStore,
+  type CandidateReviewReason,
+  type ClientEventRecord,
+  type FeedbackRecord,
+  type KnowledgeCandidate,
+} from "./observability.js";
 import { createKnowledgePublisher, defaultCandidatePath } from "./knowledge-publishing.js";
 import {
   ClientEventPipeline,
   CURRENT_HOOK_RUNTIME_VERSION,
   CURRENT_HOOK_SCHEMA_VERSION,
   normalizeEngineeringEvidence,
-  resolveClientEventSchemaVersion
+  resolveClientEventSchemaVersion,
 } from "./client-events.js";
 import { resolveProjectContext } from "./project-context.js";
 import { listDataGovernanceRules } from "./data-governance.js";
@@ -123,7 +131,7 @@ export class SkillHubApplicationService {
     private readonly auth: AuthenticationProvider,
     private readonly permissions: PermissionProvider,
     private readonly rules: ValidationRule[],
-    private readonly events: EventSink
+    private readonly events: EventSink,
   ) {
     this.analytics = new UsageAnalyticsStore(config.dataDir);
     this.evaluations = new EvaluationRunStore(config.dataDir);
@@ -135,7 +143,7 @@ export class SkillHubApplicationService {
       events: ["Stop"],
       run: async ({ event }) => {
         await this.detectStopKnowledgeCandidate(event);
-      }
+      },
     });
     for (const provider of providers) this.providers.set(provider.type, provider);
     this.skillBundleDatabase = openSkillHubDatabase(path.join(config.dataDir, "db", "team-skill-hub.sqlite3"));
@@ -149,14 +157,14 @@ export class SkillHubApplicationService {
       },
       authorize: (principal, repository) =>
         this.allowedRepositories(principal).some((candidate) => candidate.id === repository.id) &&
-        Boolean(this.publishingRoute("skill", repository.id))
+        Boolean(this.publishingRoute("skill", repository.id)),
     });
     for (const repo of config.repositories) {
       this.states.set(repo.id, {
         id: repo.id,
         status: repo.enabled ? "syncing" : "disabled",
         skillCount: 0,
-        failureCount: 0
+        failureCount: 0,
       });
     }
   }
@@ -167,7 +175,7 @@ export class SkillHubApplicationService {
       outcome: "created" | "skipped",
       reason: string,
       evidenceCount = 0,
-      candidateId?: string
+      candidateId?: string,
     ) => {
       await this.observability.recordCandidateDetection({
         detector,
@@ -178,7 +186,7 @@ export class SkillHubApplicationService {
         outcome,
         reason,
         evidenceCount,
-        candidateId
+        candidateId,
       });
     };
 
@@ -218,7 +226,7 @@ export class SkillHubApplicationService {
         solution: parsedSummary.summary.solution,
         verification: parsedSummary.summary.verification,
         applicability: parsedSummary.summary.applicability,
-        constraints: parsedSummary.summary.constraints
+        constraints: parsedSummary.summary.constraints,
       });
     } catch (error) {
       if ((error instanceof Error ? error.message : String(error)).includes("missing-required-knowledge-field")) {
@@ -228,7 +236,13 @@ export class SkillHubApplicationService {
       throw error;
     }
     const excerpt = automaticDraft.content;
-    const normalizedExcerpt = excerpt.normalize("NFKC").toLowerCase().replace(/\b[0-9a-f]{8,}\b/g, "#").replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
+    const normalizedExcerpt = excerpt
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/\b[0-9a-f]{8,}\b/g, "#")
+      .replace(/\d+/g, "#")
+      .replace(/\s+/g, " ")
+      .trim();
 
     const summarySignalText = [
       parsedSummary.summary.title,
@@ -237,10 +251,12 @@ export class SkillHubApplicationService {
       parsedSummary.summary.solution,
       parsedSummary.summary.verification,
       parsedSummary.summary.applicability,
-      parsedSummary.summary.constraints
+      parsedSummary.summary.constraints,
     ].join("\n");
-    const reusableSignals = /root cause|原因是|verified fix|修复|解决|resolved|fixed|workaround|临时方案|绕过|constraint|必须|不得|兼容|恢复|故障|安全|性能|可靠性/i;
-    const lowValueSignals = /format(?:ting)?|prettier|lint only|typo|spelling|rename only|pure refactor|格式化|排版|拼写|仅重命名|纯重构|简单编译修复/i;
+    const reusableSignals =
+      /root cause|原因是|verified fix|修复|解决|resolved|fixed|workaround|临时方案|绕过|constraint|必须|不得|兼容|恢复|故障|安全|性能|可靠性/i;
+    const lowValueSignals =
+      /format(?:ting)?|prettier|lint only|typo|spelling|rename only|pure refactor|格式化|排版|拼写|仅重命名|纯重构|简单编译修复/i;
     if (lowValueSignals.test(summarySignalText) && !reusableSignals.test(summarySignalText)) {
       await decision("skipped", "low-reuse-value-summary");
       return;
@@ -248,7 +264,7 @@ export class SkillHubApplicationService {
 
     const existing = await this.observability.listCandidates(2000);
     const sessionCandidates = existing.filter(
-      (item) => item.sourceType === "codex-summary" && item.sourceSessionId === event.sessionId
+      (item) => item.sourceType === "codex-summary" && item.sourceSessionId === event.sessionId,
     );
     const actorRecentCandidates = existing.filter((item) => {
       if (item.sourceType !== "codex-summary" || item.actorId !== event.actorId) return false;
@@ -263,7 +279,13 @@ export class SkillHubApplicationService {
       existing.some(
         (item) =>
           item.sourceType === "codex-summary" &&
-          item.content.normalize("NFKC").toLowerCase().replace(/\b[0-9a-f]{8,}\b/g, "#").replace(/\d+/g, "#").replace(/\s+/g, " ").trim() === normalizedExcerpt
+          item.content
+            .normalize("NFKC")
+            .toLowerCase()
+            .replace(/\b[0-9a-f]{8,}\b/g, "#")
+            .replace(/\d+/g, "#")
+            .replace(/\s+/g, " ")
+            .trim() === normalizedExcerpt,
       )
     ) {
       await decision("skipped", "template-summary-duplicate");
@@ -278,18 +300,14 @@ export class SkillHubApplicationService {
         (item) =>
           item.sourceType === "codex-summary" &&
           item.sourceSessionId === event.sessionId &&
-          item.sourceTurnId === event.turnId
+          item.sourceTurnId === event.turnId,
       )
     ) {
       await decision("skipped", "candidate-already-generated");
       return;
     }
 
-    const timeline = await this.observability.getClientSessionTimeline(
-      event.actorId,
-      event.tenantId,
-      event.sessionId
-    );
+    const timeline = await this.observability.getClientSessionTimeline(event.actorId, event.tenantId, event.sessionId);
     const postToolEvents = timeline
       .filter((item) => item.kind === "event" && item.event.event === "PostToolUse")
       .map((item) => (item.kind === "event" ? item.event : undefined))
@@ -307,7 +325,8 @@ export class SkillHubApplicationService {
       if (
         typeof repositoryId !== "string" ||
         !this.config.repositories.some((repository) => repository.id === repositoryId)
-      ) continue;
+      )
+        continue;
       const weight = item.event.event === "SessionStart" ? 3 : 1;
       repositoryCounts.set(repositoryId, (repositoryCounts.get(repositoryId) ?? 0) + weight);
     }
@@ -321,8 +340,9 @@ export class SkillHubApplicationService {
       if (!inferred || !this.config.repositories.some((repository) => repository.id === inferred)) continue;
       repositoryCounts.set(inferred, (repositoryCounts.get(inferred) ?? 0) + 1);
     }
-    const inferredRepository = [...repositoryCounts.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+    const inferredRepository = [...repositoryCounts.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    )[0]?.[0];
 
     const reasons: string[] = [];
     const evidenceDetails: NonNullable<KnowledgeCandidate["automation"]>["evidence"] = [];
@@ -336,8 +356,7 @@ export class SkillHubApplicationService {
         hasEngineeringAction = true;
       }
       const evidence =
-        toolEvent.metadata.engineering_evidence ??
-        normalizeEngineeringEvidence(toolName, toolEvent.metadata.evidence);
+        toolEvent.metadata.engineering_evidence ?? normalizeEngineeringEvidence(toolName, toolEvent.metadata.evidence);
       if (!evidence || typeof evidence !== "object") continue;
       evidenceCount += 1;
       const record = evidence as ReturnType<typeof normalizeEngineeringEvidence>;
@@ -349,7 +368,7 @@ export class SkillHubApplicationService {
         ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}),
         ...(record.counts ? { counts: record.counts } : {}),
         ...(record.durationMs !== undefined ? { durationMs: record.durationMs } : {}),
-        ...(record.status !== undefined ? { status: record.status } : {})
+        ...(record.status !== undefined ? { status: record.status } : {}),
       });
       const testsPassed = Number(record.counts?.passed ?? 0);
       const testsFailed = Number(record.counts?.failed ?? 0);
@@ -381,46 +400,40 @@ export class SkillHubApplicationService {
       title,
       excerpt.trim(),
       inferredRepository,
-      0.84
+      0.84,
     );
     if (nearDuplicate) {
       await decision(
         "skipped",
         `near-candidate-duplicate:${nearDuplicate.candidate.id}:${nearDuplicate.score.toFixed(3)}`,
-        evidenceCount
+        evidenceCount,
       );
       return;
     }
 
     const relatedKnowledge = inferredRepository
       ? this.knowledgeIndex
-          .search(
-            title + " " + excerpt.slice(0, 1200),
-            [inferredRepository],
-            3,
-            [inferredRepository]
-          )
+          .search(title + " " + excerpt.slice(0, 1200), [inferredRepository], 3, [inferredRepository])
           .map((result) => ({
             key: result.chunk.documentKey,
             repositoryId: result.chunk.repositoryId,
             path: result.chunk.relativePath,
             title: result.chunk.title,
             score: Number(result.score.toFixed(3)),
-            metadata: result.chunk.metadata
+            metadata: result.chunk.metadata,
           }))
       : [];
     if (inferredRepository) reasons.push(`repository inferred: ${inferredRepository}`);
 
-    const classification =
-      /workaround|临时方案|绕过/i.test(excerpt)
-        ? "workaround"
-        : hasStrongEvidence
-          ? "verified-fix"
-          : /root cause|根因|原因是|由于/i.test(excerpt)
-            ? "root-cause"
-            : /constraint|约束|必须|不得/i.test(excerpt)
-              ? "reusable-constraint"
-              : "verified-fix";
+    const classification = /workaround|临时方案|绕过/i.test(excerpt)
+      ? "workaround"
+      : hasStrongEvidence
+        ? "verified-fix"
+        : /root cause|根因|原因是|由于/i.test(excerpt)
+          ? "root-cause"
+          : /constraint|约束|必须|不得/i.test(excerpt)
+            ? "reusable-constraint"
+            : "verified-fix";
     const topRelated = relatedKnowledge[0];
     const conflictSignal = /conflict|contradict|inconsistent|冲突|矛盾|不一致|与现有.*相反/i.test(excerpt);
     const supersedeSignal = /supersede|replace(?:s|d)?|no longer|instead of|替代|取代|不再|改为/i.test(excerpt);
@@ -432,10 +445,10 @@ export class SkillHubApplicationService {
               key: topRelated.key,
               repositoryId: topRelated.repositoryId,
               path: topRelated.path,
-              title: topRelated.title
+              title: topRelated.title,
             },
             reason: "explicit conflict/contradiction signal with retrieved Knowledge",
-            confidence: topRelated.score >= 8 ? "high" as const : "medium" as const
+            confidence: topRelated.score >= 8 ? ("high" as const) : ("medium" as const),
           }
         : supersedeSignal
           ? {
@@ -444,10 +457,10 @@ export class SkillHubApplicationService {
                 key: topRelated.key,
                 repositoryId: topRelated.repositoryId,
                 path: topRelated.path,
-                title: topRelated.title
+                title: topRelated.title,
               },
               reason: "explicit replacement/supersede signal with retrieved Knowledge",
-              confidence: topRelated.score >= 8 ? "high" as const : "medium" as const
+              confidence: topRelated.score >= 8 ? ("high" as const) : ("medium" as const),
             }
           : (classification === "root-cause" || classification === "verified-fix") && topRelated.score >= 8
             ? {
@@ -456,10 +469,10 @@ export class SkillHubApplicationService {
                   key: topRelated.key,
                   repositoryId: topRelated.repositoryId,
                   path: topRelated.path,
-                  title: topRelated.title
+                  title: topRelated.title,
                 },
                 reason: "verified engineering result strongly matches existing Knowledge",
-                confidence: topRelated.score >= 14 ? "high" as const : "medium" as const
+                confidence: topRelated.score >= 14 ? ("high" as const) : ("medium" as const),
               }
             : topRelated.score >= 12
               ? {
@@ -468,10 +481,10 @@ export class SkillHubApplicationService {
                     key: topRelated.key,
                     repositoryId: topRelated.repositoryId,
                     path: topRelated.path,
-                    title: topRelated.title
+                    title: topRelated.title,
                   },
                   reason: "strong retrieval match without update/conflict evidence",
-                  confidence: "medium" as const
+                  confidence: "medium" as const,
                 }
               : undefined
       : undefined;
@@ -485,11 +498,11 @@ export class SkillHubApplicationService {
         sourceType: "codex-summary",
         suggestedType: "knowledge",
         repository: inferredRepository
-          ? this.publishingTargetFromSource("knowledge", inferredRepository) ?? inferredRepository
+          ? (this.publishingTargetFromSource("knowledge", inferredRepository) ?? inferredRepository)
           : this.defaultPublishingRepository("knowledge"),
         traceId: this.observability.traceIdForSession(
           { id: event.actorId, tenantId: event.tenantId, roles: [] },
-          event.sessionId
+          event.sessionId,
         ),
         sourceSessionId: event.sessionId,
         sourceTurnId: event.turnId,
@@ -499,12 +512,12 @@ export class SkillHubApplicationService {
           generationReason: "engineering action + passing test evidence + reusable result",
           reasons: [...new Set(reasons)].slice(0, 10),
           evidenceCount,
-          evidence: evidenceDetails.slice(0, 10)
+          evidence: evidenceDetails.slice(0, 10),
         },
         relatedKnowledge,
-        relationHint
+        relationHint,
       },
-      { submissionMode: "automatic" }
+      { submissionMode: "automatic" },
     );
     await decision("created", "verified-engineering-result", evidenceCount, candidate.id);
   }
@@ -525,12 +538,12 @@ export class SkillHubApplicationService {
           prompts: [...this.prompts.values()],
           agents: [...this.agents.values()],
           tools: [...this.tools.values()],
-          knowledgeDocuments: [...this.knowledgeDocuments.values()]
+          knowledgeDocuments: [...this.knowledgeDocuments.values()],
         },
         null,
-        2
+        2,
       ),
-      "utf8"
+      "utf8",
     );
   }
 
@@ -595,7 +608,7 @@ export class SkillHubApplicationService {
       } catch (error) {
         this.events.emit("repository.sync.failed", {
           repository: repository.id,
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
         });
       }
     }
@@ -625,11 +638,7 @@ export class SkillHubApplicationService {
       this.webhookSeen.set(id, ts);
     }
     await mkdir(path.dirname(this.webhookDedupPath()), { recursive: true });
-    await writeFile(
-      this.webhookDedupPath(),
-      JSON.stringify(Object.fromEntries(this.webhookSeen), null, 2),
-      "utf8"
-    );
+    await writeFile(this.webhookDedupPath(), JSON.stringify(Object.fromEntries(this.webhookSeen), null, 2), "utf8");
   }
 
   async claimWebhookEvent(eventId?: string): Promise<boolean> {
@@ -674,7 +683,7 @@ export class SkillHubApplicationService {
       preferredKnowledgeRepositories: [...project.preferredKnowledgeRepositories],
       tools: [...project.tools],
       environments: [...project.environments],
-      aliases: [...project.aliases]
+      aliases: [...project.aliases],
     }));
     this.config.repositories = next.repositories.map((repository) => ({
       ...repository,
@@ -686,7 +695,7 @@ export class SkillHubApplicationService {
       syncRoles: [...repository.syncRoles],
       knowledge: normalizeKnowledgeConfig(repository.knowledge),
       knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined,
-      skillPublishing: repository.skillPublishing ? { ...repository.skillPublishing } : undefined
+      skillPublishing: repository.skillPublishing ? { ...repository.skillPublishing } : undefined,
     }));
     const nextIds = new Set(this.config.repositories.map((repository) => repository.id));
     for (const repository of this.config.repositories) {
@@ -696,7 +705,7 @@ export class SkillHubApplicationService {
           id: repository.id,
           status: repository.enabled ? "syncing" : "disabled",
           skillCount: 0,
-          failureCount: 0
+          failureCount: 0,
         });
       } else if (!repository.enabled) {
         state.status = "disabled";
@@ -715,18 +724,10 @@ export class SkillHubApplicationService {
   }
 
   resolveRepositoryWebhookReference(references: string[]): string | undefined {
-    const normalizedRefs = new Set(
-      references
-        .map((value) => value.trim().replace(/\.git$/i, ""))
-        .filter(Boolean)
-    );
+    const normalizedRefs = new Set(references.map((value) => value.trim().replace(/\.git$/i, "")).filter(Boolean));
     for (const repository of this.config.repositories) {
       if (!repository.enabled) continue;
-      const candidates = new Set<string>([
-        repository.id,
-        repository.name,
-        ...repository.webhookAliases
-      ]);
+      const candidates = new Set<string>([repository.id, repository.name, ...repository.webhookAliases]);
       if (repository.gitUrl) {
         const normalizedUrl = repository.gitUrl.replace(/\.git$/i, "");
         candidates.add(normalizedUrl);
@@ -763,19 +764,11 @@ export class SkillHubApplicationService {
     await appendFile(this.auditPath(), `${JSON.stringify(event)}\n`, "utf8");
   }
 
-  async listAuditEvents(
-    limit = 100,
-    repositoryId?: string,
-    principal?: Principal
-  ): Promise<AuditEvent[]> {
+  async listAuditEvents(limit = 100, repositoryId?: string, principal?: Principal): Promise<AuditEvent[]> {
     const safeLimit = Math.max(1, Math.min(1000, limit));
-    const allowed = new Set(
-      this.allowedRepositories(principal).map((repository) => repository.id)
-    );
+    const allowed = new Set(this.allowedRepositories(principal).map((repository) => repository.id));
     try {
-      const lines = (await readFile(this.auditPath(), "utf8"))
-        .split("\n")
-        .filter(Boolean);
+      const lines = (await readFile(this.auditPath(), "utf8")).split("\n").filter(Boolean);
       const events = lines
         .map((line) => JSON.parse(line) as AuditEvent)
         .filter((event) => allowed.has(event.repositoryId))
@@ -786,10 +779,7 @@ export class SkillHubApplicationService {
     }
   }
 
-  async listRepositoryRevisions(
-    repositoryId: string,
-    principal?: Principal
-  ): Promise<RepositoryRevision[]> {
+  async listRepositoryRevisions(repositoryId: string, principal?: Principal): Promise<RepositoryRevision[]> {
     const allowed = this.allowedRepositories(principal).some((repo) => repo.id === repositoryId);
     if (!allowed) throw new Error("Repository not found");
     const state = this.states.get(repositoryId);
@@ -800,7 +790,7 @@ export class SkillHubApplicationService {
         .map((entry) => ({
           revision: entry.name,
           active: state?.revision === entry.name,
-          lastGood: state?.lastGoodRevision === entry.name
+          lastGood: state?.lastGoodRevision === entry.name,
         }))
         .sort((a, b) => b.revision.localeCompare(a.revision));
     } catch {
@@ -818,13 +808,13 @@ export class SkillHubApplicationService {
     }
     const state = this.states.get(repositoryId);
     const protectedRevisions = new Set(
-      [state?.revision, state?.lastGoodRevision].filter((value): value is string => Boolean(value))
+      [state?.revision, state?.lastGoodRevision].filter((value): value is string => Boolean(value)),
     );
     const withTime = await Promise.all(
       entries.map(async (entry) => ({
         name: entry.name,
-        mtimeMs: (await stat(path.join(root, entry.name))).mtimeMs
-      }))
+        mtimeMs: (await stat(path.join(root, entry.name))).mtimeMs,
+      })),
     );
     withTime.sort((a, b) => b.mtimeMs - a.mtimeMs);
     const keep = new Set<string>(protectedRevisions);
@@ -842,7 +832,7 @@ export class SkillHubApplicationService {
   async rollbackRepositoryRevision(
     repositoryId: string,
     revision: string,
-    principal?: Principal
+    principal?: Principal,
   ): Promise<RepositoryState> {
     const repository = this.getRepository(repositoryId);
     const resolvedPrincipal = this.principal(principal);
@@ -870,7 +860,7 @@ export class SkillHubApplicationService {
         prompts,
         agents,
         skills.map((skill) => skill.name),
-        tools
+        tools,
       );
       if (artifactIssues.length > 0) {
         throw new Error(`Stored revision artifacts invalid: ${artifactIssues.join("; ")}`);
@@ -911,7 +901,7 @@ export class SkillHubApplicationService {
         actorId: resolvedPrincipal.id,
         trigger: "manual",
         revision,
-        skillCount: skills.length
+        skillCount: skills.length,
       });
       this.metrics.increment("repository_rollback_total", { repository: repositoryId, result: "success" });
       await this.enforceRevisionRetention(repositoryId);
@@ -924,7 +914,7 @@ export class SkillHubApplicationService {
         actorId: resolvedPrincipal.id,
         trigger: "manual",
         revision,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
       this.metrics.increment("repository_rollback_total", { repository: repositoryId, result: "failed" });
       throw error;
@@ -934,7 +924,7 @@ export class SkillHubApplicationService {
   async syncRepository(
     repositoryId: string,
     trigger: RepositorySyncTrigger = "manual",
-    principal?: Principal
+    principal?: Principal,
   ): Promise<RepositoryState> {
     const existing = this.syncInFlight.get(repositoryId);
     if (existing) return existing;
@@ -966,12 +956,12 @@ export class SkillHubApplicationService {
       (candidate) =>
         candidate.repository === repositoryId &&
         Boolean(candidate.sourceGapKey) &&
-        candidate.publication?.mergeRequestState === "merged"
+        candidate.publication?.mergeRequestState === "merged",
     );
     for (const candidate of candidates) {
       const publication = candidate.publication!;
       const document = [...this.knowledgeDocuments.values()].find(
-        (item) => item.repositoryId === repositoryId && item.relativePath === publication.filePath
+        (item) => item.repositoryId === repositoryId && item.relativePath === publication.filePath,
       );
       if (!document || !publication.mergeCommitSha) continue;
       const current = management.get(candidate.sourceGapKey!);
@@ -980,7 +970,8 @@ export class SkillHubApplicationService {
         current.candidateId === candidate.id &&
         current.knowledge?.key === document.key &&
         current.commit?.sha === publication.mergeCommitSha
-      ) continue;
+      )
+        continue;
       await this.observability.updateKnowledgeGapManagement(candidate.sourceGapKey!, {
         status: "resolved",
         candidateId: candidate.id,
@@ -988,12 +979,12 @@ export class SkillHubApplicationService {
           key: document.key,
           repositoryId: document.repositoryId,
           path: document.relativePath,
-          title: document.title
+          title: document.title,
         },
         commit: {
           repositoryId,
-          sha: publication.mergeCommitSha
-        }
+          sha: publication.mergeCommitSha,
+        },
       });
     }
   }
@@ -1011,7 +1002,11 @@ export class SkillHubApplicationService {
           (candidate.status === "published" && candidate.publication?.mergeRequestState !== "merged") ||
           (candidate.status === "deleted" && candidate.deletionPublication?.mergeRequestState !== "merged")) &&
         candidate.repository === repositoryId &&
-        Boolean(candidate.status === "deleting" || candidate.status === "deleted" ? candidate.deletionPublication : candidate.publication)
+        Boolean(
+          candidate.status === "deleting" || candidate.status === "deleted"
+            ? candidate.deletionPublication
+            : candidate.publication,
+        ),
     );
     for (const candidate of candidates) {
       const existing = this.knowledgeReconcileInFlight.get(candidate.id);
@@ -1021,17 +1016,17 @@ export class SkillHubApplicationService {
         await work;
         this.metrics.increment("knowledge_publication_poll_total", {
           repository: repositoryId,
-          result: "success"
+          result: "success",
         });
       } catch (error) {
         this.metrics.increment("knowledge_publication_poll_total", {
           repository: repositoryId,
-          result: "failed"
+          result: "failed",
         });
         this.events.emit("knowledge.publication.poll.failed", {
           repository: repositoryId,
           candidate: candidate.id,
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
         });
       } finally {
         if (!existing && this.knowledgeReconcileInFlight.get(candidate.id) === work) {
@@ -1044,7 +1039,7 @@ export class SkillHubApplicationService {
   private async performSync(
     repositoryId: string,
     trigger: RepositorySyncTrigger,
-    requestPrincipal?: Principal
+    requestPrincipal?: Principal,
   ): Promise<RepositoryState> {
     const syncStarted = performance.now();
     const repository = this.getRepository(repositoryId);
@@ -1059,7 +1054,7 @@ export class SkillHubApplicationService {
         action: "repository.sync.denied",
         repositoryId,
         actorId: principal.id,
-        trigger
+        trigger,
       };
       await this.appendAudit(denied);
       throw new Error("Repository sync not permitted");
@@ -1073,46 +1068,30 @@ export class SkillHubApplicationService {
       action: "repository.sync.started",
       repositoryId,
       actorId: trigger === "manual" ? principal.id : "system",
-      trigger
+      trigger,
     });
 
     try {
       const provider = this.providers.get(repository.provider);
       if (!provider) throw new Error(`No provider registered for ${repository.provider}`);
       const materialized = await provider.materialize(repository, this.config.dataDir);
-      const scannedSkills = await scanSkills(
-        materialized.sourceRoot,
-        repository.id,
-        materialized.revision
-      );
+      const scannedSkills = await scanSkills(materialized.sourceRoot, repository.id, materialized.revision);
       const issues = validateSkills(scannedSkills, repository, this.rules);
       if (issues.length > 0) {
         throw new Error(
-          `Validation failed: ${issues.map((issue) => `${issue.skillPath ?? "repo"}: ${issue.message}`).join("; ")}`
+          `Validation failed: ${issues.map((issue) => `${issue.skillPath ?? "repo"}: ${issue.message}`).join("; ")}`,
         );
       }
-      const scannedPrompts = await scanPrompts(
-        materialized.sourceRoot,
-        repository.id,
-        materialized.revision
-      );
-      const scannedAgents = await scanAgents(
-        materialized.sourceRoot,
-        repository.id,
-        materialized.revision
-      );
-      const scannedTools = await scanTools(
-        materialized.sourceRoot,
-        repository.id,
-        materialized.revision
-      );
+      const scannedPrompts = await scanPrompts(materialized.sourceRoot, repository.id, materialized.revision);
+      const scannedAgents = await scanAgents(materialized.sourceRoot, repository.id, materialized.revision);
+      const scannedTools = await scanTools(materialized.sourceRoot, repository.id, materialized.revision);
       await scanEvaluationSuites(materialized.sourceRoot, repository.id);
       const artifactIssues = validateArtifactPolicies(
         repository,
         scannedPrompts,
         scannedAgents,
         scannedSkills.map((skill) => skill.name),
-        scannedTools
+        scannedTools,
       );
       if (artifactIssues.length > 0) {
         throw new Error(`Artifact validation failed: ${artifactIssues.join("; ")}`);
@@ -1122,13 +1101,18 @@ export class SkillHubApplicationService {
         materialized.sourceRoot,
         this.config.dataDir,
         repository.id,
-        materialized.revision
+        materialized.revision,
       );
       const skills = await scanSkills(snapshotRoot, repository.id, materialized.revision);
       const prompts = await scanPrompts(snapshotRoot, repository.id, materialized.revision);
       const agents = await scanAgents(snapshotRoot, repository.id, materialized.revision);
       const tools = await scanTools(snapshotRoot, repository.id, materialized.revision);
-      const knowledgeDocuments = await scanKnowledge(snapshotRoot, repository.id, materialized.revision, repository.knowledge);
+      const knowledgeDocuments = await scanKnowledge(
+        snapshotRoot,
+        repository.id,
+        materialized.revision,
+        repository.knowledge,
+      );
       this.registry.replaceRepository(repository.id, skills);
       for (const [key, prompt] of this.prompts) {
         if (prompt.repositoryId === repository.id) this.prompts.delete(key);
@@ -1167,7 +1151,7 @@ export class SkillHubApplicationService {
       this.events.emit("repository.sync.completed", {
         repository: repository.id,
         revision: materialized.revision,
-        skillCount: skills.length
+        skillCount: skills.length,
       });
       await this.appendAudit({
         ts: new Date().toISOString(),
@@ -1176,10 +1160,12 @@ export class SkillHubApplicationService {
         actorId: trigger === "manual" ? principal.id : "system",
         trigger,
         revision: materialized.revision,
-        skillCount: skills.length
+        skillCount: skills.length,
       });
       this.metrics.increment("repository_sync_total", { repository: repositoryId, result: "success", trigger });
-      this.metrics.observe("repository_sync_duration_seconds", (performance.now() - syncStarted) / 1000, { repository: repositoryId });
+      this.metrics.observe("repository_sync_duration_seconds", (performance.now() - syncStarted) / 1000, {
+        repository: repositoryId,
+      });
       await this.enforceRevisionRetention(repositoryId);
       return { ...state };
     } catch (error) {
@@ -1194,10 +1180,12 @@ export class SkillHubApplicationService {
         repositoryId,
         actorId: trigger === "manual" ? principal.id : "system",
         trigger,
-        error: state.error
+        error: state.error,
       });
       this.metrics.increment("repository_sync_total", { repository: repositoryId, result: "failed", trigger });
-      this.metrics.observe("repository_sync_duration_seconds", (performance.now() - syncStarted) / 1000, { repository: repositoryId });
+      this.metrics.observe("repository_sync_duration_seconds", (performance.now() - syncStarted) / 1000, {
+        repository: repositoryId,
+      });
       throw error;
     }
   }
@@ -1213,15 +1201,13 @@ export class SkillHubApplicationService {
       provider: repository.provider,
       audience: repository.audience,
       visibility: repository.visibility,
-      state: this.states.get(repository.id)
+      state: this.states.get(repository.id),
     }));
   }
 
   listSkills(filters: SearchFilters = {}, principal?: Principal): Skill[] {
     const resolvedPrincipal = this.principal(principal);
-    const allowed = new Map(
-      this.allowedRepositories(resolvedPrincipal).map((repo) => [repo.id, repo])
-    );
+    const allowed = new Map(this.allowedRepositories(resolvedPrincipal).map((repo) => [repo.id, repo]));
     return this.registry.list().filter((skill) => {
       const repo = allowed.get(skill.repositoryId);
       if (!repo || !this.permissions.canReadSkill(resolvedPrincipal, repo, skill)) return false;
@@ -1235,12 +1221,7 @@ export class SkillHubApplicationService {
     });
   }
 
-  searchSkills(
-    query: string,
-    filters: SearchFilters = {},
-    limit = 5,
-    principal?: Principal
-  ): SearchResult[] {
+  searchSkills(query: string, filters: SearchFilters = {}, limit = 5, principal?: Principal): SearchResult[] {
     this.metrics.increment("skill_search_total");
     const resolvedPrincipal = this.principal(principal);
     const allowedIds = this.allowedRepositories(resolvedPrincipal).map((repo) => repo.id);
@@ -1248,7 +1229,7 @@ export class SkillHubApplicationService {
       ? filters.repositories.filter((id) => allowedIds.includes(id))
       : allowedIds;
     const permitted = new Set(
-      this.listSkills({ ...filters, repositories }, resolvedPrincipal).map((skill) => skill.key)
+      this.listSkills({ ...filters, repositories }, resolvedPrincipal).map((skill) => skill.key),
     );
     const results = this.search
       .search(query, { ...filters, repositories }, limit * 2)
@@ -1262,17 +1243,12 @@ export class SkillHubApplicationService {
       action: "search",
       query,
       selected: results[0]?.skill.key,
-      matched: results.length > 0
+      matched: results.length > 0,
     });
     return results;
   }
 
-  resolveSkill(
-    query: string,
-    filters: SearchFilters = {},
-    limit = 3,
-    principal?: Principal
-  ): SearchResult[] {
+  resolveSkill(query: string, filters: SearchFilters = {}, limit = 3, principal?: Principal): SearchResult[] {
     this.metrics.increment("skill_resolve_total");
     const resolvedPrincipal = this.principal(principal);
     const allowedIds = this.allowedRepositories(resolvedPrincipal).map((repo) => repo.id);
@@ -1280,7 +1256,7 @@ export class SkillHubApplicationService {
       ? filters.repositories.filter((id) => allowedIds.includes(id))
       : allowedIds;
     const permitted = new Set(
-      this.listSkills({ ...filters, repositories }, resolvedPrincipal).map((skill) => skill.key)
+      this.listSkills({ ...filters, repositories }, resolvedPrincipal).map((skill) => skill.key),
     );
     const results = this.router
       .resolve(query, { ...filters, repositories }, limit * 2)
@@ -1294,7 +1270,7 @@ export class SkillHubApplicationService {
       action: "resolve",
       query,
       selected: results[0]?.skill.key,
-      matched: results.length > 0
+      matched: results.length > 0,
     });
     return results;
   }
@@ -1314,17 +1290,12 @@ export class SkillHubApplicationService {
       kind: "skill",
       action: "load",
       selected: skill.key,
-      matched: true
+      matched: true,
     });
     return skill;
   }
 
-  async getSkillResource(
-    repositoryId: string,
-    name: string,
-    resource: string,
-    principal?: Principal
-  ): Promise<string> {
+  async getSkillResource(repositoryId: string, name: string, resource: string, principal?: Principal): Promise<string> {
     const skill = this.getSkill(repositoryId, name, principal);
     const root = path.resolve(skill.rootDir);
     const target = path.resolve(root, resource);
@@ -1339,9 +1310,7 @@ export class SkillHubApplicationService {
     const allowed = new Set(this.allowedRepositories(principal).map((repository) => repository.id));
     const requested = repositories?.length ? new Set(repositories) : undefined;
     return [...this.knowledgeDocuments.values()].filter(
-      (document) =>
-        allowed.has(document.repositoryId) &&
-        (!requested || requested.has(document.repositoryId))
+      (document) => allowed.has(document.repositoryId) && (!requested || requested.has(document.repositoryId)),
     );
   }
 
@@ -1353,7 +1322,7 @@ export class SkillHubApplicationService {
     return {
       documents: documents.length,
       issues,
-      byKind
+      byKind,
     };
   }
 
@@ -1361,7 +1330,7 @@ export class SkillHubApplicationService {
     repositoryId: string,
     relativePath: string,
     kind: string,
-    principal: Principal
+    principal: Principal,
   ) {
     const allowed = this.allowedRepositories(principal).some((repo) => repo.id === repositoryId);
     if (!allowed) throw new Error("Repository not found");
@@ -1384,7 +1353,7 @@ export class SkillHubApplicationService {
       metadata?.supersedes ? `supersedes: ${metadata.supersedes}` : undefined,
       metadata?.reviewCycleDays ? `review_cycle: ${metadata.reviewCycleDays}d` : undefined,
       "---",
-      ""
+      "",
     ].filter((item): item is string => Boolean(item));
 
     const lifecycleDraft = await this.knowledgeSubmission.buildFromStructuredDraft({
@@ -1395,39 +1364,45 @@ export class SkillHubApplicationService {
         "Review and update the existing Knowledge content and lifecycle metadata as needed.",
         "",
         ...frontmatter,
-        document.content
+        document.content,
       ].join("\n"),
       verification: `Lifecycle audit detected ${issue.kind} for ${repositoryId}:${relativePath}.`,
       applicability: `Applies to the existing Knowledge item ${repositoryId}:${relativePath}.`,
-      constraints: "A human reviewer must verify both the Knowledge content and lifecycle metadata before approval."
+      constraints: "A human reviewer must verify both the Knowledge content and lifecycle metadata before approval.",
     });
-    return await this.persistKnowledgeCandidate(principal, {
-      title: lifecycleDraft.title,
-      content: lifecycleDraft.content,
-      sourceType: "review",
-      suggestedType: "knowledge",
-      repository: repositoryId,
-      suggestedPath: relativePath,
-      relatedKnowledge: [{
-        key: document.key,
-        repositoryId: document.repositoryId,
-        path: document.relativePath,
-        title: document.title,
-        score: 100,
-        metadata: document.metadata
-      }],
-      relationHint: {
-        type: "updates",
-        target: {
-          key: document.key,
-          repositoryId: document.repositoryId,
-          path: document.relativePath,
-          title: document.title
+    return await this.persistKnowledgeCandidate(
+      principal,
+      {
+        title: lifecycleDraft.title,
+        content: lifecycleDraft.content,
+        sourceType: "review",
+        suggestedType: "knowledge",
+        repository: repositoryId,
+        suggestedPath: relativePath,
+        relatedKnowledge: [
+          {
+            key: document.key,
+            repositoryId: document.repositoryId,
+            path: document.relativePath,
+            title: document.title,
+            score: 100,
+            metadata: document.metadata,
+          },
+        ],
+        relationHint: {
+          type: "updates",
+          target: {
+            key: document.key,
+            repositoryId: document.repositoryId,
+            path: document.relativePath,
+            title: document.title,
+          },
+          reason: `lifecycle issue: ${issue.kind}`,
+          confidence: "high",
         },
-        reason: `lifecycle issue: ${issue.kind}`,
-        confidence: "high"
-      }
-    }, { submissionMode: "server" });
+      },
+      { submissionMode: "server" },
+    );
   }
 
   searchKnowledge(
@@ -1435,7 +1410,7 @@ export class SkillHubApplicationService {
     limit = 5,
     repositories?: string[],
     principal?: Principal,
-    applicability?: KnowledgeApplicabilityContext
+    applicability?: KnowledgeApplicabilityContext,
   ): KnowledgeSearchResult[] {
     const resolvedPrincipal = this.principal(principal);
     const allowedIds = this.allowedRepositories(resolvedPrincipal).map((repository) => repository.id);
@@ -1443,8 +1418,7 @@ export class SkillHubApplicationService {
     const topScore = results[0]?.score;
     const matchThreshold = this.config.knowledgeMatchMinScore;
     const matched =
-      results.length > 0 &&
-      (matchThreshold === undefined || (topScore ?? Number.NEGATIVE_INFINITY) >= matchThreshold);
+      results.length > 0 && (matchThreshold === undefined || (topScore ?? Number.NEGATIVE_INFINITY) >= matchThreshold);
     void this.analytics.record({
       ts: new Date().toISOString(),
       actorId: resolvedPrincipal.id,
@@ -1454,22 +1428,15 @@ export class SkillHubApplicationService {
       query,
       selected: results[0]?.chunk.key,
       topScore,
-      matched
+      matched,
     });
     this.metrics.increment("knowledge_search_total", { matched: String(matched) });
     return results;
   }
 
-  getKnowledge(
-    repositoryId: string,
-    relativePath: string,
-    chunkIndex?: number,
-    principal?: Principal
-  ) {
+  getKnowledge(repositoryId: string, relativePath: string, chunkIndex?: number, principal?: Principal) {
     const resolvedPrincipal = this.principal(principal);
-    const allowed = this.allowedRepositories(resolvedPrincipal).some(
-      (repository) => repository.id === repositoryId
-    );
+    const allowed = this.allowedRepositories(resolvedPrincipal).some((repository) => repository.id === repositoryId);
     const document = this.knowledgeDocuments.get(`${repositoryId}:${relativePath}`);
     if (!allowed || !document) throw new Error("Knowledge document not found");
     const chunk =
@@ -1484,7 +1451,7 @@ export class SkillHubApplicationService {
       kind: "knowledge",
       action: "load",
       selected: chunk?.key ?? document.key,
-      matched: true
+      matched: true,
     });
     this.metrics.increment("knowledge_load_total", { repository: repositoryId });
     return { document, ...(chunk ? { chunk } : {}) };
@@ -1505,7 +1472,7 @@ export class SkillHubApplicationService {
     query: string,
     limit = 5,
     client?: string,
-    principal?: Principal
+    principal?: Principal,
   ): ArtifactSearchResult<PromptArtifact>[] {
     const resolvedPrincipal = this.principal(principal);
     const results = searchArtifacts(query, this.listPrompts(client, resolvedPrincipal), limit);
@@ -1517,7 +1484,7 @@ export class SkillHubApplicationService {
       action: "search",
       query,
       selected: results[0]?.artifact.key,
-      matched: results.length > 0
+      matched: results.length > 0,
     });
     this.metrics.increment("prompt_search_total", { matched: String(results.length > 0) });
     return results;
@@ -1537,7 +1504,7 @@ export class SkillHubApplicationService {
       kind: "prompt",
       action: "load",
       selected: prompt.key,
-      matched: true
+      matched: true,
     });
     this.metrics.increment("prompt_load_total", { repository: repositoryId });
     return prompt;
@@ -1558,7 +1525,7 @@ export class SkillHubApplicationService {
     query: string,
     limit = 5,
     client?: string,
-    principal?: Principal
+    principal?: Principal,
   ): ArtifactSearchResult<AgentArtifact>[] {
     const resolvedPrincipal = this.principal(principal);
     const results = searchArtifacts(query, this.listAgents(client, resolvedPrincipal), limit);
@@ -1570,7 +1537,7 @@ export class SkillHubApplicationService {
       action: "search",
       query,
       selected: results[0]?.artifact.key,
-      matched: results.length > 0
+      matched: results.length > 0,
     });
     this.metrics.increment("agent_search_total", { matched: String(results.length > 0) });
     return results;
@@ -1590,12 +1557,7 @@ export class SkillHubApplicationService {
     });
   }
 
-  searchTools(
-    query: string,
-    limit = 5,
-    client?: string,
-    principal?: Principal
-  ): ArtifactSearchResult<ToolArtifact>[] {
+  searchTools(query: string, limit = 5, client?: string, principal?: Principal): ArtifactSearchResult<ToolArtifact>[] {
     const results = searchArtifacts(query, this.listTools(client, principal), limit);
     this.metrics.increment("tool_search_total", { matched: String(results.length > 0) });
     return results;
@@ -1623,7 +1585,7 @@ export class SkillHubApplicationService {
       repositories?: string[];
       client?: string;
     } = {},
-    principal?: Principal
+    principal?: Principal,
   ) {
     const resolvedPrincipal = this.principal(principal);
     const topK = Math.max(1, Math.min(options.topK ?? 5, 20));
@@ -1635,12 +1597,8 @@ export class SkillHubApplicationService {
       return { selected: null, ambiguous: false, skills: [], knowledge: [], prompts: [], agents: [], tools: [] };
     }
 
-    const skills = this.searchSkills(
-      query,
-      { repositories, client: options.client },
-      topK,
-      resolvedPrincipal
-    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 12) }))
+    const skills = this.searchSkills(query, { repositories, client: options.client }, topK, resolvedPrincipal)
+      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 12) }))
       .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const knowledge = this.searchKnowledge(query, topK, repositories, resolvedPrincipal)
       .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 24) }))
@@ -1648,53 +1606,82 @@ export class SkillHubApplicationService {
     const repositorySet = new Set(repositories);
     const prompts = searchArtifacts(
       query,
-      this.listPrompts(options.client, resolvedPrincipal).filter((item) =>
-        repositorySet.has(item.repositoryId)
-      ),
-      topK
-    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+      this.listPrompts(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
+      topK,
+    )
+      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
       .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const agents = searchArtifacts(
       query,
-      this.listAgents(options.client, resolvedPrincipal).filter((item) =>
-        repositorySet.has(item.repositoryId)
-      ),
-      topK
-    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+      this.listAgents(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
+      topK,
+    )
+      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
       .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const tools = searchArtifacts(
       query,
-      this.listTools(options.client, resolvedPrincipal).filter((item) =>
-        repositorySet.has(item.repositoryId)
-      ),
-      topK
-    ).map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+      this.listTools(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
+      topK,
+    )
+      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
       .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const knowledgeForSelection = knowledge.filter(
-      (item, index, items) => items.findIndex(
-        (candidate) =>
-          candidate.chunk.repositoryId === item.chunk.repositoryId &&
-          candidate.chunk.relativePath === item.chunk.relativePath
-      ) === index
+      (item, index, items) =>
+        items.findIndex(
+          (candidate) =>
+            candidate.chunk.repositoryId === item.chunk.repositoryId &&
+            candidate.chunk.relativePath === item.chunk.relativePath,
+        ) === index,
     );
     const candidates = [
-      ...skills.map((item) => ({ type: "skill" as const, repository: item.skill.repositoryId, name: item.skill.name, score: item.score, confidence: item.confidence })),
-      ...knowledgeForSelection.map((item) => ({ type: "knowledge" as const, repository: item.chunk.repositoryId, path: item.chunk.relativePath, chunkIndex: item.chunk.chunkIndex, score: item.score, confidence: item.confidence })),
-      ...prompts.map((item) => ({ type: "prompt" as const, repository: item.artifact.repositoryId, name: item.artifact.name, score: item.score, confidence: item.confidence })),
-      ...agents.map((item) => ({ type: "agent" as const, repository: item.artifact.repositoryId, name: item.artifact.name, score: item.score, confidence: item.confidence })),
-      ...tools.map((item) => ({ type: "tool" as const, repository: item.artifact.repositoryId, name: item.artifact.name, score: item.score, confidence: item.confidence }))
+      ...skills.map((item) => ({
+        type: "skill" as const,
+        repository: item.skill.repositoryId,
+        name: item.skill.name,
+        score: item.score,
+        confidence: item.confidence,
+      })),
+      ...knowledgeForSelection.map((item) => ({
+        type: "knowledge" as const,
+        repository: item.chunk.repositoryId,
+        path: item.chunk.relativePath,
+        chunkIndex: item.chunk.chunkIndex,
+        score: item.score,
+        confidence: item.confidence,
+      })),
+      ...prompts.map((item) => ({
+        type: "prompt" as const,
+        repository: item.artifact.repositoryId,
+        name: item.artifact.name,
+        score: item.score,
+        confidence: item.confidence,
+      })),
+      ...agents.map((item) => ({
+        type: "agent" as const,
+        repository: item.artifact.repositoryId,
+        name: item.artifact.name,
+        score: item.score,
+        confidence: item.confidence,
+      })),
+      ...tools.map((item) => ({
+        type: "tool" as const,
+        repository: item.artifact.repositoryId,
+        name: item.artifact.name,
+        score: item.score,
+        confidence: item.confidence,
+      })),
     ].sort((a, b) => b.confidence - a.confidence || b.score - a.score);
     const top = candidates[0];
     const second = candidates[1];
-    const selected = top && (
-      (!second && top.confidence >= 0.5) ||
-      (Boolean(second) && top.confidence >= 0.55 && top.confidence - second!.confidence >= 0.12)
-    )
-      ? top
-      : null;
+    const selected =
+      top &&
+      ((!second && top.confidence >= 0.5) ||
+        (Boolean(second) && top.confidence >= 0.55 && top.confidence - second!.confidence >= 0.12))
+        ? top
+        : null;
     const ambiguous = Boolean(top && !selected && top.confidence >= 0.4);
     this.metrics.increment("discover_total", {
-      matched: String(skills.length + knowledge.length + prompts.length + agents.length + tools.length > 0)
+      matched: String(skills.length + knowledge.length + prompts.length + agents.length + tools.length > 0),
     });
     return { selected, ambiguous, skills, knowledge, prompts, agents, tools };
   }
@@ -1709,25 +1696,28 @@ export class SkillHubApplicationService {
       client?: string;
       topK?: number;
     },
-    principal?: Principal
+    principal?: Principal,
   ) {
     const resolvedPrincipal = this.principal(principal);
     const visibleRepositories = this.allowedRepositories(resolvedPrincipal);
     const project = resolveProjectContext(input.cwd, visibleRepositories, {
       remote: input.gitRemote,
       root: input.gitRoot,
-      branch: input.gitBranch
+      branch: input.gitBranch,
     });
     if (!project) {
       return {
         project: undefined,
         query: input.task?.trim() || "",
         reason: "project could not be identified unambiguously",
-        recommendations: { skills: [], knowledge: [], prompts: [], agents: [], tools: [] }
+        recommendations: { skills: [], knowledge: [], prompts: [], agents: [], tools: [] },
       };
     }
     const normalizeProjectToken = (value: string) =>
-      value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
     const wildcardMatch = (pattern: string, value: string) => {
       const normalizedPattern = pattern
         .toLowerCase()
@@ -1740,40 +1730,33 @@ export class SkillHubApplicationService {
       const aliases = [profile.id, profile.name, ...profile.aliases];
       return profile.repositoryPatterns.some(
         (pattern) =>
-          wildcardMatch(pattern, project.repositoryId) ||
-          aliases.some((alias) => wildcardMatch(pattern, alias))
+          wildcardMatch(pattern, project.repositoryId) || aliases.some((alias) => wildcardMatch(pattern, alias)),
       );
     });
     const profile = profiles.length === 1 ? profiles[0] : undefined;
     const allowedIds = new Set(visibleRepositories.map((item) => item.id));
     const preferredRepositories = profile
-      ? [
-          project.repositoryId,
-          ...profile.preferredSkillRepositories,
-          ...profile.preferredKnowledgeRepositories
-        ].filter((id, index, values) => allowedIds.has(id) && values.indexOf(id) === index)
+      ? [project.repositoryId, ...profile.preferredSkillRepositories, ...profile.preferredKnowledgeRepositories].filter(
+          (id, index, values) => allowedIds.has(id) && values.indexOf(id) === index,
+        )
       : [project.repositoryId];
     const query =
       input.task?.trim() ||
-      [
-        profile?.product,
-        profile?.name,
-        project.repositoryName,
-        project.gitBranch,
-        "project context"
-      ].filter(Boolean).join(" ");
+      [profile?.product, profile?.name, project.repositoryName, project.gitBranch, "project context"]
+        .filter(Boolean)
+        .join(" ");
     const recommendations = this.discover(
       query,
       {
         topK: Math.max(1, Math.min(input.topK ?? 3, 5)),
         repositories: preferredRepositories,
-        client: input.client
+        client: input.client,
       },
-      resolvedPrincipal
+      resolvedPrincipal,
     );
     const projectTools = profile?.tools.length
       ? recommendations.tools.filter((item) =>
-          profile.tools.some((name) => item.artifact.name === name || item.artifact.key === name)
+          profile.tools.some((name) => item.artifact.name === name || item.artifact.key === name),
         )
       : recommendations.tools;
     return {
@@ -1783,7 +1766,7 @@ export class SkillHubApplicationService {
       reason: profile
         ? `recommendations use project profile ${profile.id} within caller-visible repositories`
         : `recommendations restricted to identified project repository ${project.repositoryId}`,
-      recommendations: { ...recommendations, tools: projectTools }
+      recommendations: { ...recommendations, tools: projectTools },
     };
   }
 
@@ -1791,7 +1774,7 @@ export class SkillHubApplicationService {
     query: string,
     limit = 3,
     client?: string,
-    principal?: Principal
+    principal?: Principal,
   ): ArtifactSearchResult<AgentArtifact>[] {
     const resolvedPrincipal = this.principal(principal);
     const results = searchArtifacts(query, this.listAgents(client, resolvedPrincipal), limit);
@@ -1803,7 +1786,7 @@ export class SkillHubApplicationService {
       action: "resolve",
       query,
       selected: results[0]?.artifact.key,
-      matched: results.length > 0
+      matched: results.length > 0,
     });
     this.metrics.increment("agent_resolve_total", { matched: String(results.length > 0) });
     return results;
@@ -1823,7 +1806,7 @@ export class SkillHubApplicationService {
       kind: "agent",
       action: "load",
       selected: agent.key,
-      matched: true
+      matched: true,
     });
     this.metrics.increment("agent_load_total", { repository: repositoryId });
     return agent;
@@ -1833,7 +1816,7 @@ export class SkillHubApplicationService {
     repositoryId: string,
     name: string,
     options: { client?: string; environment?: string } = {},
-    principal?: Principal
+    principal?: Principal,
   ) {
     const resolvedPrincipal = this.principal(principal);
     const agent = this.getAgent(repositoryId, name, resolvedPrincipal);
@@ -1843,19 +1826,19 @@ export class SkillHubApplicationService {
     const bindings = resolveAgentToolBindings(
       agent,
       this.listTools(options.client, resolvedPrincipal),
-      options.environment
+      options.environment,
     );
     return {
       agent: {
         key: agent.key,
         repositoryId: agent.repositoryId,
         name: agent.name,
-        version: agent.version
+        version: agent.version,
       },
       client: options.client,
       environment: options.environment,
       ready: bindings.every((item) => item.status === "resolved"),
-      bindings
+      bindings,
     };
   }
 
@@ -1873,7 +1856,7 @@ export class SkillHubApplicationService {
   async listEvaluationSuites(
     repositoryId: string,
     revision?: string,
-    principal?: Principal
+    principal?: Principal,
   ): Promise<EvaluationSuite[]> {
     const allowed = this.allowedRepositories(principal).some((repo) => repo.id === repositoryId);
     if (!allowed) throw new Error("Repository not found");
@@ -1887,27 +1870,19 @@ export class SkillHubApplicationService {
     suiteId: string,
     revision?: string,
     baselineRevision?: string,
-    principal?: Principal
+    principal?: Principal,
   ): Promise<EvaluationRunResult> {
     const allowed = this.allowedRepositories(principal).some((repo) => repo.id === repositoryId);
     if (!allowed) throw new Error("Repository not found");
     const candidateRef = this.evaluationRevisionPath(repositoryId, revision);
-    const candidate = await loadEvaluationSnapshot(
-      candidateRef.root,
-      repositoryId,
-      candidateRef.revision
-    );
+    const candidate = await loadEvaluationSnapshot(candidateRef.root, repositoryId, candidateRef.revision);
     const suite = candidate.suites.find((item) => item.id === suiteId);
     if (!suite) throw new Error(`Evaluation suite not found: ${suiteId}`);
 
     let baseline: EvaluationRunResult | undefined;
     if (baselineRevision) {
       const baselineRef = this.evaluationRevisionPath(repositoryId, baselineRevision);
-      const baselineSnapshot = await loadEvaluationSnapshot(
-        baselineRef.root,
-        repositoryId,
-        baselineRef.revision
-      );
+      const baselineSnapshot = await loadEvaluationSnapshot(baselineRef.root, repositoryId, baselineRef.revision);
       const baselineSuite = baselineSnapshot.suites.find((item) => item.id === suiteId);
       if (baselineSuite) baseline = runEvaluationSuite(baselineSnapshot, baselineSuite);
     }
@@ -1915,7 +1890,7 @@ export class SkillHubApplicationService {
     await this.evaluations.append(result);
     this.metrics.increment("evaluation_run_total", {
       repository: repositoryId,
-      result: result.failed === 0 && !result.regression ? "pass" : "fail"
+      result: result.failed === 0 && !result.regression ? "pass" : "fail",
     });
     return result;
   }
@@ -1924,7 +1899,7 @@ export class SkillHubApplicationService {
     limit = 100,
     repositoryId?: string,
     suiteId?: string,
-    principal?: Principal
+    principal?: Principal,
   ): Promise<EvaluationRunResult[]> {
     const allowed = new Set(this.allowedRepositories(principal).map((repo) => repo.id));
     const runs = await this.evaluations.list(limit, repositoryId, suiteId);
@@ -1946,7 +1921,7 @@ export class SkillHubApplicationService {
   async getUsageSummary(limit = 10) {
     return {
       ...(await this.analytics.summary(limit)),
-      knowledgeMatchMinScore: this.config.knowledgeMatchMinScore
+      knowledgeMatchMinScore: this.config.knowledgeMatchMinScore,
     };
   }
 
@@ -1968,8 +1943,7 @@ export class SkillHubApplicationService {
     principal: Principal;
   }) {
     const resolvedSessionId =
-      input.sessionId ??
-      (await this.observability.resolveUniqueActiveClientSession(input.principal));
+      input.sessionId ?? (await this.observability.resolveUniqueActiveClientSession(input.principal));
     const resolvedTraceId =
       !input.traceExplicit && resolvedSessionId
         ? this.observability.traceIdForSession(input.principal, resolvedSessionId)
@@ -1985,7 +1959,7 @@ export class SkillHubApplicationService {
       success: input.success,
       error: input.error,
       actorId: input.principal.id,
-      tenantId: input.principal.tenantId
+      tenantId: input.principal.tenantId,
     });
   }
 
@@ -2021,7 +1995,7 @@ export class SkillHubApplicationService {
       model?: string;
       permissionMode?: string;
       metadata?: Record<string, unknown>;
-    }
+    },
   ) {
     const metadata = { ...(input.metadata ?? {}) };
     const schema = resolveClientEventSchemaVersion(input.schemaVersion);
@@ -2030,7 +2004,7 @@ export class SkillHubApplicationService {
       const projectContext = resolveProjectContext(input.cwd, this.config.repositories, {
         remote: typeof metadata.git_remote === "string" ? metadata.git_remote : undefined,
         root: typeof metadata.git_root === "string" ? metadata.git_root : undefined,
-        branch: typeof metadata.git_branch === "string" ? metadata.git_branch : undefined
+        branch: typeof metadata.git_branch === "string" ? metadata.git_branch : undefined,
       });
       if (projectContext) metadata.project_context = projectContext;
     }
@@ -2043,14 +2017,14 @@ export class SkillHubApplicationService {
       event: input.event,
       sessionId: input.sessionId,
       turnId: input.turnId,
-      metadata
+      metadata,
     });
     if (duplicate) return duplicate;
 
     const event = await this.observability.recordClientEvent(principal, {
       ...input,
       schemaVersion: schema.version,
-      metadata
+      metadata,
     });
     await this.clientEventPipeline.process(event);
     return event;
@@ -2068,15 +2042,23 @@ export class SkillHubApplicationService {
     return await this.observability.getClientEvent(id);
   }
 
-  adminFeedbackPage(query: Parameters<McpObservabilityStore["adminFeedbackPage"]>[0]) { return this.observability.adminFeedbackPage(query); }
-  adminKnowledgeCandidatesPage(query: Parameters<McpObservabilityStore["adminCandidatesPage"]>[0]) { return this.observability.adminCandidatesPage(query); }
+  adminFeedbackPage(query: Parameters<McpObservabilityStore["adminFeedbackPage"]>[0]) {
+    return this.observability.adminFeedbackPage(query);
+  }
+  adminKnowledgeCandidatesPage(query: Parameters<McpObservabilityStore["adminCandidatesPage"]>[0]) {
+    return this.observability.adminCandidatesPage(query);
+  }
 
-  private async collectAdminReviewItems(query: ReviewItemsQuery, complete = false): Promise<{ items: ReviewItem[]; total: number }> {
+  private async collectAdminReviewItems(
+    query: ReviewItemsQuery,
+    complete = false,
+  ): Promise<{ items: ReviewItem[]; total: number }> {
     let fallbackCandidates: KnowledgeCandidate[] | undefined;
     let candidateTotal = 0;
     let bundleTotal = 0;
     const fetchCandidates = async (cursor: string | undefined, limit: number) => {
-      const suggestedType = query.type === "knowledge" ? "knowledge" : query.type === "legacy-skill" ? "skill" : undefined;
+      const suggestedType =
+        query.type === "knowledge" ? "knowledge" : query.type === "legacy-skill" ? "skill" : undefined;
       const direct = this.observability.adminCandidatesPage({
         limit: String(limit),
         ...(cursor ? { cursor } : {}),
@@ -2107,8 +2089,21 @@ export class SkillHubApplicationService {
         if (suggestedType && item.suggestedType !== suggestedType) return false;
         if (query.skillCollection && item.skillCollection !== query.skillCollection) return false;
         if (q) {
-          const text = [item.id, item.title, item.content, item.repository, item.status, item.sourceType, item.suggestedType, item.skillCollection, item.reviewer, item.reviewReason]
-            .filter(Boolean).join(" ").toLowerCase();
+          const text = [
+            item.id,
+            item.title,
+            item.content,
+            item.repository,
+            item.status,
+            item.sourceType,
+            item.suggestedType,
+            item.skillCollection,
+            item.reviewer,
+            item.reviewReason,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
           if (!text.includes(q)) return false;
         }
         return true;
@@ -2116,17 +2111,24 @@ export class SkillHubApplicationService {
       const possiblyTruncated = fallbackCandidates.length >= ADMIN_REVIEW_MAX_SOURCE_ROWS;
       if (complete && possiblyTruncated) throw new Error("Admin review query exceeded bounded source scan");
       const offset = Math.max(0, Number(cursor ?? 0) || 0);
-      if (possiblyTruncated && offset >= filtered.length) throw new Error("Admin review query exceeded bounded source scan");
+      if (possiblyTruncated && offset >= filtered.length)
+        throw new Error("Admin review query exceeded bounded source scan");
       const items = filtered.slice(offset, offset + limit);
       const total = filtered.length + (possiblyTruncated ? 1 : 0);
       return {
         items,
         total,
         nextCursor: offset + items.length < total ? String(offset + items.length) : undefined,
-      };    };
+      };
+    };
 
     const fetchBundles = async (cursor: string | undefined, limit: number) => {
-      const impliedImportType = query.type === "skill-bundle-skill" ? "skill" : query.type === "skill-bundle-collection" ? "collection" : undefined;
+      const impliedImportType =
+        query.type === "skill-bundle-skill"
+          ? "skill"
+          : query.type === "skill-bundle-collection"
+            ? "collection"
+            : undefined;
       const page = this.skillBundles.listImportsPage({
         limit: String(limit),
         ...(cursor ? { cursor } : {}),
@@ -2137,7 +2139,7 @@ export class SkillHubApplicationService {
         ...(query.sourceType ? { sourceType: query.sourceType } : {}),
         ...(query.reviewer ? { reviewer: query.reviewer } : {}),
         ...(query.submitter ? { submitter: query.submitter } : {}),
-        ...((query.importType || impliedImportType) ? { importType: query.importType || impliedImportType } : {}),
+        ...(query.importType || impliedImportType ? { importType: query.importType || impliedImportType } : {}),
       });
       return { items: page.items, total: page.total, nextCursor: page.nextCursor };
     };
@@ -2155,7 +2157,9 @@ export class SkillHubApplicationService {
       fetchBundles,
       bundleSnapshotSummary: (record) => {
         const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
-        return snapshot ? { skillCount: snapshot.skills.length, fileCount: snapshot.fileCount, totalBytes: snapshot.totalBytes } : undefined;
+        return snapshot
+          ? { skillCount: snapshot.skills.length, fileCount: snapshot.fileCount, totalBytes: snapshot.totalBytes }
+          : undefined;
       },
     });
     return { items, total: candidateTotal + bundleTotal };
@@ -2180,14 +2184,35 @@ export class SkillHubApplicationService {
     return this.observability.adminCandidateDetectionsPage(query);
   }
 
-  adminMcpCallsPage(query: Parameters<McpObservabilityStore["adminMcpCallsPage"]>[0], mode: "all" | "reuse" | "failures" = "all") {
+  adminMcpCallsPage(
+    query: Parameters<McpObservabilityStore["adminMcpCallsPage"]>[0],
+    mode: "all" | "reuse" | "failures" = "all",
+  ) {
     return this.observability.adminMcpCallsPage(query, mode);
   }
 
   adminSessionsPage(query: Parameters<McpObservabilityStore["adminSessionsPage"]>[0]) {
-    const result = this.observability.adminSessionsPage({ ...query, expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION, expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION });
+    const result = this.observability.adminSessionsPage({
+      ...query,
+      expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION,
+      expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION,
+    });
     if (!result) return undefined;
-    return { ...result, items: result.items.map((session) => ({ ...session, runtimeStatus: !session.runtimeVersion || !session.hookSchemaVersion ? "unknown" as const : session.runtimeVersion === CURRENT_HOOK_RUNTIME_VERSION && session.hookSchemaVersion === CURRENT_HOOK_SCHEMA_VERSION ? "current" as const : "outdated" as const, expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION, expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION })) };
+    return {
+      ...result,
+      items: result.items.map((session) => ({
+        ...session,
+        runtimeStatus:
+          !session.runtimeVersion || !session.hookSchemaVersion
+            ? ("unknown" as const)
+            : session.runtimeVersion === CURRENT_HOOK_RUNTIME_VERSION &&
+                session.hookSchemaVersion === CURRENT_HOOK_SCHEMA_VERSION
+              ? ("current" as const)
+              : ("outdated" as const),
+        expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION,
+        expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION,
+      })),
+    };
   }
 
   async listCandidateDetections(limit = 500) {
@@ -2207,15 +2232,13 @@ export class SkillHubApplicationService {
     const [calls, usage, candidates] = await Promise.all([
       this.observability.listCalls(5000),
       this.analytics.list(5000, false),
-      this.observability.listCandidates(5000)
+      this.observability.listCandidates(5000),
     ]);
     const today = new Date();
     const dates = Array.from({ length: windowDays }, (_, index) => {
-      const date = new Date(Date.UTC(
-        today.getUTCFullYear(),
-        today.getUTCMonth(),
-        today.getUTCDate() - (windowDays - 1 - index)
-      ));
+      const date = new Date(
+        Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (windowDays - 1 - index)),
+      );
       return date.toISOString().slice(0, 10);
     });
     const rows = dates.map((date) => {
@@ -2225,12 +2248,12 @@ export class SkillHubApplicationService {
       const approvalChanges = candidates.filter(
         (item) =>
           item.updatedAt.slice(0, 10) === date &&
-          (item.status === "approved" || item.status === "publishing" || item.status === "published")
+          (item.status === "approved" || item.status === "publishing" || item.status === "published"),
       );
       const unmatched = dailyUsage.filter((item) => item.action === "search" && !item.matched);
       const activeUsers = new Set([
         ...dailyCalls.map((item) => item.actorId),
-        ...dailyUsage.map((item) => item.actorId)
+        ...dailyUsage.map((item) => item.actorId),
       ]).size;
       const latencyMs = dailyCalls.length
         ? dailyCalls.reduce((sum, item) => sum + item.latencyMs, 0) / dailyCalls.length
@@ -2244,7 +2267,7 @@ export class SkillHubApplicationService {
         approvals: approvalChanges.length,
         gapSignals: new Set(unmatched.map((item) => item.query).filter(Boolean)).size,
         activeUsers,
-        avgLatencyMs: Math.round(latencyMs)
+        avgLatencyMs: Math.round(latencyMs),
       };
     });
     return {
@@ -2254,8 +2277,8 @@ export class SkillHubApplicationService {
         noHits: "unmatched search usage events",
         gapSignals: "distinct unmatched search queries per day",
         approvals: "approved/publishing/published candidates grouped by latest updatedAt",
-        latency: "average MCP call latency per day"
-      }
+        latency: "average MCP call latency per day",
+      },
     };
   }
 
@@ -2264,7 +2287,7 @@ export class SkillHubApplicationService {
     const [usage, feedback, candidates] = await Promise.all([
       this.analytics.list(5000, false),
       this.observability.listFeedback(5000),
-      this.observability.listCandidates(5000)
+      this.observability.listCandidates(5000),
     ]);
     const now = Date.now();
     const dayMs = 24 * 60 * 60 * 1000;
@@ -2274,23 +2297,21 @@ export class SkillHubApplicationService {
     };
     const feedbackFor = (type: "skill" | "knowledge", matches: (target: string) => boolean) => {
       const rows = feedback.filter(
-        (item) => item.targetType === type && typeof item.target === "string" && matches(item.target)
+        (item) => item.targetType === type && typeof item.target === "string" && matches(item.target),
       );
       return {
         positive: rows.filter((item) => item.rating === "positive").length,
-        negative: rows.filter((item) => item.rating === "negative").length
+        negative: rows.filter((item) => item.rating === "negative").length,
       };
     };
     const usageFor = (kind: "skill" | "knowledge", matches: (selected: string) => boolean) => {
       const rows = usage.filter(
-        (item) => item.kind === kind && typeof item.selected === "string" && matches(item.selected)
+        (item) => item.kind === kind && typeof item.selected === "string" && matches(item.selected),
       );
       const searchTop1 = rows.filter((item) => item.action === "search").length;
       const resolve = rows.filter((item) => item.action === "resolve").length;
       const load = rows.filter((item) => item.action === "load").length;
-      const lastUsedAt = rows
-        .map((item) => item.ts)
-        .sort((a, b) => b.localeCompare(a))[0];
+      const lastUsedAt = rows.map((item) => item.ts).sort((a, b) => b.localeCompare(a))[0];
       return {
         total: rows.length,
         searchTop1,
@@ -2299,7 +2320,7 @@ export class SkillHubApplicationService {
         reuse: resolve + load,
         reuseRate: searchTop1 ? (resolve + load) / searchTop1 : resolve + load > 0 ? 1 : 0,
         lastUsedAt,
-        daysSinceLastUse: ageDays(lastUsedAt)
+        daysSinceLastUse: ageDays(lastUsedAt),
       };
     };
 
@@ -2320,14 +2341,14 @@ export class SkillHubApplicationService {
           (item) =>
             item.suggestedType === "skill" &&
             item.repository === skill.repositoryId &&
-            item.title.toLowerCase().includes(skill.name.toLowerCase())
-        ).length
+            item.title.toLowerCase().includes(skill.name.toLowerCase()),
+        ).length,
       };
     });
     const knowledge = this.listKnowledgeDocuments(resolvedPrincipal).map((document) => {
       const activity = usageFor(
         "knowledge",
-        (selected) => selected === document.key || selected.startsWith(document.key + "#")
+        (selected) => selected === document.key || selected.startsWith(document.key + "#"),
       );
       const reviewedAt = document.metadata?.updatedAt ?? document.metadata?.createdAt;
       const reviewAgeDays = ageDays(reviewedAt);
@@ -2343,23 +2364,19 @@ export class SkillHubApplicationService {
         usage: activity,
         feedback: feedbackFor(
           "knowledge",
-          (target) => target === document.key || target.startsWith(document.key + "#")
+          (target) => target === document.key || target.startsWith(document.key + "#"),
         ),
         staleByUsage: activity.daysSinceLastUse === undefined || activity.daysSinceLastUse > 90,
         reviewFreshness: {
           reviewedAt,
           reviewAgeDays,
           reviewCycleDays,
-          overdue:
-            reviewAgeDays !== undefined &&
-            reviewCycleDays !== undefined &&
-            reviewAgeDays > reviewCycleDays
+          overdue: reviewAgeDays !== undefined && reviewCycleDays !== undefined && reviewAgeDays > reviewCycleDays,
         },
         candidateUpdateCount: candidates.filter(
           (item) =>
-            item.knowledgeRelation?.target?.key === document.key ||
-            item.relationHint?.target.key === document.key
-        ).length
+            item.knowledgeRelation?.target?.key === document.key || item.relationHint?.target.key === document.key,
+        ).length,
       };
     });
     return {
@@ -2376,14 +2393,14 @@ export class SkillHubApplicationService {
           knowledge.reduce((sum, item) => sum + item.feedback.positive, 0),
         negativeFeedback:
           skills.reduce((sum, item) => sum + item.feedback.negative, 0) +
-          knowledge.reduce((sum, item) => sum + item.feedback.negative, 0)
+          knowledge.reduce((sum, item) => sum + item.feedback.negative, 0),
       },
       semantics: {
         searchRank: "searchTop1 counts selections recorded as the first search result",
         reuseRate: "(resolve + load) / searchTop1; capped only by observed event history, not a quality score",
         staleByUsage: "no recorded usage or more than 90 days since last recorded usage",
-        automaticDeletion: false
-      }
+        automaticDeletion: false,
+      },
     };
   }
 
@@ -2391,7 +2408,7 @@ export class SkillHubApplicationService {
     const resolvedPrincipal = this.principal(principal);
     const [usage, feedback] = await Promise.all([
       this.analytics.list(5000, false),
-      this.observability.listFeedback(5000)
+      this.observability.listFeedback(5000),
     ]);
     const skills = this.listSkills({}, resolvedPrincipal);
     const prompts = this.listPrompts(undefined, resolvedPrincipal);
@@ -2406,30 +2423,23 @@ export class SkillHubApplicationService {
       }
     }
 
-    const usageCount = (key: string) =>
-      usage.filter((item) => item.selected === key).length;
+    const usageCount = (key: string) => usage.filter((item) => item.selected === key).length;
     const feedbackCounts = (type: "skill" | "prompt" | "agent", key: string) => {
       const rows = feedback.filter((item) => item.targetType === type && item.target === key);
       return {
         positive: rows.filter((item) => item.rating === "positive").length,
-        negative: rows.filter((item) => item.rating === "negative").length
+        negative: rows.filter((item) => item.rating === "negative").length,
       };
     };
-    const evaluationCount = (
-      target: "skill" | "prompt" | "agent",
-      key: string,
-      name: string
-    ) =>
+    const evaluationCount = (target: "skill" | "prompt" | "agent", key: string, name: string) =>
       evaluationCases.filter(
         (item) =>
           item.target === target &&
-          (
-            item.name === name ||
+          (item.name === name ||
             item.expect.selected === key ||
             item.expect.selected === name ||
             item.expect.skills?.includes(name) ||
-            item.expect.prompts?.includes(name)
-          )
+            item.expect.prompts?.includes(name)),
       ).length;
     const duplicateNames = <T extends { name: string }>(items: T[]) => {
       const counts = new Map<string, number>();
@@ -2461,7 +2471,7 @@ export class SkillHubApplicationService {
         feedback: reviews,
         evaluationCases: evaluations,
         dependencies: skill.metadata.dependsOn,
-        issues
+        issues,
       };
     });
     const promptRows = prompts.map((prompt) => {
@@ -2483,7 +2493,7 @@ export class SkillHubApplicationService {
         usage: uses,
         feedback: reviews,
         evaluationCases: evaluations,
-        issues
+        issues,
       };
     });
     const visibleTools = this.listTools(undefined, resolvedPrincipal);
@@ -2511,10 +2521,10 @@ export class SkillHubApplicationService {
         capabilities: {
           skills: agent.skills,
           prompts: agent.prompts,
-          tools: agent.tools
+          tools: agent.tools,
         },
         toolBindingsReady: bindings.every((item) => item.status === "resolved"),
-        issues
+        issues,
       };
     });
     const all = [...skillRows, ...promptRows, ...agentRows];
@@ -2530,8 +2540,8 @@ export class SkillHubApplicationService {
         deprecatedSkills: skillRows.filter((item) => item.status === "deprecated").length,
         missingVersion: all.filter((item) => item.issues.includes("missing-version")).length,
         duplicateNames: all.filter((item) => item.issues.includes("duplicate-name")).length,
-        unresolvedAgentTools: agentRows.filter((item) => !item.toolBindingsReady).length
-      }
+        unresolvedAgentTools: agentRows.filter((item) => !item.toolBindingsReady).length,
+      },
     };
   }
 
@@ -2542,9 +2552,7 @@ export class SkillHubApplicationService {
       : this.allowedRepositories(resolvedPrincipal);
     const audits = await this.listAuditEvents(1000, undefined, resolvedPrincipal);
     const now = Date.now();
-    const webhookSecretConfigured = Boolean(
-      process.env.GITLAB_WEBHOOK_TOKEN ?? process.env.WEBHOOK_SECRET
-    );
+    const webhookSecretConfigured = Boolean(process.env.GITLAB_WEBHOOK_TOKEN ?? process.env.WEBHOOK_SECRET);
     const rows = repositories.map((repository) => {
       const state = this.states.get(repository.id);
       const lastSuccessMs = state?.lastSuccessAt ? Date.parse(state.lastSuccessAt) : NaN;
@@ -2552,9 +2560,7 @@ export class SkillHubApplicationService {
         ? Math.max(0, Math.floor((now - lastSuccessMs) / 1000))
         : undefined;
       const expectedMaxLagSeconds =
-        repository.pollingIntervalSeconds > 0
-          ? Math.max(15 * 60, repository.pollingIntervalSeconds * 3)
-          : undefined;
+        repository.pollingIntervalSeconds > 0 ? Math.max(15 * 60, repository.pollingIntervalSeconds * 3) : undefined;
       const stale =
         Boolean(repository.enabled) &&
         expectedMaxLagSeconds !== undefined &&
@@ -2563,16 +2569,11 @@ export class SkillHubApplicationService {
         (event) =>
           event.repositoryId === repository.id &&
           event.trigger === "webhook" &&
-          (event.action === "repository.sync.completed" || event.action === "repository.sync.failed")
+          (event.action === "repository.sync.completed" || event.action === "repository.sync.failed"),
       );
       const lastWebhook = webhookEvents[0];
       const webhookStatus:
-        | "not-applicable"
-        | "not-configured"
-        | "misconfigured"
-        | "configured-no-events"
-        | "healthy"
-        | "error" =
+        "not-applicable" | "not-configured" | "misconfigured" | "configured-no-events" | "healthy" | "error" =
         repository.provider !== "git"
           ? "not-applicable"
           : repository.webhookAliases.length === 0
@@ -2616,9 +2617,9 @@ export class SkillHubApplicationService {
               ? "failed"
               : lastWebhook?.action === "repository.sync.completed"
                 ? "success"
-                : undefined
+                : undefined,
         },
-        issues
+        issues,
       };
     });
     return {
@@ -2627,10 +2628,9 @@ export class SkillHubApplicationService {
         total: rows.length,
         missingOwner: rows.filter((item) => item.issues.includes("missing-owner")).length,
         stale: rows.filter((item) => item.stale).length,
-        webhookErrors: rows.filter(
-          (item) => item.webhook.status === "misconfigured" || item.webhook.status === "error"
-        ).length
-      }
+        webhookErrors: rows.filter((item) => item.webhook.status === "misconfigured" || item.webhook.status === "error")
+          .length,
+      },
     };
   }
 
@@ -2648,9 +2648,7 @@ export class SkillHubApplicationService {
     });
     const candidates = await this.observability.listCandidates(5000);
     const lifecycle = this.getKnowledgeLifecycleAudit(principal);
-    let disk:
-      | { totalBytes: number; freeBytes: number; usedBytes: number; usedRatio: number }
-      | undefined;
+    let disk: { totalBytes: number; freeBytes: number; usedBytes: number; usedRatio: number } | undefined;
     try {
       await mkdir(this.config.dataDir, { recursive: true });
       const fs = await statfs(this.config.dataDir);
@@ -2660,7 +2658,7 @@ export class SkillHubApplicationService {
         totalBytes,
         freeBytes,
         usedBytes: Math.max(0, totalBytes - freeBytes),
-        usedRatio: totalBytes > 0 ? Math.max(0, Math.min(1, (totalBytes - freeBytes) / totalBytes)) : 0
+        usedRatio: totalBytes > 0 ? Math.max(0, Math.min(1, (totalBytes - freeBytes) / totalBytes)) : 0,
       };
     } catch {
       disk = undefined;
@@ -2676,27 +2674,27 @@ export class SkillHubApplicationService {
         stale: staleRepositories.map((state) => ({
           id: state.id,
           lastSuccessAt: state.lastSuccessAt,
-          failureCount: state.failureCount
+          failureCount: state.failureCount,
         })),
         repeatedFailures: states
           .filter((state) => state.failureCount >= 3)
-          .map((state) => ({ id: state.id, failureCount: state.failureCount, error: state.error }))
+          .map((state) => ({ id: state.id, failureCount: state.failureCount, error: state.error })),
       },
       candidates: {
         pending: candidates.filter((item) => item.status === "pending").length,
         approved: candidates.filter((item) => item.status === "approved").length,
         publishFailed: candidates.filter((item) => item.status === "publish_failed").length,
-        publishing: candidates.filter((item) => item.status === "publishing").length
+        publishing: candidates.filter((item) => item.status === "publishing").length,
       },
       knowledge: {
         documents: lifecycle.documents,
         lifecycleIssues: lifecycle.issues.length,
         reviewOverdue: lifecycle.byKind["review-overdue"] ?? 0,
         expired: lifecycle.byKind.expired ?? 0,
-        missingOwner: lifecycle.byKind["missing-owner"] ?? 0
+        missingOwner: lifecycle.byKind["missing-owner"] ?? 0,
       },
       storage: disk,
-      observabilityStorage
+      observabilityStorage,
     };
   }
 
@@ -2704,7 +2702,7 @@ export class SkillHubApplicationService {
     const [sessions, calls, candidates] = await Promise.all([
       this.observability.listClientSessions(Math.max(1, Math.min(limit, 1000))),
       this.observability.listCalls(5000),
-      this.observability.listCandidates(5000)
+      this.observability.listCandidates(5000),
     ]);
     const searchTools = new Set([
       "discover",
@@ -2712,17 +2710,21 @@ export class SkillHubApplicationService {
       "search_knowledge",
       "search_prompts",
       "search_agents",
-      "search_tools"
+      "search_tools",
     ]);
     const knowledgeTools = new Set(["search_knowledge", "get_knowledge"]);
     const searchKey = (call: { tool: string; args?: Record<string, unknown> }) => {
       const args = call.args ?? {};
       const query =
-        typeof args.query === "string" ? args.query :
-        typeof args.task === "string" ? args.task :
-        typeof args.name === "string" ? args.name :
-        typeof args.path === "string" ? args.path :
-        "";
+        typeof args.query === "string"
+          ? args.query
+          : typeof args.task === "string"
+            ? args.task
+            : typeof args.name === "string"
+              ? args.name
+              : typeof args.path === "string"
+                ? args.path
+                : "";
       return call.tool + "\0" + query.trim().toLowerCase();
     };
     const rows = sessions.map((session) => {
@@ -2730,7 +2732,7 @@ export class SkillHubApplicationService {
         (call) =>
           call.sessionId === session.sessionId &&
           call.actorId === session.actorId &&
-          call.tenantId === session.tenantId
+          call.tenantId === session.tenantId,
       );
       const seenSearches = new Set<string>();
       let repeatedSearches = 0;
@@ -2740,19 +2742,16 @@ export class SkillHubApplicationService {
         if (seenSearches.has(key)) repeatedSearches += 1;
         else seenSearches.add(key);
       }
-      const durationMs = Math.max(
-        0,
-        Date.parse(session.endedAt) - Date.parse(session.startedAt)
-      );
+      const durationMs = Math.max(0, Date.parse(session.endedAt) - Date.parse(session.startedAt));
       const candidateCount = candidates.filter(
         (candidate) =>
           candidate.sourceSessionId === session.sessionId &&
           candidate.actorId === session.actorId &&
-          candidate.tenantId === session.tenantId
+          candidate.tenantId === session.tenantId,
       ).length;
       const knowledgeCalls = sessionCalls.filter((call) => knowledgeTools.has(call.tool)).length;
       const successfulKnowledgeReuse = sessionCalls.filter(
-        (call) => call.tool === "get_knowledge" && call.success
+        (call) => call.tool === "get_knowledge" && call.success,
       ).length;
       const failedCalls = sessionCalls.filter((call) => !call.success).length;
       return {
@@ -2772,10 +2771,10 @@ export class SkillHubApplicationService {
         candidateCount,
         failedCalls,
         evidenceCount: session.evidenceCount,
-        callCount: session.callCount
+        callCount: session.callCount,
       };
     });
-    const average = (select: (row: typeof rows[number]) => number) =>
+    const average = (select: (row: (typeof rows)[number]) => number) =>
       rows.length ? rows.reduce((sum, row) => sum + select(row), 0) / rows.length : 0;
     return {
       sessions: rows,
@@ -2790,14 +2789,15 @@ export class SkillHubApplicationService {
         averageFailedCallsPerSession: average((row) => row.failedCalls),
         averageEvidencePerSession: average((row) => row.evidenceCount),
         sessionsWithFailures: rows.filter((row) => row.failedCalls > 0).length,
-        sessionsWithKnowledgeReuse: rows.filter((row) => row.successfulKnowledgeReuse > 0).length
+        sessionsWithKnowledgeReuse: rows.filter((row) => row.successfulKnowledgeReuse > 0).length,
       },
       semantics: {
-        duration: "first-to-last observed Session event/MCP call timestamp; active sessions are not wall-clock task completion",
+        duration:
+          "first-to-last observed Session event/MCP call timestamp; active sessions are not wall-clock task completion",
         repeatedSearches: "repeated identical search tool + observable query within one session",
         successfulKnowledgeReuse: "successful get_knowledge MCP calls",
-        failedTasks: "failed MCP calls are used as the observable failure proxy"
-      }
+        failedTasks: "failed MCP calls are used as the observable failure proxy",
+      },
     };
   }
 
@@ -2808,41 +2808,39 @@ export class SkillHubApplicationService {
       this.observability.listCandidateDetections(5000),
       this.analytics.summary(20),
       this.observability.listFeedback(5000),
-      this.observability.summary()
+      this.observability.summary(),
     ]);
     const reviewed = candidates.filter((item) =>
-      ["approved", "rejected", "publishing", "published", "publish_failed"].includes(item.status)
+      ["approved", "rejected", "publishing", "published", "publish_failed"].includes(item.status),
     );
     const approved = reviewed.filter((item) =>
-      ["approved", "publishing", "published", "publish_failed"].includes(item.status)
+      ["approved", "publishing", "published", "publish_failed"].includes(item.status),
     ).length;
     const autoReviewed = reviewed.filter((item) => Boolean(item.automation));
     const autoAccepted = autoReviewed.filter((item) =>
-      ["approved", "publishing", "published", "publish_failed"].includes(item.status)
+      ["approved", "publishing", "published", "publish_failed"].includes(item.status),
     ).length;
     const autoRejected = autoReviewed.filter((item) => item.status === "rejected").length;
     const labeledAutoReviewed = autoReviewed.filter((item) => Boolean(item.reviewReason));
     const usefulAutoReviewed = labeledAutoReviewed.filter((item) => item.reviewReason === "useful").length;
-    const falsePositiveAutoReviewed = labeledAutoReviewed.filter((item) => item.reviewReason === "false_positive").length;
+    const falsePositiveAutoReviewed = labeledAutoReviewed.filter(
+      (item) => item.reviewReason === "false_positive",
+    ).length;
     const duplicateFiltered = detections.filter(
       (item) =>
         item.outcome === "skipped" &&
-        (
-          item.reason === "exact-candidate-duplicate" ||
+        (item.reason === "exact-candidate-duplicate" ||
           item.reason.startsWith("near-candidate-duplicate:") ||
           item.reason === "template-summary-duplicate" ||
-          item.reason === "candidate-already-generated"
-        )
+          item.reason === "candidate-already-generated"),
     ).length;
     const lowValueFiltered = detections.filter(
       (item) =>
         item.outcome === "skipped" &&
-        (
-          item.reason === "low-reuse-value-summary" ||
+        (item.reason === "low-reuse-value-summary" ||
           item.reason === "assistant-summary-too-short" ||
           item.reason === "no-engineering-action" ||
-          item.reason === "no-strong-test-evidence"
-        )
+          item.reason === "no-strong-test-evidence"),
     ).length;
     const publishedWithMr = candidates.filter((item) => Boolean(item.publication));
     const mergedMrs = publishedWithMr.filter((item) => item.publication?.mergeRequestState === "merged").length;
@@ -2881,7 +2879,7 @@ export class SkillHubApplicationService {
       autoUsefulRate: labeledAutoReviewed.length ? usefulAutoReviewed / labeledAutoReviewed.length : 0,
       autoFalsePositiveRate: labeledAutoReviewed.length ? falsePositiveAutoReviewed / labeledAutoReviewed.length : 0,
       duplicateFiltered,
-      lowValueFiltered
+      lowValueFiltered,
     };
   }
 
@@ -2892,8 +2890,8 @@ export class SkillHubApplicationService {
       invariants: [
         "raw sensitive payload classes are not persisted by default",
         "observability files use classification-specific retention when no explicit test override is supplied",
-        "policy changes must not expand local collection ceilings"
-      ]
+        "policy changes must not expand local collection ceilings",
+      ],
     };
   }
 
@@ -2901,7 +2899,7 @@ export class SkillHubApplicationService {
     const [health, kpis, evaluationRuns] = await Promise.all([
       this.getOperationalHealth(principal),
       this.getPlatformKpis(principal),
-      this.listEvaluationRuns(20, undefined, undefined, principal)
+      this.listEvaluationRuns(20, undefined, undefined, principal),
     ]);
     type AlertSeverity = "warning" | "critical";
     const alerts: Array<{
@@ -2911,13 +2909,8 @@ export class SkillHubApplicationService {
       title: string;
       detail: string;
     }> = [];
-    const add = (
-      id: string,
-      severity: AlertSeverity,
-      category: string,
-      title: string,
-      detail: string
-    ) => alerts.push({ id, severity, category, title, detail });
+    const add = (id: string, severity: AlertSeverity, category: string, title: string, detail: string) =>
+      alerts.push({ id, severity, category, title, detail });
 
     for (const repository of health.repositories.repeatedFailures) {
       add(
@@ -2925,7 +2918,7 @@ export class SkillHubApplicationService {
         repository.failureCount >= 5 ? "critical" : "warning",
         "repository",
         "Repository sync repeatedly failing: " + repository.id,
-        repository.failureCount + " consecutive failures" + (repository.error ? " · " + repository.error : "")
+        repository.failureCount + " consecutive failures" + (repository.error ? " · " + repository.error : ""),
       );
     }
     for (const repository of health.repositories.stale) {
@@ -2934,7 +2927,7 @@ export class SkillHubApplicationService {
         "warning",
         "repository",
         "Repository is stale: " + repository.id,
-        "Last successful sync: " + (repository.lastSuccessAt ?? "unknown")
+        "Last successful sync: " + (repository.lastSuccessAt ?? "unknown"),
       );
     }
     if (health.candidates.publishFailed >= 3) {
@@ -2943,7 +2936,7 @@ export class SkillHubApplicationService {
         health.candidates.publishFailed >= 10 ? "critical" : "warning",
         "publishing",
         "Knowledge publishing failures are accumulating",
-        health.candidates.publishFailed + " candidates are in publish_failed"
+        health.candidates.publishFailed + " candidates are in publish_failed",
       );
     }
     if (health.candidates.pending >= 50) {
@@ -2952,7 +2945,7 @@ export class SkillHubApplicationService {
         health.candidates.pending >= 150 ? "critical" : "warning",
         "review",
         "Review Inbox backlog is high",
-        health.candidates.pending + " pending candidates"
+        health.candidates.pending + " pending candidates",
       );
     }
     if (kpis.mcpErrorRate >= 0.05) {
@@ -2961,7 +2954,7 @@ export class SkillHubApplicationService {
         kpis.mcpErrorRate >= 0.1 ? "critical" : "warning",
         "mcp",
         "MCP error rate is elevated",
-        (kpis.mcpErrorRate * 100).toFixed(1) + "% error rate"
+        (kpis.mcpErrorRate * 100).toFixed(1) + "% error rate",
       );
     }
     if (kpis.noHitRate >= 0.3) {
@@ -2970,7 +2963,7 @@ export class SkillHubApplicationService {
         kpis.noHitRate >= 0.5 ? "critical" : "warning",
         "retrieval",
         "Knowledge retrieval no-hit rate is high",
-        (kpis.noHitRate * 100).toFixed(1) + "% no-hit rate"
+        (kpis.noHitRate * 100).toFixed(1) + "% no-hit rate",
       );
     }
     if (kpis.negativeFeedbackRate >= 0.25) {
@@ -2979,7 +2972,7 @@ export class SkillHubApplicationService {
         kpis.negativeFeedbackRate >= 0.5 ? "critical" : "warning",
         "quality",
         "Negative feedback rate is high",
-        (kpis.negativeFeedbackRate * 100).toFixed(1) + "% negative feedback"
+        (kpis.negativeFeedbackRate * 100).toFixed(1) + "% negative feedback",
       );
     }
     if (health.storage && health.storage.usedRatio >= 0.85) {
@@ -2988,7 +2981,7 @@ export class SkillHubApplicationService {
         health.storage.usedRatio >= 0.95 ? "critical" : "warning",
         "storage",
         "DATA_DIR disk usage is high",
-        (health.storage.usedRatio * 100).toFixed(1) + "% used"
+        (health.storage.usedRatio * 100).toFixed(1) + "% used",
       );
     }
     if (!health.observabilityStorage.storageReady || health.observabilityStorage.sqlite?.quickCheck === false) {
@@ -2997,7 +2990,7 @@ export class SkillHubApplicationService {
         "critical",
         "storage",
         "Observability SQLite storage is unhealthy",
-        !health.observabilityStorage.storageReady ? "SQLite is not writable" : "SQLite quick_check failed"
+        !health.observabilityStorage.storageReady ? "SQLite is not writable" : "SQLite quick_check failed",
       );
     }
     if (health.observabilityStorage.maintenance.lastError) {
@@ -3006,7 +2999,7 @@ export class SkillHubApplicationService {
         "warning",
         "storage",
         "Observability retention maintenance is failing",
-        health.observabilityStorage.maintenance.lastError
+        health.observabilityStorage.maintenance.lastError,
       );
     }
     const latestRunBySuite = new Map<string, EvaluationRunResult>();
@@ -3021,7 +3014,7 @@ export class SkillHubApplicationService {
         "critical",
         "evaluation",
         "Evaluation regression: " + run.repositoryId + " / " + run.suiteId,
-        run.failed + "/" + run.total + " cases failed" + (run.regression ? " · baseline regression detected" : "")
+        run.failed + "/" + run.total + " cases failed" + (run.regression ? " · baseline regression detected" : ""),
       );
     }
 
@@ -3029,9 +3022,9 @@ export class SkillHubApplicationService {
       generatedAt: new Date().toISOString(),
       counts: {
         critical: alerts.filter((item) => item.severity === "critical").length,
-        warning: alerts.filter((item) => item.severity === "warning").length
+        warning: alerts.filter((item) => item.severity === "warning").length,
       },
-      alerts
+      alerts,
     };
   }
 
@@ -3039,7 +3032,7 @@ export class SkillHubApplicationService {
     const days = Math.max(1, Math.min(Math.floor(windowDays) || 7, 90));
     const [candidates, detections] = await Promise.all([
       this.observability.listCandidates(10000),
-      this.observability.listCandidateDetections(10000)
+      this.observability.listCandidateDetections(10000),
     ]);
     const now = Date.now();
     const dayMs = 24 * 60 * 60 * 1000;
@@ -3071,7 +3064,7 @@ export class SkillHubApplicationService {
         return ts >= from && ts < to && (!detector || itemDetector === detector);
       });
       const reviewed = scopedCandidates.filter((item) =>
-        ["approved", "rejected", "publishing", "published", "publish_failed"].includes(item.status)
+        ["approved", "rejected", "publishing", "published", "publish_failed"].includes(item.status),
       );
       const labeled = reviewed.filter((item) => Boolean(item.reviewReason));
       const useful = labeled.filter((item) => item.reviewReason === "useful").length;
@@ -3085,31 +3078,29 @@ export class SkillHubApplicationService {
         labelCoverage: reviewed.length ? labeled.length / reviewed.length : 0,
         usefulRate: labeled.length ? useful / labeled.length : 0,
         falsePositiveRate: labeled.length ? falsePositive / labeled.length : 0,
-        duplicateFiltered: scopedDetections.filter(
-          (item) => item.outcome === "skipped" && duplicateReason(item.reason)
-        ).length,
-        lowValueFiltered: scopedDetections.filter(
-          (item) => item.outcome === "skipped" && lowValueReason(item.reason)
-        ).length
+        duplicateFiltered: scopedDetections.filter((item) => item.outcome === "skipped" && duplicateReason(item.reason))
+          .length,
+        lowValueFiltered: scopedDetections.filter((item) => item.outcome === "skipped" && lowValueReason(item.reason))
+          .length,
       };
     };
     const current = summarize(currentStart, now);
     const baseline = summarize(baselineStart, currentStart);
     const detectors = new Set<string>([
       ...automatic.map((item) => item.automation?.detector).filter((value): value is string => Boolean(value)),
-      ...detections.map((item) => item.detector ?? "legacy")
+      ...detections.map((item) => item.detector ?? "legacy"),
     ]);
     const byDetector = [...detectors].sort().map((detectorName) => ({
       detector: detectorName,
       current: summarize(currentStart, now, detectorName),
-      baseline: summarize(baselineStart, currentStart, detectorName)
+      baseline: summarize(baselineStart, currentStart, detectorName),
     }));
     const timeSeries = Array.from({ length: days * 2 }, (_, index) => {
       const from = baselineStart + index * dayMs;
       const to = from + dayMs;
       return {
         date: new Date(from).toISOString().slice(0, 10),
-        ...summarize(from, to)
+        ...summarize(from, to),
       };
     });
     return {
@@ -3121,10 +3112,10 @@ export class SkillHubApplicationService {
         falsePositiveRate: current.falsePositiveRate - baseline.falsePositiveRate,
         labelCoverage: current.labelCoverage - baseline.labelCoverage,
         created: current.created - baseline.created,
-        skipped: current.skipped - baseline.skipped
+        skipped: current.skipped - baseline.skipped,
       },
       byDetector,
-      timeSeries
+      timeSeries,
     };
   }
 
@@ -3142,7 +3133,7 @@ export class SkillHubApplicationService {
       hasReuse?: boolean;
       from?: string;
       to?: string;
-    }
+    },
   ) {
     const sessions = await this.observability.listClientSessions(1000);
     return sessions
@@ -3156,23 +3147,41 @@ export class SkillHubApplicationService {
               ? ("current" as const)
               : ("outdated" as const),
         expectedRuntimeVersion: CURRENT_HOOK_RUNTIME_VERSION,
-        expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION
+        expectedHookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION,
       }))
       .filter((session) => !filters?.actorId || session.actorId === filters.actorId)
-      .filter(
-        (session) =>
-          !filters?.repositoryId || session.repositoryId === filters.repositoryId
-      )
+      .filter((session) => !filters?.repositoryId || session.repositoryId === filters.repositoryId)
       .filter((session) => !filters?.event || session.events.includes(filters.event))
-      .filter((session) => !filters?.status || (filters.status === "ended" ? session.ended : filters.status === "active" ? !session.ended : session.failedCallCount > 0))
-      .filter((session) => !filters?.q || [session.sessionId, session.actorId, session.tenantId, session.client, session.repositoryId, ...session.events, ...session.tools].filter(Boolean).join(" ").toLowerCase().includes(filters.q.toLowerCase()))
-      .filter((session) => filters?.hasMcp === undefined || (session.callCount > 0) === filters.hasMcp)
-      .filter((session) => filters?.hasEvidence === undefined || (session.evidenceCount > 0) === filters.hasEvidence)
-      .filter((session) => filters?.hasReuse === undefined || session.tools.some(isReuseMcpTool) === filters.hasReuse)
       .filter(
         (session) =>
-          !filters?.runtimeStatus || session.runtimeStatus === filters.runtimeStatus
+          !filters?.status ||
+          (filters.status === "ended"
+            ? session.ended
+            : filters.status === "active"
+              ? !session.ended
+              : session.failedCallCount > 0),
       )
+      .filter(
+        (session) =>
+          !filters?.q ||
+          [
+            session.sessionId,
+            session.actorId,
+            session.tenantId,
+            session.client,
+            session.repositoryId,
+            ...session.events,
+            ...session.tools,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(filters.q.toLowerCase()),
+      )
+      .filter((session) => filters?.hasMcp === undefined || session.callCount > 0 === filters.hasMcp)
+      .filter((session) => filters?.hasEvidence === undefined || session.evidenceCount > 0 === filters.hasEvidence)
+      .filter((session) => filters?.hasReuse === undefined || session.tools.some(isReuseMcpTool) === filters.hasReuse)
+      .filter((session) => !filters?.runtimeStatus || session.runtimeStatus === filters.runtimeStatus)
       .filter((session) => !filters?.from || session.endedAt >= filters.from)
       .filter((session) => !filters?.to || session.startedAt <= filters.to)
       .slice(0, Math.max(1, Math.min(limit, 1000)));
@@ -3181,7 +3190,7 @@ export class SkillHubApplicationService {
   getClientRuntimeInfo() {
     return {
       runtimeVersion: CURRENT_HOOK_RUNTIME_VERSION,
-      hookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION
+      hookSchemaVersion: CURRENT_HOOK_SCHEMA_VERSION,
     };
   }
 
@@ -3193,22 +3202,19 @@ export class SkillHubApplicationService {
     const [timeline, candidates, detections] = await Promise.all([
       this.observability.getClientSessionTimeline(actorId, tenantId, sessionId),
       this.observability.listCandidates(1000),
-      this.observability.listCandidateDetections(5000)
+      this.observability.listCandidateDetections(5000),
     ]);
     const evidence = timeline
-      .filter((item): item is Extract<typeof timeline[number], { kind: "event" }> => item.kind === "event")
+      .filter((item): item is Extract<(typeof timeline)[number], { kind: "event" }> => item.kind === "event")
       .map((item) => ({
         ts: item.ts,
         event: item.event.event,
-        tool:
-          typeof item.event.metadata.tool_name === "string"
-            ? item.event.metadata.tool_name
-            : undefined,
-        evidence: item.event.metadata.engineering_evidence
+        tool: typeof item.event.metadata.tool_name === "string" ? item.event.metadata.tool_name : undefined,
+        evidence: item.event.metadata.engineering_evidence,
       }))
       .filter((item) => item.evidence && typeof item.evidence === "object");
     const calls = timeline.filter(
-      (item): item is Extract<typeof timeline[number], { kind: "mcp-call" }> => item.kind === "mcp-call"
+      (item): item is Extract<(typeof timeline)[number], { kind: "mcp-call" }> => item.kind === "mcp-call",
     );
     const assetTools = new Set([
       "discover",
@@ -3223,7 +3229,7 @@ export class SkillHubApplicationService {
       "resolve_agent",
       "get_agent",
       "search_tools",
-      "get_tool"
+      "get_tool",
     ]);
     const assetUsage = calls
       .filter((item) => assetTools.has(item.call.tool))
@@ -3231,7 +3237,7 @@ export class SkillHubApplicationService {
         ts: item.ts,
         tool: item.call.tool,
         success: item.call.success,
-        args: item.call.args
+        args: item.call.args,
       }));
     return {
       sessionId,
@@ -3241,24 +3247,15 @@ export class SkillHubApplicationService {
       evidence,
       assetUsage,
       candidates: candidates.filter(
-        (item) =>
-          item.actorId === actorId &&
-          item.tenantId === tenantId &&
-          item.sourceSessionId === sessionId
+        (item) => item.actorId === actorId && item.tenantId === tenantId && item.sourceSessionId === sessionId,
       ),
       detections: detections.filter(
-        (item) =>
-          item.actorId === actorId &&
-          item.tenantId === tenantId &&
-          item.sessionId === sessionId
-      )
+        (item) => item.actorId === actorId && item.tenantId === tenantId && item.sessionId === sessionId,
+      ),
     };
   }
 
-  async submitFeedback(
-    principal: Principal,
-    input: Omit<FeedbackRecord, "id" | "ts" | "actorId" | "tenantId">
-  ) {
+  async submitFeedback(principal: Principal, input: Omit<FeedbackRecord, "id" | "ts" | "actorId" | "tenantId">) {
     return await this.observability.submitFeedback(principal, input);
   }
 
@@ -3280,7 +3277,7 @@ export class SkillHubApplicationService {
     this.events.emit("knowledge_submission_spec.updated", {
       previousSpecVersion: previous.spec_version,
       specVersion: saved.spec_version,
-      schemaVersion: saved.schema_version
+      schemaVersion: saved.schema_version,
     });
     return saved;
   }
@@ -3292,7 +3289,7 @@ export class SkillHubApplicationService {
       previousSpecVersion: previous.spec_version,
       sourceSpecVersion: version,
       specVersion: saved.spec_version,
-      schemaVersion: saved.schema_version
+      schemaVersion: saved.schema_version,
     });
     return saved;
   }
@@ -3300,12 +3297,12 @@ export class SkillHubApplicationService {
   private async persistKnowledgeCandidate(
     principal: Principal,
     input: Parameters<McpObservabilityStore["createCandidate"]>[1],
-    options: { submittedSpecVersion?: number; submissionMode: NonNullable<KnowledgeCandidate["submissionMode"]> }
+    options: { submittedSpecVersion?: number; submissionMode: NonNullable<KnowledgeCandidate["submissionMode"]> },
   ): Promise<KnowledgeCandidate> {
     const normalized = await this.knowledgeSubmission.normalize({
       title: input.title,
       content: input.content,
-      submittedSpecVersion: options.submittedSpecVersion
+      submittedSpecVersion: options.submittedSpecVersion,
     });
     const created = await this.observability.createCandidate(principal, {
       ...input,
@@ -3314,7 +3311,7 @@ export class SkillHubApplicationService {
       submissionSpecVersion: normalized.submittedSpecVersion ?? normalized.appliedSpecVersion,
       validationSpecVersion: normalized.appliedSpecVersion,
       submissionSpecSchemaVersion: normalized.schemaVersion,
-      submissionMode: options.submissionMode
+      submissionMode: options.submissionMode,
     });
     if (!created.suggestedPath) {
       return await this.observability.updateCandidate(created.id, { suggestedPath: defaultCandidatePath(created) });
@@ -3326,14 +3323,28 @@ export class SkillHubApplicationService {
     principal: Principal,
     input: Pick<
       KnowledgeCandidate,
-      "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"
-    > & { submittedSpecVersion?: number; submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]> }
+      | "title"
+      | "content"
+      | "sourceType"
+      | "suggestedType"
+      | "skillCollection"
+      | "repository"
+      | "suggestedPath"
+      | "traceId"
+    > & { submittedSpecVersion?: number; submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]> },
   ) {
     let candidateInput: Parameters<McpObservabilityStore["createCandidate"]>[1] = input;
     if (input.suggestedType === "skill") {
       const body = input.content.trim();
-      if (!body.startsWith("---") || !/\bschema_version:\s*1\b/.test(body) || !/\bname:\s*[^\s]+/.test(body) || !/\bmetadata:\s*$/m.test(body)) {
-        throw new Error("Skill candidate content must be a complete SKILL.md with schema_version: 1, name, and metadata front matter");
+      if (
+        !body.startsWith("---") ||
+        !/\bschema_version:\s*1\b/.test(body) ||
+        !/\bname:\s*[^\s]+/.test(body) ||
+        !/\bmetadata:\s*$/m.test(body)
+      ) {
+        throw new Error(
+          "Skill candidate content must be a complete SKILL.md with schema_version: 1, name, and metadata front matter",
+        );
       }
       candidateInput = { ...input, skillCollection: input.skillCollection ?? "custom-skills" };
     }
@@ -3353,14 +3364,15 @@ export class SkillHubApplicationService {
     }
     return await this.persistKnowledgeCandidate(principal, candidateInput, {
       submittedSpecVersion: input.submittedSpecVersion,
-      submissionMode: input.submissionMode ?? (input.sourceType === "mcp-session" ? "mcp" : "admin")
+      submissionMode: input.submissionMode ?? (input.sourceType === "mcp-session" ? "mcp" : "admin"),
     });
   }
 
   private skillBundlePublishingRepository(principal: Principal, repositoryId?: string): RepositoryConfig {
     const allowedRepositories = this.allowedRepositories(principal);
     const targetId = repositoryId ?? this.defaultPublishingRepository("skill", allowedRepositories);
-    if (!targetId) throw new Error("Unable to determine Skill publishing repository; select a repository before submitting");
+    if (!targetId)
+      throw new Error("Unable to determine Skill publishing repository; select a repository before submitting");
     if (!allowedRepositories.some((repository) => repository.id === targetId)) throw new Error("Repository not found");
     const route = this.requirePublishingRoute("skill", targetId);
     return { ...route.targetRepository, skillPublishing: route.publishing };
@@ -3381,26 +3393,28 @@ export class SkillHubApplicationService {
       fileCount: snapshot?.fileCount ?? 0,
       submitter: record.submitter,
       reviewer: record.review?.reviewer,
-      ...extra
+      ...extra,
     });
   }
 
   async previewSkillBundle(
     principal: Principal,
-    input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey"> & { repository?: string }
+    input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey"> & {
+      repository?: string;
+    },
   ) {
     const repository = this.skillBundlePublishingRepository(principal, input.repository);
     return await this.skillBundles.preview(principal, repository, {
       namespace: input.namespace,
       importType: input.importType,
       skillPath: input.skillPath,
-      files: input.files
+      files: input.files,
     });
   }
 
   async submitSkillBundle(
     principal: Principal,
-    input: SubmitSkillBundleServiceInput & { repository?: string }
+    input: SubmitSkillBundleServiceInput & { repository?: string },
   ): Promise<SkillBundleImport> {
     const repository = this.skillBundlePublishingRepository(principal, input.repository);
     try {
@@ -3411,9 +3425,12 @@ export class SkillHubApplicationService {
         files: input.files,
         sourceType: input.sourceType,
         sourceMetadata: input.sourceMetadata,
-        submissionKey: input.submissionKey
+        submissionKey: input.submissionKey,
       });
-      this.emitSkillBundleEvent(result.created ? "skill_bundle.import.created" : "skill_bundle.import.reused", result.import);
+      this.emitSkillBundleEvent(
+        result.created ? "skill_bundle.import.created" : "skill_bundle.import.reused",
+        result.import,
+      );
       return result.import;
     } catch (error) {
       this.events.emit("skill_bundle.import.failed", {
@@ -3423,7 +3440,7 @@ export class SkillHubApplicationService {
         skillPath: input.skillPath,
         sourceType: input.sourceType,
         submitter: principal.id,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
@@ -3438,7 +3455,7 @@ export class SkillHubApplicationService {
       skillCollection: "rd-skills" | "custom-skills";
       repository?: string;
       suggestedPath: string;
-    }
+    },
   ) {
     if (input.skillCollection === "rd-skills") {
       const mapped = legacyRdSkillPathToTarget(input.suggestedPath);
@@ -3449,7 +3466,7 @@ export class SkillHubApplicationService {
           skillPath: mapped.skillPath,
           files: [{ path: "SKILL.md", content: input.content }],
           sourceType: "mcp",
-          repository: input.repository
+          repository: input.repository,
         });
       }
     }
@@ -3461,12 +3478,16 @@ export class SkillHubApplicationService {
       suggestedType: "skill",
       skillCollection: input.skillCollection,
       repository: input.repository ?? "rd-skills",
-      suggestedPath: input.suggestedPath
+      suggestedPath: input.suggestedPath,
     });
   }
 
-  listSkillBundleImports(limit = 500, filters?: { status?: string; repository?: string; namespace?: string; importType?: string }) {
-    return this.skillBundles.listImports(Math.max(limit * 2, limit))
+  listSkillBundleImports(
+    limit = 500,
+    filters?: { status?: string; repository?: string; namespace?: string; importType?: string },
+  ) {
+    return this.skillBundles
+      .listImports(Math.max(limit * 2, limit))
       .filter((item) => !filters?.status || item.status === filters.status)
       .filter((item) => !filters?.repository || item.repository === filters.repository)
       .filter((item) => !filters?.namespace || item.namespace === filters.namespace)
@@ -3474,13 +3495,27 @@ export class SkillHubApplicationService {
       .slice(0, limit);
   }
 
-  skillBundleImportsPage(query: { limit?: string; cursor?: string; q?: string; status?: string; repository?: string; namespace?: string; importType?: string }) {
+  skillBundleImportsPage(query: {
+    limit?: string;
+    cursor?: string;
+    q?: string;
+    status?: string;
+    repository?: string;
+    namespace?: string;
+    importType?: string;
+  }) {
     return this.skillBundles.listImportsPage(query);
   }
 
-  getSkillBundleImport(id: string) { return this.skillBundles.getImport(id); }
-  getSkillBundleSnapshot(id: string) { return this.skillBundles.getSnapshot(id); }
-  getSkillBundleHistory(id: string) { return this.skillBundles.getHistory(id); }
+  getSkillBundleImport(id: string) {
+    return this.skillBundles.getImport(id);
+  }
+  getSkillBundleSnapshot(id: string) {
+    return this.skillBundles.getSnapshot(id);
+  }
+  getSkillBundleHistory(id: string) {
+    return this.skillBundles.getHistory(id);
+  }
 
   async deleteSkillBundle(principal: Principal, id: string) {
     const record = this.skillBundles.getImport(id);
@@ -3493,7 +3528,7 @@ export class SkillHubApplicationService {
       this.emitSkillBundleEvent("skill_bundle.import.deleted", record, {
         skillCount: snapshot?.skills.length ?? 0,
         fileCount: snapshot?.fileCount ?? 0,
-        deletedBy: principal.id
+        deletedBy: principal.id,
       });
     }
     return deleted;
@@ -3517,7 +3552,7 @@ export class SkillHubApplicationService {
       diffSha256: reviewed.review?.diffSha256,
       added: reviewed.review?.added,
       modified: reviewed.review?.modified,
-      deleted: reviewed.review?.deleted
+      deleted: reviewed.review?.deleted,
     });
     return reviewed;
   }
@@ -3532,7 +3567,7 @@ export class SkillHubApplicationService {
         this.emitSkillBundleEvent("skill_bundle.review.stale", published);
       } else if (published.publication?.kind === "no-op") {
         this.emitSkillBundleEvent("skill_bundle.published.noop", published, {
-          expectedTreeSha256: published.publication.expectedTreeSha256
+          expectedTreeSha256: published.publication.expectedTreeSha256,
         });
       } else if (published.publication?.kind === "pull-request") {
         this.emitSkillBundleEvent("skill_bundle.change_request.created", published, {
@@ -3541,7 +3576,7 @@ export class SkillHubApplicationService {
           mergeRequestUrl: published.publication.mergeRequestUrl,
           added: published.publication.added,
           modified: published.publication.modified,
-          deleted: published.publication.deleted
+          deleted: published.publication.deleted,
         });
       }
       return published;
@@ -3560,14 +3595,16 @@ export class SkillHubApplicationService {
       const reconciled = await this.skillBundles.reconcile(principal, repository, id);
       if (reconciled.status === "published") {
         this.emitSkillBundleEvent("skill_bundle.published", reconciled, {
-          finalTreeSha256: reconciled.publication?.kind === "pull-request" ? reconciled.publication.finalTreeSha256 : undefined
+          finalTreeSha256:
+            reconciled.publication?.kind === "pull-request" ? reconciled.publication.finalTreeSha256 : undefined,
         });
       } else if (reconciled.status === "published_drifted") {
         this.emitSkillBundleEvent("skill_bundle.published.drifted", reconciled, {
-          finalTreeSha256: reconciled.publication?.kind === "pull-request" ? reconciled.publication.finalTreeSha256 : undefined,
+          finalTreeSha256:
+            reconciled.publication?.kind === "pull-request" ? reconciled.publication.finalTreeSha256 : undefined,
           driftAdded: reconciled.driftSummary?.added.length,
           driftModified: reconciled.driftSummary?.modified.length,
-          driftDeleted: reconciled.driftSummary?.deleted.length
+          driftDeleted: reconciled.driftSummary?.deleted.length,
         });
       } else if (reconciled.status === "publish_failed") {
         this.emitSkillBundleEvent("skill_bundle.remote.closed", reconciled, { error: reconciled.publishError });
@@ -3586,15 +3623,20 @@ export class SkillHubApplicationService {
     if (record.status !== "published_drifted") throw new Error("Only published_drifted imports can be re-imported");
     const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
     if (!snapshot) throw new Error("Skill Bundle snapshot not found");
-    if (!principal.roles.includes("admin")) throw new Error("administrator role is required for Skill Bundle re-import");
+    if (!principal.roles.includes("admin"))
+      throw new Error("administrator role is required for Skill Bundle re-import");
     const created = await this.submitSkillBundle(principal, {
       namespace: record.namespace,
       importType: record.importType,
       skillPath: record.skillPath,
-      files: snapshot.files.map((file) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }), mode: file.mode })),
+      files: snapshot.files.map((file) => ({
+        path: file.path,
+        ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }),
+        mode: file.mode,
+      })),
       sourceType: record.sourceType,
       sourceMetadata: { ...(record.sourceMetadata ?? {}), reimport_of: record.id },
-      repository: record.repository
+      repository: record.repository,
     });
     this.emitSkillBundleEvent("skill_bundle.reimport.created", created, { reimportOf: record.id });
     return created;
@@ -3611,7 +3653,7 @@ export class SkillHubApplicationService {
       automatic?: boolean;
       suggestedType?: "knowledge" | "skill";
       skillCollection?: "rd-skills" | "custom-skills";
-    }
+    },
   ) {
     const candidates = await this.observability.listCandidates(Math.max(limit * 4, limit));
     return candidates
@@ -3623,7 +3665,7 @@ export class SkillHubApplicationService {
       .filter((item) => !filters?.suggestedType || item.suggestedType === filters.suggestedType)
       .filter((item) => !filters?.skillCollection || item.skillCollection === filters.skillCollection)
       .filter((item) =>
-        filters?.automatic === undefined ? true : filters.automatic ? Boolean(item.automation) : !item.automation
+        filters?.automatic === undefined ? true : filters.automatic ? Boolean(item.automation) : !item.automation,
       )
       .slice(0, limit);
   }
@@ -3633,7 +3675,7 @@ export class SkillHubApplicationService {
     status: "approved" | "rejected",
     reviewer: string,
     reviewReason: CandidateReviewReason,
-    reviewNote?: string
+    reviewNote?: string,
   ) {
     const uniqueIds = [...new Set(ids.map((item) => item.trim()).filter(Boolean))].slice(0, 100);
     const results: Array<{ id: string; ok: boolean; error?: string }> = [];
@@ -3680,19 +3722,21 @@ export class SkillHubApplicationService {
       prefix < currentLines.length &&
       prefix < candidateLines.length &&
       currentLines[prefix] === candidateLines[prefix]
-    ) prefix += 1;
+    )
+      prefix += 1;
     let suffix = 0;
     while (
       suffix < currentLines.length - prefix &&
       suffix < candidateLines.length - prefix &&
       currentLines[currentLines.length - 1 - suffix] === candidateLines[candidateLines.length - 1 - suffix]
-    ) suffix += 1;
+    )
+      suffix += 1;
     return {
       candidate: {
         id: candidate.id,
         title: candidate.title,
         content: candidate.content,
-        relation: candidate.knowledgeRelation ?? candidate.relationHint
+        relation: candidate.knowledgeRelation ?? candidate.relationHint,
       },
       target: document
         ? {
@@ -3701,27 +3745,35 @@ export class SkillHubApplicationService {
             path: document.relativePath,
             title: document.title,
             content: document.content,
-            revision: document.revision
+            revision: document.revision,
           }
         : undefined,
       changeSummary: {
         unchangedPrefixLines: prefix,
         unchangedSuffixLines: suffix,
         removedLines: Math.max(0, currentLines.length - prefix - suffix),
-        addedLines: Math.max(0, candidateLines.length - prefix - suffix)
-      }
+        addedLines: Math.max(0, candidateLines.length - prefix - suffix),
+      },
     };
   }
 
   async updateKnowledgeCandidate(
     id: string,
-    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation">>
+    input: Partial<
+      Pick<
+        KnowledgeCandidate,
+        "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation"
+      >
+    >,
   ) {
     const current = await this.observability.getCandidate(id);
     if (!current) throw new Error("Knowledge candidate not found");
     let candidateUpdate: Parameters<McpObservabilityStore["updateCandidate"]>[1] = { ...input };
     const effectiveType = input.suggestedType ?? current.suggestedType;
-    if (effectiveType === "knowledge" && (input.content !== undefined || input.title !== undefined || input.suggestedType !== undefined)) {
+    if (
+      effectiveType === "knowledge" &&
+      (input.content !== undefined || input.title !== undefined || input.suggestedType !== undefined)
+    ) {
       let content = input.content ?? current.content;
       if (input.title !== undefined) {
         const requestedTitle = input.title.trim();
@@ -3736,7 +3788,7 @@ export class SkillHubApplicationService {
         title: normalized.title,
         content: normalized.content,
         validationSpecVersion: normalized.appliedSpecVersion,
-        submissionSpecSchemaVersion: normalized.schemaVersion
+        submissionSpecSchemaVersion: normalized.schemaVersion,
       };
     }
     if (input.repository !== undefined && input.repository) {
@@ -3757,8 +3809,8 @@ export class SkillHubApplicationService {
             key: target.key,
             repositoryId: target.repositoryId,
             path: target.relativePath,
-            title: target.title
-          }
+            title: target.title,
+          },
         };
       }
     }
@@ -3770,7 +3822,7 @@ export class SkillHubApplicationService {
     status: "approved" | "rejected",
     reviewer: string,
     reviewNote?: string,
-    reviewReason?: CandidateReviewReason
+    reviewReason?: CandidateReviewReason,
   ) {
     return await this.observability.reviewCandidate(id, status, reviewer, reviewNote, reviewReason);
   }
@@ -3794,7 +3846,7 @@ export class SkillHubApplicationService {
       this.defaultPublishingRepository(candidate.suggestedType === "skill" ? "skill" : "knowledge");
     if (!repositoryId) {
       throw new Error(
-        `Unable to determine ${candidate.suggestedType === "skill" ? "Skill" : "Knowledge"} publishing repository; select a repository before publishing`
+        `Unable to determine ${candidate.suggestedType === "skill" ? "Skill" : "Knowledge"} publishing repository; select a repository before publishing`,
       );
     }
     if (relationTarget && relationTarget.repositoryId !== repositoryId) {
@@ -3815,7 +3867,10 @@ export class SkillHubApplicationService {
     await this.observability.markCandidatePublishing(id);
     try {
       const publisher = createKnowledgePublisher(publishingRepository);
-      const publication = await publisher.publish({ ...candidateForPublish, suggestedPath: publishPath, status: "approved" }, publishingRepository);
+      const publication = await publisher.publish(
+        { ...candidateForPublish, suggestedPath: publishPath, status: "approved" },
+        publishingRepository,
+      );
       return await this.observability.updateCandidatePublication(id, publication);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3849,7 +3904,7 @@ export class SkillHubApplicationService {
         id,
         verifiedPublication,
         correctedStatus,
-        verifiedPublication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined
+        verifiedPublication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined,
       );
     }
 
@@ -3861,7 +3916,7 @@ export class SkillHubApplicationService {
       const deletionPublication = await publisher.deletePublished(
         { ...candidate, status: "published", publication: verifiedPublication },
         verifiedPublication,
-        publishingRepository
+        publishingRepository,
       );
       return await this.observability.updateCandidateDeletionPublication(id, deletionPublication);
     } catch (error) {
@@ -3895,14 +3950,14 @@ export class SkillHubApplicationService {
     const status = await publisher.reconcile(candidate.publication, publishingRepository);
     const publication = {
       ...candidate.publication,
-      ...status
+      ...status,
     };
     if (candidate.status === "published" && publication.mergeRequestState !== "merged") {
       return await this.observability.correctCandidatePublishedState(
         id,
         publication,
         publication.mergeRequestState === "closed" ? "publish_failed" : "publishing",
-        publication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined
+        publication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined,
       );
     }
     if (candidate.status === "publishing" && publication.mergeRequestState === "merged") {
@@ -3927,23 +3982,21 @@ export class SkillHubApplicationService {
         deterministicValidation: true,
         humanReviewRequired: true,
         appliedAutomatically: false,
-        directKnowledgeWrite: false
-      }
+        directKnowledgeWrite: false,
+      },
     };
   }
 
   async curateKnowledgeGaps() {
-    const gaps = (await this.listKnowledgeGaps()).filter(
-      (gap) => (gap.management?.status ?? "active") === "active"
-    );
+    const gaps = (await this.listKnowledgeGaps()).filter((gap) => (gap.management?.status ?? "active") === "active");
     const clusters = await new HttpKnowledgeCurator().clusterGaps(
       gaps.map((gap) => ({
         key: gap.key,
         query: gap.query,
         occurrences: gap.occurrences,
         source: gap.source,
-        members: gap.members
-      }))
+        members: gap.members,
+      })),
     );
     return {
       clusters,
@@ -3951,8 +4004,8 @@ export class SkillHubApplicationService {
       guard: {
         deterministicValidation: true,
         humanReviewRequired: true,
-        appliedAutomatically: false
-      }
+        appliedAutomatically: false,
+      },
     };
   }
 
@@ -3969,10 +4022,7 @@ export class SkillHubApplicationService {
     return (await this.getRepositoryGovernance(principal)).repositories.find((item) => item.id === id);
   }
 
-  async updateKnowledgeGap(
-    gapKey: string,
-    input: { status?: "active" | "ignored" | "resolved"; keywords?: string[] }
-  ) {
+  async updateKnowledgeGap(gapKey: string, input: { status?: "active" | "ignored" | "resolved"; keywords?: string[] }) {
     const gaps = await this.listKnowledgeGaps();
     const gap = gaps.find((item) => item.key === gapKey);
     if (!gap) throw new Error("Knowledge gap not found");
@@ -3988,13 +4038,14 @@ export class SkillHubApplicationService {
   async createKnowledgeCandidateFromGap(
     gapKey: string,
     principal: Principal,
-    input?: { repository?: string; suggestedPath?: string }
+    input?: { repository?: string; suggestedPath?: string },
   ) {
     const gaps = await this.listKnowledgeGaps();
     const gap = gaps.find((item) => item.key === gapKey);
     if (!gap) throw new Error("Knowledge gap not found");
     if (gap.management?.status === "ignored") throw new Error("Ignored Knowledge gap cannot create a Candidate");
-    if (gap.management?.status === "resolved") throw new Error("Resolved Knowledge gap cannot create another Candidate");
+    if (gap.management?.status === "resolved")
+      throw new Error("Resolved Knowledge gap cannot create another Candidate");
     if (gap.management?.candidateId) throw new Error("Knowledge gap already has a Candidate");
     if (input?.repository) {
       const allowed = this.allowedRepositories(principal).some((repo) => repo.id === input.repository);
@@ -4005,28 +4056,34 @@ export class SkillHubApplicationService {
     const gapDraft = await this.knowledgeSubmission.buildFromStructuredDraft({
       title: "Knowledge gap: " + gap.query.slice(0, 120),
       problem: [gap.query, "", "Related queries:", ...members.map((item) => "- " + item)].join("\n"),
-      rootCause: "Team Skill Hub does not yet contain verified reusable Knowledge that resolves this recurring query cluster.",
-      solution: "Use this Candidate as a review container and replace the triage guidance with the verified reusable engineering answer before publishing.",
-      verification: [
-        `Occurrences: ${gap.occurrences}`,
-        `Source: ${gap.source}`,
-        `Last seen: ${gap.lastSeenAt}`
-      ].join("\n"),
+      rootCause:
+        "Team Skill Hub does not yet contain verified reusable Knowledge that resolves this recurring query cluster.",
+      solution:
+        "Use this Candidate as a review container and replace the triage guidance with the verified reusable engineering answer before publishing.",
+      verification: [`Occurrences: ${gap.occurrences}`, `Source: ${gap.source}`, `Last seen: ${gap.lastSeenAt}`].join(
+        "\n",
+      ),
       applicability: "Applies to Knowledge-gap triage for this query cluster.",
-      constraints: "This is a triage Candidate. Human review must supply and verify the engineering conclusion before approval and publication."
+      constraints:
+        "This is a triage Candidate. Human review must supply and verify the engineering conclusion before approval and publication.",
     });
-    const candidate = await this.persistKnowledgeCandidate(principal, {
-      title: gapDraft.title,
-      content: gapDraft.content,
-      sourceType: "review",
-      suggestedType: "knowledge",
-      repository: input?.repository ?? this.defaultPublishingRepository("knowledge", this.allowedRepositories(principal)),
-      suggestedPath: input?.suggestedPath,
-      sourceGapKey: gap.key
-    }, { submissionMode: "gap" });
+    const candidate = await this.persistKnowledgeCandidate(
+      principal,
+      {
+        title: gapDraft.title,
+        content: gapDraft.content,
+        sourceType: "review",
+        suggestedType: "knowledge",
+        repository:
+          input?.repository ?? this.defaultPublishingRepository("knowledge", this.allowedRepositories(principal)),
+        suggestedPath: input?.suggestedPath,
+        sourceGapKey: gap.key,
+      },
+      { submissionMode: "gap" },
+    );
     await this.observability.updateKnowledgeGapManagement(gap.key, {
       status: "active",
-      candidateId: candidate.id
+      candidateId: candidate.id,
     });
     return candidate;
   }
@@ -4038,13 +4095,17 @@ export class SkillHubApplicationService {
   }
 
   private normalizePublishingProjectPath(value: string): string {
-    return value.trim().replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+    return value
+      .trim()
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "")
+      .replace(/\.git$/i, "");
   }
 
   private repositoryPublishingPaths(repository: RepositoryConfig): Set<string> {
     const paths = new Set<string>([
       this.normalizePublishingProjectPath(repository.id),
-      ...repository.webhookAliases.map((item) => this.normalizePublishingProjectPath(item))
+      ...repository.webhookAliases.map((item) => this.normalizePublishingProjectPath(item)),
     ]);
     const gitUrl = repository.gitUrl?.trim();
     if (gitUrl) {
@@ -4068,20 +4129,20 @@ export class SkillHubApplicationService {
       (repository) =>
         repository.enabled &&
         repository.provider === "git" &&
-        this.repositoryPublishingPaths(repository).has(normalized)
+        this.repositoryPublishingPaths(repository).has(normalized),
     );
     if (exact.length === 1) return exact[0];
     if (exact.length > 1) return undefined;
     const basename = normalized.split("/").filter(Boolean).at(-1);
     const byId = this.config.repositories.filter(
-      (repository) => repository.enabled && repository.provider === "git" && repository.id === basename
+      (repository) => repository.enabled && repository.provider === "git" && repository.id === basename,
     );
     return byId.length === 1 ? byId[0] : undefined;
   }
 
   private publishingRoutes(
     type: "knowledge" | "skill",
-    targetRepositories: RepositoryConfig[] = this.config.repositories
+    targetRepositories: RepositoryConfig[] = this.config.repositories,
   ) {
     const allowedTargetIds = new Set(targetRepositories.map((repository) => repository.id));
     return this.config.repositories.flatMap((configRepository) => {
@@ -4108,7 +4169,9 @@ export class SkillHubApplicationService {
     if (self) return self;
     if (routes.length === 1) return routes[0];
     if (routes.length > 1) {
-      throw new Error(`Ambiguous ${type === "skill" ? "Skill" : "Knowledge"} publishing configuration for repository ${targetRepositoryId}`);
+      throw new Error(
+        `Ambiguous ${type === "skill" ? "Skill" : "Knowledge"} publishing configuration for repository ${targetRepositoryId}`,
+      );
     }
     return undefined;
   }
@@ -4117,21 +4180,25 @@ export class SkillHubApplicationService {
     const routes = this.publishingRoutes(type);
     if (!routes.length) return;
     if (!this.publishingRoute(type, targetRepositoryId)) {
-      throw new Error(`${type === "skill" ? "Skill" : "Knowledge"} candidate repository ${targetRepositoryId} is not a configured ${type === "skill" ? "Skill" : "Knowledge"} publishing target`);
+      throw new Error(
+        `${type === "skill" ? "Skill" : "Knowledge"} candidate repository ${targetRepositoryId} is not a configured ${type === "skill" ? "Skill" : "Knowledge"} publishing target`,
+      );
     }
   }
 
   private requirePublishingRoute(type: "knowledge" | "skill", targetRepositoryId: string) {
     const route = this.publishingRoute(type, targetRepositoryId);
     if (!route) {
-      throw new Error(`${type === "skill" ? "Skill" : "Knowledge"} candidate repository ${targetRepositoryId} is not a configured ${type === "skill" ? "Skill" : "Knowledge"} publishing target`);
+      throw new Error(
+        `${type === "skill" ? "Skill" : "Knowledge"} candidate repository ${targetRepositoryId} is not a configured ${type === "skill" ? "Skill" : "Knowledge"} publishing target`,
+      );
     }
     return route;
   }
 
   private defaultPublishingRepository(
     type: "knowledge" | "skill",
-    repositories: RepositoryConfig[] = this.config.repositories
+    repositories: RepositoryConfig[] = this.config.repositories,
   ): string | undefined {
     const targetIds = [...new Set(this.publishingRoutes(type, repositories).map((route) => route.targetRepository.id))];
     return targetIds.length === 1 ? targetIds[0] : undefined;

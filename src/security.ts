@@ -1,11 +1,5 @@
 import { hashApiKey, type ManagedApiKeyRecord } from "./api-keys.js";
-import type {
-  AuthenticationProvider,
-  PermissionProvider,
-  Principal,
-  RepositoryConfig,
-  Skill
-} from "./types.js";
+import type { AuthenticationProvider, PermissionProvider, Principal, RepositoryConfig, Skill } from "./types.js";
 
 export class DevelopmentAuthenticationProvider implements AuthenticationProvider {
   constructor(private readonly roles: string[]) {}
@@ -25,7 +19,7 @@ export class ApiKeyAuthenticationProvider implements AuthenticationProvider {
       if (!record.enabled) continue;
       this.managedPrincipalsByHash.set(record.keyHash, {
         ...record.principal,
-        roles: [...record.principal.roles]
+        roles: [...record.principal.roles],
       });
     }
   }
@@ -35,9 +29,7 @@ export class ApiKeyAuthenticationProvider implements AuthenticationProvider {
     const bearer = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
     const key = headers?.get("x-skill-hub-api-key") ?? bearer;
     if (!key) throw new Error("Authentication required");
-    const principal =
-      this.principalsByKey[key] ??
-      this.managedPrincipalsByHash.get(hashApiKey(key));
+    const principal = this.principalsByKey[key] ?? this.managedPrincipalsByHash.get(hashApiKey(key));
     if (!principal) throw new Error("Invalid API key");
     return { ...principal, roles: [...principal.roles] };
   }

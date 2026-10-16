@@ -8,7 +8,7 @@ import {
   evaluateGate,
   loadEvaluationSnapshot,
   runEvaluationSuite,
-  scanEvaluationSuites
+  scanEvaluationSuites,
 } from "../src/evaluation.js";
 
 async function makeEvaluationRepo(options: { breakPrompt?: boolean } = {}) {
@@ -33,7 +33,7 @@ metadata:
 ---
 # Review
 Always report deletion risk.
-`
+`,
   );
   await writeFile(
     path.join(review, "PROMPT.md"),
@@ -50,7 +50,7 @@ metadata:
 ---
 # Prompt
 ${options.breakPrompt ? "Review OTA." : "Review OTA and report deletion risk as Low, Medium, or High."}
-`
+`,
   );
   await writeFile(
     path.join(root, "ota", "AGENT.yaml"),
@@ -65,7 +65,7 @@ metadata:
 skills: [ota-code-review]
 prompts: [ota-code-review-prompt]
 tools: [git]
-`
+`,
   );
   await writeFile(
     path.join(root, "ota", "EVALUATION.yaml"),
@@ -94,7 +94,7 @@ cases:
       skills: [ota-code-review]
       prompts: [ota-code-review-prompt]
       tools: [git]
-`
+`,
   );
   return root;
 }
@@ -131,7 +131,7 @@ test("baseline comparison treats removed passing cases as regression", async () 
   const baselineSuite = baseline.suites[0]!;
   const candidateSuite = {
     ...candidate.suites[0]!,
-    cases: candidate.suites[0]!.cases.slice(0, 2)
+    cases: candidate.suites[0]!.cases.slice(0, 2),
   };
   const baselineResult = runEvaluationSuite(baseline, baselineSuite);
   const candidateResult = runEvaluationSuite(candidate, candidateSuite, baselineResult);
@@ -146,17 +146,17 @@ test("knowledge retrieval evaluation reports Hit@1/3/5 and MRR regression", asyn
   await writeFile(
     path.join(docs, "doc-a.md"),
     "# Recovery Checkpoint\n\nUnique phrase: amber checkpoint resume state machine.\n",
-    "utf8"
+    "utf8",
   );
   await writeFile(
     path.join(docs, "doc-b.md"),
     "# Watchdog Timing\n\nUnique phrase: delta capacitor watchdog timing rule.\n",
-    "utf8"
+    "utf8",
   );
   await writeFile(
     path.join(docs, "doc-c.md"),
     "# CVE Policy\n\nUnique phrase: cobalt six month CVE remediation policy.\n",
-    "utf8"
+    "utf8",
   );
   await writeFile(
     path.join(root, "EVALUATION.yaml"),
@@ -183,7 +183,7 @@ cases:
     expect:
       selected: docs/doc-c.md
 `,
-    "utf8"
+    "utf8",
   );
 
   const baseline = await loadEvaluationSnapshot(root, "rd-skills", "baseline");
@@ -193,13 +193,13 @@ cases:
     hitAt1: 1,
     hitAt3: 1,
     hitAt5: 1,
-    mrr: 1
+    mrr: 1,
   });
 
   await writeFile(
     path.join(docs, "doc-b.md"),
     "# Unrelated Note\n\nGeneric maintenance note about storage cleanup and UI preferences.\n",
-    "utf8"
+    "utf8",
   );
   const candidate = await loadEvaluationSnapshot(root, "rd-skills", "candidate");
   const candidateResult = runEvaluationSuite(candidate, candidate.suites[0]!, baselineResult);
@@ -237,14 +237,14 @@ cases:
     expect:
       selected: docs/b.md
 `,
-    "utf8"
+    "utf8",
   );
   const snapshot = await loadEvaluationSnapshot(root, "rd-skills", "candidate");
   const result = runEvaluationSuite(snapshot, snapshot.suites[0]!);
   const passing = evaluateGate([result], {
     minPassRate: 1,
     minHitAt1: 0.9,
-    warnMrr: 1
+    warnMrr: 1,
   });
   assert.equal(passing.ok, true);
   assert.equal(passing.blockingReasons.length, 0);
@@ -254,12 +254,12 @@ cases:
     retrievalMetrics: {
       ...result.retrievalMetrics!,
       hitAt1: 0.8,
-      mrr: 0.85
-    }
+      mrr: 0.85,
+    },
   };
   const blocked = evaluateGate([degraded], {
     minPassRate: 1,
-    minHitAt1: 0.9
+    minHitAt1: 0.9,
   });
   assert.equal(blocked.ok, false);
   assert.match(blocked.blockingReasons.join("\n"), /hitAt1/);
@@ -303,7 +303,7 @@ cases:
     operation: get
     name: b
     expect: {}
-`
+`,
   );
   await assert.rejects(() => scanEvaluationSuites(root, "rd-skills"), /duplicate or missing case id/);
 });

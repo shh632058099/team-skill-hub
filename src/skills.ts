@@ -1,13 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
-import type {
-  RepositoryConfig,
-  Skill,
-  SkillMetadata,
-  ValidationIssue,
-  ValidationRule
-} from "./types.js";
+import type { RepositoryConfig, Skill, SkillMetadata, ValidationIssue, ValidationRule } from "./types.js";
 
 interface Frontmatter {
   schema_version?: number;
@@ -26,7 +20,7 @@ function splitFrontmatter(content: string): { data: Frontmatter; body: string } 
   if (!match) throw new Error("Invalid YAML frontmatter boundary");
   return {
     data: YAML.parse(match[1]!) as Frontmatter,
-    body: match[2]!
+    body: match[2]!,
   };
 }
 
@@ -44,11 +38,7 @@ async function findSkillFiles(root: string): Promise<string[]> {
   return result.sort();
 }
 
-export async function scanSkills(
-  root: string,
-  repositoryId: string,
-  revision: string
-): Promise<Skill[]> {
+export async function scanSkills(root: string, repositoryId: string, revision: string): Promise<Skill[]> {
   const files = await findSkillFiles(root);
   const skills: Skill[] = [];
   for (const file of files) {
@@ -78,8 +68,8 @@ export async function scanSkills(
         owner: metadata.owner ?? "",
         priority: metadata.priority ?? 50,
         dependsOn: metadata.depends_on ?? metadata.dependsOn ?? [],
-        compatibility: metadata.compatibility ?? {}
-      }
+        compatibility: metadata.compatibility ?? {},
+      },
     });
   }
   return skills;
@@ -131,13 +121,10 @@ export class SkillDependencyRule implements ValidationRule {
         issues.push({ rule: this.name, message: "Skill cannot depend on itself" });
         continue;
       }
-      if (
-        repositoryId === repository.id &&
-        !allSkills.some((candidate) => candidate.name === skillName)
-      ) {
+      if (repositoryId === repository.id && !allSkills.some((candidate) => candidate.name === skillName)) {
         issues.push({
           rule: this.name,
-          message: `Missing same-repository dependency: ${dependency}`
+          message: `Missing same-repository dependency: ${dependency}`,
         });
       }
     }
@@ -148,14 +135,14 @@ export class SkillDependencyRule implements ValidationRule {
 export class RepositoryVisibilityRule implements ValidationRule {
   readonly name = "repository-visibility";
   validate(skill: Skill, repository: RepositoryConfig): ValidationIssue[] {
-    const invalid = skill.metadata.visibility.filter(
-      (visibility) => !repository.visibility.includes(visibility)
-    );
+    const invalid = skill.metadata.visibility.filter((visibility) => !repository.visibility.includes(visibility));
     return invalid.length > 0
-      ? [{
-          rule: this.name,
-          message: `Skill visibility exceeds repository visibility: ${invalid.join(", ")}`
-        }]
+      ? [
+          {
+            rule: this.name,
+            message: `Skill visibility exceeds repository visibility: ${invalid.join(", ")}`,
+          },
+        ]
       : [];
   }
 }
@@ -163,7 +150,7 @@ export class RepositoryVisibilityRule implements ValidationRule {
 export function validateSkills(
   skills: Skill[],
   repository: RepositoryConfig,
-  rules: ValidationRule[]
+  rules: ValidationRule[],
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const skill of skills) {

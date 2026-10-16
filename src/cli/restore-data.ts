@@ -12,18 +12,26 @@ const force = process.argv.includes("--force");
 const verifyOnly = process.argv.includes("--verify-only");
 
 if (!backup) {
-  console.error("Usage: npm run restore:data -- --backup <backup-dir> [--data-dir <data-dir>] [--force] [--verify-only]");
+  console.error(
+    "Usage: npm run restore:data -- --backup <backup-dir> [--data-dir <data-dir>] [--force] [--verify-only]",
+  );
   process.exitCode = 2;
 } else {
   try {
     const result = await restoreDataBackup(backup, dataDir, { force, verifyOnly });
-    console.log(JSON.stringify({
-      backup: path.resolve(backup),
-      dataDir,
-      verifyOnly,
-      restoredFiles: result.restoredFiles,
-      previousDataDir: result.previousDataDir
-    }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          backup: path.resolve(backup),
+          dataDir,
+          verifyOnly,
+          restoredFiles: result.restoredFiles,
+          previousDataDir: result.previousDataDir,
+        },
+        null,
+        2,
+      ),
+    );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

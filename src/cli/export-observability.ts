@@ -9,7 +9,9 @@ function arg(name: string) {
 
 const dataDir = path.resolve(arg("--data-dir") ?? process.env.DATA_DIR ?? "./data");
 const outDir = path.resolve(arg("--out") ?? path.join(dataDir, "archive"));
-const dbPath = path.resolve(arg("--db") ?? process.env.OBSERVABILITY_SQLITE_PATH ?? path.join(dataDir, "db", "team-skill-hub.sqlite3"));
+const dbPath = path.resolve(
+  arg("--db") ?? process.env.OBSERVABILITY_SQLITE_PATH ?? path.join(dataDir, "db", "team-skill-hub.sqlite3"),
+);
 const database = openSkillHubDatabase(dbPath);
 try {
   const files = await exportObservabilityColdArchive(database, outDir);

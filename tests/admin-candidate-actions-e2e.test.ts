@@ -22,7 +22,7 @@ test("admin candidate actions support approve then publish over HTTP", async () 
     dataDir,
     defaultRoles: ["developer", "internal"],
     authentication: { mode: "development", apiKeys: {} },
-    repositories: []
+    repositories: [],
   };
   const service = new SkillHubApplicationService(
     config,
@@ -33,7 +33,7 @@ test("admin candidate actions support approve then publish over HTTP", async () 
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   const principal: Principal = { id: "candidate-author", tenantId: "rd", roles: ["developer", "internal"] };
@@ -41,7 +41,7 @@ test("admin candidate actions support approve then publish over HTTP", async () 
     title: "Admin action chain",
     content: "Verified admin action chain.",
     sourceType: "review",
-    suggestedType: "knowledge"
+    suggestedType: "knowledge",
   });
   let publishCalled = false;
   const originalPublish = service.publishKnowledgeCandidate.bind(service);
@@ -58,23 +58,31 @@ test("admin candidate actions support approve then publish over HTTP", async () 
     const base = `http://127.0.0.1:${address.port}`;
     const headers = { "x-skill-hub-admin-key": "candidate-actions-admin", "content-type": "application/json" };
 
-    const review = await fetch(base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id) + "/review", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ status: "approved", reviewReason: "useful" })
-    });
+    const review = await fetch(
+      base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id) + "/review",
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ status: "approved", reviewReason: "useful" }),
+      },
+    );
     assert.equal(review.status, 200);
     assert.equal(((await review.json()) as { candidate: { status: string } }).candidate.status, "approved");
 
-    const detail = await fetch(base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id), { headers });
+    const detail = await fetch(base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id), {
+      headers,
+    });
     assert.equal(detail.status, 200);
     assert.equal(((await detail.json()) as { candidate: { status: string } }).candidate.status, "approved");
 
-    const publish = await fetch(base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id) + "/publish", {
-      method: "POST",
-      headers,
-      body: "{}"
-    });
+    const publish = await fetch(
+      base + "/admin/api/knowledge-candidates/" + encodeURIComponent(candidate.id) + "/publish",
+      {
+        method: "POST",
+        headers,
+        body: "{}",
+      },
+    );
     assert.equal(publish.status, 200);
     assert.equal(((await publish.json()) as { candidate: { status: string } }).candidate.status, "publishing");
     assert.equal(publishCalled, true);
@@ -97,7 +105,7 @@ test("admin candidate actions support reject, reapprove, and delete over HTTP", 
     dataDir,
     defaultRoles: ["developer", "internal"],
     authentication: { mode: "development", apiKeys: {} },
-    repositories: []
+    repositories: [],
   };
   const service = new SkillHubApplicationService(
     config,
@@ -108,7 +116,7 @@ test("admin candidate actions support reject, reapprove, and delete over HTTP", 
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   const principal: Principal = { id: "candidate-manager", tenantId: "rd", roles: ["developer", "internal"] };
@@ -116,7 +124,7 @@ test("admin candidate actions support reject, reapprove, and delete over HTTP", 
     title: "Admin manage chain",
     content: "Verified candidate management chain.",
     sourceType: "review",
-    suggestedType: "skill"
+    suggestedType: "skill",
   });
   const app = await startServer(config, service);
   try {
@@ -129,7 +137,7 @@ test("admin candidate actions support reject, reapprove, and delete over HTTP", 
     const rejected = await fetch(candidateUrl + "/review", {
       method: "POST",
       headers,
-      body: JSON.stringify({ status: "rejected", reviewReason: "false_positive" })
+      body: JSON.stringify({ status: "rejected", reviewReason: "false_positive" }),
     });
     assert.equal(rejected.status, 200);
     assert.equal(((await rejected.json()) as { candidate: { status: string } }).candidate.status, "rejected");
@@ -137,14 +145,14 @@ test("admin candidate actions support reject, reapprove, and delete over HTTP", 
     const reapproved = await fetch(candidateUrl + "/review", {
       method: "POST",
       headers,
-      body: JSON.stringify({ status: "approved", reviewReason: "useful" })
+      body: JSON.stringify({ status: "approved", reviewReason: "useful" }),
     });
     assert.equal(reapproved.status, 200);
     assert.equal(((await reapproved.json()) as { candidate: { status: string } }).candidate.status, "approved");
 
     const deleted = await fetch(candidateUrl, {
       method: "DELETE",
-      headers: { "x-skill-hub-admin-key": "candidate-manage-admin" }
+      headers: { "x-skill-hub-admin-key": "candidate-manage-admin" },
     });
     assert.equal(deleted.status, 200);
     assert.deepEqual(await deleted.json(), { deleted: true });
@@ -169,7 +177,7 @@ test("admin can request deletion of a published asset over HTTP", async () => {
     dataDir,
     defaultRoles: ["developer", "internal"],
     authentication: { mode: "development", apiKeys: {} },
-    repositories: []
+    repositories: [],
   };
   const service = new SkillHubApplicationService(
     config,
@@ -180,7 +188,7 @@ test("admin can request deletion of a published asset over HTTP", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   let requestedId = "";
@@ -196,7 +204,7 @@ test("admin can request deletion of a published asset over HTTP", async () => {
     const id = "kc_published_delete_http";
     const response = await fetch(
       `http://127.0.0.1:${address.port}/admin/api/knowledge-candidates/${encodeURIComponent(id)}/delete-published`,
-      { method: "POST", headers: { "x-skill-hub-admin-key": "candidate-delete-published-admin" } }
+      { method: "POST", headers: { "x-skill-hub-admin-key": "candidate-delete-published-admin" } },
     );
     assert.equal(response.status, 200);
     assert.equal(((await response.json()) as { candidate: { status: string } }).candidate.status, "deleting");

@@ -9,7 +9,7 @@ const filterSchema = {
   category: z.string().optional(),
   audience: z.string().optional(),
   maturity: z.enum(["experimental", "beta", "stable", "deprecated"]).optional(),
-  client: z.string().min(1).optional()
+  client: z.string().min(1).optional(),
 };
 
 function compactSkill(skill: ReturnType<SkillHubApplicationService["listSkills"]>[number]) {
@@ -20,7 +20,7 @@ function compactSkill(skill: ReturnType<SkillHubApplicationService["listSkills"]
     version: skill.version,
     description: skill.description,
     path: skill.relativePath,
-    metadata: skill.metadata
+    metadata: skill.metadata,
   };
 }
 
@@ -37,7 +37,7 @@ function compactPrompt(prompt: ReturnType<SkillHubApplicationService["listPrompt
     keywords: prompt.keywords,
     category: prompt.category,
     owner: prompt.owner,
-    compatibility: prompt.compatibility
+    compatibility: prompt.compatibility,
   };
 }
 
@@ -56,7 +56,7 @@ function compactAgent(agent: ReturnType<SkillHubApplicationService["listAgents"]
     skills: agent.skills,
     prompts: agent.prompts,
     tools: agent.tools,
-    compatibility: agent.compatibility
+    compatibility: agent.compatibility,
   };
 }
 
@@ -78,14 +78,14 @@ function compactTool(tool: ReturnType<SkillHubApplicationService["listTools"]>[n
     permissions: tool.permissions,
     endpoints: tool.endpoints,
     authentication: tool.authentication,
-    compatibility: tool.compatibility
+    compatibility: tool.compatibility,
   };
 }
 
 function toolResult(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-    structuredContent: value as Record<string, unknown>
+    structuredContent: value as Record<string, unknown>,
   };
 }
 
@@ -95,26 +95,17 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     const server = new McpServer({
       name: "team-skill-hub",
       version: "0.1.0",
-      description: "Team shared skill registry, search and routing service."
+      description: "Team shared skill registry, search and routing service.",
     });
     const requestHeaders = requestInfo?.headers;
     const explicitTraceId =
-      requestHeaders?.get("x-skill-hub-trace-id") ??
-      requestHeaders?.get("x-trace-id") ??
-      undefined;
+      requestHeaders?.get("x-skill-hub-trace-id") ?? requestHeaders?.get("x-trace-id") ?? undefined;
     const traceId = explicitTraceId ?? appService.newMcpTraceId();
     const sessionId = requestHeaders?.get("x-skill-hub-session-id") ?? undefined;
     const transportSessionId = requestHeaders?.get("mcp-session-id") ?? undefined;
-    const client =
-      requestHeaders?.get("x-skill-hub-client") ??
-      requestHeaders?.get("user-agent") ??
-      undefined;
+    const client = requestHeaders?.get("x-skill-hub-client") ?? requestHeaders?.get("user-agent") ?? undefined;
 
-    const registerTool = (
-      name: string,
-      definition: any,
-      handler: (...args: any[]) => Promise<any>
-    ) =>
+    const registerTool = (name: string, definition: any, handler: (...args: any[]) => Promise<any>) =>
       server.registerTool(name, definition as any, async (...args: any[]) => {
         const started = performance.now();
         try {
@@ -129,12 +120,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             args: args[0],
             latencyMs: performance.now() - started,
             success: true,
-            principal
+            principal,
           });
           if (result?.structuredContent && typeof result.structuredContent === "object") {
             result.structuredContent = {
               ...result.structuredContent,
-              _trace: { trace_id: call.traceId, session_id: call.sessionId, call_id: call.id }
+              _trace: { trace_id: call.traceId, session_id: call.sessionId, call_id: call.id },
             };
           }
           return result;
@@ -150,7 +141,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             latencyMs: performance.now() - started,
             success: false,
             error: error instanceof Error ? error.message : String(error),
-            principal
+            principal,
           });
           throw error;
         }
@@ -160,7 +151,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       "get_server_info",
       {
         description: "Return Team Skill Hub version and capabilities.",
-        inputSchema: z.object({})
+        inputSchema: z.object({}),
       },
       async () => {
         const clientIntegration = await loadClientIntegrationStatus();
@@ -171,7 +162,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           principal: {
             id: principal.id,
             roles: principal.roles,
-            tenant_id: principal.tenantId
+            tenant_id: principal.tenantId,
           },
           capabilities: [
             "multi-repository",
@@ -198,16 +189,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             "knowledge-fts5-rag",
             "mcp-observability",
             "feedback-loop",
-            "knowledge-candidate-inbox"
-,
-        "unified-discover"
-,
-        "tool-registry",
-        "project-context-recommendations",
-        "agent-tool-resolution"
-          ]
+            "knowledge-candidate-inbox",
+            "unified-discover",
+            "tool-registry",
+            "project-context-recommendations",
+            "agent-tool-resolution",
+          ],
         });
-      }
+      },
     );
 
     registerTool(
@@ -219,15 +208,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
           repositories: z.array(z.string()).optional(),
-          client: z.string().min(1).optional()
-        })
+          client: z.string().min(1).optional(),
+        }),
       },
       async ({ query, top_k, repositories, client }) => {
-        const result = appService.discover(
-          query,
-          { topK: top_k ?? 5, repositories, client },
-          principal
-        );
+        const result = appService.discover(query, { topK: top_k ?? 5, repositories, client }, principal);
         return toolResult({
           selected: result.selected,
           ambiguous: result.ambiguous,
@@ -236,7 +221,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             score: item.score,
             confidence: item.confidence,
             coverage: item.coverage,
-            reason: item.reason
+            reason: item.reason,
           })),
           knowledge: result.knowledge.map((item) => ({
             repository: item.chunk.repositoryId,
@@ -249,31 +234,31 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             score: item.score,
             confidence: item.confidence,
             coverage: item.coverage,
-            reason: item.reason
+            reason: item.reason,
           })),
           prompts: result.prompts.map((item) => ({
             ...compactPrompt(item.artifact),
             score: item.score,
             confidence: item.confidence,
             coverage: item.coverage,
-            reason: item.reason
+            reason: item.reason,
           })),
           agents: result.agents.map((item) => ({
             ...compactAgent(item.artifact),
             score: item.score,
             confidence: item.confidence,
             coverage: item.coverage,
-            reason: item.reason
+            reason: item.reason,
           })),
           tools: result.tools.map((item) => ({
             ...compactTool(item.artifact),
             score: item.score,
             confidence: item.confidence,
             coverage: item.coverage,
-            reason: item.reason
-          }))
+            reason: item.reason,
+          })),
         });
-      }
+      },
     );
 
     registerTool(
@@ -288,8 +273,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           git_branch: z.string().optional(),
           task: z.string().optional(),
           client: z.string().min(1).optional(),
-          top_k: z.number().int().min(1).max(5).optional()
-        })
+          top_k: z.number().int().min(1).max(5).optional(),
+        }),
       },
       async ({ cwd, git_remote, git_root, git_branch, task, client, top_k }) => {
         const result = appService.recommendProjectContext(
@@ -300,9 +285,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             gitBranch: git_branch,
             task,
             client,
-            topK: top_k
+            topK: top_k,
           },
-          principal
+          principal,
         );
         return toolResult({
           project: result.project,
@@ -312,7 +297,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           skills: result.recommendations.skills.map((item) => ({
             ...compactSkill(item.skill),
             score: item.score,
-            reason: item.reason
+            reason: item.reason,
           })),
           knowledge: result.recommendations.knowledge.map((item) => ({
             repository: item.chunk.repositoryId,
@@ -320,34 +305,34 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             title: item.chunk.title,
             chunk_index: item.chunk.chunkIndex,
             score: item.score,
-            reason: item.reason
+            reason: item.reason,
           })),
           prompts: result.recommendations.prompts.map((item) => ({
             ...compactPrompt(item.artifact),
             score: item.score,
-            reason: item.reason
+            reason: item.reason,
           })),
           agents: result.recommendations.agents.map((item) => ({
             ...compactAgent(item.artifact),
             score: item.score,
-            reason: item.reason
+            reason: item.reason,
           })),
           tools: result.recommendations.tools.map((item) => ({
             ...compactTool(item.artifact),
             score: item.score,
-            reason: item.reason
-          }))
+            reason: item.reason,
+          })),
         });
-      }
+      },
     );
 
     registerTool(
       "list_skill_repositories",
       {
         description: "List skill repositories visible to the current caller.",
-        inputSchema: z.object({})
+        inputSchema: z.object({}),
       },
-      async () => toolResult({ repositories: appService.listRepositories(principal) })
+      async () => toolResult({ repositories: appService.listRepositories(principal) }),
     );
 
     registerTool(
@@ -359,36 +344,30 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           repository: z.string().min(1),
           agent: z.string().min(1),
           client: z.string().min(1).optional(),
-          environment: z.string().min(1).optional()
-        })
+          environment: z.string().min(1).optional(),
+        }),
       },
       async ({ repository, agent, client, environment }) => {
-        const result = appService.resolveAgentTools(
-          repository,
-          agent,
-          { client, environment },
-          principal
-        );
+        const result = appService.resolveAgentTools(repository, agent, { client, environment }, principal);
         return toolResult({
           ...result,
           bindings: result.bindings.map((binding) => ({
             reference: binding.reference,
             status: binding.status,
             reason: binding.reason,
-            tool: binding.tool ? compactTool(binding.tool) : undefined
-          }))
+            tool: binding.tool ? compactTool(binding.tool) : undefined,
+          })),
         });
-      }
+      },
     );
 
     registerTool(
       "list_skills",
       {
         description: "List visible skills with optional metadata filters.",
-        inputSchema: z.object(filterSchema)
+        inputSchema: z.object(filterSchema),
       },
-      async (filters) =>
-        toolResult({ skills: appService.listSkills(filters, principal).map(compactSkill) })
+      async (filters) => toolResult({ skills: appService.listSkills(filters, principal).map(compactSkill) }),
     );
 
     registerTool(
@@ -398,17 +377,17 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          ...filterSchema
-        })
+          ...filterSchema,
+        }),
       },
       async ({ query, top_k, ...filters }) =>
         toolResult({
           results: appService.searchSkills(query, filters, top_k ?? 5, principal).map((result) => ({
             ...compactSkill(result.skill),
             score: result.score,
-            reason: result.reason
-          }))
-        })
+            reason: result.reason,
+          })),
+        }),
     );
 
     registerTool(
@@ -418,8 +397,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(10).optional(),
-          ...filterSchema
-        })
+          ...filterSchema,
+        }),
       },
       async ({ query, top_k, ...filters }) => {
         const results = appService.resolveSkill(query, filters, top_k ?? 3, principal);
@@ -429,15 +408,15 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             ? {
                 ...compactSkill(selected.skill),
                 score: selected.score,
-                confidence: Math.min(1, selected.score / 10)
+                confidence: Math.min(1, selected.score / 10),
               }
             : null,
           alternatives: results.slice(1).map((result) => ({
             ...compactSkill(result.skill),
-            score: result.score
-          }))
+            score: result.score,
+          })),
         });
-      }
+      },
     );
 
     registerTool(
@@ -446,16 +425,16 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         description: "Load the complete SKILL.md for a selected skill.",
         inputSchema: z.object({
           repository: z.string().min(1),
-          name: z.string().min(1)
-        })
+          name: z.string().min(1),
+        }),
       },
       async ({ repository, name }) => {
         const skill = appService.getSkill(repository, name, principal);
         return toolResult({
           ...compactSkill(skill),
-          content: skill.content
+          content: skill.content,
         });
-      }
+      },
     );
 
     registerTool(
@@ -465,16 +444,16 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           repository: z.string().min(1),
           name: z.string().min(1),
-          resource: z.string().min(1)
-        })
+          resource: z.string().min(1),
+        }),
       },
       async ({ repository, name, resource }) =>
         toolResult({
           repository,
           name,
           resource,
-          content: await appService.getSkillResource(repository, name, resource, principal)
-        })
+          content: await appService.getSkillResource(repository, name, resource, principal),
+        }),
     );
 
     registerTool(
@@ -482,8 +461,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       {
         description: "List repository knowledge documents visible to the current caller.",
         inputSchema: z.object({
-          repositories: z.array(z.string()).optional()
-        })
+          repositories: z.array(z.string()).optional(),
+        }),
       },
       async ({ repositories }) => {
         const documents = appService.listKnowledgeDocuments(principal, repositories);
@@ -493,7 +472,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             repository: document.repositoryId,
             documents: 0,
             chunks: 0,
-            paths: []
+            paths: [],
           };
           current.documents += 1;
           current.chunks += document.chunkCount;
@@ -501,60 +480,65 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           grouped.set(document.repositoryId, current);
         }
         return toolResult({ sources: [...grouped.values()] });
-      }
+      },
     );
 
     registerTool(
       "search_knowledge",
       {
-        description: "Search internal repository documentation and text knowledge. Use this for current project facts, designs, APIs, troubleshooting notes, and other document-grounded context.",
+        description:
+          "Search internal repository documentation and text knowledge. Use this for current project facts, designs, APIs, troubleshooting notes, and other document-grounded context.",
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
           repositories: z.array(z.string()).optional(),
-          applicability: z.object({
-            product: z.string().optional(),
-            branch: z.string().optional(),
-            firmware_version: z.string().optional(),
-            yocto_release: z.string().optional(),
-            kernel_version: z.string().optional(),
-            api_version: z.string().optional(),
-            hardware_revision: z.string().optional(),
-            variant: z.string().optional()
-          }).optional()
-        })
+          applicability: z
+            .object({
+              product: z.string().optional(),
+              branch: z.string().optional(),
+              firmware_version: z.string().optional(),
+              yocto_release: z.string().optional(),
+              kernel_version: z.string().optional(),
+              api_version: z.string().optional(),
+              hardware_revision: z.string().optional(),
+              variant: z.string().optional(),
+            })
+            .optional(),
+        }),
       },
       async ({ query, top_k, repositories, applicability }) =>
         toolResult({
-          results: appService.searchKnowledge(
-            query,
-            top_k ?? 5,
-            repositories,
-            principal,
-            applicability
-              ? {
-                  product: applicability.product,
-                  branch: applicability.branch,
-                  firmwareVersion: applicability.firmware_version,
-                  yoctoRelease: applicability.yocto_release,
-                  kernelVersion: applicability.kernel_version,
-                  apiVersion: applicability.api_version,
-                  hardwareRevision: applicability.hardware_revision,
-                  variant: applicability.variant
-                }
-              : undefined
-          ).map((result) => ({
-            repository: result.chunk.repositoryId,
-            revision: result.chunk.revision,
-            path: result.chunk.relativePath,
-            title: result.chunk.title,
-            metadata: result.chunk.metadata,
-            chunk_index: result.chunk.chunkIndex,
-            content: result.chunk.content,
-            score: result.score,
-            reason: result.reason
-          }))
-        })
+          results: appService
+            .searchKnowledge(
+              query,
+              top_k ?? 5,
+              repositories,
+              principal,
+              applicability
+                ? {
+                    product: applicability.product,
+                    branch: applicability.branch,
+                    firmwareVersion: applicability.firmware_version,
+                    yoctoRelease: applicability.yocto_release,
+                    kernelVersion: applicability.kernel_version,
+                    apiVersion: applicability.api_version,
+                    hardwareRevision: applicability.hardware_revision,
+                    variant: applicability.variant,
+                  }
+                : undefined,
+            )
+            .map((result) => ({
+              repository: result.chunk.repositoryId,
+              revision: result.chunk.revision,
+              path: result.chunk.relativePath,
+              title: result.chunk.title,
+              metadata: result.chunk.metadata,
+              chunk_index: result.chunk.chunkIndex,
+              content: result.chunk.content,
+              score: result.score,
+              reason: result.reason,
+            })),
+        }),
     );
 
     registerTool(
@@ -564,8 +548,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           repository: z.string().min(1),
           path: z.string().min(1),
-          chunk_index: z.number().int().min(0).optional()
-        })
+          chunk_index: z.number().int().min(0).optional(),
+        }),
       },
       async ({ repository, path, chunk_index }) => {
         const result = appService.getKnowledge(repository, path, chunk_index, principal);
@@ -577,7 +561,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             title: result.document.title,
             metadata: result.document.metadata,
             chunk_index: result.chunk.chunkIndex,
-            content: result.chunk.content
+            content: result.chunk.content,
           });
         }
         return toolResult({
@@ -587,19 +571,18 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           title: result.document.title,
           metadata: result.document.metadata,
           chunk_count: result.document.chunkCount,
-          content: result.document.content
+          content: result.document.content,
         });
-      }
+      },
     );
 
     registerTool(
       "list_prompts",
       {
         description: "List visible reusable prompts.",
-        inputSchema: z.object({ client: z.string().min(1).optional() })
+        inputSchema: z.object({ client: z.string().min(1).optional() }),
       },
-      async ({ client }) =>
-        toolResult({ prompts: appService.listPrompts(client, principal).map(compactPrompt) })
+      async ({ client }) => toolResult({ prompts: appService.listPrompts(client, principal).map(compactPrompt) }),
     );
 
     registerTool(
@@ -609,39 +592,38 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          client: z.string().min(1).optional()
-        })
+          client: z.string().min(1).optional(),
+        }),
       },
       async ({ query, top_k, client }) =>
         toolResult({
           results: appService.searchPrompts(query, top_k ?? 5, client, principal).map((result) => ({
             ...compactPrompt(result.artifact),
             score: result.score,
-            reason: result.reason
-          }))
-        })
+            reason: result.reason,
+          })),
+        }),
     );
 
     registerTool(
       "get_prompt",
       {
         description: "Load the complete reusable PROMPT.md.",
-        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) })
+        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) }),
       },
       async ({ repository, name }) => {
         const prompt = appService.getPrompt(repository, name, principal);
         return toolResult({ ...compactPrompt(prompt), content: prompt.content });
-      }
+      },
     );
 
     registerTool(
       "list_agents",
       {
         description: "List visible team Agent manifests.",
-        inputSchema: z.object({ client: z.string().min(1).optional() })
+        inputSchema: z.object({ client: z.string().min(1).optional() }),
       },
-      async ({ client }) =>
-        toolResult({ agents: appService.listAgents(client, principal).map(compactAgent) })
+      async ({ client }) => toolResult({ agents: appService.listAgents(client, principal).map(compactAgent) }),
     );
 
     registerTool(
@@ -651,27 +633,26 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          client: z.string().min(1).optional()
-        })
+          client: z.string().min(1).optional(),
+        }),
       },
       async ({ query, top_k, client }) =>
         toolResult({
           results: appService.searchAgents(query, top_k ?? 5, client, principal).map((result) => ({
             ...compactAgent(result.artifact),
             score: result.score,
-            reason: result.reason
-          }))
-        })
+            reason: result.reason,
+          })),
+        }),
     );
 
     registerTool(
       "list_tools",
       {
         description: "List visible registered team tools and their non-secret metadata.",
-        inputSchema: z.object({ client: z.string().min(1).optional() })
+        inputSchema: z.object({ client: z.string().min(1).optional() }),
       },
-      async ({ client }) =>
-        toolResult({ tools: appService.listTools(client, principal).map(compactTool) })
+      async ({ client }) => toolResult({ tools: appService.listTools(client, principal).map(compactTool) }),
     );
 
     registerTool(
@@ -681,27 +662,26 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          client: z.string().min(1).optional()
-        })
+          client: z.string().min(1).optional(),
+        }),
       },
       async ({ query, top_k, client }) =>
         toolResult({
           results: appService.searchTools(query, top_k ?? 5, client, principal).map((item) => ({
             ...compactTool(item.artifact),
             score: item.score,
-            reason: item.reason
-          }))
-        })
+            reason: item.reason,
+          })),
+        }),
     );
 
     registerTool(
       "get_tool",
       {
         description: "Load one registered team Tool manifest. Credential values are never returned.",
-        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) })
+        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) }),
       },
-      async ({ repository, name }) =>
-        toolResult(compactTool(appService.getTool(repository, name, principal)))
+      async ({ repository, name }) => toolResult(compactTool(appService.getTool(repository, name, principal))),
     );
 
     registerTool(
@@ -711,31 +691,28 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(10).optional(),
-          client: z.string().min(1).optional()
-        })
+          client: z.string().min(1).optional(),
+        }),
       },
       async ({ query, top_k, client }) => {
         const results = appService.resolveAgent(query, top_k ?? 3, client, principal);
         return toolResult({
-          selected_agent: results[0]
-            ? { ...compactAgent(results[0].artifact), score: results[0].score }
-            : null,
+          selected_agent: results[0] ? { ...compactAgent(results[0].artifact), score: results[0].score } : null,
           alternatives: results.slice(1).map((result) => ({
             ...compactAgent(result.artifact),
-            score: result.score
-          }))
+            score: result.score,
+          })),
         });
-      }
+      },
     );
 
     registerTool(
       "get_agent",
       {
         description: "Load one team Agent manifest including its Skill/Prompt/Tool bindings.",
-        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) })
+        inputSchema: z.object({ repository: z.string().min(1), name: z.string().min(1) }),
       },
-      async ({ repository, name }) =>
-        toolResult(compactAgent(appService.getAgent(repository, name, principal)))
+      async ({ repository, name }) => toolResult(compactAgent(appService.getAgent(repository, name, principal))),
     );
 
     registerTool(
@@ -744,15 +721,15 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         description: "List deterministic golden evaluation suites for a visible repository/revision.",
         inputSchema: z.object({
           repository: z.string().min(1),
-          revision: z.string().min(1).optional()
-        })
+          revision: z.string().min(1).optional(),
+        }),
       },
       async ({ repository, revision }) =>
         toolResult({
           repository,
           revision: revision ?? "active",
-          suites: await appService.listEvaluationSuites(repository, revision, principal)
-        })
+          suites: await appService.listEvaluationSuites(repository, revision, principal),
+        }),
     );
 
     registerTool(
@@ -763,19 +740,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           repository: z.string().min(1),
           suite: z.string().min(1),
           revision: z.string().min(1).optional(),
-          baseline_revision: z.string().min(1).optional()
-        })
+          baseline_revision: z.string().min(1).optional(),
+        }),
       },
       async ({ repository, suite, revision, baseline_revision }) =>
-        toolResult(
-          await appService.runEvaluation(
-            repository,
-            suite,
-            revision,
-            baseline_revision,
-            principal
-          )
-        )
+        toolResult(await appService.runEvaluation(repository, suite, revision, baseline_revision, principal)),
     );
 
     registerTool(
@@ -785,28 +754,22 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         inputSchema: z.object({
           repository: z.string().min(1).optional(),
           suite: z.string().min(1).optional(),
-          limit: z.number().int().min(1).max(1000).optional()
-        })
+          limit: z.number().int().min(1).max(1000).optional(),
+        }),
       },
       async ({ repository, suite, limit }) =>
         toolResult({
-          runs: await appService.listEvaluationRuns(
-            limit ?? 100,
-            repository,
-            suite,
-            principal
-          )
-        })
+          runs: await appService.listEvaluationRuns(limit ?? 100, repository, suite, principal),
+        }),
     );
 
     registerTool(
       "get_evaluation_run",
       {
         description: "Get one persisted evaluation run by id.",
-        inputSchema: z.object({ run_id: z.string().min(1) })
+        inputSchema: z.object({ run_id: z.string().min(1) }),
       },
-      async ({ run_id }) =>
-        toolResult(await appService.getEvaluationRun(run_id, principal))
+      async ({ run_id }) => toolResult(await appService.getEvaluationRun(run_id, principal)),
     );
 
     registerTool(
@@ -819,8 +782,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           target_type: z.enum(["skill", "knowledge", "prompt", "agent", "mcp-call"]),
           target: z.string().min(1).optional(),
           rating: z.enum(["positive", "negative"]),
-          reason: z.string().max(2000).optional()
-        })
+          reason: z.string().max(2000).optional(),
+        }),
       },
       async ({ trace_id, call_id, target_type, target, rating, reason }) =>
         toolResult({
@@ -830,32 +793,34 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             targetType: target_type,
             target,
             rating,
-            reason
-          })
-        })
+            reason,
+          }),
+        }),
     );
 
     registerTool(
       "get_knowledge_submission_spec",
       {
-        description: "Return the current server-managed Knowledge submission specification. Call this immediately before submit_knowledge_candidate and follow the returned template and spec_version.",
-        inputSchema: z.object({ repository: z.string().min(1).optional() })
+        description:
+          "Return the current server-managed Knowledge submission specification. Call this immediately before submit_knowledge_candidate and follow the returned template and spec_version.",
+        inputSchema: z.object({ repository: z.string().min(1).optional() }),
       },
-      async () => toolResult(await appService.getKnowledgeSubmissionSpec())
+      async () => toolResult(await appService.getKnowledgeSubmissionSpec()),
     );
 
     registerTool(
       "submit_knowledge_candidate",
       {
-        description: "Knowledge ONLY. Submit a candidate team Knowledge item for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
+        description:
+          "Knowledge ONLY. Submit a candidate team Knowledge item for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
           spec_version: z.number().int().min(1),
           title: z.string().min(1).max(200),
           content: z.string().min(1).max(50_000),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
-          repository: z.string().min(1).optional()
-        })
+          repository: z.string().min(1).optional(),
+        }),
       },
       async ({ trace_id, spec_version, title, content, source_type, repository }) =>
         toolResult({
@@ -867,45 +832,84 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             suggestedType: "knowledge",
             repository,
             submittedSpecVersion: spec_version,
-            submissionMode: "mcp"
-          })
-        })
+            submissionMode: "mcp",
+          }),
+        }),
     );
 
     registerTool(
       "submit_skill_bundle",
       {
-        description: "The only MCP entrypoint for submitting Skills. Use this for every Skill, including a single-file Skill containing only SKILL.md, and for explicit multi-Skill collections. Submit one complete Skill root with import_type=skill or one complete namespace snapshot with import_type=collection. The Bundle is validated against the target repository and is never published directly.",
-        inputSchema: z.object({
-          trace_id: z.string().min(1).optional(),
-          namespace: z.string().min(1).max(200),
-          import_type: z.enum(["skill", "collection"]),
-          skill_path: z.string().min(1).max(500).optional(),
-          skill_collection: z.literal("rd-skills"),
-          repository: z.string().min(1).optional(),
-          files: z.array(z.object({
-            path: z.string().min(1).max(1000),
-            content: z.string().max(512 * 1024).optional().describe("UTF-8 text file content. For a text file, set this field and omit content_base64 (an empty content_base64 placeholder is tolerated)."),
-            content_base64: z.string().max(700 * 1024).optional().describe("Base64-encoded binary file content. For a binary file, set this field and omit content (an empty content placeholder is tolerated)."),
-            mode: z.enum(["0644", "0755"]).optional()
-          }).refine((file) => {
-            const hasTextField = file.content !== undefined;
-            const hasBinaryField = file.content_base64 !== undefined;
-            if (!hasTextField && !hasBinaryField) return false;
-            if (hasTextField && hasBinaryField && file.content !== "" && file.content_base64 !== "") return false;
-            return true;
-          }, { message: "file must contain one representation: content for text or content_base64 for binary; an empty unused placeholder is allowed" })).min(1).max(500),
-          source: z.object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() }).optional(),
-          note: z.string().max(4000).optional(),
-          submission_key: z.string().min(1).max(500).optional()
-        }).superRefine((input, ctx) => {
-          if (input.import_type === "skill" && !input.skill_path) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["skill_path"], message: "skill_path is required when import_type=skill" });
-          }
-          if (input.import_type === "collection" && input.skill_path !== undefined) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["skill_path"], message: "skill_path is not allowed when import_type=collection" });
-          }
-        })
+        description:
+          "The only MCP entrypoint for submitting Skills. Use this for every Skill, including a single-file Skill containing only SKILL.md, and for explicit multi-Skill collections. Submit one complete Skill root with import_type=skill or one complete namespace snapshot with import_type=collection. The Bundle is validated against the target repository and is never published directly.",
+        inputSchema: z
+          .object({
+            trace_id: z.string().min(1).optional(),
+            namespace: z.string().min(1).max(200),
+            import_type: z.enum(["skill", "collection"]),
+            skill_path: z.string().min(1).max(500).optional(),
+            skill_collection: z.literal("rd-skills"),
+            repository: z.string().min(1).optional(),
+            files: z
+              .array(
+                z
+                  .object({
+                    path: z.string().min(1).max(1000),
+                    content: z
+                      .string()
+                      .max(512 * 1024)
+                      .optional()
+                      .describe(
+                        "UTF-8 text file content. For a text file, set this field and omit content_base64 (an empty content_base64 placeholder is tolerated).",
+                      ),
+                    content_base64: z
+                      .string()
+                      .max(700 * 1024)
+                      .optional()
+                      .describe(
+                        "Base64-encoded binary file content. For a binary file, set this field and omit content (an empty content placeholder is tolerated).",
+                      ),
+                    mode: z.enum(["0644", "0755"]).optional(),
+                  })
+                  .refine(
+                    (file) => {
+                      const hasTextField = file.content !== undefined;
+                      const hasBinaryField = file.content_base64 !== undefined;
+                      if (!hasTextField && !hasBinaryField) return false;
+                      if (hasTextField && hasBinaryField && file.content !== "" && file.content_base64 !== "")
+                        return false;
+                      return true;
+                    },
+                    {
+                      message:
+                        "file must contain one representation: content for text or content_base64 for binary; an empty unused placeholder is allowed",
+                    },
+                  ),
+              )
+              .min(1)
+              .max(500),
+            source: z
+              .object({ repository_url: z.string().max(2000).optional(), revision: z.string().max(500).optional() })
+              .optional(),
+            note: z.string().max(4000).optional(),
+            submission_key: z.string().min(1).max(500).optional(),
+          })
+          .superRefine((input, ctx) => {
+            if (input.import_type === "skill" && !input.skill_path) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ["skill_path"],
+                message: "skill_path is required when import_type=skill",
+              });
+            }
+            if (input.import_type === "collection" && input.skill_path !== undefined) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ["skill_path"],
+                message: "skill_path is not allowed when import_type=collection",
+              });
+            }
+          }),
       },
       async (input) =>
         toolResult({
@@ -913,25 +917,30 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             namespace: input.namespace,
             importType: input.import_type,
             ...(input.import_type === "skill" ? { skillPath: input.skill_path! } : {}),
-            files: input.files.map((file: { path: string; content?: string; content_base64?: string; mode?: "0644" | "0755" }) => {
-              const useBinary = file.content_base64 !== undefined && file.content_base64 !== "" && (file.content === undefined || file.content === "");
-              return {
-                path: file.path,
-                ...(useBinary ? { contentBase64: file.content_base64 } : { content: file.content ?? "" }),
-                mode: file.mode
-              };
-            }),
+            files: input.files.map(
+              (file: { path: string; content?: string; content_base64?: string; mode?: "0644" | "0755" }) => {
+                const useBinary =
+                  file.content_base64 !== undefined &&
+                  file.content_base64 !== "" &&
+                  (file.content === undefined || file.content === "");
+                return {
+                  path: file.path,
+                  ...(useBinary ? { contentBase64: file.content_base64 } : { content: file.content ?? "" }),
+                  mode: file.mode,
+                };
+              },
+            ),
             sourceType: "mcp",
             sourceMetadata: {
               ...(input.source?.repository_url ? { repository_url: input.source.repository_url } : {}),
               ...(input.source?.revision ? { revision: input.source.revision } : {}),
               ...(input.note ? { note: input.note } : {}),
-              ...(input.trace_id ? { trace_id: input.trace_id } : {})
+              ...(input.trace_id ? { trace_id: input.trace_id } : {}),
             },
             submissionKey: input.submission_key,
-            repository: input.repository
-          })
-        })
+            repository: input.repository,
+          }),
+        }),
     );
 
     registerTool(
@@ -939,24 +948,23 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       {
         description: "Synchronize one configured skill repository and activate it only after validation.",
         inputSchema: z.object({
-          repository: z.string().min(1)
-        })
+          repository: z.string().min(1),
+        }),
       },
-      async ({ repository }) =>
-        toolResult(await appService.syncRepository(repository, "manual", principal))
+      async ({ repository }) => toolResult(await appService.syncRepository(repository, "manual", principal)),
     );
 
     registerTool(
       "list_repository_revisions",
       {
         description: "List validated revisions available for a visible repository.",
-        inputSchema: z.object({ repository: z.string().min(1) })
+        inputSchema: z.object({ repository: z.string().min(1) }),
       },
       async ({ repository }) =>
         toolResult({
           repository,
-          revisions: await appService.listRepositoryRevisions(repository, principal)
-        })
+          revisions: await appService.listRepositoryRevisions(repository, principal),
+        }),
     );
 
     registerTool(
@@ -965,11 +973,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         description: "Rollback a repository to a previously validated revision. Requires sync permission.",
         inputSchema: z.object({
           repository: z.string().min(1),
-          revision: z.string().min(1)
-        })
+          revision: z.string().min(1),
+        }),
       },
       async ({ repository, revision }) =>
-        toolResult(await appService.rollbackRepositoryRevision(repository, revision, principal))
+        toolResult(await appService.rollbackRepositoryRevision(repository, revision, principal)),
     );
 
     registerTool(
@@ -978,13 +986,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         description: "List recent repository synchronization audit events.",
         inputSchema: z.object({
           repository: z.string().min(1).optional(),
-          limit: z.number().int().min(1).max(1000).optional()
-        })
+          limit: z.number().int().min(1).max(1000).optional(),
+        }),
       },
       async ({ repository, limit }) =>
         toolResult({
-          events: await appService.listAuditEvents(limit ?? 100, repository, principal)
-        })
+          events: await appService.listAuditEvents(limit ?? 100, repository, principal),
+        }),
     );
 
     return server;

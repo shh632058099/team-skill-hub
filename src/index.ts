@@ -1,21 +1,13 @@
 import path from "node:path";
 import { loadConfig } from "./config.js";
-import {
-  GitRepositoryProvider,
-  LocalRepositoryProvider
-} from "./repository.js";
-import {
-  RequiredFieldsRule,
-  RepositoryVisibilityRule,
-  SkillDependencyRule,
-  UniqueNameRule
-} from "./skills.js";
+import { GitRepositoryProvider, LocalRepositoryProvider } from "./repository.js";
+import { RequiredFieldsRule, RepositoryVisibilityRule, SkillDependencyRule, UniqueNameRule } from "./skills.js";
 import { MemoryRegistryStore } from "./registry.js";
 import { HybridRoutingStrategy, SqliteFtsSearchBackend } from "./search.js";
 import {
   ApiKeyAuthenticationProvider,
   DevelopmentAuthenticationProvider,
-  StaticRolePermissionProvider
+  StaticRolePermissionProvider,
 } from "./security.js";
 import { LoggingEventSink } from "./events.js";
 import { SkillHubApplicationService } from "./application.js";
@@ -25,9 +17,7 @@ import { ManagedApiKeyStore } from "./api-keys.js";
 
 const configPath = path.resolve(
   process.env.CONFIG_PATH ??
-    (process.env.NODE_ENV === "production"
-      ? "./config/repositories.yaml"
-      : "./config/repositories.example.yaml")
+    (process.env.NODE_ENV === "production" ? "./config/repositories.yaml" : "./config/repositories.example.yaml"),
 );
 const config = await loadConfig(configPath);
 const adminConfigStore = new AdminConfigStore(config.dataDir);
@@ -56,17 +46,18 @@ const service = new SkillHubApplicationService(
   routing,
   auth,
   permissions,
-  [
-    new RequiredFieldsRule(),
-    new UniqueNameRule(),
-    new SkillDependencyRule(),
-    new RepositoryVisibilityRule()
-  ],
-  events
+  [new RequiredFieldsRule(), new UniqueNameRule(), new SkillDependencyRule(), new RepositoryVisibilityRule()],
+  events,
 );
 
 await service.initialize();
-await startServer(config, service, adminConfigStore, apiKeyStore, auth instanceof ApiKeyAuthenticationProvider ? auth : undefined);
+await startServer(
+  config,
+  service,
+  adminConfigStore,
+  apiKeyStore,
+  auth instanceof ApiKeyAuthenticationProvider ? auth : undefined,
+);
 
 const lastPolledAt = new Map<string, number>();
 const pollScheduler = setInterval(() => {
@@ -87,8 +78,8 @@ const pollScheduler = setInterval(() => {
         JSON.stringify({
           event: "repository.poll.failed",
           repository: repositoryId,
-          error: error instanceof Error ? error.message : String(error)
-        })
+          error: error instanceof Error ? error.message : String(error),
+        }),
       );
     });
   }
@@ -103,6 +94,6 @@ console.log(
     event: "server.started",
     host: config.host,
     port: config.port,
-    config: configPath
-  })
+    config: configPath,
+  }),
 );

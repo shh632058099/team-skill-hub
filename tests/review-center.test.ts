@@ -52,7 +52,21 @@ function bundle(overrides: Partial<SkillBundleImport> = {}): SkillBundleImport {
 }
 
 test("candidate projection distinguishes knowledge and legacy skill", () => {
-  const knowledge = projectCandidateReviewItem(candidate({ publication: { provider: "github", projectPath: "rd/k", branch: "b", targetBranch: "main", filePath: "docs/k.md", action: "create", mergeRequestIid: 1, mergeRequestUrl: "https://example.com/pr/1", publishedAt: "2026-10-15T00:00:00.000Z" } }));
+  const knowledge = projectCandidateReviewItem(
+    candidate({
+      publication: {
+        provider: "github",
+        projectPath: "rd/k",
+        branch: "b",
+        targetBranch: "main",
+        filePath: "docs/k.md",
+        action: "create",
+        mergeRequestIid: 1,
+        mergeRequestUrl: "https://example.com/pr/1",
+        publishedAt: "2026-10-15T00:00:00.000Z",
+      },
+    }),
+  );
   assert.equal(knowledge.kind, "candidate");
   assert.equal(knowledge.contentType, "knowledge");
   assert.equal(knowledge.title, "Candidate title");
@@ -60,7 +74,9 @@ test("candidate projection distinguishes knowledge and legacy skill", () => {
   assert.equal(knowledge.submitter, "alice");
   assert.equal(knowledge.publication?.mergeRequestUrl, "https://example.com/pr/1");
 
-  const skill = projectCandidateReviewItem(candidate({ id: "kc_skill", suggestedType: "skill", skillCollection: "rd-skills", repository: "rd-skills" }));
+  const skill = projectCandidateReviewItem(
+    candidate({ id: "kc_skill", suggestedType: "skill", skillCollection: "rd-skills", repository: "rd-skills" }),
+  );
   assert.equal(skill.contentType, "legacy-skill");
   assert.equal(skill.skillCollection, "rd-skills");
 });
@@ -77,7 +93,9 @@ test("skill bundle projection distinguishes skill and collection", () => {
   assert.equal(collection.skillCount, 14);
   assert.equal(collection.fileCount, 65);
 
-  const skill = projectSkillBundleReviewItem(bundle({ id: "sbi_skill", importType: "skill", skillPath: "tdd", replacementRoot: "skills/superpowers/tdd" }));
+  const skill = projectSkillBundleReviewItem(
+    bundle({ id: "sbi_skill", importType: "skill", skillPath: "tdd", replacementRoot: "skills/superpowers/tdd" }),
+  );
   assert.equal(skill.contentType, "skill-bundle-skill");
   assert.equal(skill.importType, "skill");
 });
@@ -95,15 +113,47 @@ test("review projection preserves original status and normalized status group", 
 test("mixed review items filter by kind content type status repository and namespace", () => {
   const items: ReviewItem[] = [
     projectCandidateReviewItem(candidate({ id: "kc_k", title: "Knowledge A" })),
-    projectCandidateReviewItem(candidate({ id: "kc_s", title: "Skill A", suggestedType: "skill", skillCollection: "rd-skills", repository: "rd-skills" })),
+    projectCandidateReviewItem(
+      candidate({
+        id: "kc_s",
+        title: "Skill A",
+        suggestedType: "skill",
+        skillCollection: "rd-skills",
+        repository: "rd-skills",
+      }),
+    ),
     projectSkillBundleReviewItem(bundle({ id: "sbi_c", namespace: "superpowers", status: "pending" })),
-    projectSkillBundleReviewItem(bundle({ id: "sbi_s", namespace: "ota", importType: "skill", skillPath: "design", replacementRoot: "skills/ota/design", status: "approved" })),
+    projectSkillBundleReviewItem(
+      bundle({
+        id: "sbi_s",
+        namespace: "ota",
+        importType: "skill",
+        skillPath: "design",
+        replacementRoot: "skills/ota/design",
+        status: "approved",
+      }),
+    ),
   ];
-  assert.deepEqual(filterReviewItems(items, { kind: "candidate" }).map((x) => x.id), ["kc_k", "kc_s"]);
-  assert.deepEqual(filterReviewItems(items, { type: "legacy-skill" }).map((x) => x.id), ["kc_s"]);
-  assert.deepEqual(filterReviewItems(items, { status: "approved" }).map((x) => x.id), ["sbi_s"]);
-  assert.deepEqual(filterReviewItems(items, { repository: "rd-skills" }).map((x) => x.id), ["kc_s", "sbi_c", "sbi_s"]);
-  assert.deepEqual(filterReviewItems(items, { namespace: "superpowers" }).map((x) => x.id), ["sbi_c"]);
+  assert.deepEqual(
+    filterReviewItems(items, { kind: "candidate" }).map((x) => x.id),
+    ["kc_k", "kc_s"],
+  );
+  assert.deepEqual(
+    filterReviewItems(items, { type: "legacy-skill" }).map((x) => x.id),
+    ["kc_s"],
+  );
+  assert.deepEqual(
+    filterReviewItems(items, { status: "approved" }).map((x) => x.id),
+    ["sbi_s"],
+  );
+  assert.deepEqual(
+    filterReviewItems(items, { repository: "rd-skills" }).map((x) => x.id),
+    ["kc_s", "sbi_c", "sbi_s"],
+  );
+  assert.deepEqual(
+    filterReviewItems(items, { namespace: "superpowers" }).map((x) => x.id),
+    ["sbi_c"],
+  );
 });
 
 test("review items sort by updatedAt desc then kind then id", () => {
@@ -113,7 +163,10 @@ test("review items sort by updatedAt desc then kind then id", () => {
     projectCandidateReviewItem(candidate({ id: "kc_a", updatedAt: "2026-10-15T01:00:00.000Z" })),
     projectSkillBundleReviewItem(bundle({ id: "sbi_new", updatedAt: "2026-10-15T02:00:00.000Z" })),
   ];
-  assert.deepEqual(sortReviewItems(rows).map((x) => x.id), ["sbi_new", "kc_a", "kc_b", "sbi_b"]);
+  assert.deepEqual(
+    sortReviewItems(rows).map((x) => x.id),
+    ["sbi_new", "kc_a", "kc_b", "sbi_b"],
+  );
 });
 
 test("unknown filter value does not widen results", () => {
@@ -124,16 +177,27 @@ test("unknown filter value does not widen results", () => {
 });
 
 test("review paging over interleaved rows has no duplicates or skips", () => {
-  const items: ReviewItem[] = Array.from({ length: 6 }, (_, i) => i % 2 === 0
-    ? projectCandidateReviewItem(candidate({ id: `kc_${i}`, updatedAt: `2026-10-15T0${6 - i}:00:00.000Z` }))
-    : projectSkillBundleReviewItem(bundle({ id: `sbi_${i}`, updatedAt: `2026-10-15T0${6 - i}:00:00.000Z` })));
+  const items: ReviewItem[] = Array.from({ length: 6 }, (_, i) =>
+    i % 2 === 0
+      ? projectCandidateReviewItem(candidate({ id: `kc_${i}`, updatedAt: `2026-10-15T0${6 - i}:00:00.000Z` }))
+      : projectSkillBundleReviewItem(bundle({ id: `sbi_${i}`, updatedAt: `2026-10-15T0${6 - i}:00:00.000Z` })),
+  );
   const sorted = sortReviewItems(items);
   const first = paginateReviewItems(sorted, { limit: "2" });
   const second = paginateReviewItems(sorted, { limit: "2", cursor: "2" });
   const third = paginateReviewItems(sorted, { limit: "2", cursor: "4" });
-  assert.deepEqual(first.items.map((x) => x.id), sorted.slice(0, 2).map((x) => x.id));
-  assert.deepEqual(second.items.map((x) => x.id), sorted.slice(2, 4).map((x) => x.id));
-  assert.deepEqual(third.items.map((x) => x.id), sorted.slice(4, 6).map((x) => x.id));
+  assert.deepEqual(
+    first.items.map((x) => x.id),
+    sorted.slice(0, 2).map((x) => x.id),
+  );
+  assert.deepEqual(
+    second.items.map((x) => x.id),
+    sorted.slice(2, 4).map((x) => x.id),
+  );
+  assert.deepEqual(
+    third.items.map((x) => x.id),
+    sorted.slice(4, 6).map((x) => x.id),
+  );
   assert.equal(new Set([...first.items, ...second.items, ...third.items].map((x) => x.id)).size, 6);
   assert.equal(first.page.previousCursor, undefined);
   assert.equal(first.page.nextCursor, "2");
@@ -168,23 +232,39 @@ test("bounded collector fetches beyond one source page for a global window", asy
   ];
   let candidateCalls = 0;
   let bundleCalls = 0;
-  const items = await collectReviewItemsBounded({ limit: "2", cursor: "2" }, {
-    pageSize: 1,
-    maxSourceRows: 10,
-    fetchCandidates: async (cursor, limit) => {
-      candidateCalls += 1;
-      const offset = Number(cursor ?? 0);
-      const page = candidateRows.slice(offset, offset + limit);
-      return { items: page, total: candidateRows.length, nextCursor: offset + limit < candidateRows.length ? String(offset + limit) : undefined };
+  const items = await collectReviewItemsBounded(
+    { limit: "2", cursor: "2" },
+    {
+      pageSize: 1,
+      maxSourceRows: 10,
+      fetchCandidates: async (cursor, limit) => {
+        candidateCalls += 1;
+        const offset = Number(cursor ?? 0);
+        const page = candidateRows.slice(offset, offset + limit);
+        return {
+          items: page,
+          total: candidateRows.length,
+          nextCursor: offset + limit < candidateRows.length ? String(offset + limit) : undefined,
+        };
+      },
+      fetchBundles: async (cursor, limit) => {
+        bundleCalls += 1;
+        const offset = Number(cursor ?? 0);
+        const page = bundleRows.slice(offset, offset + limit);
+        return {
+          items: page,
+          total: bundleRows.length,
+          nextCursor: offset + limit < bundleRows.length ? String(offset + limit) : undefined,
+        };
+      },
     },
-    fetchBundles: async (cursor, limit) => {
-      bundleCalls += 1;
-      const offset = Number(cursor ?? 0);
-      const page = bundleRows.slice(offset, offset + limit);
-      return { items: page, total: bundleRows.length, nextCursor: offset + limit < bundleRows.length ? String(offset + limit) : undefined };
-    },
-  });
-  assert.deepEqual(sortReviewItems(items).slice(2, 4).map((item) => item.id), ["kc_4", "sbi_3"]);
+  );
+  assert.deepEqual(
+    sortReviewItems(items)
+      .slice(2, 4)
+      .map((item) => item.id),
+    ["kc_4", "sbi_3"],
+  );
   assert.ok(candidateCalls >= 3, "candidate source must page beyond its first page");
   assert.ok(bundleCalls >= 3, "bundle source must page beyond its first page");
 });
@@ -193,23 +273,36 @@ test("bounded collector stops after the requested global window and reports sour
   let candidateCalls = 0;
   let bundleCalls = 0;
   const totals = new Map<string, number>();
-  const items = await collectReviewItemsBounded({ limit: "20" }, {
-    pageSize: 20,
-    maxSourceRows: 1000,
-    onSourceTotal: (kind, total) => totals.set(kind, total),
-    fetchCandidates: async (cursor, limit) => {
-      candidateCalls += 1;
-      const offset = Number(cursor ?? 0);
-      const rows = Array.from({ length: limit }, (_, index) => candidate({ id: `kc_${offset + index}`, updatedAt: new Date(Date.UTC(2026, 9, 15, 23, 59, offset + index)).toISOString() }));
-      return { items: rows, total: 5000, nextCursor: String(offset + limit) };
+  const items = await collectReviewItemsBounded(
+    { limit: "20" },
+    {
+      pageSize: 20,
+      maxSourceRows: 1000,
+      onSourceTotal: (kind, total) => totals.set(kind, total),
+      fetchCandidates: async (cursor, limit) => {
+        candidateCalls += 1;
+        const offset = Number(cursor ?? 0);
+        const rows = Array.from({ length: limit }, (_, index) =>
+          candidate({
+            id: `kc_${offset + index}`,
+            updatedAt: new Date(Date.UTC(2026, 9, 15, 23, 59, offset + index)).toISOString(),
+          }),
+        );
+        return { items: rows, total: 5000, nextCursor: String(offset + limit) };
+      },
+      fetchBundles: async (cursor, limit) => {
+        bundleCalls += 1;
+        const offset = Number(cursor ?? 0);
+        const rows = Array.from({ length: limit }, (_, index) =>
+          bundle({
+            id: `sbi_${offset + index}`,
+            updatedAt: new Date(Date.UTC(2026, 9, 14, 23, 59, offset + index)).toISOString(),
+          }),
+        );
+        return { items: rows, total: 4000, nextCursor: String(offset + limit) };
+      },
     },
-    fetchBundles: async (cursor, limit) => {
-      bundleCalls += 1;
-      const offset = Number(cursor ?? 0);
-      const rows = Array.from({ length: limit }, (_, index) => bundle({ id: `sbi_${offset + index}`, updatedAt: new Date(Date.UTC(2026, 9, 14, 23, 59, offset + index)).toISOString() }));
-      return { items: rows, total: 4000, nextCursor: String(offset + limit) };
-    },
-  });
+  );
   assert.equal(items.length, 40, "top-20 globally needs at most 20 rows from each sorted source");
   assert.equal(candidateCalls, 1);
   assert.equal(bundleCalls, 1);
@@ -223,16 +316,21 @@ test("bounded collector stops after the requested global window and reports sour
 
 test("bounded collector fails instead of scanning beyond its source cap", async () => {
   await assert.rejects(
-    collectReviewItemsBounded({ q: "never-matches", limit: "2" }, {
-      pageSize: 2,
-      maxSourceRows: 4,
-      fetchCandidates: async (cursor, limit) => {
-        const offset = Number(cursor ?? 0);
-        const rows = Array.from({ length: limit }, (_, index) => candidate({ id: `kc_${offset + index}`, title: "other" }));
-        return { items: rows, total: 100, nextCursor: String(offset + limit) };
+    collectReviewItemsBounded(
+      { q: "never-matches", limit: "2" },
+      {
+        pageSize: 2,
+        maxSourceRows: 4,
+        fetchCandidates: async (cursor, limit) => {
+          const offset = Number(cursor ?? 0);
+          const rows = Array.from({ length: limit }, (_, index) =>
+            candidate({ id: `kc_${offset + index}`, title: "other" }),
+          );
+          return { items: rows, total: 100, nextCursor: String(offset + limit) };
+        },
+        fetchBundles: async () => ({ items: [], total: 0 }),
       },
-      fetchBundles: async () => ({ items: [], total: 0 }),
-    }),
-    /Admin review query exceeded bounded source scan/
+    ),
+    /Admin review query exceeded bounded source scan/,
   );
 });

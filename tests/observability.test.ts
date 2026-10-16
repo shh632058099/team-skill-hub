@@ -19,11 +19,12 @@ test("MCP observability redacts secrets and summarizes calls", async () => {
       client: "codex",
       tool: "search_knowledge",
       args: {
-        query: "contact user@example.com Bearer super-secret-token eyJabcde.abcdefgh.ijklmnop https://user:pass@example.com postgres://dbuser:dbpass@db.example.com/app AKIAABCDEFGHIJKLMNOP password=hunter2 token=plain-token secret:plain-secret api_key=plain-api-key authorization=plain-auth",
-        apiKey: "skh_this_should_never_be_persisted"
+        query:
+          "contact user@example.com Bearer super-secret-token eyJabcde.abcdefgh.ijklmnop https://user:pass@example.com postgres://dbuser:dbpass@db.example.com/app AKIAABCDEFGHIJKLMNOP password=hunter2 token=plain-token secret:plain-secret api_key=plain-api-key authorization=plain-auth",
+        apiKey: "skh_this_should_never_be_persisted",
       },
       latencyMs: 12,
-      success: true
+      success: true,
     });
     await store.recordCall({
       traceId: "trace-1",
@@ -33,7 +34,7 @@ test("MCP observability redacts secrets and summarizes calls", async () => {
       args: {},
       latencyMs: 8,
       success: false,
-      error: "not found"
+      error: "not found",
     });
 
     const persisted = await readFile(path.join(root, "observability", "mcp-calls.jsonl"), "utf8");
@@ -76,7 +77,7 @@ test("observability recovers corrupted lines and rotates oversized files", async
         tool: "search_knowledge",
         args: { query: "rotation payload " + index + " " + "x".repeat(160) },
         latencyMs: index,
-        success: true
+        success: true,
       });
       if (index === 0) firstCallId = recorded.id;
     }
@@ -86,12 +87,15 @@ test("observability recovers corrupted lines and rotates oversized files", async
     const archivedText = (await Promise.all(archives.map((name) => readFile(path.join(dir, name), "utf8")))).join("\n");
     assert.match(archivedText, new RegExp(firstCallId));
     assert.equal(await store.getCall(firstCallId), undefined);
-    assert.equal((await readdir(dir)).some((name) => name.includes(".tmp.")), false);
+    assert.equal(
+      (await readdir(dir)).some((name) => name.includes(".tmp.")),
+      false,
+    );
 
     await appendFile(
       path.join(dir, "mcp-calls.jsonl"),
       '{broken-json\nnull\n{}\n{"id":"legacy","ts":"2026-01-01T00:00:00.000Z","tool":"legacy"}\n',
-      "utf8"
+      "utf8",
     );
     const calls = await store.listCalls(100);
     assert.ok(calls.length >= 1);
@@ -111,16 +115,19 @@ test("observability reads are bounded to the newest 2000 current-file rows", asy
     const dir = path.join(root, "observability");
     const { mkdir } = await import("node:fs/promises");
     await mkdir(dir, { recursive: true });
-    const rows = Array.from({ length: 2105 }, (_, index) => JSON.stringify({
-      id: "call-" + index,
-      ts: new Date(1_700_000_000_000 + index).toISOString(),
-      traceId: "trace-" + index,
-      actorId: principal.id,
-      tenantId: principal.tenantId,
-      tool: "search_knowledge",
-      latencyMs: index,
-      success: true
-    })).join("\n") + "\n";
+    const rows =
+      Array.from({ length: 2105 }, (_, index) =>
+        JSON.stringify({
+          id: "call-" + index,
+          ts: new Date(1_700_000_000_000 + index).toISOString(),
+          traceId: "trace-" + index,
+          actorId: principal.id,
+          tenantId: principal.tenantId,
+          tool: "search_knowledge",
+          latencyMs: index,
+          success: true,
+        }),
+      ).join("\n") + "\n";
     await appendFile(path.join(dir, "mcp-calls.jsonl"), rows, "utf8");
     const store = new McpObservabilityStore(root, 10000);
     const calls = await store.listCalls(5000);
@@ -149,8 +156,8 @@ test("client hook events persist only sanitized metadata", async () => {
       permissionMode: "default",
       metadata: {
         tool_name: "Bash",
-        apiKey: "skh_should_be_redacted"
-      }
+        apiKey: "skh_should_be_redacted",
+      },
     });
     assert.equal(event.event, "PostToolUse");
     const listed = await store.listClientEvents();
@@ -172,19 +179,19 @@ test("client event duplicate lookup uses stable lifecycle natural keys", async (
       event: "PostToolUse",
       sessionId: "session-dedupe",
       turnId: "turn-1",
-      metadata: { tool_use_id: "tool-1", tool_name: "Bash" }
+      metadata: { tool_use_id: "tool-1", tool_name: "Bash" },
     });
     const duplicate = await store.findDuplicateClientEvent(principal, {
       event: "PostToolUse",
       sessionId: "session-dedupe",
       turnId: "turn-1",
-      metadata: { tool_use_id: "tool-1" }
+      metadata: { tool_use_id: "tool-1" },
     });
     const differentTool = await store.findDuplicateClientEvent(principal, {
       event: "PostToolUse",
       sessionId: "session-dedupe",
       turnId: "turn-1",
-      metadata: { tool_use_id: "tool-2" }
+      metadata: { tool_use_id: "tool-2" },
     });
     assert.equal(duplicate?.id, first.id);
     assert.equal(differentTool, undefined);
@@ -193,13 +200,13 @@ test("client event duplicate lookup uses stable lifecycle natural keys", async (
       event: "Stop",
       sessionId: "session-dedupe",
       turnId: "turn-1",
-      metadata: {}
+      metadata: {},
     });
     const duplicateStop = await store.findDuplicateClientEvent(principal, {
       event: "Stop",
       sessionId: "session-dedupe",
       turnId: "turn-1",
-      metadata: {}
+      metadata: {},
     });
     assert.equal(duplicateStop?.id, stop.id);
   } finally {
@@ -214,19 +221,31 @@ test("client session timeline sorts persisted events by timestamp", async () => 
     await store.recordClientEvent(principal, {
       event: "SessionStart",
       sessionId: "session-order",
-      metadata: {}
+      metadata: {},
     });
     const file = path.join(root, "observability", "client-events.jsonl");
-    const rows = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const rows = (await readFile(file, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
     const base = rows[0];
     await rm(file);
-    await appendFile(file, JSON.stringify({ ...base, id: "evt_late", event: "SessionEnd", ts: "2026-09-30T10:00:03.000Z" }) + "\n");
-    await appendFile(file, JSON.stringify({ ...base, id: "evt_early", event: "SessionStart", ts: "2026-09-30T10:00:01.000Z" }) + "\n");
-    await appendFile(file, JSON.stringify({ ...base, id: "evt_middle", event: "UserPromptSubmit", ts: "2026-09-30T10:00:02.000Z" }) + "\n");
+    await appendFile(
+      file,
+      JSON.stringify({ ...base, id: "evt_late", event: "SessionEnd", ts: "2026-09-30T10:00:03.000Z" }) + "\n",
+    );
+    await appendFile(
+      file,
+      JSON.stringify({ ...base, id: "evt_early", event: "SessionStart", ts: "2026-09-30T10:00:01.000Z" }) + "\n",
+    );
+    await appendFile(
+      file,
+      JSON.stringify({ ...base, id: "evt_middle", event: "UserPromptSubmit", ts: "2026-09-30T10:00:02.000Z" }) + "\n",
+    );
     const timeline = await store.getClientSessionTimeline(principal.id, principal.tenantId, "session-order");
     assert.deepEqual(
-      timeline.map((item) => item.kind === "event" ? item.event.id : item.call.id),
-      ["evt_early", "evt_middle", "evt_late"]
+      timeline.map((item) => (item.kind === "event" ? item.event.id : item.call.id)),
+      ["evt_early", "evt_middle", "evt_late"],
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -237,14 +256,14 @@ test("Stop assistant excerpt keeps a larger bounded payload with server-side red
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-stop-excerpt-"));
   try {
     const store = new McpObservabilityStore(root);
-    const longText = ("Verified OTA recovery behavior with regression coverage. ".repeat(30)) +
-      " token=SUPER_SECRET_TOKEN_VALUE";
+    const longText =
+      "Verified OTA recovery behavior with regression coverage. ".repeat(30) + " token=SUPER_SECRET_TOKEN_VALUE";
     const event = await store.recordClientEvent(principal, {
       event: "Stop",
       sessionId: "session-stop",
       turnId: "turn-stop",
       client: "codex",
-      metadata: { assistant_result_excerpt: longText }
+      metadata: { assistant_result_excerpt: longText },
     });
     const excerpt = String(event.metadata.assistant_result_excerpt ?? "");
     assert.ok(excerpt.length > 500);
@@ -264,7 +283,7 @@ test("client sessions resolve only when a principal has one active session", asy
       event: "SessionStart",
       sessionId: "session-a",
       client: "codex",
-      metadata: { source: "startup" }
+      metadata: { source: "startup" },
     });
     assert.equal(await store.resolveUniqueActiveClientSession(principal), "session-a");
 
@@ -276,7 +295,7 @@ test("client sessions resolve only when a principal has one active session", asy
       event: "SessionStart",
       sessionId: "session-b",
       client: "codex",
-      metadata: { source: "startup" }
+      metadata: { source: "startup" },
     });
     assert.equal(await store.resolveUniqueActiveClientSession(principal), undefined);
 
@@ -284,7 +303,7 @@ test("client sessions resolve only when a principal has one active session", asy
       event: "SessionEnd",
       sessionId: "session-b",
       client: "codex",
-      metadata: { reason: "other" }
+      metadata: { reason: "other" },
     });
     assert.equal(await store.resolveUniqueActiveClientSession(principal), "session-a");
 
@@ -297,7 +316,7 @@ test("client sessions resolve only when a principal has one active session", asy
       tool: "search_knowledge",
       args: { query: "OTA checkpoint" },
       latencyMs: 5,
-      success: true
+      success: true,
     });
     const sessions = await store.listClientSessions();
     const session = sessions.find((item) => item.sessionId === "session-a");
@@ -306,7 +325,10 @@ test("client sessions resolve only when a principal has one active session", asy
     assert.deepEqual(session?.tools, ["search_knowledge"]);
 
     const timeline = await store.getClientSessionTimeline(principal.id, principal.tenantId, "session-a");
-    assert.deepEqual(timeline.map((item) => item.kind), ["event", "mcp-call"]);
+    assert.deepEqual(
+      timeline.map((item) => item.kind),
+      ["event", "mcp-call"],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -322,7 +344,7 @@ test("knowledge candidates mark exact duplicates without dropping submissions", 
       sourceType: "mcp-session",
       suggestedType: "knowledge",
       repository: "rd-skills",
-      suggestedPath: "docs/ota/recovery.md"
+      suggestedPath: "docs/ota/recovery.md",
     });
     const second = await store.createCandidate(principal, {
       title: "  ota recovery ",
@@ -330,13 +352,13 @@ test("knowledge candidates mark exact duplicates without dropping submissions", 
       sourceType: "mcp-session",
       suggestedType: "knowledge",
       repository: "rd-skills",
-      suggestedPath: "docs/ota/recovery-2.md"
+      suggestedPath: "docs/ota/recovery-2.md",
     });
     assert.equal(second.duplicateOf, first.id);
     assert.equal(second.fingerprint, first.fingerprint);
 
     const edited = await store.updateCandidate(second.id, {
-      content: "A materially different recovery rule."
+      content: "A materially different recovery rule.",
     });
     assert.equal(edited.duplicateOf, undefined);
     assert.notEqual(edited.fingerprint, first.fingerprint);
@@ -351,17 +373,19 @@ test("knowledge candidates surface deterministic near duplicates separately from
     const store = new McpObservabilityStore(root);
     const first = await store.createCandidate(principal, {
       title: "OTA power loss recovery",
-      content: "Device resumes from the last verified checkpoint after reboot and validates image integrity before boot.",
+      content:
+        "Device resumes from the last verified checkpoint after reboot and validates image integrity before boot.",
       sourceType: "codex-summary",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     const second = await store.createCandidate(principal, {
       title: "OTA recovery after power loss",
-      content: "After reboot the device resumes from the last verified checkpoint and validates image integrity before continuing boot.",
+      content:
+        "After reboot the device resumes from the last verified checkpoint and validates image integrity before continuing boot.",
       sourceType: "manual",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     assert.equal(second.duplicateOf, undefined);
     assert.equal(second.possibleDuplicateOf, first.id);
@@ -369,10 +393,11 @@ test("knowledge candidates surface deterministic near duplicates separately from
 
     const unrelated = await store.createCandidate(principal, {
       title: "Yocto CVE triage policy",
-      content: "Security advisories are reviewed by release age and remediation ownership before each quarterly release.",
+      content:
+        "Security advisories are reviewed by release age and remediation ownership before each quarterly release.",
       sourceType: "manual",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     assert.equal(unrelated.possibleDuplicateOf, undefined);
   } finally {
@@ -388,17 +413,11 @@ test("exact candidate duplicate lookup ignores rejected items", async () => {
       title: "Verified OTA behavior",
       content: "The device resumes from the last safe checkpoint after reboot.",
       sourceType: "codex-summary",
-      suggestedType: "knowledge"
+      suggestedType: "knowledge",
     });
-    assert.equal(
-      (await store.findExactCandidateDuplicate(first.title, first.content))?.id,
-      first.id
-    );
+    assert.equal((await store.findExactCandidateDuplicate(first.title, first.content))?.id, first.id);
     await store.reviewCandidate(first.id, "rejected", "admin-http", "not durable");
-    assert.equal(
-      await store.findExactCandidateDuplicate(first.title, first.content),
-      undefined
-    );
+    assert.equal(await store.findExactCandidateDuplicate(first.title, first.content), undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -413,7 +432,7 @@ test("knowledge candidate preserves explicit Knowledge relation metadata", async
       content: "Recovery now resumes from the verified checkpoint.",
       sourceType: "review",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     const updated = await store.updateCandidate(candidate.id, {
       knowledgeRelation: {
@@ -422,9 +441,9 @@ test("knowledge candidate preserves explicit Knowledge relation metadata", async
           key: "rd-skills:docs/ota/recovery.md",
           repositoryId: "rd-skills",
           path: "docs/ota/recovery.md",
-          title: "OTA Recovery"
-        }
-      }
+          title: "OTA Recovery",
+        },
+      },
     });
     assert.equal(updated.knowledgeRelation?.type, "updates");
     assert.equal(updated.knowledgeRelation?.target?.path, "docs/ota/recovery.md");
@@ -444,7 +463,7 @@ test("knowledge candidate review is append-only and preserves latest state", asy
       sourceType: "troubleshooting",
       suggestedType: "knowledge",
       repository: "rd-skills",
-      suggestedPath: "docs/ota/recovery.md"
+      suggestedPath: "docs/ota/recovery.md",
     });
     assert.equal(candidate.status, "pending");
 
@@ -453,7 +472,7 @@ test("knowledge candidate review is append-only and preserves latest state", asy
       "approved",
       "admin-http",
       "Verified against current implementation",
-      "useful"
+      "useful",
     );
     assert.equal(reviewed.status, "approved");
     assert.equal(reviewed.reviewer, "admin-http");
@@ -476,12 +495,15 @@ test("knowledge candidate delete removes all persisted history", async () => {
       content: "Temporary content",
       sourceType: "manual",
       suggestedType: "knowledge",
-      repository: "rd-skills"
+      repository: "rd-skills",
     });
     await store.reviewCandidate(candidate.id, "approved", "admin-http", "ok", "useful");
     assert.ok((await store.getCandidateHistory(candidate.id)).length >= 2);
     assert.equal(await store.deleteCandidate(candidate.id), true);
-    assert.equal((await store.listCandidates()).some((item) => item.id === candidate.id), false);
+    assert.equal(
+      (await store.listCandidates()).some((item) => item.id === candidate.id),
+      false,
+    );
     assert.deepEqual(await store.getCandidateHistory(candidate.id), []);
     assert.equal(await store.deleteCandidate(candidate.id), false);
   } finally {
@@ -499,13 +521,13 @@ test("knowledge candidate supports edit review publish failure and retry lifecyc
       sourceType: "manual",
       suggestedType: "knowledge",
       repository: "rd-skills",
-      suggestedPath: "docs/draft.md"
+      suggestedPath: "docs/draft.md",
     });
 
     const edited = await store.updateCandidate(created.id, {
       title: "Reviewed title",
       content: "Reviewed content",
-      suggestedPath: "docs/reviewed.md"
+      suggestedPath: "docs/reviewed.md",
     });
     assert.equal(edited.status, "pending");
     assert.equal(edited.title, "Reviewed title");
@@ -533,14 +555,11 @@ test("knowledge candidate supports edit review publish failure and retry lifecyc
       action: "create",
       mergeRequestIid: 42,
       mergeRequestUrl: "https://gitlab.example.com/ai/rd-skills/-/merge_requests/42",
-      publishedAt: new Date().toISOString()
+      publishedAt: new Date().toISOString(),
     });
     assert.equal(published.status, "published");
     assert.equal(published.publication?.mergeRequestIid, 42);
-    await assert.rejects(
-      () => store.updateCandidate(created.id, { title: "too late" }),
-      /cannot be edited/
-    );
+    await assert.rejects(() => store.updateCandidate(created.id, { title: "too late" }), /cannot be edited/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -554,12 +573,12 @@ test("knowledge gaps combine unmatched queries and negative feedback", async () 
       targetType: "knowledge",
       target: "rd-skills:docs/old.md#0",
       rating: "negative",
-      reason: "OTA rollback document is outdated"
+      reason: "OTA rollback document is outdated",
     });
 
     const gaps = await store.knowledgeGaps([
       { query: "Yocto CVE six month policy", count: 4 },
-      { query: "Yocto CVE 180 day rule", count: 2 }
+      { query: "Yocto CVE 180 day rule", count: 2 },
     ]);
     const cveGap = gaps.find((item) => item.members?.some((member) => member.includes("CVE")));
     assert.ok(cveGap);
@@ -580,7 +599,7 @@ test("knowledge gap management persists ignore, keywords and resolved publicatio
 
     const ignored = await store.updateKnowledgeGapManagement(gap.key, {
       status: "ignored",
-      keywords: ["ota", "rollback", "ota"]
+      keywords: ["ota", "rollback", "ota"],
     });
     assert.equal(ignored.status, "ignored");
     assert.deepEqual(ignored.keywords, ["ota", "rollback"]);
@@ -593,9 +612,9 @@ test("knowledge gap management persists ignore, keywords and resolved publicatio
         key: "rd-skills:docs/ota/recovery.md",
         repositoryId: "rd-skills",
         path: "docs/ota/recovery.md",
-        title: "OTA recovery"
+        title: "OTA recovery",
       },
-      commit: { repositoryId: "rd-skills", sha: "abc123" }
+      commit: { repositoryId: "rd-skills", sha: "abc123" },
     });
     assert.equal(resolved.status, "resolved");
     assert.equal(resolved.candidateId, "kc_gap");

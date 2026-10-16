@@ -6,7 +6,7 @@ import {
   AdminSessionManager,
   clearAdminSessionCookie,
   safeAdminNextPath,
-  serializeAdminSessionCookie
+  serializeAdminSessionCookie,
 } from "../src/admin-auth.js";
 
 test("admin login prefers ADMIN_PASSWORD and can fall back to ADMIN_API_KEY", () => {
@@ -71,7 +71,6 @@ test("admin next path only permits local admin pages", () => {
   assert.equal(safeAdminNextPath("/administrator"), "/admin");
 });
 
-
 test("admin login limiter blocks repeated failures and resets on success/window expiry", () => {
   let now = 1_700_000_000_000;
   const limiter = new AdminLoginAttemptLimiter({ maxFailures: 2, windowMs: 60_000, now: () => now });
@@ -83,7 +82,8 @@ test("admin login limiter blocks repeated failures and resets on success/window 
   assert.ok(limiter.retryAfterSeconds("127.0.0.1") > 0);
   limiter.recordSuccess("127.0.0.1");
   assert.equal(limiter.canAttempt("127.0.0.1"), true);
-  limiter.recordFailure("127.0.0.1"); limiter.recordFailure("127.0.0.1");
+  limiter.recordFailure("127.0.0.1");
+  limiter.recordFailure("127.0.0.1");
   now += 60_001;
   assert.equal(limiter.canAttempt("127.0.0.1"), true);
 });

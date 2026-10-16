@@ -3,6 +3,65 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { openSkillHubDatabase } from "../storage/database.js";
-function arg(name:string){const i=process.argv.indexOf(name);return i>=0?process.argv[i+1]:undefined}
-const rows=Math.max(1,Number(arg("--rows")??100000));const root=await mkdtemp(path.join(os.tmpdir(),"skill-hub-sqlite-benchmark-"));const db=openSkillHubDatabase(path.join(root,"bench.sqlite3"));
-try{const insert=db.raw.prepare("INSERT INTO mcp_calls(id,ts,tenant_id,actor_id,session_id,trace_id,tool,success,record_json) VALUES(?,?,?,?,?,?,?,?,?)");const started=performance.now();db.transaction(()=>{for(let i=0;i<rows;i++){const record={id:`c${i}`,ts:new Date(1700000000000+i).toISOString(),traceId:`t${Math.floor(i/5)}`,sessionId:`s${i%1000}`,actorId:`u${i%100}`,tenantId:"bench",tool:i%10===0?"discover":"search_knowledge",latencyMs:i%50,success:i%97!==0};insert.run(record.id,1700000000000+i,record.tenantId,record.actorId,record.sessionId,record.traceId,record.tool,record.success?1:0,JSON.stringify(record))}});const writeMs=performance.now()-started;const queryStarted=performance.now();const latest=db.raw.prepare("SELECT record_json FROM mcp_calls WHERE tenant_id=? AND actor_id=? ORDER BY ts DESC LIMIT 100").all("bench","u1");const queryMs=performance.now()-queryStarted;console.log(JSON.stringify({rows,writeMs:Math.round(writeMs),rowsPerSecond:Math.round(rows/(writeMs/1000)),queryMs:Number(queryMs.toFixed(3)),queryRows:latest.length,database:db.filePath},null,2));}finally{db.close();if(!process.argv.includes("--keep"))await rm(root,{recursive:true,force:true})}
+function arg(name: string) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+const rows = Math.max(1, Number(arg("--rows") ?? 100000));
+const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-sqlite-benchmark-"));
+const db = openSkillHubDatabase(path.join(root, "bench.sqlite3"));
+try {
+  const insert = db.raw.prepare(
+    "INSERT INTO mcp_calls(id,ts,tenant_id,actor_id,session_id,trace_id,tool,success,record_json) VALUES(?,?,?,?,?,?,?,?,?)",
+  );
+  const started = performance.now();
+  db.transaction(() => {
+    for (let i = 0; i < rows; i++) {
+      const record = {
+        id: `c${i}`,
+        ts: new Date(1700000000000 + i).toISOString(),
+        traceId: `t${Math.floor(i / 5)}`,
+        sessionId: `s${i % 1000}`,
+        actorId: `u${i % 100}`,
+        tenantId: "bench",
+        tool: i % 10 === 0 ? "discover" : "search_knowledge",
+        latencyMs: i % 50,
+        success: i % 97 !== 0,
+      };
+      insert.run(
+        record.id,
+        1700000000000 + i,
+        record.tenantId,
+        record.actorId,
+        record.sessionId,
+        record.traceId,
+        record.tool,
+        record.success ? 1 : 0,
+        JSON.stringify(record),
+      );
+    }
+  });
+  const writeMs = performance.now() - started;
+  const queryStarted = performance.now();
+  const latest = db.raw
+    .prepare("SELECT record_json FROM mcp_calls WHERE tenant_id=? AND actor_id=? ORDER BY ts DESC LIMIT 100")
+    .all("bench", "u1");
+  const queryMs = performance.now() - queryStarted;
+  console.log(
+    JSON.stringify(
+      {
+        rows,
+        writeMs: Math.round(writeMs),
+        rowsPerSecond: Math.round(rows / (writeMs / 1000)),
+        queryMs: Number(queryMs.toFixed(3)),
+        queryRows: latest.length,
+        database: db.filePath,
+      },
+      null,
+      2,
+    ),
+  );
+} finally {
+  db.close();
+  if (!process.argv.includes("--keep")) await rm(root, { recursive: true, force: true });
+}

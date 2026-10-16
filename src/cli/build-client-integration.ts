@@ -15,11 +15,16 @@ function argument(name: string): string | undefined {
 }
 
 async function exists(file: string): Promise<boolean> {
-  return stat(file).then(() => true, () => false);
+  return stat(file).then(
+    () => true,
+    () => false,
+  );
 }
 
 async function sha256(file: string): Promise<string> {
-  return createHash("sha256").update(await readFile(file)).digest("hex");
+  return createHash("sha256")
+    .update(await readFile(file))
+    .digest("hex");
 }
 
 async function addTreeToZip(zip: JSZip, root: string, current = ""): Promise<void> {
@@ -29,7 +34,11 @@ async function addTreeToZip(zip: JSZip, root: string, current = ""): Promise<voi
   for (const entry of entries) {
     const rel = path.posix.join(current.split(path.sep).join("/"), entry.name);
     if (entry.isDirectory()) await addTreeToZip(zip, root, rel);
-    else zip.file(rel, await readFile(path.join(root, rel)), { date: new Date("1980-01-01T00:00:00.000Z"), createFolders: false });
+    else
+      zip.file(rel, await readFile(path.join(root, rel)), {
+        date: new Date("1980-01-01T00:00:00.000Z"),
+        createFolders: false,
+      });
   }
 }
 
@@ -44,7 +53,7 @@ async function copyAllowedAssets(repoRoot: string, staging: string): Promise<voi
     "scripts/bootstrap-client-integration.ps1",
     "scripts/team-skill-hub-hook.sh",
     "scripts/team-skill-hub-hook.ps1",
-    "scripts/team-skill-hub-claude-stop.sh"
+    "scripts/team-skill-hub-claude-stop.sh",
   ];
   for (const rel of files) {
     const source = path.join(repoRoot, rel);
@@ -71,7 +80,18 @@ async function main(): Promise<void> {
   try {
     await copyAllowedAssets(repoRoot, temp);
     const linuxPath = path.join(releaseDir, "linux.tar.gz");
-    await execFileAsync("tar", ["--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner", "-czf", linuxPath, "-C", temp, "."]);
+    await execFileAsync("tar", [
+      "--sort=name",
+      "--mtime=@0",
+      "--owner=0",
+      "--group=0",
+      "--numeric-owner",
+      "-czf",
+      linuxPath,
+      "-C",
+      temp,
+      ".",
+    ]);
     const zip = new JSZip();
     await addTreeToZip(zip, temp);
     const windowsPath = path.join(releaseDir, "windows.zip");
@@ -79,13 +99,22 @@ async function main(): Promise<void> {
     const linuxSha256 = await sha256(linuxPath);
     const windowsSha256 = await sha256(windowsPath);
     const manifest = buildClientIntegrationManifest(release, {
-      releasedAt: new Date().toISOString(), serverVersion: "0.1.0", linuxSha256, windowsSha256
+      releasedAt: new Date().toISOString(),
+      serverVersion: "0.1.0",
+      linuxSha256,
+      windowsSha256,
     });
     await writeFile(path.join(outRoot, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-    await writeFile(path.join(releaseDir, "checksums.json"), JSON.stringify({ linux: linuxSha256, windows: windowsSha256 }, null, 2) + "\n");
+    await writeFile(
+      path.join(releaseDir, "checksums.json"),
+      JSON.stringify({ linux: linuxSha256, windows: windowsSha256 }, null, 2) + "\n",
+    );
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
 }
 
-main().catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

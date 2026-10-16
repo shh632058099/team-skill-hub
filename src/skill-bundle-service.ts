@@ -14,7 +14,7 @@ import {
   type SkillBundleDiff,
   type SkillBundleFile,
   type SkillBundleImport,
-  type SkillBundleImportType
+  type SkillBundleImportType,
 } from "./skill-bundles.js";
 import type { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundlePublisher, SkillBundleReviewStaleError } from "./skill-bundle-publishing.js";
@@ -60,14 +60,18 @@ interface SkillBundleServiceOptions {
 }
 
 function semanticsHash(repository: RepositoryConfig, normalized: NormalizedSkillBundleInput): string {
-  return createHash("sha256").update(JSON.stringify({
-    repository: repository.id,
-    collection: "rd-skills",
-    namespace: normalized.namespace,
-    importType: normalized.importType,
-    skillPath: normalized.skillPath ?? null,
-    snapshotSha256: normalized.snapshotSha256
-  })).digest("hex");
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        repository: repository.id,
+        collection: "rd-skills",
+        namespace: normalized.namespace,
+        importType: normalized.importType,
+        skillPath: normalized.skillPath ?? null,
+        snapshotSha256: normalized.snapshotSha256,
+      }),
+    )
+    .digest("hex");
 }
 
 async function readTextTree(root: string): Promise<SkillBundleFile[]> {
@@ -85,7 +89,8 @@ async function readTextTree(root: string): Promise<SkillBundleFile[]> {
       const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
       const full = path.join(dir, entry.name);
       const info = await lstat(full);
-      if (info.isSymbolicLink()) throw new Error(`target repository contains symlink inside replacementRoot: ${childRelative}`);
+      if (info.isSymbolicLink())
+        throw new Error(`target repository contains symlink inside replacementRoot: ${childRelative}`);
       if (info.isDirectory()) {
         await walk(full, childRelative);
         continue;
@@ -103,8 +108,9 @@ async function readTextTree(root: string): Promise<SkillBundleFile[]> {
         ...(content !== undefined ? { content } : { contentBase64: bytes.toString("base64") }),
         sha256,
         sizeBytes: bytes.byteLength,
-        mode: (info.mode & 0o111) !== 0 ? "0755" : "0644"
-      });    }
+        mode: (info.mode & 0o111) !== 0 ? "0755" : "0644",
+      });
+    }
   }
   await walk(root);
   return files.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
@@ -141,7 +147,10 @@ export class SkillBundleService {
     }
   }
 
-  private async previewNormalized(repository: RepositoryConfig, normalized: NormalizedSkillBundleInput): Promise<SkillBundlePreview> {
+  private async previewNormalized(
+    repository: RepositoryConfig,
+    normalized: NormalizedSkillBundleInput,
+  ): Promise<SkillBundlePreview> {
     const materialized = await this.options.materialize(repository);
     const currentRoot = path.join(materialized.sourceRoot, ...normalized.replacementRoot.split("/"));
     const before = await readTextTree(currentRoot);
@@ -150,13 +159,15 @@ export class SkillBundleService {
     try {
       await cp(materialized.sourceRoot, tempRoot, {
         recursive: true,
-        filter: (source) => path.basename(source) !== ".git"
+        filter: (source) => path.basename(source) !== ".git",
       });
       await writeSnapshotRoot(tempRoot, normalized);
       const skills = await scanSkills(tempRoot, repository.id, materialized.revision);
       const issues = validateSkills(skills, repository, this.options.rules);
       if (issues.length) {
-        throw new Error(`Skill Bundle validation failed: ${issues.map((issue) => `${issue.skillPath ?? "repo"}: ${issue.message}`).join("; ")}`);
+        throw new Error(
+          `Skill Bundle validation failed: ${issues.map((issue) => `${issue.skillPath ?? "repo"}: ${issue.message}`).join("; ")}`,
+        );
       }
       return {
         namespace: normalized.namespace,
@@ -167,27 +178,36 @@ export class SkillBundleService {
         targetTreeSha256: canonicalTreeHash(before),
         expectedTreeSha256: normalized.expectedTreeSha256,
         diff: diffSkillBundleTrees(before, normalized.files),
-        skills
+        skills,
       };
     } finally {
       await rm(tempParent, { recursive: true, force: true });
     }
   }
 
-  async preview(principal: Principal, repository: RepositoryConfig, input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey">): Promise<SkillBundlePreview> {
+  async preview(
+    principal: Principal,
+    repository: RepositoryConfig,
+    input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey">,
+  ): Promise<SkillBundlePreview> {
     this.assertAuthorized(principal, repository);
     const normalized = normalizeSkillBundleInput(input);
     return await this.previewNormalized(repository, normalized);
   }
 
-  async submitDetailed(principal: Principal, repository: RepositoryConfig, input: SubmitSkillBundleServiceInput): Promise<SkillBundleSubmitResult> {
+  async submitDetailed(
+    principal: Principal,
+    repository: RepositoryConfig,
+    input: SubmitSkillBundleServiceInput,
+  ): Promise<SkillBundleSubmitResult> {
     this.assertAuthorized(principal, repository);
     const normalized = normalizeSkillBundleInput(input);
     const requestSemanticsSha256 = semanticsHash(repository, normalized);
     if (input.submissionKey) {
       const existing = this.options.storage.findBySubmissionKey(principal.id, input.submissionKey);
       if (existing) {
-        if (existing.requestSemanticsSha256 !== requestSemanticsSha256) throw new Error("submission_key conflicts with a different Skill Bundle request");
+        if (existing.requestSemanticsSha256 !== requestSemanticsSha256)
+          throw new Error("submission_key conflicts with a different Skill Bundle request");
         return { import: existing, created: false };
       }
     }
@@ -212,7 +232,7 @@ export class SkillBundleService {
       ...(input.submissionKey ? { submissionKey: input.submissionKey } : {}),
       requestSemanticsSha256,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
     };
     try {
       return { import: this.options.storage.createImport(record), created: true };
@@ -220,7 +240,8 @@ export class SkillBundleService {
       if (input.submissionKey) {
         const existing = this.options.storage.findBySubmissionKey(principal.id, input.submissionKey);
         if (existing) {
-          if (existing.requestSemanticsSha256 !== requestSemanticsSha256) throw new Error("submission_key conflicts with a different Skill Bundle request");
+          if (existing.requestSemanticsSha256 !== requestSemanticsSha256)
+            throw new Error("submission_key conflicts with a different Skill Bundle request");
           return { import: existing, created: false };
         }
       }
@@ -228,7 +249,11 @@ export class SkillBundleService {
     }
   }
 
-  async submit(principal: Principal, repository: RepositoryConfig, input: SubmitSkillBundleServiceInput): Promise<SkillBundleImport> {
+  async submit(
+    principal: Principal,
+    repository: RepositoryConfig,
+    input: SubmitSkillBundleServiceInput,
+  ): Promise<SkillBundleImport> {
     return (await this.submitDetailed(principal, repository, input)).import;
   }
 
@@ -239,7 +264,11 @@ export class SkillBundleService {
       namespace: record.namespace,
       importType: record.importType,
       skillPath: record.skillPath,
-      files: snapshot.files.map((file) => ({ path: file.path, ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }), mode: file.mode }))
+      files: snapshot.files.map((file) => ({
+        path: file.path,
+        ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }),
+        mode: file.mode,
+      })),
     });
   }
 
@@ -250,7 +279,13 @@ export class SkillBundleService {
     return await this.previewNormalized(repository, this.normalizedFromImport(record));
   }
 
-  async review(principal: Principal, repository: RepositoryConfig, id: string, status: "approved" | "rejected", reason?: string): Promise<SkillBundleImport> {
+  async review(
+    principal: Principal,
+    repository: RepositoryConfig,
+    id: string,
+    status: "approved" | "rejected",
+    reason?: string,
+  ): Promise<SkillBundleImport> {
     this.assertAuthorized(principal, repository);
     this.assertAdmin(principal);
     const current = this.options.storage.getImport(id);
@@ -263,7 +298,7 @@ export class SkillBundleService {
         status,
         review: { reviewer: principal.id, reviewedAt: now, ...(reason ? { reason } : {}) },
         publishError: undefined,
-        updatedAt: now
+        updatedAt: now,
       });
     }
     const preview = await this.previewImport(principal, repository, id);
@@ -279,10 +314,10 @@ export class SkillBundleService {
         added: preview.diff.added.length,
         modified: preview.diff.modified.length,
         deleted: preview.diff.deleted.length,
-        ...(reason ? { reason } : {})
+        ...(reason ? { reason } : {}),
       },
       publishError: undefined,
-      updatedAt: now
+      updatedAt: now,
     });
   }
 
@@ -302,7 +337,7 @@ export class SkillBundleService {
       ...current,
       status: "review_stale",
       publishError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     });
   }
 
@@ -320,7 +355,7 @@ export class SkillBundleService {
       ...fresh,
       status: "publishing",
       publishError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     });
     try {
       const publication = await this.publisher.publish({ ...fresh, status: fresh.status }, snapshot, repository);
@@ -330,7 +365,7 @@ export class SkillBundleService {
         status: nextStatus,
         publication,
         publishError: undefined,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -339,14 +374,14 @@ export class SkillBundleService {
           ...publishing,
           status: "review_stale",
           publishError: undefined,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
         });
       }
       this.options.storage.updateImport({
         ...publishing,
         status: "publish_failed",
         publishError: message,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       });
       throw error;
     }
@@ -368,14 +403,15 @@ export class SkillBundleService {
       const result = await this.publisher.reconcile(current.publication, snapshot, repository);
       let status: SkillBundleImport["status"] = "publishing";
       if (result.publication.mergeRequestState === "closed") status = "publish_failed";
-      else if (result.publication.mergeRequestState === "merged") status = result.finalTreeMatches ? "published" : "published_drifted";
+      else if (result.publication.mergeRequestState === "merged")
+        status = result.finalTreeMatches ? "published" : "published_drifted";
       return this.options.storage.updateImport({
         ...current,
         status,
         publication: result.publication,
         publishError: status === "publish_failed" ? "PR/MR was closed without merge" : undefined,
         ...(status === "published_drifted" ? { driftSummary: result.finalDiff } : { driftSummary: undefined }),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -384,7 +420,7 @@ export class SkillBundleService {
         ...current,
         status: "publish_failed",
         publishError: message,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       });
       throw error;
     }
@@ -401,9 +437,19 @@ export class SkillBundleService {
     return this.options.storage.deleteImport(id, current.revision);
   }
 
-  getImport(id: string): SkillBundleImport | undefined { return this.options.storage.getImport(id); }
-  getSnapshot(id: string) { return this.options.storage.getSnapshot(id); }
-  getHistory(id: string): SkillBundleImport[] { return this.options.storage.getImportHistory(id); }
-  listImports(limit = 200): SkillBundleImport[] { return this.options.storage.listImports(limit); }
-  listImportsPage(query: Parameters<SqliteSkillBundleRepository["listImportsPage"]>[0]) { return this.options.storage.listImportsPage(query); }
+  getImport(id: string): SkillBundleImport | undefined {
+    return this.options.storage.getImport(id);
+  }
+  getSnapshot(id: string) {
+    return this.options.storage.getSnapshot(id);
+  }
+  getHistory(id: string): SkillBundleImport[] {
+    return this.options.storage.getImportHistory(id);
+  }
+  listImports(limit = 200): SkillBundleImport[] {
+    return this.options.storage.listImports(limit);
+  }
+  listImportsPage(query: Parameters<SqliteSkillBundleRepository["listImportsPage"]>[0]) {
+    return this.options.storage.listImportsPage(query);
+  }
 }

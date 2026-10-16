@@ -5,12 +5,35 @@ import type {
   Skill,
   SkillCandidateReranker,
   SkillRoutingStrategy,
-  SkillSearchBackend
+  SkillSearchBackend,
 } from "./types.js";
 
 const SEARCH_STOP_WORDS = new Set([
-  "a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with",
-  "使用", "实现", "问题", "相关", "如何", "怎么", "帮我", "当前", "项目", "配置", "规则", "的", "和", "与"
+  "a",
+  "an",
+  "and",
+  "for",
+  "in",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+  "使用",
+  "实现",
+  "问题",
+  "相关",
+  "如何",
+  "怎么",
+  "帮我",
+  "当前",
+  "项目",
+  "配置",
+  "规则",
+  "的",
+  "和",
+  "与",
 ]);
 
 function tokenize(text: string): string[] {
@@ -55,18 +78,33 @@ function manualScore(skill: Skill, query: string): { score: number; coverage: nu
     description: new Set(tokenize(skill.description)),
     keywords: new Set(tokenize(skill.metadata.keywords.join(" "))),
     domain: new Set(tokenize(skill.metadata.domain.join(" "))),
-    category: new Set(tokenize(skill.metadata.category.join(" ")))
+    category: new Set(tokenize(skill.metadata.category.join(" "))),
   };
   let score = 0;
   let phraseMatched = false;
   const matched = new Set<string>();
   for (const term of terms) {
     let hit = false;
-    if (tokenSets.name.has(term)) { score += 4; hit = true; }
-    if (tokenSets.keywords.has(term)) { score += 3; hit = true; }
-    if (tokenSets.domain.has(term)) { score += 2; hit = true; }
-    if (tokenSets.category.has(term)) { score += 2; hit = true; }
-    if (tokenSets.description.has(term)) { score += 1; hit = true; }
+    if (tokenSets.name.has(term)) {
+      score += 4;
+      hit = true;
+    }
+    if (tokenSets.keywords.has(term)) {
+      score += 3;
+      hit = true;
+    }
+    if (tokenSets.domain.has(term)) {
+      score += 2;
+      hit = true;
+    }
+    if (tokenSets.category.has(term)) {
+      score += 2;
+      hit = true;
+    }
+    if (tokenSets.description.has(term)) {
+      score += 1;
+      hit = true;
+    }
     if (hit) matched.add(term);
   }
   const normalizedName = skill.name.toLowerCase().replace(/[-_]+/g, " ");
@@ -112,7 +150,7 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
     this.skills = new Map(skills.map((skill) => [skill.key, skill]));
     this.db.exec("DELETE FROM skill_fts");
     const insert = this.db.prepare(
-      "INSERT INTO skill_fts(skill_key,repository_id,name,description,keywords,domain,category) VALUES(?,?,?,?,?,?,?)"
+      "INSERT INTO skill_fts(skill_key,repository_id,name,description,keywords,domain,category) VALUES(?,?,?,?,?,?,?)",
     );
     for (const skill of skills) {
       insert.run(
@@ -122,7 +160,7 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
         skill.description,
         skill.metadata.keywords.join(" "),
         skill.metadata.domain.join(" "),
-        skill.metadata.category.join(" ")
+        skill.metadata.category.join(" "),
       );
     }
   }
@@ -142,7 +180,7 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
                  FROM skill_fts
                  WHERE skill_fts MATCH ?
                    AND repository_id IN (${repositories.map(() => "?").join(",")})
-                 LIMIT ?`
+                 LIMIT ?`,
               )
               .all(match, ...repositories, Math.max(limit * 5, 20)) as Array<{
               skill_key: string;
@@ -168,7 +206,7 @@ export class SqliteFtsSearchBackend implements SkillSearchBackend {
         skill,
         score,
         coverage: manual.coverage,
-        reason: `matched exact tokens/phrases; coverage=${manual.coverage.toFixed(2)}; score=${score.toFixed(2)}`
+        reason: `matched exact tokens/phrases; coverage=${manual.coverage.toFixed(2)}; score=${score.toFixed(2)}`,
       });
     }
     return results.sort((a, b) => b.score - a.score).slice(0, limit);
@@ -188,7 +226,7 @@ export class PassThroughCandidateReranker implements SkillCandidateReranker {
 export class HybridRoutingStrategy implements SkillRoutingStrategy {
   constructor(
     private readonly backend: SkillSearchBackend,
-    private readonly reranker: SkillCandidateReranker = new PassThroughCandidateReranker()
+    private readonly reranker: SkillCandidateReranker = new PassThroughCandidateReranker(),
   ) {}
 
   resolve(query: string, filters: SearchFilters, limit: number): SearchResult[] {

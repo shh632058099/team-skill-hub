@@ -89,7 +89,12 @@ export const REVIEW_STATUS_GROUPS: ReviewStatusGroup[] = [
 ];
 
 const REVIEW_KINDS = new Set<ReviewItemKind>(["candidate", "skill-bundle"]);
-const REVIEW_CONTENT_TYPES = new Set<ReviewContentType>(["knowledge", "legacy-skill", "skill-bundle-skill", "skill-bundle-collection"]);
+const REVIEW_CONTENT_TYPES = new Set<ReviewContentType>([
+  "knowledge",
+  "legacy-skill",
+  "skill-bundle-skill",
+  "skill-bundle-collection",
+]);
 const REVIEW_STATUS_SET = new Set<string>(REVIEW_STATUS_GROUPS);
 
 function statusGroup(status: string): ReviewStatusGroup {
@@ -111,16 +116,21 @@ export function projectCandidateReviewItem(candidate: KnowledgeCandidate): Revie
     submitter: candidate.actorId,
     reviewer: candidate.reviewer,
     updatedAt: candidate.updatedAt,
-    publication: candidate.publication ? {
-      provider: candidate.publication.provider,
-      mergeRequestIid: candidate.publication.mergeRequestIid,
-      mergeRequestUrl: candidate.publication.mergeRequestUrl,
-      mergeRequestState: candidate.publication.mergeRequestState,
-    } : undefined,
+    publication: candidate.publication
+      ? {
+          provider: candidate.publication.provider,
+          mergeRequestIid: candidate.publication.mergeRequestIid,
+          mergeRequestUrl: candidate.publication.mergeRequestUrl,
+          mergeRequestState: candidate.publication.mergeRequestState,
+        }
+      : undefined,
   };
 }
 
-export function projectSkillBundleReviewItem(record: SkillBundleImport, snapshotSummary: SkillBundleSnapshotSummary = {}): ReviewItem {
+export function projectSkillBundleReviewItem(
+  record: SkillBundleImport,
+  snapshotSummary: SkillBundleSnapshotSummary = {},
+): ReviewItem {
   const publication = record.publication?.kind === "pull-request" ? record.publication : undefined;
   return {
     kind: "skill-bundle",
@@ -140,12 +150,14 @@ export function projectSkillBundleReviewItem(record: SkillBundleImport, snapshot
     skillCount: snapshotSummary.skillCount,
     fileCount: snapshotSummary.fileCount,
     totalBytes: snapshotSummary.totalBytes,
-    publication: publication ? {
-      provider: publication.provider,
-      mergeRequestIid: publication.mergeRequestIid,
-      mergeRequestUrl: publication.mergeRequestUrl,
-      mergeRequestState: publication.mergeRequestState,
-    } : undefined,
+    publication: publication
+      ? {
+          provider: publication.provider,
+          mergeRequestIid: publication.mergeRequestIid,
+          mergeRequestUrl: publication.mergeRequestUrl,
+          mergeRequestState: publication.mergeRequestState,
+        }
+      : undefined,
   };
 }
 
@@ -167,7 +179,17 @@ export function filterReviewItems(items: ReviewItem[], query: ReviewItemsQuery):
     if (query.skillCollection && item.skillCollection !== query.skillCollection) return false;
     if (query.importType && item.importType !== query.importType) return false;
     if (needle) {
-      const searchable = [item.id, item.title, item.status, item.sourceType, item.repository, item.namespace, item.skillCollection, item.reviewer, item.importType]
+      const searchable = [
+        item.id,
+        item.title,
+        item.status,
+        item.sourceType,
+        item.repository,
+        item.namespace,
+        item.skillCollection,
+        item.reviewer,
+        item.importType,
+      ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -178,8 +200,8 @@ export function filterReviewItems(items: ReviewItem[], query: ReviewItemsQuery):
 }
 
 export function sortReviewItems(items: ReviewItem[]): ReviewItem[] {
-  return [...items].sort((a, b) =>
-    b.updatedAt.localeCompare(a.updatedAt) || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id)
+  return [...items].sort(
+    (a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id),
   );
 }
 
@@ -193,7 +215,11 @@ export function normalizeReviewOffset(value: ReviewItemsQuery["cursor"]): number
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
 }
 
-export function paginateReviewItems(items: ReviewItem[], query: ReviewItemsQuery, total = items.length): { items: ReviewItem[]; page: ReviewPage } {
+export function paginateReviewItems(
+  items: ReviewItem[],
+  query: ReviewItemsQuery,
+  total = items.length,
+): { items: ReviewItem[]; page: ReviewPage } {
   const limit = normalizeReviewLimit(query.limit);
   const offset = normalizeReviewOffset(query.cursor);
   const pageItems = items.slice(offset, offset + limit);
@@ -226,8 +252,11 @@ export interface ReviewCollectorOptions {
   bundleSnapshotSummary?: (record: SkillBundleImport) => SkillBundleSnapshotSummary | undefined;
 }
 
-export async function collectReviewItemsBounded(query: ReviewItemsQuery, options: ReviewCollectorOptions): Promise<ReviewItem[]> {
-  const targetCount = options.targetCount ?? (normalizeReviewOffset(query.cursor) + normalizeReviewLimit(query.limit));
+export async function collectReviewItemsBounded(
+  query: ReviewItemsQuery,
+  options: ReviewCollectorOptions,
+): Promise<ReviewItem[]> {
+  const targetCount = options.targetCount ?? normalizeReviewOffset(query.cursor) + normalizeReviewLimit(query.limit);
   const pageSize = Math.max(1, Math.min(options.pageSize ?? 100, 100));
   const maxSourceRows = Math.max(pageSize, options.maxSourceRows ?? 1000);
   const collected: ReviewItem[] = [];
@@ -269,22 +298,30 @@ export async function collectReviewItemsBounded(query: ReviewItemsQuery, options
   };
 
   const candidateTypeApplicable = !query.type || query.type === "knowledge" || query.type === "legacy-skill";
-  const bundleTypeApplicable = !query.type || query.type === "skill-bundle-skill" || query.type === "skill-bundle-collection";
-  const candidateApplicable = query.kind !== "skill-bundle" && candidateTypeApplicable && !query.namespace && !query.importType;
-  const bundleApplicable = query.kind !== "candidate" && bundleTypeApplicable && (!query.skillCollection || query.skillCollection === "rd-skills");
+  const bundleTypeApplicable =
+    !query.type || query.type === "skill-bundle-skill" || query.type === "skill-bundle-collection";
+  const candidateApplicable =
+    query.kind !== "skill-bundle" && candidateTypeApplicable && !query.namespace && !query.importType;
+  const bundleApplicable =
+    query.kind !== "candidate" &&
+    bundleTypeApplicable &&
+    (!query.skillCollection || query.skillCollection === "rd-skills");
 
   await collectSource("candidate", candidateApplicable, options.fetchCandidates, projectCandidateReviewItem);
-  await collectSource(
-    "skill-bundle",
-    bundleApplicable,
-    options.fetchBundles,
-    (record) => projectSkillBundleReviewItem(record, options.bundleSnapshotSummary?.(record)),
+  await collectSource("skill-bundle", bundleApplicable, options.fetchBundles, (record) =>
+    projectSkillBundleReviewItem(record, options.bundleSnapshotSummary?.(record)),
   );
   return filterReviewItems(collected, filterQuery);
 }
 
-export function summarizeReviewItems(items: ReviewItem[]): { counts: Record<ReviewStatusGroup, number>; total: number } {
-  const counts = Object.fromEntries(REVIEW_STATUS_GROUPS.map((status) => [status, 0])) as Record<ReviewStatusGroup, number>;
+export function summarizeReviewItems(items: ReviewItem[]): {
+  counts: Record<ReviewStatusGroup, number>;
+  total: number;
+} {
+  const counts = Object.fromEntries(REVIEW_STATUS_GROUPS.map((status) => [status, 0])) as Record<
+    ReviewStatusGroup,
+    number
+  >;
   for (const item of items) counts[item.statusGroup] += 1;
   return { counts, total: items.length };
 }

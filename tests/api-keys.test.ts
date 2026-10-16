@@ -13,7 +13,7 @@ test("managed API key authenticates without persisting plaintext", async () => {
     await store.load();
     const created = await store.create({
       label: "Codex",
-      principal: { id: "biao", roles: ["developer", "internal"], tenantId: "rd" }
+      principal: { id: "biao", roles: ["developer", "internal"], tenantId: "rd" },
     });
 
     assert.match(created.apiKey, /^skh_/);
@@ -24,21 +24,16 @@ test("managed API key authenticates without persisting plaintext", async () => {
 
     const auth = new ApiKeyAuthenticationProvider({});
     auth.replaceManagedKeys(store.snapshot());
-    const principal = auth.authenticate(
-      new Headers({ "x-skill-hub-api-key": created.apiKey })
-    );
+    const principal = auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey }));
     assert.deepEqual(principal, {
       id: "biao",
       roles: ["developer", "internal"],
-      tenantId: "rd"
+      tenantId: "rd",
     });
 
     await store.update(created.record.id, { enabled: false });
     auth.replaceManagedKeys(store.snapshot());
-    assert.throws(
-      () => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
-      /Invalid API key/
-    );
+    assert.throws(() => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })), /Invalid API key/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -51,31 +46,28 @@ test("deleted managed API key is removed from persistence and authentication imm
     await store.load();
     const created = await store.create({
       label: "Temporary Codex",
-      principal: { id: "temporary-user", roles: ["developer"], tenantId: "rd" }
+      principal: { id: "temporary-user", roles: ["developer"], tenantId: "rd" },
     });
     const auth = new ApiKeyAuthenticationProvider({});
     auth.replaceManagedKeys(store.snapshot());
-    assert.equal(
-      auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })).id,
-      "temporary-user"
-    );
+    assert.equal(auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })).id, "temporary-user");
 
     assert.equal(await store.delete(created.record.id), true);
     auth.replaceManagedKeys(store.snapshot());
-    assert.throws(
-      () => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
-      /Invalid API key/
-    );
+    assert.throws(() => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })), /Invalid API key/);
     assert.equal(await store.delete(created.record.id), false);
 
     const reloaded = new ManagedApiKeyStore(dir);
     await reloaded.load();
-    assert.equal(reloaded.list().some((item) => item.id === created.record.id), false);
+    assert.equal(
+      reloaded.list().some((item) => item.id === created.record.id),
+      false,
+    );
     const reloadedAuth = new ApiKeyAuthenticationProvider({});
     reloadedAuth.replaceManagedKeys(reloaded.snapshot());
     assert.throws(
       () => reloadedAuth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
-      /Invalid API key/
+      /Invalid API key/,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -89,7 +81,7 @@ test("rotated managed API key invalidates the previous key without persisting pl
     await store.load();
     const created = await store.create({
       label: "Rotating Codex",
-      principal: { id: "rotating-user", roles: ["developer"], tenantId: "rd" }
+      principal: { id: "rotating-user", roles: ["developer"], tenantId: "rd" },
     });
     const rotated = await store.rotate(created.record.id);
 
@@ -106,14 +98,8 @@ test("rotated managed API key invalidates the previous key without persisting pl
 
     const auth = new ApiKeyAuthenticationProvider({});
     auth.replaceManagedKeys(store.snapshot());
-    assert.throws(
-      () => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })),
-      /Invalid API key/
-    );
-    assert.equal(
-      auth.authenticate(new Headers({ "x-skill-hub-api-key": rotated.apiKey })).id,
-      "rotating-user"
-    );
+    assert.throws(() => auth.authenticate(new Headers({ "x-skill-hub-api-key": created.apiKey })), /Invalid API key/);
+    assert.equal(auth.authenticate(new Headers({ "x-skill-hub-api-key": rotated.apiKey })).id, "rotating-user");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -126,7 +112,7 @@ test("revealed API key survives store reload while remaining encrypted at rest",
     await store.load();
     const created = await store.create({
       label: "Revealable Codex",
-      principal: { id: "reveal-user", roles: ["developer"], tenantId: "rd" }
+      principal: { id: "reveal-user", roles: ["developer"], tenantId: "rd" },
     });
 
     const reloaded = new ManagedApiKeyStore(dir);
@@ -147,21 +133,15 @@ test("bootstrap API keys remain compatible with managed keys", async () => {
     await store.load();
     const created = await store.create({
       label: "Customer",
-      principal: { id: "customer-a", roles: ["customer"], tenantId: "customer-a" }
+      principal: { id: "customer-a", roles: ["customer"], tenantId: "customer-a" },
     });
     const auth = new ApiKeyAuthenticationProvider({
-      bootstrap: { id: "bootstrap-user", roles: ["developer"], tenantId: "rd" }
+      bootstrap: { id: "bootstrap-user", roles: ["developer"], tenantId: "rd" },
     });
     auth.replaceManagedKeys(store.snapshot());
 
-    assert.equal(
-      auth.authenticate(new Headers({ "x-skill-hub-api-key": "bootstrap" })).id,
-      "bootstrap-user"
-    );
-    assert.equal(
-      auth.authenticate(new Headers({ authorization: `Bearer ${created.apiKey}` })).id,
-      "customer-a"
-    );
+    assert.equal(auth.authenticate(new Headers({ "x-skill-hub-api-key": "bootstrap" })).id, "bootstrap-user");
+    assert.equal(auth.authenticate(new Headers({ authorization: `Bearer ${created.apiKey}` })).id, "customer-a");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

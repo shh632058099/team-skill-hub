@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   DATA_GOVERNANCE_POLICY,
   governanceRuleForObservabilityFile,
-  listDataGovernanceRules
+  listDataGovernanceRules,
 } from "../src/data-governance.js";
 
 test("data governance blocks persistence for sensitive raw data classes", () => {

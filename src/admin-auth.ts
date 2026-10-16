@@ -38,7 +38,6 @@ function constantTimeEqual(left: string, right: string): boolean {
   return timingSafeEqual(secretDigest(left), secretDigest(right));
 }
 
-
 export class AdminLoginAttemptLimiter {
   private readonly attempts = new Map<string, { failures: number; startedAt: number }>();
   private readonly maxFailures: number;
@@ -54,7 +53,10 @@ export class AdminLoginAttemptLimiter {
   private current(key: string) {
     const value = this.attempts.get(key);
     if (!value) return undefined;
-    if (this.now() - value.startedAt >= this.windowMs) { this.attempts.delete(key); return undefined; }
+    if (this.now() - value.startedAt >= this.windowMs) {
+      this.attempts.delete(key);
+      return undefined;
+    }
     return value;
   }
 
@@ -68,7 +70,9 @@ export class AdminLoginAttemptLimiter {
     else this.attempts.set(key, { failures: 1, startedAt: this.now() });
   }
 
-  recordSuccess(key: string): void { this.attempts.delete(key); }
+  recordSuccess(key: string): void {
+    this.attempts.delete(key);
+  }
 
   retryAfterSeconds(key: string): number {
     const current = this.current(key);
@@ -88,7 +92,8 @@ export class AdminSessionManager {
 
   constructor(options: AdminSessionManagerOptions) {
     this.username = options.username?.trim() || "admin";
-    this.credential = options.password !== undefined && options.password !== "" ? options.password : options.apiKey || undefined;
+    this.credential =
+      options.password !== undefined && options.password !== "" ? options.password : options.apiKey || undefined;
     this.ttlSeconds = Math.max(1, Math.floor(options.ttlSeconds ?? 8 * 60 * 60));
     this.maxSessions = Math.max(1, Math.floor(options.maxSessions ?? 20));
     this.now = options.now ?? Date.now;
@@ -118,7 +123,10 @@ export class AdminSessionManager {
     }
   }
 
-  createSession(metadata: { userAgent?: string; remoteAddress?: string }): { token: string; session: AdminSessionView } {
+  createSession(metadata: { userAgent?: string; remoteAddress?: string }): {
+    token: string;
+    session: AdminSessionView;
+  } {
     this.cleanupExpired();
     while (this.sessions.size >= this.maxSessions) {
       const oldest = [...this.sessions.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
@@ -135,7 +143,7 @@ export class AdminSessionManager {
       lastSeenAt: new Date(now).toISOString(),
       expiresAt: new Date(now + this.ttlSeconds * 1000).toISOString(),
       userAgent: metadata.userAgent?.slice(0, 300),
-      remoteAddress: metadata.remoteAddress?.slice(0, 100)
+      remoteAddress: metadata.remoteAddress?.slice(0, 100),
     };
     this.sessions.set(record.id, record);
     this.tokenIndex.set(record.tokenHash, record.id);
@@ -191,7 +199,7 @@ export class AdminSessionManager {
       expiresAt: record.expiresAt,
       userAgent: record.userAgent,
       remoteAddress: record.remoteAddress,
-      current
+      current,
     };
   }
 }
@@ -215,8 +223,10 @@ export function serializeAdminSessionCookie(token: string, maxAgeSeconds: number
     "HttpOnly",
     "SameSite=Strict",
     "Max-Age=" + Math.max(1, Math.floor(maxAgeSeconds)),
-    secure ? "Secure" : undefined
-  ].filter(Boolean).join("; ");
+    secure ? "Secure" : undefined,
+  ]
+    .filter(Boolean)
+    .join("; ");
 }
 
 export function clearAdminSessionCookie(secure: boolean): string {
@@ -227,8 +237,10 @@ export function clearAdminSessionCookie(secure: boolean): string {
     "SameSite=Strict",
     "Max-Age=0",
     "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-    secure ? "Secure" : undefined
-  ].filter(Boolean).join("; ");
+    secure ? "Secure" : undefined,
+  ]
+    .filter(Boolean)
+    .join("; ");
 }
 
 export function safeAdminNextPath(value: string | undefined): string {
@@ -236,7 +248,8 @@ export function safeAdminNextPath(value: string | undefined): string {
   try {
     const url = new URL(value, "http://admin.local");
     if (url.origin !== "http://admin.local") return "/admin";
-    if ((url.pathname !== "/admin" && !url.pathname.startsWith("/admin/")) || url.pathname === "/admin/login") return "/admin";
+    if ((url.pathname !== "/admin" && !url.pathname.startsWith("/admin/")) || url.pathname === "/admin/login")
+      return "/admin";
     return url.pathname + url.search + url.hash;
   } catch {
     return "/admin";

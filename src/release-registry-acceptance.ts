@@ -39,7 +39,11 @@ function parseDigests(value: string, label: string): string[] {
   } catch {
     throw new Error(label + " RepoDigests output is not valid JSON");
   }
-  if (!Array.isArray(parsed) || !parsed.length || !parsed.every((item) => typeof item === "string" && item.includes("@sha256:"))) {
+  if (
+    !Array.isArray(parsed) ||
+    !parsed.length ||
+    !parsed.every((item) => typeof item === "string" && item.includes("@sha256:"))
+  ) {
     throw new Error(label + " has no immutable registry digest evidence");
   }
   return parsed as string[];
@@ -47,7 +51,7 @@ function parseDigests(value: string, label: string): string[] {
 
 export async function validateRegistryRelease(
   options: RegistryAcceptanceOptions,
-  docker: DockerCommandRunner
+  docker: DockerCommandRunner,
 ): Promise<RegistryAcceptanceReport> {
   assertImmutableReference(options.releaseImage, "release image");
   assertImmutableReference(options.shaImage, "SHA image");
@@ -90,11 +94,13 @@ export async function validateRegistryRelease(
       "node",
       options.releaseImage,
       "-p",
-      "require('/app/package.json').version"
+      "require('/app/package.json').version",
     ])
   ).trim();
   if (imageVersion !== options.expectedVersion) {
-    throw new Error("Release image package version " + imageVersion + " does not match expected " + options.expectedVersion);
+    throw new Error(
+      "Release image package version " + imageVersion + " does not match expected " + options.expectedVersion,
+    );
   }
 
   return {
@@ -109,6 +115,6 @@ export async function validateRegistryRelease(
     rollbackImageId,
     releaseDigests,
     shaDigests,
-    rollbackDigests
+    rollbackDigests,
   };
 }

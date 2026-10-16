@@ -34,9 +34,9 @@ test("Codex shell hook posts structured unittest evidence", async () => {
         "capture_stop_message=true",
         "runtime_version=1.2.0",
         "hook_schema_version=1",
-        ""
+        "",
       ].join("\n"),
-      "utf8"
+      "utf8",
     );
     const payload = JSON.stringify({
       hook_event_name: "PostToolUse",
@@ -46,10 +46,9 @@ test("Codex shell hook posts structured unittest evidence", async () => {
       tool_name: "Bash",
       tool_use_id: "tool-hook-test",
       tool_response: {
-        aggregated_output:
-          "test_one ... ok\ntest_two ... ok\ntest_three ... ok\n\nRan 3 tests in 0.001s\n\nOK\n",
-        exit_code: 0
-      }
+        aggregated_output: "test_one ... ok\ntest_two ... ok\ntest_three ... ok\n\nRan 3 tests in 0.001s\n\nOK\n",
+        exit_code: 0,
+      },
     });
     await new Promise<void>((resolve, reject) => {
       const child = spawn("bash", ["scripts/team-skill-hub-hook.sh"], {
@@ -57,9 +56,9 @@ test("Codex shell hook posts structured unittest evidence", async () => {
         env: {
           ...process.env,
           TEAM_SKILL_HUB_HOOK_CONFIG: config,
-          TEST_HOOK_MARKER: "test-marker"
+          TEST_HOOK_MARKER: "test-marker",
         },
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
       });
       let stderr = "";
       child.stderr.setEncoding("utf8");
@@ -82,7 +81,7 @@ test("Codex shell hook posts structured unittest evidence", async () => {
       tests_passed: 3,
       tests_failed: 0,
       success: true,
-      status: "passed"
+      status: "passed",
     });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

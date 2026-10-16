@@ -10,7 +10,8 @@ import { SkillBundleReviewStaleError, type SkillBundlePublisher } from "../src/s
 import { RequiredFieldsRule, RepositoryVisibilityRule, SkillDependencyRule, UniqueNameRule } from "../src/skills.js";
 import type { Principal, RepositoryConfig } from "../src/types.js";
 
-const skill = (name: string) => `---\nschema_version: 1\nname: ${name}\ndescription: ${name}\nmetadata:\n  owner: team\n  audience: [developer]\n  domain: [ota]\n  category: [engineering]\n  keywords: [ota]\n  visibility: [internal]\n  priority: 50\n---\n\n# ${name}\n`;
+const skill = (name: string) =>
+  `---\nschema_version: 1\nname: ${name}\ndescription: ${name}\nmetadata:\n  owner: team\n  audience: [developer]\n  domain: [ota]\n  category: [engineering]\n  keywords: [ota]\n  visibility: [internal]\n  priority: 50\n---\n\n# ${name}\n`;
 
 const repository: RepositoryConfig = {
   id: "rd-skills",
@@ -32,8 +33,8 @@ const repository: RepositoryConfig = {
     projectPath: "example/rd-skills",
     tokenEnv: "TEST_TOKEN",
     targetBranch: "master",
-    branchPrefix: "skill-hub-skill"
-  }
+    branchPrefix: "skill-hub-skill",
+  },
 };
 
 const principal: Principal = { id: "user-1", tenantId: "tenant-1", roles: [] };
@@ -50,7 +51,7 @@ async function fixture() {
     storage,
     rules: [new RequiredFieldsRule(), new UniqueNameRule(), new SkillDependencyRule(), new RepositoryVisibilityRule()],
     materialize: async () => ({ sourceRoot, revision: "rev-1" }),
-    authorize: (_who, repo) => repo.id === "rd-skills"
+    authorize: (_who, repo) => repo.id === "rd-skills",
   });
   return { dir, sourceRoot, db, service };
 }
@@ -76,7 +77,7 @@ async function publisherFixture(finalTreeMatches = true) {
         deleted: 0,
         expectedTreeSha256: snapshot.sha256,
         pullRequestCreatedAt: "2026-10-14T01:00:00.000Z",
-        lastCheckedAt: "2026-10-14T01:00:00.000Z"
+        lastCheckedAt: "2026-10-14T01:00:00.000Z",
       };
     },
     async reconcile(publication: any) {
@@ -88,18 +89,18 @@ async function publisherFixture(finalTreeMatches = true) {
           mergedAt: "2026-10-14T02:00:00.000Z",
           lastCheckedAt: "2026-10-14T02:00:00.000Z",
           finalTreeSha256: finalTreeMatches ? publication.expectedTreeSha256 : "different",
-          finalTreeVerifiedAt: "2026-10-14T02:00:00.000Z"
+          finalTreeVerifiedAt: "2026-10-14T02:00:00.000Z",
         },
-        finalTreeMatches
+        finalTreeMatches,
       };
-    }
+    },
   } as unknown as SkillBundlePublisher;
   const service = new SkillBundleService({
     storage: (base.service as any).options.storage,
     rules: [new RequiredFieldsRule(), new UniqueNameRule(), new SkillDependencyRule(), new RepositoryVisibilityRule()],
     materialize: async () => ({ sourceRoot: base.sourceRoot, revision: "rev-1" }),
     authorize: (_who, repo) => repo.id === "rd-skills",
-    publisher
+    publisher,
   });
   return { ...base, service, calls };
 }
@@ -113,7 +114,7 @@ test("submit validates the whole repository while replacing only the skill root"
       skillPath: "design",
       files: [{ path: "SKILL.md", content: skill("ota-design") }],
       sourceType: "mcp",
-      submissionKey: "key-1"
+      submissionKey: "key-1",
     });
     assert.equal(created.status, "pending");
     assert.equal(created.replacementRoot, "skills/ota/design");
@@ -135,7 +136,7 @@ test("approval stores a review baseline and later target changes make it stale",
       importType: "skill",
       skillPath: "design",
       files: [{ path: "SKILL.md", content: skill("ota-design") }],
-      sourceType: "mcp"
+      sourceType: "mcp",
     });
     const approved = await service.review(adminPrincipal, repository, created.id, "approved", "looks good");
     assert.equal(approved.status, "approved");
@@ -158,7 +159,7 @@ test("reject does not require the current target tree to remain valid", async ()
       importType: "skill",
       skillPath: "design",
       files: [{ path: "SKILL.md", content: skill("ota-design") }],
-      sourceType: "mcp"
+      sourceType: "mcp",
     });
     await writeFile(path.join(sourceRoot, "skills", "ota", "usage", "SKILL.md"), "not valid skill");
     const rejected = await service.review(adminPrincipal, repository, created.id, "rejected", "not wanted");
@@ -174,8 +175,12 @@ test("approval cannot overwrite a concurrent rejection", async () => {
   const base = await fixture();
   let entered!: () => void;
   let release!: () => void;
-  const previewEntered = new Promise<void>((resolve) => { entered = resolve; });
-  const previewRelease = new Promise<void>((resolve) => { release = resolve; });
+  const previewEntered = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const previewRelease = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   let blockPreview = false;
   const service = new SkillBundleService({
     storage: (base.service as any).options.storage,
@@ -187,12 +192,15 @@ test("approval cannot overwrite a concurrent rejection", async () => {
       }
       return { sourceRoot: base.sourceRoot, revision: "rev-1" };
     },
-    authorize: (_who, repo) => repo.id === "rd-skills"
+    authorize: (_who, repo) => repo.id === "rd-skills",
   });
   try {
     const created = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
     });
     blockPreview = true;
     const approving = service.review(adminPrincipal, repository, created.id, "approved");
@@ -211,13 +219,21 @@ test("approval cannot overwrite a concurrent rejection", async () => {
 test("unauthorized principal cannot submit", async () => {
   const { dir, db, service } = await fixture();
   try {
-    await assert.rejects(() => service.submit({ ...principal, id: "blocked" }, { ...repository, id: "other" }, {
-      namespace: "ota",
-      importType: "skill",
-      skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }],
-      sourceType: "mcp"
-    }), /not authorized/i);
+    await assert.rejects(
+      () =>
+        service.submit(
+          { ...principal, id: "blocked" },
+          { ...repository, id: "other" },
+          {
+            namespace: "ota",
+            importType: "skill",
+            skillPath: "design",
+            files: [{ path: "SKILL.md", content: skill("ota-design") }],
+            sourceType: "mcp",
+          },
+        ),
+      /not authorized/i,
+    );
   } finally {
     db.close();
     await rm(dir, { recursive: true, force: true });
@@ -228,19 +244,28 @@ test("non-admin submitter cannot review or publish a Bundle", async () => {
   const { dir, db, service } = await fixture();
   try {
     const created = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
     });
     await assert.rejects(() => service.review(principal, repository, created.id, "approved"), /administrator role/i);
-  } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("admin can delete only unpublished Bundle states", async () => {
   const { dir, db, service } = await fixture();
   try {
     const first = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "auth-check",
-      files: [{ path: "SKILL.md", content: skill("ota-auth-check") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "auth-check",
+      files: [{ path: "SKILL.md", content: skill("ota-auth-check") }],
+      sourceType: "mcp",
     });
     await assert.rejects(() => service.delete(principal, repository, first.id), /administrator role/i);
 
@@ -248,10 +273,16 @@ test("admin can delete only unpublished Bundle states", async () => {
     const allowed = ["pending", "approved", "rejected", "publish_failed", "review_stale"] as const;
     for (const [index, status] of allowed.entries()) {
       const created = await service.submit(principal, repository, {
-        namespace: "ota", importType: "skill", skillPath: `delete-${index}`,
-        files: [{ path: "SKILL.md", content: skill(`ota-delete-${index}`) }], sourceType: "mcp"
+        namespace: "ota",
+        importType: "skill",
+        skillPath: `delete-${index}`,
+        files: [{ path: "SKILL.md", content: skill(`ota-delete-${index}`) }],
+        sourceType: "mcp",
       });
-      const current = status === "pending" ? created : storage.updateImport({ ...created, status, updatedAt: `2026-10-14T03:0${index}:00.000Z` });
+      const current =
+        status === "pending"
+          ? created
+          : storage.updateImport({ ...created, status, updatedAt: `2026-10-14T03:0${index}:00.000Z` });
       assert.equal(await service.delete(adminPrincipal, repository, current.id), true, `${status} should be deletable`);
       assert.equal(service.getImport(current.id), undefined);
     }
@@ -259,8 +290,11 @@ test("admin can delete only unpublished Bundle states", async () => {
     const forbidden = ["publishing", "published", "published_drifted"] as const;
     for (const [index, status] of forbidden.entries()) {
       const created = await service.submit(principal, repository, {
-        namespace: "ota", importType: "skill", skillPath: `keep-${index}`,
-        files: [{ path: "SKILL.md", content: skill(`ota-keep-${index}`) }], sourceType: "mcp"
+        namespace: "ota",
+        importType: "skill",
+        skillPath: `keep-${index}`,
+        files: [{ path: "SKILL.md", content: skill(`ota-keep-${index}`) }],
+        sourceType: "mcp",
       });
       const current = storage.updateImport({ ...created, status, updatedAt: `2026-10-14T04:0${index}:00.000Z` });
       await assert.rejects(() => service.delete(adminPrincipal, repository, current.id), /cannot be deleted/i);
@@ -279,13 +313,18 @@ test("publisher-time target drift returns review_stale instead of publish_failed
     materialize: async () => ({ sourceRoot: base.sourceRoot, revision: "rev-1" }),
     authorize: (_who, repo) => repo.id === "rd-skills",
     publisher: {
-      async publish() { throw new SkillBundleReviewStaleError(); }
-    } as unknown as SkillBundlePublisher
+      async publish() {
+        throw new SkillBundleReviewStaleError();
+      },
+    } as unknown as SkillBundlePublisher,
   });
   try {
     const created = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
     });
     await service.review(adminPrincipal, repository, created.id, "approved");
     const stale = await service.publish(adminPrincipal, repository, created.id);
@@ -301,8 +340,11 @@ test("publish marks PR workflow publishing and reconcile marks exact merged tree
   const { dir, db, service, calls } = await publisherFixture(true);
   try {
     const created = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
     });
     await service.review(adminPrincipal, repository, created.id, "approved");
     const publishing = await service.publish(adminPrincipal, repository, created.id);
@@ -311,36 +353,53 @@ test("publish marks PR workflow publishing and reconcile marks exact merged tree
     const published = await service.reconcile(adminPrincipal, repository, created.id);
     assert.equal(published.status, "published");
     assert.deepEqual(calls, ["publish", "reconcile"]);
-  } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("reconcile marks merged but divergent final tree published_drifted", async () => {
   const { dir, db, service } = await publisherFixture(false);
   try {
     const created = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
     });
     await service.review(adminPrincipal, repository, created.id, "approved");
     await service.publish(adminPrincipal, repository, created.id);
     const drifted = await service.reconcile(adminPrincipal, repository, created.id);
     assert.equal(drifted.status, "published_drifted");
-  } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("reconcile transport failure does not downgrade an already published import", async () => {
   const { dir, db, service } = await publisherFixture(true);
   try {
     const created = await service.submit(principal, repository, {
-      namespace: "ota", importType: "skill", skillPath: "design",
-      files: [{ path: "SKILL.md", content: skill("ota-design") }], sourceType: "mcp"
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
     });
     await service.review(adminPrincipal, repository, created.id, "approved");
     await service.publish(adminPrincipal, repository, created.id);
     const published = await service.reconcile(adminPrincipal, repository, created.id);
     assert.equal(published.status, "published");
-    (service as any).publisher.reconcile = async () => { throw new Error("temporary remote failure"); };
+    (service as any).publisher.reconcile = async () => {
+      throw new Error("temporary remote failure");
+    };
     await assert.rejects(() => service.reconcile(adminPrincipal, repository, created.id), /temporary remote failure/);
     assert.equal(service.getImport(created.id)?.status, "published");
-  } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -14,12 +14,18 @@ if (!out) {
 } else {
   try {
     const manifest = await createDataBackup(dataDir, out, { sqlitePath: process.env.OBSERVABILITY_SQLITE_PATH });
-    console.log(JSON.stringify({
-      backup: path.resolve(out),
-      dataDir,
-      createdAt: manifest.createdAt,
-      files: manifest.files.length
-    }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          backup: path.resolve(out),
+          dataDir,
+          createdAt: manifest.createdAt,
+          files: manifest.files.length,
+        },
+        null,
+        2,
+      ),
+    );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

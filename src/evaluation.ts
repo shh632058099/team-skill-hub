@@ -10,7 +10,7 @@ import type {
   EvaluationSuite,
   KnowledgeDocument,
   PromptArtifact,
-  Skill
+  Skill,
 } from "./types.js";
 import { scanAgents, scanPrompts, searchArtifacts } from "./artifacts.js";
 import { scanSkills } from "./skills.js";
@@ -49,10 +49,7 @@ async function walkEvaluationFiles(root: string): Promise<string[]> {
   return result.sort();
 }
 
-export async function scanEvaluationSuites(
-  root: string,
-  repositoryId: string
-): Promise<EvaluationSuite[]> {
+export async function scanEvaluationSuites(root: string, repositoryId: string): Promise<EvaluationSuite[]> {
   const suites: EvaluationSuite[] = [];
   for (const file of await walkEvaluationFiles(root)) {
     const raw = YAML.parse(await readFile(file, "utf8")) as EvaluationFile;
@@ -77,10 +74,7 @@ export async function scanEvaluationSuites(
       if (!testCase.expect || typeof testCase.expect !== "object") {
         throw new Error(`Evaluation suite ${raw.id}: case ${testCase.id} requires expect`);
       }
-      if (
-        (testCase.operation === "search" || testCase.operation === "resolve") &&
-        !testCase.query
-      ) {
+      if ((testCase.operation === "search" || testCase.operation === "resolve") && !testCase.query) {
         throw new Error(`Evaluation suite ${raw.id}: case ${testCase.id} requires query`);
       }
       if (testCase.operation === "get" && !testCase.name) {
@@ -99,7 +93,7 @@ export async function scanEvaluationSuites(
       description: raw.description,
       repositoryId,
       relativePath: path.relative(root, file).replaceAll("\\", "/"),
-      cases: raw.cases
+      cases: raw.cases,
     });
   }
   return suites;
@@ -108,14 +102,14 @@ export async function scanEvaluationSuites(
 export async function loadEvaluationSnapshot(
   root: string,
   repositoryId: string,
-  revision: string
+  revision: string,
 ): Promise<EvaluationSnapshot> {
   const [skills, prompts, agents, knowledge, suites] = await Promise.all([
     scanSkills(root, repositoryId, revision),
     scanPrompts(root, repositoryId, revision),
     scanAgents(root, repositoryId, revision),
     scanKnowledge(root, repositoryId, revision),
-    scanEvaluationSuites(root, repositoryId)
+    scanEvaluationSuites(root, repositoryId),
   ]);
   return { repositoryId, revision, root, skills, prompts, agents, knowledge, suites };
 }
@@ -131,10 +125,7 @@ function evaluateContent(content: string, contains?: string[]): string | undefin
   return undefined;
 }
 
-function evaluateCase(
-  testCase: EvaluationCase,
-  snapshot: EvaluationSnapshot
-): EvaluationCaseResult {
+function evaluateCase(testCase: EvaluationCase, snapshot: EvaluationSnapshot): EvaluationCaseResult {
   try {
     if (testCase.target === "skill") {
       if (testCase.operation === "get") {
@@ -154,17 +145,17 @@ function evaluateCase(
                 testCase.query!,
                 {
                   repositories: [snapshot.repositoryId],
-                  client: testCase.client
+                  client: testCase.client,
                 },
-                5
+                5,
               )
             : search.search(
                 testCase.query!,
                 {
                   repositories: [snapshot.repositoryId],
-                  client: testCase.client
+                  client: testCase.client,
                 },
-                5
+                5,
               );
         const selected = results[0]?.skill;
         const expected = testCase.expect.selected;
@@ -176,7 +167,7 @@ function evaluateCase(
           id: testCase.id,
           passed,
           message: passed ? "matched" : `expected ${expected ?? "a result"}, got ${selected?.name ?? "none"}`,
-          actual: results.map((item) => ({ name: item.skill.name, score: item.score }))
+          actual: results.map((item) => ({ name: item.skill.name, score: item.score })),
         };
       } finally {
         search.close();
@@ -187,12 +178,7 @@ function evaluateCase(
       const index = new KnowledgeIndex();
       try {
         index.rebuild(chunksForDocuments(snapshot.knowledge));
-        const results = index.search(
-          testCase.query!,
-          [snapshot.repositoryId],
-          5,
-          [snapshot.repositoryId]
-        );
+        const results = index.search(testCase.query!, [snapshot.repositoryId], 5, [snapshot.repositoryId]);
         const expectedPath = testCase.expect.selected!;
         const rankIndex = results.findIndex((item) => item.chunk.relativePath === expectedPath);
         const rank = rankIndex >= 0 ? rankIndex + 1 : undefined;
@@ -204,8 +190,8 @@ function evaluateCase(
           actual: results.map((item) => ({
             path: item.chunk.relativePath,
             chunkIndex: item.chunk.chunkIndex,
-            score: item.score
-          }))
+            score: item.score,
+          })),
         };
       } finally {
         index.close();
@@ -221,7 +207,7 @@ function evaluateCase(
         return { id: testCase.id, passed: true, message: "matched", actual: prompt.name };
       }
       const candidates = snapshot.prompts.filter(
-        (item) => !testCase.client || item.compatibility[testCase.client] !== false
+        (item) => !testCase.client || item.compatibility[testCase.client] !== false,
       );
       const results = searchArtifacts(testCase.query!, candidates, 5);
       const selected = results[0]?.artifact;
@@ -234,7 +220,7 @@ function evaluateCase(
         id: testCase.id,
         passed,
         message: passed ? "matched" : `expected ${expected ?? "a result"}, got ${selected?.name ?? "none"}`,
-        actual: results.map((item) => ({ name: item.artifact.name, score: item.score }))
+        actual: results.map((item) => ({ name: item.artifact.name, score: item.score })),
       };
     }
 
@@ -249,11 +235,11 @@ function evaluateCase(
         id: testCase.id,
         passed,
         message: passed ? "bindings matched" : "agent bindings do not match expectations",
-        actual: { skills: agent.skills, prompts: agent.prompts, tools: agent.tools }
+        actual: { skills: agent.skills, prompts: agent.prompts, tools: agent.tools },
       };
     }
     const candidates = snapshot.agents.filter(
-      (item) => !testCase.client || item.compatibility[testCase.client] !== false
+      (item) => !testCase.client || item.compatibility[testCase.client] !== false,
     );
     const results = searchArtifacts(testCase.query!, candidates, 5);
     const selected = results[0]?.artifact;
@@ -266,13 +252,13 @@ function evaluateCase(
       id: testCase.id,
       passed,
       message: passed ? "matched" : `expected ${expected ?? "a result"}, got ${selected?.name ?? "none"}`,
-      actual: results.map((item) => ({ name: item.artifact.name, score: item.score }))
+      actual: results.map((item) => ({ name: item.artifact.name, score: item.score })),
     };
   } catch (error) {
     return {
       id: testCase.id,
       passed: false,
-      message: error instanceof Error ? error.message : String(error)
+      message: error instanceof Error ? error.message : String(error),
     };
   }
 }
@@ -280,11 +266,11 @@ function evaluateCase(
 export function runEvaluationSuite(
   snapshot: EvaluationSnapshot,
   suite: EvaluationSuite,
-  baseline?: EvaluationRunResult
+  baseline?: EvaluationRunResult,
 ): EvaluationRunResult {
   const cases = suite.cases.map((testCase) => ({
     ...evaluateCase(testCase, snapshot),
-    expected: testCase.expect
+    expected: testCase.expect,
   }));
   const passed = cases.filter((item) => item.passed).length;
   const total = cases.length;
@@ -298,7 +284,7 @@ export function runEvaluationSuite(
     passed,
     failed: total - passed,
     passRate: total === 0 ? 0 : passed / total,
-    cases
+    cases,
   };
   const retrieval = suite.cases
     .map((testCase, index) => ({ testCase, result: cases[index]! }))
@@ -311,7 +297,7 @@ export function runEvaluationSuite(
       hitAt1: ranks.filter((rank) => rank !== undefined && rank <= 1).length / count,
       hitAt3: ranks.filter((rank) => rank !== undefined && rank <= 3).length / count,
       hitAt5: ranks.filter((rank) => rank !== undefined && rank <= 5).length / count,
-      mrr: ranks.reduce<number>((sum, rank) => sum + (rank === undefined ? 0 : 1 / rank), 0) / count
+      mrr: ranks.reduce<number>((sum, rank) => sum + (rank === undefined ? 0 : 1 / rank), 0) / count,
     };
   }
   if (baseline) {
@@ -363,7 +349,7 @@ export interface EvaluationGateResult {
 export function evaluateGate(
   runs: EvaluationRunResult[],
   thresholds: EvaluationGateThresholds = {},
-  missingBaselineSuites: string[] = []
+  missingBaselineSuites: string[] = [],
 ): EvaluationGateResult {
   const total = runs.reduce((sum, run) => sum + run.total, 0);
   const passed = runs.reduce((sum, run) => sum + run.passed, 0);
@@ -372,17 +358,15 @@ export function evaluateGate(
   const retrievalCases = retrievalRuns.reduce((sum, run) => sum + run.retrievalMetrics!.cases, 0);
   const weighted = (key: "hitAt1" | "hitAt3" | "hitAt5" | "mrr"): number | undefined =>
     retrievalCases
-      ? retrievalRuns.reduce(
-          (sum, run) => sum + run.retrievalMetrics![key] * run.retrievalMetrics!.cases,
-          0
-        ) / retrievalCases
+      ? retrievalRuns.reduce((sum, run) => sum + run.retrievalMetrics![key] * run.retrievalMetrics!.cases, 0) /
+        retrievalCases
       : undefined;
   const metrics = {
     passRate,
     hitAt1: weighted("hitAt1"),
     hitAt3: weighted("hitAt3"),
     hitAt5: weighted("hitAt5"),
-    mrr: weighted("mrr")
+    mrr: weighted("mrr"),
   };
   const blockingReasons: string[] = [];
   const warnings: string[] = [];
@@ -391,7 +375,7 @@ export function evaluateGate(
     label: string,
     value: number | undefined,
     blocking: number | undefined,
-    warning: number | undefined
+    warning: number | undefined,
   ) => {
     if (blocking !== undefined && value === undefined) {
       blockingReasons.push(label + " threshold configured but no metric was produced");
@@ -426,14 +410,14 @@ export function evaluateGate(
     ok: blockingReasons.length === 0,
     blockingReasons: [...new Set(blockingReasons)],
     warnings: [...new Set(warnings)],
-    metrics
+    metrics,
   };
 }
 
 export class EvaluationRunStore {
   constructor(
     private readonly dataDir: string,
-    private readonly maxRuns = 1000
+    private readonly maxRuns = 1000,
   ) {}
 
   private file(): string {

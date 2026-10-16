@@ -12,7 +12,7 @@ export const GENERIC_AGENT_EVENTS = [
   "PreCompact",
   "PostCompact",
   "Stop",
-  "SessionEnd"
+  "SessionEnd",
 ] as const satisfies readonly ClientHookEventName[];
 
 export interface ClientEventSchemaResolution {
@@ -24,7 +24,7 @@ export function resolveClientEventSchemaVersion(value: unknown): ClientEventSche
   if (value === undefined || value === null) {
     return {
       version: CURRENT_HOOK_SCHEMA_VERSION,
-      compatibility: "implicit-v1"
+      compatibility: "implicit-v1",
     };
   }
   if (
@@ -34,12 +34,12 @@ export function resolveClientEventSchemaVersion(value: unknown): ClientEventSche
     value > CURRENT_HOOK_SCHEMA_VERSION
   ) {
     throw new Error(
-      `Unsupported client event schema_version ${String(value)}; supported range is ${MIN_SUPPORTED_HOOK_SCHEMA_VERSION}..${CURRENT_HOOK_SCHEMA_VERSION}`
+      `Unsupported client event schema_version ${String(value)}; supported range is ${MIN_SUPPORTED_HOOK_SCHEMA_VERSION}..${CURRENT_HOOK_SCHEMA_VERSION}`,
     );
   }
   return {
     version: value,
-    compatibility: "explicit-current"
+    compatibility: "explicit-current",
   };
 }
 
@@ -76,10 +76,7 @@ function finiteNumber(value: unknown): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
-export function normalizeEngineeringEvidence(
-  toolName: string,
-  raw: unknown
-): EngineeringEvidence | undefined {
+export function normalizeEngineeringEvidence(toolName: string, raw: unknown): EngineeringEvidence | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const record = raw as Record<string, unknown>;
   const run = finiteNumber(record.tests_run);
@@ -88,11 +85,7 @@ export function normalizeEngineeringEvidence(
   const exitCode = finiteNumber(record.exit_code);
   const durationMs = finiteNumber(record.duration_ms);
   const success =
-    typeof record.success === "boolean"
-      ? record.success
-      : exitCode !== undefined
-        ? exitCode === 0
-        : undefined;
+    typeof record.success === "boolean" ? record.success : exitCode !== undefined ? exitCode === 0 : undefined;
   const status = typeof record.status === "string" ? record.status.slice(0, 80) : undefined;
 
   let type: EngineeringEvidenceType = "tool";
@@ -128,12 +121,12 @@ export function normalizeEngineeringEvidence(
           counts: {
             ...(run !== undefined ? { run } : {}),
             ...(passed !== undefined ? { passed } : {}),
-            ...(failed !== undefined ? { failed } : {})
-          }
+            ...(failed !== undefined ? { failed } : {}),
+          },
         }
       : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
-    ...(status !== undefined ? { status } : {})
+    ...(status !== undefined ? { status } : {}),
   };
 }
 

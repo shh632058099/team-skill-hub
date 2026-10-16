@@ -19,7 +19,7 @@ function tool(repositoryId: string, name: string, environments: string[]): ToolA
     keywords: [name],
     environments,
     capabilities: ["query"],
-    compatibility: {}
+    compatibility: {},
   };
 }
 
@@ -39,7 +39,7 @@ function agent(tools: string[]): AgentArtifact {
     skills: [],
     prompts: [],
     tools,
-    compatibility: {}
+    compatibility: {},
   };
 }
 
@@ -49,9 +49,9 @@ test("agent tool resolution prefers same repository and checks environment", () 
     [
       tool("shared-tools", "gitlab", ["dev", "prod"]),
       tool("rd-skills", "gitlab", ["dev", "prod"]),
-      tool("rd-skills", "device-farm", ["lab"])
+      tool("rd-skills", "device-farm", ["lab"]),
     ],
-    "prod"
+    "prod",
   );
   assert.equal(bindings[0]?.status, "resolved");
   assert.equal(bindings[0]?.tool?.repositoryId, "rd-skills");
@@ -64,9 +64,9 @@ test("agent tool resolution requires qualification for ambiguous cross-repositor
     [
       tool("shared-tools", "jenkins", ["dev"]),
       tool("release-tools", "jenkins", ["dev"]),
-      tool("shared-tools", "gitlab", ["dev"])
+      tool("shared-tools", "gitlab", ["dev"]),
     ],
-    "dev"
+    "dev",
   );
   assert.equal(bindings[0]?.status, "ambiguous");
   assert.equal(bindings[1]?.status, "resolved");

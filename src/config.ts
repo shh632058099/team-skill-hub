@@ -106,9 +106,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     }
     if (repo.provider === "git" && repo.git_auth?.type === "ssh") {
       if (!repo.git_auth.ssh_key_path || !repo.git_auth.known_hosts_path) {
-        throw new Error(
-          `Repository ${repo.id}: ssh git_auth requires ssh_key_path and known_hosts_path`
-        );
+        throw new Error(`Repository ${repo.id}: ssh git_auth requires ssh_key_path and known_hosts_path`);
       }
     }
     return {
@@ -116,9 +114,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       name: repo.name,
       owners: [...new Set((repo.owners ?? []).map((item) => item.trim()).filter(Boolean))],
       provider: repo.provider,
-      path: repo.path
-        ? path.resolve(base, repo.path)
-        : undefined,
+      path: repo.path ? path.resolve(base, repo.path) : undefined,
       gitUrl: repo.git_url,
       branch: repo.branch ?? "main",
       gitAuth: {
@@ -126,7 +122,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         tokenEnv: repo.git_auth?.token_env,
         usernameEnv: repo.git_auth?.username_env,
         sshKeyPath: repo.git_auth?.ssh_key_path,
-        knownHostsPath: repo.git_auth?.known_hosts_path
+        knownHostsPath: repo.git_auth?.known_hosts_path,
       },
       webhookAliases: repo.webhook_aliases ?? [],
       enabled: repo.enabled ?? true,
@@ -147,7 +143,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         exclude: repo.knowledge?.exclude ?? [],
         maxDocumentBytes: Math.max(1024, Number(repo.knowledge?.max_document_bytes ?? 2 * 1024 * 1024)),
         chunkSizeChars: Math.max(200, Number(repo.knowledge?.chunk_size_chars ?? 1400)),
-        chunkOverlapChars: Math.max(0, Number(repo.knowledge?.chunk_overlap_chars ?? 180))
+        chunkOverlapChars: Math.max(0, Number(repo.knowledge?.chunk_overlap_chars ?? 180)),
       },
       knowledgePublishing: {
         enabled: repo.knowledge_publishing?.enabled ?? false,
@@ -158,7 +154,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
           repo.knowledge_publishing?.token_env ??
           (repo.knowledge_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
         targetBranch: repo.knowledge_publishing?.target_branch ?? repo.branch ?? "main",
-        branchPrefix: repo.knowledge_publishing?.branch_prefix ?? "skill-hub-knowledge"
+        branchPrefix: repo.knowledge_publishing?.branch_prefix ?? "skill-hub-knowledge",
       },
       skillPublishing: {
         enabled: repo.skill_publishing?.enabled ?? false,
@@ -169,8 +165,8 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
           repo.skill_publishing?.token_env ??
           (repo.skill_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
         targetBranch: repo.skill_publishing?.target_branch ?? repo.branch ?? "main",
-        branchPrefix: repo.skill_publishing?.branch_prefix ?? "skill-hub-skill"
-      }
+        branchPrefix: repo.skill_publishing?.branch_prefix ?? "skill-hub-skill",
+      },
     };
   });
 
@@ -181,12 +177,16 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       name: project.name?.trim() || project.id.trim(),
       repositoryPatterns: (project.repository_patterns ?? [project.id]).map((item) => item.trim()).filter(Boolean),
       owners: [...new Set((project.owners ?? []).map((item) => item.trim()).filter(Boolean))],
-      preferredSkillRepositories: [...new Set((project.preferred_skill_repositories ?? []).map((item) => item.trim()).filter(Boolean))],
-      preferredKnowledgeRepositories: [...new Set((project.preferred_knowledge_repositories ?? []).map((item) => item.trim()).filter(Boolean))],
+      preferredSkillRepositories: [
+        ...new Set((project.preferred_skill_repositories ?? []).map((item) => item.trim()).filter(Boolean)),
+      ],
+      preferredKnowledgeRepositories: [
+        ...new Set((project.preferred_knowledge_repositories ?? []).map((item) => item.trim()).filter(Boolean)),
+      ],
       tools: [...new Set((project.tools ?? []).map((item) => item.trim()).filter(Boolean))],
       environments: [...new Set((project.environments ?? []).map((item) => item.trim()).filter(Boolean))],
       product: project.product?.trim() || undefined,
-      aliases: [...new Set((project.aliases ?? []).map((item) => item.trim()).filter(Boolean))]
+      aliases: [...new Set((project.aliases ?? []).map((item) => item.trim()).filter(Boolean))],
     };
   });
   const projectIds = new Set<string>();
@@ -195,9 +195,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     projectIds.add(project.id);
   }
 
-  const authMode = (process.env.AUTH_MODE ?? raw.authentication?.mode ?? "development") as
-    | "development"
-    | "api-key";
+  const authMode = (process.env.AUTH_MODE ?? raw.authentication?.mode ?? "development") as "development" | "api-key";
   let apiKeys: Record<string, Principal> = {};
   const apiKeysJson = process.env.SKILL_HUB_API_KEYS_JSON;
   if (apiKeysJson) {
@@ -208,9 +206,9 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         {
           id: principal.id ?? "api-key-user",
           roles: principal.roles ?? [],
-          tenantId: principal.tenantId ?? "default"
-        }
-      ])
+          tenantId: principal.tenantId ?? "default",
+        },
+      ]),
     );
   }
   return {
@@ -219,17 +217,14 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     dataDir: path.resolve(process.env.DATA_DIR ?? raw.data_dir ?? "./data"),
     defaultRoles: raw.default_roles ?? ["developer", "internal"],
     authentication: { mode: authMode, apiKeys },
-    revisionRetentionMax: Math.max(
-      2,
-      Number(process.env.REVISION_RETENTION_MAX ?? raw.retention?.max_revisions ?? 20)
-    ),
+    revisionRetentionMax: Math.max(2, Number(process.env.REVISION_RETENTION_MAX ?? raw.retention?.max_revisions ?? 20)),
     webhookDedupMaxEntries: Math.max(
       100,
-      Number(process.env.WEBHOOK_DEDUP_MAX_ENTRIES ?? raw.webhook_dedup?.max_entries ?? 1000)
+      Number(process.env.WEBHOOK_DEDUP_MAX_ENTRIES ?? raw.webhook_dedup?.max_entries ?? 1000),
     ),
     webhookDedupTtlSeconds: Math.max(
       3600,
-      Number(process.env.WEBHOOK_DEDUP_TTL_SECONDS ?? raw.webhook_dedup?.ttl_seconds ?? 604800)
+      Number(process.env.WEBHOOK_DEDUP_TTL_SECONDS ?? raw.webhook_dedup?.ttl_seconds ?? 604800),
     ),
     knowledgeMatchMinScore: (() => {
       const rawValue = process.env.KNOWLEDGE_MATCH_MIN_SCORE ?? raw.knowledge_search?.match_min_score;
@@ -241,6 +236,6 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       return value;
     })(),
     repositories,
-    projects
+    projects,
   };
 }

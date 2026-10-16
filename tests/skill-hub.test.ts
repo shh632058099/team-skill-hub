@@ -10,13 +10,13 @@ import {
   RepositoryVisibilityRule,
   UniqueNameRule,
   scanSkills,
-  validateSkills
+  validateSkills,
 } from "../src/skills.js";
 import { LocalRepositoryProvider } from "../src/repository.js";
 import {
   ApiKeyAuthenticationProvider,
   DevelopmentAuthenticationProvider,
-  StaticRolePermissionProvider
+  StaticRolePermissionProvider,
 } from "../src/security.js";
 import { LoggingEventSink } from "../src/events.js";
 import { SkillHubApplicationService } from "../src/application.js";
@@ -34,7 +34,7 @@ const repo: RepositoryConfig = {
   visibility: ["internal"],
   pollingIntervalSeconds: 300,
   readRoles: ["developer", "internal"],
-  syncRoles: ["developer", "admin"]
+  syncRoles: ["developer", "admin"],
 };
 
 async function makeSkillRoot() {
@@ -63,7 +63,7 @@ metadata:
     customer_agent: false
 ---
 # OTA review
-`
+`,
   );
   await writeFile(path.join(skillDir, "references", "checklist.md"), "API necessity\n");
   return root;
@@ -95,7 +95,7 @@ metadata:
     customer_agent: true
 ---
 # Customer troubleshooting
-`
+`,
   );
   return root;
 }
@@ -106,7 +106,7 @@ async function makeKnowledgeOnlyRoot() {
   await mkdir(docsDir, { recursive: true });
   await writeFile(
     path.join(docsDir, "knowledge.md"),
-    "# Knowledge only\n\nRepository contains Knowledge but no Skill manifests.\n"
+    "# Knowledge only\n\nRepository contains Knowledge but no Skill manifests.\n",
   );
   return root;
 }
@@ -131,7 +131,7 @@ metadata:
 ---
 # Prompt
 Review OTA APIs and call chains.
-`
+`,
   );
   await writeFile(
     path.join(root, "ota", "AGENT.yaml"),
@@ -152,7 +152,7 @@ prompts:
   - ota-code-review-prompt
 tools:
   - git
-`
+`,
   );
   await writeFile(
     path.join(root, "ota", "TOOL.yaml"),
@@ -173,7 +173,7 @@ capabilities: [status, diff, commit]
 authentication:
   type: environment
   reference: GIT_CREDENTIAL_HELPER
-`
+`,
   );
 }
 
@@ -184,7 +184,7 @@ test("scan, validate and search an OTA skill", async () => {
   const issues = validateSkills(skills, repo, [
     new RequiredFieldsRule(),
     new UniqueNameRule(),
-    new RepositoryVisibilityRule()
+    new RepositoryVisibilityRule(),
   ]);
   assert.deepEqual(issues, []);
 
@@ -192,11 +192,7 @@ test("scan, validate and search an OTA skill", async () => {
   search.rebuild(skills);
   const results = search.search("OTA API 调用链", { repositories: ["rd-skills"] }, 5);
   assert.equal(results[0]?.skill.name, "ota-code-review");
-  const incompatible = search.search(
-    "OTA API 调用链",
-    { repositories: ["rd-skills"], client: "customer_agent" },
-    5
-  );
+  const incompatible = search.search("OTA API 调用链", { repositories: ["rd-skills"], client: "customer_agent" }, 5);
   assert.equal(incompatible.length, 0);
   search.close();
 });
@@ -214,8 +210,8 @@ test("skill FTS candidate query filters repositories before applying its limit",
     metadata: {
       ...template.metadata,
       keywords: ["checkpoint", "checkpoint", "checkpoint"],
-      priority: 100
-    }
+      priority: 100,
+    },
   }));
   const allowed = {
     ...template,
@@ -226,8 +222,8 @@ test("skill FTS candidate query filters repositories before applying its limit",
     metadata: {
       ...template.metadata,
       keywords: [],
-      priority: 1
-    }
+      priority: 1,
+    },
   };
 
   const search = new SqliteFtsSearchBackend();
@@ -242,7 +238,6 @@ test("skill FTS candidate query filters repositories before applying its limit",
     search.close();
   }
 });
-
 
 test("registry replaces one repository atomically", async () => {
   const root = await makeSkillRoot();
@@ -267,7 +262,7 @@ test("knowledge-only repository becomes ready after successful startup sync", as
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -276,7 +271,7 @@ test("knowledge-only repository becomes ready after successful startup sync", as
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -301,7 +296,7 @@ test("invalid repository update preserves last known good skill", async () => {
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     registry,
@@ -310,7 +305,7 @@ test("invalid repository update preserves last known good skill", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -318,7 +313,7 @@ test("invalid repository update preserves last known good skill", async () => {
 
   await writeFile(
     path.join(root, "ota", "review", "SKILL.md"),
-    "---\nschema_version: 1\nname: broken\n---\n# broken\n"
+    "---\nschema_version: 1\nname: broken\n---\n# broken\n",
   );
 
   await assert.rejects(() => service.syncRepository("rd-skills"), /Validation failed/);
@@ -337,7 +332,7 @@ test("repository access policy separates read and sync roles", () => {
     id: "customer-skills",
     visibility: ["customer"],
     readRoles: ["customer"],
-    syncRoles: ["admin"]
+    syncRoles: ["admin"],
   };
 
   assert.equal(permissions.allowedRepositories(customer, [customerRepo]).length, 1);
@@ -352,7 +347,7 @@ test("GitLab webhook references resolve configured repositories", async () => {
     ...repo,
     path: root,
     gitUrl: "git@gitlab.company.example:ai/rd-skills.git",
-    webhookAliases: ["engineering/ota-skills"]
+    webhookAliases: ["engineering/ota-skills"],
   };
   const search = new SqliteFtsSearchBackend();
   const service = new SkillHubApplicationService(
@@ -362,7 +357,7 @@ test("GitLab webhook references resolve configured repositories", async () => {
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -371,7 +366,7 @@ test("GitLab webhook references resolve configured repositories", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   assert.equal(service.resolveRepositoryWebhookReference(["ai/rd-skills"]), "rd-skills");
@@ -394,7 +389,7 @@ test("sync writes audit history", async () => {
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     registry,
@@ -403,14 +398,17 @@ test("sync writes audit history", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
   const audit = await service.listAuditEvents(10, "rd-skills");
   assert.equal(audit[0]?.action, "repository.sync.completed");
   assert.equal(audit[0]?.trigger, "startup");
-  assert.equal(audit.some((event) => event.action === "repository.sync.started"), true);
+  assert.equal(
+    audit.some((event) => event.action === "repository.sync.started"),
+    true,
+  );
   search.close();
 });
 
@@ -421,7 +419,7 @@ test("repository view hides source and policy configuration", async () => {
     ...repo,
     path: root,
     gitUrl: "https://example.invalid/private.git",
-    pollingIntervalSeconds: 0
+    pollingIntervalSeconds: 0,
   };
   const search = new SqliteFtsSearchBackend();
   const service = new SkillHubApplicationService(
@@ -431,7 +429,7 @@ test("repository view hides source and policy configuration", async () => {
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -440,7 +438,7 @@ test("repository view hides source and policy configuration", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -465,7 +463,7 @@ test("concurrent sync requests share one in-flight repository sync", async () =>
       materializeCalls += 1;
       await new Promise((resolve) => setTimeout(resolve, 25));
       return { config: repository, sourceRoot: root, revision: "shared-revision" };
-    }
+    },
   };
   const search = new SqliteFtsSearchBackend();
   const service = new SkillHubApplicationService(
@@ -475,7 +473,7 @@ test("concurrent sync requests share one in-flight repository sync", async () =>
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [provider],
     new MemoryRegistryStore(),
@@ -484,13 +482,13 @@ test("concurrent sync requests share one in-flight repository sync", async () =>
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await Promise.all([
     service.syncRepository("rd-skills", "manual"),
     service.syncRepository("rd-skills", "webhook"),
-    service.syncRepository("rd-skills", "poll")
+    service.syncRepository("rd-skills", "poll"),
   ]);
   assert.equal(materializeCalls, 1);
   const audit = await service.listAuditEvents(10, "rd-skills");
@@ -513,11 +511,11 @@ test("api-key principals isolate developer and customer repositories", async () 
     visibility: ["customer"],
     readRoles: ["customer"],
     syncRoles: ["admin"],
-    pollingIntervalSeconds: 0
+    pollingIntervalSeconds: 0,
   };
   const auth = new ApiKeyAuthenticationProvider({
     devkey: { id: "dev-a", roles: ["developer", "internal"], tenantId: "rd" },
-    customerkey: { id: "customer-a", roles: ["customer"], tenantId: "customer-a" }
+    customerkey: { id: "customer-a", roles: ["customer"], tenantId: "customer-a" },
   });
   const search = new SqliteFtsSearchBackend();
   const service = new SkillHubApplicationService(
@@ -527,7 +525,7 @@ test("api-key principals isolate developer and customer repositories", async () 
       dataDir,
       defaultRoles: [],
       authentication: { mode: "api-key", apiKeys: {} },
-      repositories: [rdRepo, customerRepo]
+      repositories: [rdRepo, customerRepo],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -536,7 +534,7 @@ test("api-key principals isolate developer and customer repositories", async () 
     auth,
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
 
@@ -544,27 +542,30 @@ test("api-key principals isolate developer and customer repositories", async () 
   const customer = service.authenticateRequest(new Headers({ "x-skill-hub-api-key": "customerkey" }));
   const bearerDev = service.authenticateRequest(new Headers({ authorization: "Bearer devkey" }));
   assert.equal(bearerDev.id, "dev-a");
-  assert.deepEqual(service.listRepositories(dev).map((item) => item.id), ["rd-skills"]);
-  assert.deepEqual(service.listRepositories(customer).map((item) => item.id), ["customer-skills"]);
+  assert.deepEqual(
+    service.listRepositories(dev).map((item) => item.id),
+    ["rd-skills"],
+  );
+  assert.deepEqual(
+    service.listRepositories(customer).map((item) => item.id),
+    ["customer-skills"],
+  );
   assert.throws(() => service.getSkill("customer-skills", "ota-customer-troubleshooting", dev), /Skill not found/);
-  assert.equal(service.getSkill("customer-skills", "ota-customer-troubleshooting", customer).name, "ota-customer-troubleshooting");
+  assert.equal(
+    service.getSkill("customer-skills", "ota-customer-troubleshooting", customer).name,
+    "ota-customer-troubleshooting",
+  );
   assert.throws(() => service.authenticateRequest(new Headers({ "x-skill-hub-api-key": "bad" })), /Invalid API key/);
   search.close();
 });
 
 test("api-key authentication rejects missing and invalid MCP credentials", () => {
   const auth = new ApiKeyAuthenticationProvider({
-    valid: { id: "speed-test", roles: ["developer"], tenantId: "rd" }
+    valid: { id: "speed-test", roles: ["developer"], tenantId: "rd" },
   });
   assert.throws(() => auth.authenticate(new Headers()), /Authentication required/);
-  assert.throws(
-    () => auth.authenticate(new Headers({ "x-skill-hub-api-key": "invalid" })),
-    /Invalid API key/
-  );
-  assert.equal(
-    auth.authenticate(new Headers({ "x-skill-hub-api-key": "valid" })).id,
-    "speed-test"
-  );
+  assert.throws(() => auth.authenticate(new Headers({ "x-skill-hub-api-key": "invalid" })), /Invalid API key/);
+  assert.equal(auth.authenticate(new Headers({ "x-skill-hub-api-key": "valid" })).id, "speed-test");
 });
 
 test("validated revision history supports rollback", async () => {
@@ -579,7 +580,7 @@ test("validated revision history supports rollback", async () => {
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -588,7 +589,7 @@ test("validated revision history supports rollback", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   const first = (await service.listRepositoryRevisions("rd-skills"))[0]!.revision;
@@ -615,7 +616,7 @@ test("metrics expose sync search resolve and load counters", async () => {
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -624,7 +625,7 @@ test("metrics expose sync search resolve and load counters", async () => {
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   service.searchSkills("OTA API");
@@ -642,7 +643,11 @@ test("prompt and agent registries load, search and resolve repository artifacts"
   const root = await makeSkillRoot();
   await addPromptAndAgent(root);
   await mkdir(path.join(root, "docs"), { recursive: true });
-  await writeFile(path.join(root, "docs", "ota-review-context.md"), "# OTA Review Context\n\nReview OTA APIs, debugging, and recovery behavior.\n", "utf8");
+  await writeFile(
+    path.join(root, "docs", "ota-review-context.md"),
+    "# OTA Review Context\n\nReview OTA APIs, debugging, and recovery behavior.\n",
+    "utf8",
+  );
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-artifacts-"));
   const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
   const search = new SqliteFtsSearchBackend();
@@ -653,7 +658,7 @@ test("prompt and agent registries load, search and resolve repository artifacts"
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -662,32 +667,42 @@ test("prompt and agent registries load, search and resolve repository artifacts"
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
-  assert.equal(service.listPrompts("codex").map((item) => item.name).includes("ota-code-review-prompt"), true);
+  assert.equal(
+    service
+      .listPrompts("codex")
+      .map((item) => item.name)
+      .includes("ota-code-review-prompt"),
+    true,
+  );
   assert.equal(service.searchPrompts("OTA review", 5, "codex")[0]?.artifact.name, "ota-code-review-prompt");
   assert.equal(service.getPrompt("rd-skills", "ota-code-review-prompt").name, "ota-code-review-prompt");
-  assert.equal(service.listAgents("codex").map((item) => item.name).includes("ota-expert"), true);
+  assert.equal(
+    service
+      .listAgents("codex")
+      .map((item) => item.name)
+      .includes("ota-expert"),
+    true,
+  );
   assert.equal(service.resolveAgent("OTA debugging review", 3, "codex")[0]?.artifact.name, "ota-expert");
   assert.deepEqual(service.getAgent("rd-skills", "ota-expert").skills, ["ota-code-review"]);
   assert.equal(service.listTools("codex")[0]?.name, "git");
   assert.equal(service.searchTools("source control", 5, "codex")[0]?.artifact.name, "git");
   assert.deepEqual(service.getTool("rd-skills", "git").capabilities, ["status", "diff", "commit"]);
-  const discovered = service.discover(
-    "OTA review debugging recovery git repository",
-    { topK: 5, repositories: ["rd-skills"], client: "codex" }
-  );
+  const discovered = service.discover("OTA review debugging recovery git repository", {
+    topK: 5,
+    repositories: ["rd-skills"],
+    client: "codex",
+  });
   assert.equal(discovered.skills[0]?.skill.name, "ota-code-review");
   assert.equal(discovered.prompts[0]?.artifact.name, "ota-code-review-prompt");
   assert.equal(discovered.agents[0]?.artifact.name, "ota-expert");
   assert.equal(discovered.knowledge[0]?.chunk.relativePath, "docs/ota-review-context.md");
   assert.equal(discovered.tools[0]?.artifact.name, "git");
-  assert.deepEqual(
-    service.discover("OTA review", { repositories: ["not-visible"] }).skills,
-    []
-  );
+  assert.deepEqual(service.discover("OTA review", { repositories: ["not-visible"] }).skills, []);
   search.close();
 });
 
@@ -715,13 +730,13 @@ metadata:
     codex: true
 ---
 # Clash Rules
-`
+`,
   );
   await mkdir(path.join(root, "docs"), { recursive: true });
   await writeFile(
     path.join(root, "docs", "codex-custom-models.md"),
     "# Codex 与 Claude Code 自定义模型配置\n\nCodex model_catalog_json、自定义模型、模型 provider 和 model picker 配置说明。\n",
-    "utf8"
+    "utf8",
   );
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-discover-ranking-"));
   const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
@@ -733,7 +748,7 @@ metadata:
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -742,7 +757,7 @@ metadata:
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -750,23 +765,32 @@ metadata:
   const clash = service.discover("Clash Verge Rev 分流规则 配置 GEOIP GEOSITE 自定义规则", {
     topK: 5,
     repositories: ["rd-skills"],
-    client: "codex"
+    client: "codex",
   });
   assert.equal(clash.selected?.type, "skill");
   assert.equal(clash.selected && "name" in clash.selected ? clash.selected.name : undefined, "clash-rules");
   assert.equal(clash.ambiguous, false);
   assert.equal(clash.skills[0]?.skill.name, "clash-rules");
   assert.ok((clash.skills[0]?.confidence ?? 0) > 0.55);
-  assert.equal(clash.skills.some((item) => item.skill.name === "ota-code-review"), false);
-  assert.equal(clash.knowledge.some((item) => item.chunk.relativePath === "docs/codex-custom-models.md"), false);
+  assert.equal(
+    clash.skills.some((item) => item.skill.name === "ota-code-review"),
+    false,
+  );
+  assert.equal(
+    clash.knowledge.some((item) => item.chunk.relativePath === "docs/codex-custom-models.md"),
+    false,
+  );
 
   const codex = service.discover("Codex 自定义模型配置 config.toml model provider base_url API key", {
     topK: 5,
     repositories: ["rd-skills"],
-    client: "codex"
+    client: "codex",
   });
   assert.equal(codex.selected?.type, "knowledge");
-  assert.equal(codex.selected && "path" in codex.selected ? codex.selected.path : undefined, "docs/codex-custom-models.md");
+  assert.equal(
+    codex.selected && "path" in codex.selected ? codex.selected.path : undefined,
+    "docs/codex-custom-models.md",
+  );
   assert.equal(codex.ambiguous, false);
   assert.equal(codex.knowledge[0]?.chunk.relativePath, "docs/codex-custom-models.md");
   assert.ok((codex.knowledge[0]?.confidence ?? 0) > 0.55);
@@ -777,10 +801,37 @@ metadata:
 test("discover matches Chinese workflow intent from skill metadata", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-multilingual-discover-"));
   const definitions = [
-    ["systematic-debugging", "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes", ["superpowers", "systematic-debugging", "debugging", "troubleshooting", "root-cause", "调试", "排查", "根因", "故障", "报错"]],
-    ["test-driven-development", "Use when implementing any feature or bugfix, before writing implementation code", ["superpowers", "test-driven-development", "tdd", "testing", "test-first", "测试驱动", "先写测试", "单元测试"]],
-    ["brainstorming", "Use before creative work to explore user intent, requirements and design before implementation", ["superpowers", "brainstorming", "requirements", "design", "需求分析", "方案设计", "头脑风暴"]],
-    ["writing-plans", "Use when you have a spec or requirements for a multi-step task, before touching code", ["superpowers", "writing-plans", "implementation-plan", "planning", "实现计划", "实施计划"]]
+    [
+      "systematic-debugging",
+      "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+      [
+        "superpowers",
+        "systematic-debugging",
+        "debugging",
+        "troubleshooting",
+        "root-cause",
+        "调试",
+        "排查",
+        "根因",
+        "故障",
+        "报错",
+      ],
+    ],
+    [
+      "test-driven-development",
+      "Use when implementing any feature or bugfix, before writing implementation code",
+      ["superpowers", "test-driven-development", "tdd", "testing", "test-first", "测试驱动", "先写测试", "单元测试"],
+    ],
+    [
+      "brainstorming",
+      "Use before creative work to explore user intent, requirements and design before implementation",
+      ["superpowers", "brainstorming", "requirements", "design", "需求分析", "方案设计", "头脑风暴"],
+    ],
+    [
+      "writing-plans",
+      "Use when you have a spec or requirements for a multi-step task, before touching code",
+      ["superpowers", "writing-plans", "implementation-plan", "planning", "实现计划", "实施计划"],
+    ],
   ] as const;
   for (const [name, description, keywords] of definitions) {
     const skillDir = path.join(root, "skills", "superpowers", name);
@@ -788,7 +839,7 @@ test("discover matches Chinese workflow intent from skill metadata", async () =>
     await writeFile(
       path.join(skillDir, "SKILL.md"),
       `---\nschema_version: 1\nname: ${name}\nversion: 1.0.0\ndescription: ${description}\nmetadata:\n  audience: [developer]\n  domain: [software-engineering]\n  category: [workflow]\n  keywords: [${keywords.join(", ")}]\n  visibility: [internal]\n  maturity: stable\n  owner: superpowers\n  priority: 50\n  depends_on: []\n  compatibility:\n    codex: true\n---\n# ${name}\n`,
-      "utf8"
+      "utf8",
     );
   }
 
@@ -802,7 +853,7 @@ test("discover matches Chinese workflow intent from skill metadata", async () =>
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -811,7 +862,7 @@ test("discover matches Chinese workflow intent from skill metadata", async () =>
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -820,7 +871,7 @@ test("discover matches Chinese workflow intent from skill metadata", async () =>
       ["这个功能先做需求分析和方案设计", "brainstorming"],
       ["这个报错先别急着修复，先排查根因", "systematic-debugging"],
       ["这个 bug 按测试驱动方式做，先写测试", "test-driven-development"],
-      ["需求已经明确，给我写实现计划", "writing-plans"]
+      ["需求已经明确，给我写实现计划", "writing-plans"],
     ] as const;
     for (const [query, expected] of cases) {
       const result = service.discover(query, { topK: 5, repositories: ["rd-skills"], client: "codex" });
@@ -847,7 +898,7 @@ metadata:
 skills: [ota-code-review]
 prompts: [ota-code-review-prompt]
 tools: [missing-tool]
-`
+`,
   );
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-tool-binding-"));
   const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
@@ -859,7 +910,7 @@ tools: [missing-tool]
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -868,7 +919,7 @@ tools: [missing-tool]
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
   assert.equal(service.listRepositoryStates()[0]?.status, "error");
@@ -892,7 +943,7 @@ metadata:
 skills: [missing-skill]
 prompts: []
 tools: []
-`
+`,
   );
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-agent-binding-"));
   const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
@@ -904,7 +955,7 @@ tools: []
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -913,7 +964,7 @@ tools: []
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -940,7 +991,7 @@ cases:
     operation: get
     name: ota-code-review
     expect: {}
-`
+`,
   );
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-bad-eval-"));
   const repository = { ...repo, path: root, pollingIntervalSeconds: 0 };
@@ -952,7 +1003,7 @@ cases:
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -961,7 +1012,7 @@ cases:
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
 
   await service.initialize();
@@ -982,7 +1033,7 @@ test("usage analytics collect unmatched queries with basic secret redaction", as
       dataDir,
       defaultRoles: ["developer", "internal"],
       authentication: { mode: "development", apiKeys: {} },
-      repositories: [repository]
+      repositories: [repository],
     },
     [new LocalRepositoryProvider()],
     new MemoryRegistryStore(),
@@ -991,10 +1042,12 @@ test("usage analytics collect unmatched queries with basic secret redaction", as
     new DevelopmentAuthenticationProvider(["developer", "internal"]),
     new StaticRolePermissionProvider(),
     [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
-    new LoggingEventSink()
+    new LoggingEventSink(),
   );
   await service.initialize();
-  service.searchSkills("no-such-skill user@example.com glpat-abcdefghijklmnop Bearer abc.def.ghi https://user:pass@example.com mysql://db:secret@localhost/app");
+  service.searchSkills(
+    "no-such-skill user@example.com glpat-abcdefghijklmnop Bearer abc.def.ghi https://user:pass@example.com mysql://db:secret@localhost/app",
+  );
   await new Promise((resolve) => setTimeout(resolve, 30));
   const unmatched = await service.listUsageAnalytics(10, true);
   assert.equal(unmatched.length >= 1, true);

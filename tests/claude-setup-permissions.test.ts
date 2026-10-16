@@ -14,19 +14,14 @@ async function makeFakeClaude(binDir: string): Promise<void> {
 }
 
 async function runSetup(configDir: string, binDir: string, extraArgs: string[] = []): Promise<void> {
-  await execFileAsync("bash", [
-    "scripts/setup-claude-code.sh",
-    "--url",
-    "http://127.0.0.1:8080/mcp",
-    ...extraArgs
-  ], {
+  await execFileAsync("bash", ["scripts/setup-claude-code.sh", "--url", "http://127.0.0.1:8080/mcp", ...extraArgs], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       CLAUDE_CONFIG_DIR: configDir,
       TEAM_SKILL_HUB_CLIENT_ROOT: path.join(path.dirname(configDir), ".team-skill-hub"),
-      PATH: `${binDir}:${process.env.PATH ?? ""}`
-    }
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    },
   });
 }
 
@@ -37,13 +32,17 @@ test("Claude setup allows every tool from the configured Team Skill Hub without 
   await mkdir(configDir, { recursive: true });
   await mkdir(binDir, { recursive: true });
   await makeFakeClaude(binDir);
-  await writeFile(path.join(configDir, "settings.json"), JSON.stringify({
-    permissions: {
-      allow: ["Bash(git status)"],
-      ask: ["Bash(git push *)"],
-      deny: ["Read(./secrets/**)"]
-    }
-  }), "utf8");
+  await writeFile(
+    path.join(configDir, "settings.json"),
+    JSON.stringify({
+      permissions: {
+        allow: ["Bash(git status)"],
+        ask: ["Bash(git push *)"],
+        deny: ["Read(./secrets/**)"],
+      },
+    }),
+    "utf8",
+  );
 
   try {
     await runSetup(configDir, binDir, ["--server-name", "rdHub"]);

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+secrets/
+.superpowers/
+client-integration/
+config/repositories.yaml
+config/repositories.local.yaml
+config/repositories.gitlab.yaml

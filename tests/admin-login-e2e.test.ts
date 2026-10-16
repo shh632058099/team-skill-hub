@@ -18,25 +18,53 @@ test("admin browser login session protects pages and APIs", async () => {
   process.env.ADMIN_USERNAME = "admin-user";
   process.env.ADMIN_PASSWORD = "test-value-one";
   process.env.ADMIN_API_KEY = "test-value-two";
-  const config = { host: "127.0.0.1", port: 0, dataDir, defaultRoles: ["developer", "internal"], authentication: { mode: "development" as const, apiKeys: {} }, repositories: [] };
-  const service = new SkillHubApplicationService(config, [], new MemoryRegistryStore(), search, new SearchRoutingStrategy(search), new DevelopmentAuthenticationProvider(["developer", "internal"]), new StaticRolePermissionProvider(), [], new LoggingEventSink());
+  const config = {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    defaultRoles: ["developer", "internal"],
+    authentication: { mode: "development" as const, apiKeys: {} },
+    repositories: [],
+  };
+  const service = new SkillHubApplicationService(
+    config,
+    [],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [],
+    new LoggingEventSink(),
+  );
   await service.initialize();
   const app = await startServer(config, service);
   try {
-    const address = app.server.address(); assert.ok(address && typeof address !== "string");
+    const address = app.server.address();
+    assert.ok(address && typeof address !== "string");
     const base = "http://127.0.0.1:" + address.port;
     const page = await fetch(base + "/admin", { redirect: "manual" });
     assert.equal(page.status, 302);
     assert.equal(page.headers.get("location"), "/admin/login?next=%2Fadmin");
     assert.match(await (await fetch(base + "/admin/login")).text(), /管理员登录/);
     assert.equal((await fetch(base + "/admin/api/config")).status, 403);
-    const bad = await fetch(base + "/admin/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "admin-user", password: "bad" }) });
+    const bad = await fetch(base + "/admin/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin-user", password: "bad" }),
+    });
     assert.equal(bad.status, 401);
-    const login = await fetch(base + "/admin/api/auth/login", { method: "POST", headers: { "content-type": "application/json", "user-agent": "admin-login-test" }, body: JSON.stringify({ username: "admin-user", password: "test-value-one", next: "/admin/observability" }) });
+    const login = await fetch(base + "/admin/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "user-agent": "admin-login-test" },
+      body: JSON.stringify({ username: "admin-user", password: "test-value-one", next: "/admin/observability" }),
+    });
     assert.equal(login.status, 200);
-    const body = await login.json() as { next: string; session: { id: string } };
+    const body = (await login.json()) as { next: string; session: { id: string } };
     const setCookie = login.headers.get("set-cookie") ?? "";
-    assert.equal(body.next, "/admin/observability"); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /SameSite=Strict/);
+    assert.equal(body.next, "/admin/observability");
+    assert.match(setCookie, /HttpOnly/);
+    assert.match(setCookie, /SameSite=Strict/);
     const cookie = setCookie.split(";", 1)[0]!;
     assert.equal((await fetch(base + "/admin", { headers: { cookie } })).status, 200);
     assert.equal((await fetch(base + "/admin/api/config", { headers: { cookie } })).status, 200);
@@ -44,17 +72,30 @@ test("admin browser login session protects pages and APIs", async () => {
     assert.equal((await fetch(base + "/analytics/summary", { headers: { cookie } })).status, 200);
     assert.equal((await fetch(base + "/evaluations/runs", { headers: { cookie } })).status, 200);
     const current = await fetch(base + "/admin/api/auth/session", { headers: { cookie } });
-    const currentBody = await current.json() as { authType: string; session: { username: string } };
-    assert.equal(current.status, 200); assert.equal(currentBody.authType, "session"); assert.equal(currentBody.session.username, "admin-user");
+    const currentBody = (await current.json()) as { authType: string; session: { username: string } };
+    assert.equal(current.status, 200);
+    assert.equal(currentBody.authType, "session");
+    assert.equal(currentBody.session.username, "admin-user");
     const sessions = await fetch(base + "/admin/api/auth/sessions", { headers: { cookie } });
-    const sessionsBody = await sessions.json() as { sessions: Array<{ id: string; current: boolean }> };
-    assert.equal(sessionsBody.sessions.length, 1); assert.equal(sessionsBody.sessions[0]?.current, true);
-    const revoked = await fetch(base + "/admin/api/auth/sessions/" + encodeURIComponent(body.session.id), { method: "DELETE", headers: { cookie } });
-    assert.equal(revoked.status, 200); assert.match(revoked.headers.get("set-cookie") ?? "", /Max-Age=0/);
+    const sessionsBody = (await sessions.json()) as { sessions: Array<{ id: string; current: boolean }> };
+    assert.equal(sessionsBody.sessions.length, 1);
+    assert.equal(sessionsBody.sessions[0]?.current, true);
+    const revoked = await fetch(base + "/admin/api/auth/sessions/" + encodeURIComponent(body.session.id), {
+      method: "DELETE",
+      headers: { cookie },
+    });
+    assert.equal(revoked.status, 200);
+    assert.match(revoked.headers.get("set-cookie") ?? "", /Max-Age=0/);
     assert.equal((await fetch(base + "/admin/api/config", { headers: { cookie } })).status, 403);
-    assert.equal((await fetch(base + "/admin/api/config", { headers: { "x-skill-hub-admin-key": "test-value-two" } })).status, 200);
+    assert.equal(
+      (await fetch(base + "/admin/api/config", { headers: { "x-skill-hub-admin-key": "test-value-two" } })).status,
+      200,
+    );
   } finally {
-    await app.close(); search.close(); await rm(dataDir, { recursive: true, force: true });
-    for (const key of ["AUTH_MODE", "ADMIN_LOGIN_REQUIRED", "ADMIN_USERNAME", "ADMIN_PASSWORD", "ADMIN_API_KEY"]) delete process.env[key];
+    await app.close();
+    search.close();
+    await rm(dataDir, { recursive: true, force: true });
+    for (const key of ["AUTH_MODE", "ADMIN_LOGIN_REQUIRED", "ADMIN_USERNAME", "ADMIN_PASSWORD", "ADMIN_API_KEY"])
+      delete process.env[key];
   }
 });

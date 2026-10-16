@@ -32,9 +32,9 @@ test("Claude Stop Hook posts a redacted minimal Stop event", async () => {
         `event_url=http://127.0.0.1:${address.port}/client-events/claude-code`,
         "api_key_env=TEST_CLAUDE_HOOK_MARKER",
         "capture_stop_message=true",
-        ""
+        "",
       ].join("\n"),
-      "utf8"
+      "utf8",
     );
 
     const payload = JSON.stringify({
@@ -46,8 +46,7 @@ test("Claude Stop Hook posts a redacted minimal Stop event", async () => {
       stop_hook_active: false,
       transcript_path: "/private/transcript.jsonl",
       prompt: "customer secret prompt",
-      last_assistant_message:
-        "Verified OTA result. email=biao@example.com token=skh_secret_value"
+      last_assistant_message: "Verified OTA result. email=biao@example.com token=skh_secret_value",
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -56,9 +55,9 @@ test("Claude Stop Hook posts a redacted minimal Stop event", async () => {
         env: {
           ...process.env,
           TEAM_SKILL_HUB_HOOK_CONFIG: config,
-          TEST_CLAUDE_HOOK_MARKER: "test-marker"
+          TEST_CLAUDE_HOOK_MARKER: "test-marker",
         },
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
       });
       let stderr = "";
       child.stderr.setEncoding("utf8");

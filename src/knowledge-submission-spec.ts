@@ -9,7 +9,7 @@ export const KNOWLEDGE_SECTION_IDS = [
   "solution",
   "verification",
   "applicability",
-  "constraints"
+  "constraints",
 ] as const;
 export type KnowledgeSectionId = (typeof KNOWLEDGE_SECTION_IDS)[number];
 
@@ -53,11 +53,11 @@ export function defaultKnowledgeSubmissionSpec(): KnowledgeSubmissionSpec {
     title: {
       max_chars: 160,
       recommended_min_chars: 20,
-      recommended_max_chars: 80
+      recommended_max_chars: 80,
     },
     content: {
       max_chars: 50_000,
-      format: "markdown"
+      format: "markdown",
     },
     sections: [
       { id: "problem", heading: "问题", required: true, description: "描述需要解决的问题或观察到的现象" },
@@ -65,15 +65,15 @@ export function defaultKnowledgeSubmissionSpec(): KnowledgeSubmissionSpec {
       { id: "solution", heading: "解决方案", required: true, description: "说明最终有效的处理方案" },
       { id: "verification", heading: "验证结果", required: true, description: "记录测试、日志或其他验证证据" },
       { id: "applicability", heading: "适用范围", required: true },
-      { id: "constraints", heading: "约束/限制", required: true }
+      { id: "constraints", heading: "约束/限制", required: true },
     ],
     requirements: {
       durable: true,
       verified: true,
       reject_speculation: true,
       reject_secrets: true,
-      reject_customer_sensitive_data: true
-    }
+      reject_customer_sensitive_data: true,
+    },
   };
 }
 
@@ -101,7 +101,8 @@ export function validateKnowledgeSubmissionSpec(value: unknown): KnowledgeSubmis
   const maxContent = positiveInteger(raw.content.max_chars, "content.max_chars");
   if (maxContent > 50_000) fail("content.max_chars must not exceed 50000");
   if (raw.content.format !== "markdown") fail("content.format must be markdown");
-  if (!Array.isArray(raw.sections) || raw.sections.length !== KNOWLEDGE_SECTION_IDS.length) fail("sections must contain the supported section ids exactly once");
+  if (!Array.isArray(raw.sections) || raw.sections.length !== KNOWLEDGE_SECTION_IDS.length)
+    fail("sections must contain the supported section ids exactly once");
   const seen = new Set<string>();
   const sections: KnowledgeSubmissionSectionSpec[] = raw.sections.map((section: any) => {
     if (!section || typeof section !== "object") fail("section must be an object");
@@ -110,17 +111,24 @@ export function validateKnowledgeSubmissionSpec(value: unknown): KnowledgeSubmis
     seen.add(section.id);
     if (typeof section.heading !== "string" || !section.heading.trim()) fail(`section ${section.id} requires heading`);
     if (typeof section.required !== "boolean") fail(`section ${section.id} requires boolean required`);
-    if (section.description !== undefined && typeof section.description !== "string") fail(`section ${section.id} description must be text`);
+    if (section.description !== undefined && typeof section.description !== "string")
+      fail(`section ${section.id} description must be text`);
     return {
       id: section.id,
       heading: section.heading.trim(),
       required: section.required,
-      ...(section.description?.trim() ? { description: section.description.trim() } : {})
+      ...(section.description?.trim() ? { description: section.description.trim() } : {}),
     };
   });
   for (const id of KNOWLEDGE_SECTION_IDS) if (!seen.has(id)) fail(`missing section id ${id}`);
   if (!raw.requirements || typeof raw.requirements !== "object") fail("requirements are required");
-  const requirementNames = ["durable", "verified", "reject_speculation", "reject_secrets", "reject_customer_sensitive_data"] as const;
+  const requirementNames = [
+    "durable",
+    "verified",
+    "reject_speculation",
+    "reject_secrets",
+    "reject_customer_sensitive_data",
+  ] as const;
   const requirements = {} as KnowledgeSubmissionSpec["requirements"];
   for (const name of requirementNames) {
     if (typeof raw.requirements[name] !== "boolean") fail(`requirements.${name} must be boolean`);
@@ -132,11 +140,11 @@ export function validateKnowledgeSubmissionSpec(value: unknown): KnowledgeSubmis
     title: {
       max_chars: maxTitle,
       recommended_min_chars: recommendedMin,
-      recommended_max_chars: recommendedMax
+      recommended_max_chars: recommendedMax,
     },
     content: { max_chars: maxContent, format: "markdown" },
     sections,
-    requirements
+    requirements,
   };
 }
 
@@ -150,8 +158,12 @@ export class KnowledgeSubmissionSpecStore {
     this.historyDir = path.join(this.root, "history");
   }
 
-  private currentFile(): string { return path.join(this.root, "current.json"); }
-  private historyFile(version: number): string { return path.join(this.historyDir, `v${version}.json`); }
+  private currentFile(): string {
+    return path.join(this.root, "current.json");
+  }
+  private historyFile(version: number): string {
+    return path.join(this.historyDir, `v${version}.json`);
+  }
 
   private async atomicWrite(file: string, value: KnowledgeSubmissionSpec): Promise<void> {
     await mkdir(path.dirname(file), { recursive: true });
@@ -206,7 +218,10 @@ export class KnowledgeSubmissionSpecStore {
   }
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.mutationQueue.then(operation, operation);
-    this.mutationQueue = run.then(() => undefined, () => undefined);
+    this.mutationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
     return run;
   }
 
@@ -214,7 +229,11 @@ export class KnowledgeSubmissionSpecStore {
     return await this.enqueue(async () => {
       const current = await this.loadCurrent();
       await this.ensureVersionPersisted(current);
-      const validated = validateKnowledgeSubmissionSpec({ ...clone(input), schema_version: 1, spec_version: current.spec_version + 1 });
+      const validated = validateKnowledgeSubmissionSpec({
+        ...clone(input),
+        schema_version: 1,
+        spec_version: current.spec_version + 1,
+      });
       await this.writeHistoryImmutable(validated);
       await this.atomicWrite(this.currentFile(), validated);
       return clone(validated);
@@ -225,7 +244,11 @@ export class KnowledgeSubmissionSpecStore {
     const current = await this.loadCurrent();
     await mkdir(this.historyDir, { recursive: true });
     let names: string[] = [];
-    try { names = await readdir(this.historyDir); } catch { names = []; }
+    try {
+      names = await readdir(this.historyDir);
+    } catch {
+      names = [];
+    }
     const byVersion = new Map<number, KnowledgeSubmissionSpec>();
     for (const name of names) {
       const match = /^v(\d+)\.json$/.exec(name);

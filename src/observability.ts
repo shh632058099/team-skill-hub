@@ -9,20 +9,22 @@ import { REUSE_MCP_TOOLS, isReuseMcpTool } from "./observability-tools.js";
 import { cleanupObservabilityRetention, observabilityStorageMetrics } from "./storage/maintenance.js";
 
 export type FeedbackRating = "positive" | "negative";
-export type CandidateStatus = "pending" | "approved" | "rejected" | "publishing" | "published" | "publish_failed" | "deleting" | "deleted" | "delete_failed";
+export type CandidateStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "publishing"
+  | "published"
+  | "publish_failed"
+  | "deleting"
+  | "deleted"
+  | "delete_failed";
 export { REUSE_MCP_TOOLS, isReuseMcpTool };
-export type CandidateKnowledgeRelationType = "new" | "duplicate_of" | "updates" | "supersedes" | "conflicts_with" | "related_to";
+export type CandidateKnowledgeRelationType =
+  "new" | "duplicate_of" | "updates" | "supersedes" | "conflicts_with" | "related_to";
 export type CandidateReviewReason =
-  | "useful"
-  | "needs_edit"
-  | "false_positive"
-  | "duplicate"
-  | "low_reuse_value"
-  | "outdated";
-export function isCandidateReviewReasonValid(
-  status: "approved" | "rejected",
-  reason: CandidateReviewReason
-): boolean {
+  "useful" | "needs_edit" | "false_positive" | "duplicate" | "low_reuse_value" | "outdated";
+export function isCandidateReviewReasonValid(status: "approved" | "rejected", reason: CandidateReviewReason): boolean {
   return status === "approved"
     ? reason === "useful" || reason === "needs_edit"
     : reason === "false_positive" || reason === "duplicate" || reason === "low_reuse_value" || reason === "outdated";
@@ -52,7 +54,6 @@ export interface ClientEventRecord {
   permissionMode?: string;
   metadata: Record<string, unknown>;
 }
-
 
 export interface CandidateDetectionRecord {
   id: string;
@@ -276,11 +277,7 @@ function sanitizeValue(value: unknown, depth = 0): unknown {
 }
 
 function candidateFingerprint(title: string, content: string): string {
-  const normalized = (title + "\n" + content)
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  const normalized = (title + "\n" + content).normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
   return createHash("sha256").update(normalized).digest("hex");
 }
 
@@ -299,12 +296,7 @@ function candidateSimilarityTokens(title: string, content: string): Set<string> 
   return tokens;
 }
 
-function candidateSimilarity(
-  leftTitle: string,
-  leftContent: string,
-  rightTitle: string,
-  rightContent: string
-): number {
+function candidateSimilarity(leftTitle: string, leftContent: string, rightTitle: string, rightContent: string): number {
   const left = candidateSimilarityTokens(leftTitle, leftContent);
   const right = candidateSimilarityTokens(rightTitle, rightContent);
   if (!left.size || !right.size) return 0;
@@ -313,16 +305,16 @@ function candidateSimilarity(
   return (2 * intersection) / (left.size + right.size);
 }
 
-function writeBackend(value:string|undefined):"jsonl"|"dual"|"sqlite"{
-  if(value===undefined||value==="")return"jsonl";
-  if(value==="jsonl"||value==="dual"||value==="sqlite")return value;
-  throw new Error("Invalid OBSERVABILITY_WRITE_BACKEND: "+value);
+function writeBackend(value: string | undefined): "jsonl" | "dual" | "sqlite" {
+  if (value === undefined || value === "") return "jsonl";
+  if (value === "jsonl" || value === "dual" || value === "sqlite") return value;
+  throw new Error("Invalid OBSERVABILITY_WRITE_BACKEND: " + value);
 }
 
-function readBackend(value:string|undefined):"jsonl"|"sqlite"{
-  if(value===undefined||value==="")return"jsonl";
-  if(value==="jsonl"||value==="sqlite")return value;
-  throw new Error("Invalid OBSERVABILITY_READ_BACKEND: "+value);
+function readBackend(value: string | undefined): "jsonl" | "sqlite" {
+  if (value === undefined || value === "") return "jsonl";
+  if (value === "jsonl" || value === "sqlite") return value;
+  throw new Error("Invalid OBSERVABILITY_READ_BACKEND: " + value);
 }
 
 export class McpObservabilityStore {
@@ -345,33 +337,65 @@ export class McpObservabilityStore {
   constructor(
     private readonly dataDir: string,
     private readonly maxEntries = 10000,
-    options?: { retentionDays?: number; maxFileBytes?: number; writeBackend?: "jsonl" | "dual" | "sqlite"; readBackend?: "jsonl" | "sqlite"; sqlitePath?: string; shadowSqlite?: boolean }
+    options?: {
+      retentionDays?: number;
+      maxFileBytes?: number;
+      writeBackend?: "jsonl" | "dual" | "sqlite";
+      readBackend?: "jsonl" | "sqlite";
+      sqlitePath?: string;
+      shadowSqlite?: boolean;
+    },
   ) {
-    this.retentionDaysOverride = options?.retentionDays === undefined ? undefined : Math.max(1, Math.floor(options.retentionDays));
+    this.retentionDaysOverride =
+      options?.retentionDays === undefined ? undefined : Math.max(1, Math.floor(options.retentionDays));
     this.maxFileBytes = Math.max(1024, Math.floor(options?.maxFileBytes ?? 5 * 1024 * 1024));
     this.writeBackend = writeBackend(options?.writeBackend ?? process.env.OBSERVABILITY_WRITE_BACKEND);
     this.readBackend = readBackend(options?.readBackend ?? process.env.OBSERVABILITY_READ_BACKEND);
     this.shadowSqlite = options?.shadowSqlite ?? process.env.OBSERVABILITY_SHADOW_SQLITE === "true";
     if (this.writeBackend !== "jsonl" || this.readBackend === "sqlite" || this.shadowSqlite) {
-      this.sqliteDatabase = openSkillHubDatabase(options?.sqlitePath ?? process.env.OBSERVABILITY_SQLITE_PATH ?? path.join(this.dataDir, "db", "team-skill-hub.sqlite3"));
+      this.sqliteDatabase = openSkillHubDatabase(
+        options?.sqlitePath ??
+          process.env.OBSERVABILITY_SQLITE_PATH ??
+          path.join(this.dataDir, "db", "team-skill-hub.sqlite3"),
+      );
       this.sqlite = new SqliteObservabilityRepository(this.sqliteDatabase);
-      const interval = Math.max(60_000, Number(process.env.OBSERVABILITY_MAINTENANCE_INTERVAL_MS ?? 600_000) || 600_000);
-      this.maintenanceTimer = setInterval(() => { void this.runRetentionMaintenance().catch(() => undefined); }, interval);
+      const interval = Math.max(
+        60_000,
+        Number(process.env.OBSERVABILITY_MAINTENANCE_INTERVAL_MS ?? 600_000) || 600_000,
+      );
+      this.maintenanceTimer = setInterval(() => {
+        void this.runRetentionMaintenance().catch(() => undefined);
+      }, interval);
       this.maintenanceTimer.unref();
     }
   }
 
   async runRetentionMaintenance() {
     if (!this.sqliteDatabase || !this.sqlite) return undefined;
-    const envRetention=process.env.OBSERVABILITY_RETENTION_DAYS;
-    const retentionDays=envRetention===undefined||envRetention===""?this.retentionDaysOverride:Math.max(1,Number(envRetention)||30);
-    try{
-      const result=await cleanupObservabilityRetention(this.sqliteDatabase,this.sqlite,{retentionDays,batchSize:5000});
-      this.lastMaintenanceAt=new Date().toISOString();this.lastMaintenanceError=undefined;return result;
-    }catch(error){this.maintenanceFailureCount+=1;this.lastMaintenanceAt=new Date().toISOString();this.lastMaintenanceError=error instanceof Error?error.message:String(error);throw error}
+    const envRetention = process.env.OBSERVABILITY_RETENTION_DAYS;
+    const retentionDays =
+      envRetention === undefined || envRetention === ""
+        ? this.retentionDaysOverride
+        : Math.max(1, Number(envRetention) || 30);
+    try {
+      const result = await cleanupObservabilityRetention(this.sqliteDatabase, this.sqlite, {
+        retentionDays,
+        batchSize: 5000,
+      });
+      this.lastMaintenanceAt = new Date().toISOString();
+      this.lastMaintenanceError = undefined;
+      return result;
+    } catch (error) {
+      this.maintenanceFailureCount += 1;
+      this.lastMaintenanceAt = new Date().toISOString();
+      this.lastMaintenanceError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
-  isStorageReady():boolean { return !this.sqliteDatabase||this.sqliteDatabase.writableCheck(); }
+  isStorageReady(): boolean {
+    return !this.sqliteDatabase || this.sqliteDatabase.writableCheck();
+  }
 
   async getStorageStatus() {
     return {
@@ -379,19 +403,40 @@ export class McpObservabilityStore {
       readBackend: this.readBackend,
       writeFailures: { jsonl: this.jsonlWriteFailures, sqlite: this.sqliteWriteFailures },
       shadowReadMismatches: this.shadowReadMismatches,
-      storageReady:this.isStorageReady(),
-      maintenance:{lastAt:this.lastMaintenanceAt,lastError:this.lastMaintenanceError,failureCount:this.maintenanceFailureCount},
-      sqlite: this.sqliteDatabase ? await observabilityStorageMetrics(this.sqliteDatabase) : undefined
+      storageReady: this.isStorageReady(),
+      maintenance: {
+        lastAt: this.lastMaintenanceAt,
+        lastError: this.lastMaintenanceError,
+        failureCount: this.maintenanceFailureCount,
+      },
+      sqlite: this.sqliteDatabase ? await observabilityStorageMetrics(this.sqliteDatabase) : undefined,
     };
   }
 
-  adminFeedbackPage(query: Parameters<SqliteObservabilityRepository["adminFeedback"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminFeedback(query) : undefined; }
-  adminCandidatesPage(query: Parameters<SqliteObservabilityRepository["adminCandidates"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidates(query) : undefined; }
-  adminCandidateHistoryPage(query: Parameters<SqliteObservabilityRepository["adminCandidateHistory"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateHistory(query) : undefined; }
-  adminClientEventsPage(query: Parameters<SqliteObservabilityRepository["adminClientEvents"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminClientEvents(query) : undefined; }
-  adminCandidateDetectionsPage(query: Parameters<SqliteObservabilityRepository["adminCandidateDetections"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateDetections(query) : undefined; }
-  adminMcpCallsPage(query: Parameters<SqliteObservabilityRepository["adminMcpCalls"]>[0], mode: "all" | "reuse" | "failures" = "all") { return this.readBackend === "sqlite" ? this.sqlite!.adminMcpCalls(query, mode) : undefined; }
-  adminSessionsPage(query: Parameters<SqliteObservabilityRepository["adminSessions"]>[0]) { return this.readBackend === "sqlite" ? this.sqlite!.adminSessions(query) : undefined; }
+  adminFeedbackPage(query: Parameters<SqliteObservabilityRepository["adminFeedback"]>[0]) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminFeedback(query) : undefined;
+  }
+  adminCandidatesPage(query: Parameters<SqliteObservabilityRepository["adminCandidates"]>[0]) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminCandidates(query) : undefined;
+  }
+  adminCandidateHistoryPage(query: Parameters<SqliteObservabilityRepository["adminCandidateHistory"]>[0]) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateHistory(query) : undefined;
+  }
+  adminClientEventsPage(query: Parameters<SqliteObservabilityRepository["adminClientEvents"]>[0]) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminClientEvents(query) : undefined;
+  }
+  adminCandidateDetectionsPage(query: Parameters<SqliteObservabilityRepository["adminCandidateDetections"]>[0]) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateDetections(query) : undefined;
+  }
+  adminMcpCallsPage(
+    query: Parameters<SqliteObservabilityRepository["adminMcpCalls"]>[0],
+    mode: "all" | "reuse" | "failures" = "all",
+  ) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminMcpCalls(query, mode) : undefined;
+  }
+  adminSessionsPage(query: Parameters<SqliteObservabilityRepository["adminSessions"]>[0]) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminSessions(query) : undefined;
+  }
 
   close(): void {
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
@@ -422,14 +467,25 @@ export class McpObservabilityStore {
     let jsonlError: unknown;
     let sqliteError: unknown;
     if (this.writeBackend !== "sqlite") {
-      try { await this.append(name, value); } catch (error) { this.jsonlWriteFailures += 1; jsonlError = error; }
+      try {
+        await this.append(name, value);
+      } catch (error) {
+        this.jsonlWriteFailures += 1;
+        jsonlError = error;
+      }
     }
     if (this.writeBackend !== "jsonl") {
-      try { await sqliteWrite(); } catch (error) { this.sqliteWriteFailures += 1; sqliteError = error; }
+      try {
+        await sqliteWrite();
+      } catch (error) {
+        this.sqliteWriteFailures += 1;
+        sqliteError = error;
+      }
     }
     if (this.writeBackend === "jsonl" && jsonlError) throw jsonlError;
     if (this.writeBackend === "sqlite" && sqliteError) throw sqliteError;
-    if (this.writeBackend === "dual" && jsonlError && sqliteError) throw new AggregateError([jsonlError, sqliteError], "all observability write backends failed");
+    if (this.writeBackend === "dual" && jsonlError && sqliteError)
+      throw new AggregateError([jsonlError, sqliteError], "all observability write backends failed");
   }
 
   private async append(name: string, value: unknown): Promise<void> {
@@ -459,11 +515,7 @@ export class McpObservabilityStore {
 
   private rowTimestamp(value: Record<string, unknown>): number | undefined {
     const raw =
-      typeof value.updatedAt === "string"
-        ? value.updatedAt
-        : typeof value.ts === "string"
-          ? value.ts
-          : undefined;
+      typeof value.updatedAt === "string" ? value.updatedAt : typeof value.ts === "string" ? value.ts : undefined;
     if (!raw) return undefined;
     const parsed = Date.parse(raw);
     return Number.isFinite(parsed) ? parsed : undefined;
@@ -546,7 +598,7 @@ export class McpObservabilityStore {
 
   async resolveUniqueActiveClientSession(
     principal: Principal,
-    maxAgeMs = 12 * 60 * 60 * 1000
+    maxAgeMs = 12 * 60 * 60 * 1000,
   ): Promise<string | undefined> {
     const events = await this.listClientEvents(this.maxEntries);
     const cutoff = Date.now() - maxAgeMs;
@@ -567,7 +619,7 @@ export class McpObservabilityStore {
       ts: new Date().toISOString(),
       client: input.client ? redactText(input.client, 300) : undefined,
       error: input.error ? redactText(input.error, 1000) : undefined,
-      args: sanitizeValue(input.args) as Record<string, unknown> | undefined
+      args: sanitizeValue(input.args) as Record<string, unknown> | undefined,
     };
     await this.persistRecord("mcp-calls.jsonl", record, () => this.sqlite!.recordMcpCall(record));
     return record;
@@ -578,7 +630,8 @@ export class McpObservabilityStore {
     const primary = await this.readMcpCalls(limit);
     if (this.shadowSqlite && this.sqlite) {
       const shadow = (await this.sqlite.listMcpCalls({ limit })).items;
-      if (primary.map((item) => item.id).join("\0") !== shadow.map((item) => item.id).join("\0")) this.shadowReadMismatches += 1;
+      if (primary.map((item) => item.id).join("\0") !== shadow.map((item) => item.id).join("\0"))
+        this.shadowReadMismatches += 1;
     }
     return primary;
   }
@@ -615,23 +668,25 @@ export class McpObservabilityStore {
       errorRate: rows.length ? failed / rows.length : 0,
       avgLatencyMs: rows.length ? latency / rows.length : 0,
       p95LatencyMs: latencies.length ? latencies[p95Index]! : 0,
-      byTool
+      byTool,
     };
   }
 
-  async listTraces(limit = 100): Promise<Array<{
-    traceId: string;
-    sessionId?: string;
-    actorId: string;
-    tenantId: string;
-    client?: string;
-    startedAt: string;
-    endedAt: string;
-    callCount: number;
-    failed: boolean;
-    totalLatencyMs: number;
-    tools: string[];
-  }>> {
+  async listTraces(limit = 100): Promise<
+    Array<{
+      traceId: string;
+      sessionId?: string;
+      actorId: string;
+      tenantId: string;
+      client?: string;
+      startedAt: string;
+      endedAt: string;
+      callCount: number;
+      failed: boolean;
+      totalLatencyMs: number;
+      tools: string[];
+    }>
+  > {
     const calls = await this.listCalls(this.maxEntries);
     const grouped = new Map<string, McpCallRecord[]>();
     for (const call of calls) {
@@ -655,7 +710,7 @@ export class McpObservabilityStore {
           callCount: ordered.length,
           failed: ordered.some((item) => !item.success),
           totalLatencyMs: ordered.reduce((sum, item) => sum + item.latencyMs, 0),
-          tools: ordered.map((item) => item.tool)
+          tools: ordered.map((item) => item.tool),
         };
       })
       .sort((a, b) => b.endedAt.localeCompare(a.endedAt))
@@ -675,15 +730,13 @@ export class McpObservabilityStore {
       sessionId: string;
       turnId?: string;
       metadata?: Record<string, unknown>;
-    }
+    },
   ): Promise<ClientEventRecord | undefined> {
     const toolUseId =
       input.event === "PostToolUse" && typeof input.metadata?.tool_use_id === "string"
         ? input.metadata.tool_use_id
         : undefined;
-    const turnScoped =
-      Boolean(input.turnId) &&
-      (input.event === "UserPromptSubmit" || input.event === "Stop");
+    const turnScoped = Boolean(input.turnId) && (input.event === "UserPromptSubmit" || input.event === "Stop");
     const sessionScoped = input.event === "SessionStart" || input.event === "SessionEnd";
     if (!toolUseId && !turnScoped && !sessionScoped) return undefined;
 
@@ -694,7 +747,8 @@ export class McpObservabilityStore {
         item.tenantId !== principal.tenantId ||
         item.sessionId !== input.sessionId ||
         item.event !== input.event
-      ) return false;
+      )
+        return false;
       if (toolUseId) return item.metadata?.tool_use_id === toolUseId;
       if (turnScoped) return item.turnId === input.turnId;
       return true;
@@ -713,7 +767,7 @@ export class McpObservabilityStore {
       model?: string;
       permissionMode?: string;
       metadata?: Record<string, unknown>;
-    }
+    },
   ): Promise<ClientEventRecord> {
     const metadata = (sanitizeValue(input.metadata ?? {}) ?? {}) as Record<string, unknown>;
     if (typeof input.metadata?.assistant_result_excerpt === "string") {
@@ -732,7 +786,7 @@ export class McpObservabilityStore {
       cwd: input.cwd ? redactText(input.cwd, 500) : undefined,
       model: input.model ? redactText(input.model, 120) : undefined,
       permissionMode: input.permissionMode ? redactText(input.permissionMode, 80) : undefined,
-      metadata
+      metadata,
     };
     await this.persistRecord("client-events.jsonl", record, () => this.sqlite!.recordClientEvent(record));
     return record;
@@ -743,7 +797,8 @@ export class McpObservabilityStore {
     const primary = await this.read<ClientEventRecord>("client-events.jsonl", limit);
     if (this.shadowSqlite && this.sqlite) {
       const shadow = (await this.sqlite.listClientEvents({ limit })).items;
-      if (primary.map((item) => item.id).join("\0") !== shadow.map((item) => item.id).join("\0")) this.shadowReadMismatches += 1;
+      if (primary.map((item) => item.id).join("\0") !== shadow.map((item) => item.id).join("\0"))
+        this.shadowReadMismatches += 1;
     }
     return primary;
   }
@@ -753,24 +808,26 @@ export class McpObservabilityStore {
     return (await this.listClientEvents(this.maxEntries)).find((item) => item.id === id);
   }
 
-  async listClientSessions(limit = 100): Promise<Array<{
-    sessionId: string;
-    actorId: string;
-    tenantId: string;
-    client: string;
-    startedAt: string;
-    endedAt: string;
-    eventCount: number;
-    callCount: number;
-    failedCallCount: number;
-    evidenceCount: number;
-    tools: string[];
-    events: string[];
-    repositoryId?: string;
-    runtimeVersion?: string;
-    hookSchemaVersion?: number;
-    ended: boolean;
-  }>> {
+  async listClientSessions(limit = 100): Promise<
+    Array<{
+      sessionId: string;
+      actorId: string;
+      tenantId: string;
+      client: string;
+      startedAt: string;
+      endedAt: string;
+      eventCount: number;
+      callCount: number;
+      failedCallCount: number;
+      evidenceCount: number;
+      tools: string[];
+      events: string[];
+      repositoryId?: string;
+      runtimeVersion?: string;
+      hookSchemaVersion?: number;
+      ended: boolean;
+    }>
+  > {
     if (this.readBackend === "sqlite") return (await this.sqlite!.listSessions({ limit })).items;
     const events = await this.listClientEvents(this.maxEntries);
     const calls = await this.listCalls(this.maxEntries);
@@ -790,32 +847,23 @@ export class McpObservabilityStore {
     }
     return [...groups.values()]
       .map((group) => {
-        const timeline = [
-          ...group.events.map((item) => item.ts),
-          ...group.calls.map((item) => item.ts)
-        ].sort();
+        const timeline = [...group.events.map((item) => item.ts), ...group.calls.map((item) => item.ts)].sort();
         const firstEvent = [...group.events].sort((a, b) => a.ts.localeCompare(b.ts))[0];
         const latestEvent = [...group.events].sort((a, b) => b.ts.localeCompare(a.ts))[0];
         const projectContext = group.events
           .map((item) => item.metadata?.project_context)
-          .find((item) => item && typeof item === "object") as
-          | { repositoryId?: string }
-          | undefined;
+          .find((item) => item && typeof item === "object") as { repositoryId?: string } | undefined;
         const runtimeMetadata = [...group.events]
           .sort((a, b) => b.ts.localeCompare(a.ts))
           .map((item) => item.metadata)
-          .find((metadata) =>
-            typeof metadata?.runtime_version === "string" ||
-            typeof metadata?.hook_schema_version === "number"
+          .find(
+            (metadata) =>
+              typeof metadata?.runtime_version === "string" || typeof metadata?.hook_schema_version === "number",
           );
         const runtimeVersion =
-          typeof runtimeMetadata?.runtime_version === "string"
-            ? runtimeMetadata.runtime_version
-            : undefined;
+          typeof runtimeMetadata?.runtime_version === "string" ? runtimeMetadata.runtime_version : undefined;
         const hookSchemaVersion =
-          typeof runtimeMetadata?.hook_schema_version === "number"
-            ? runtimeMetadata.hook_schema_version
-            : undefined;
+          typeof runtimeMetadata?.hook_schema_version === "number" ? runtimeMetadata.hook_schema_version : undefined;
         return {
           sessionId: firstEvent?.sessionId ?? group.calls[0]!.sessionId!,
           actorId: firstEvent?.actorId ?? group.calls[0]!.actorId,
@@ -835,7 +883,7 @@ export class McpObservabilityStore {
           repositoryId: projectContext?.repositoryId,
           runtimeVersion,
           hookSchemaVersion,
-          ended: latestEvent?.event === "SessionEnd"
+          ended: latestEvent?.event === "SessionEnd",
         };
       })
       .sort((a, b) => b.endedAt.localeCompare(a.endedAt))
@@ -845,12 +893,14 @@ export class McpObservabilityStore {
   async getClientSessionTimeline(
     principalId: string,
     tenantId: string,
-    sessionId: string
-  ): Promise<Array<
-    | { kind: "event"; ts: string; event: ClientEventRecord }
-    | { kind: "mcp-call"; ts: string; call: McpCallRecord }
-  >> {
-    if (this.readBackend === "sqlite") return await this.sqlite!.getSessionTimeline({ actorId: principalId, tenantId, sessionId });
+    sessionId: string,
+  ): Promise<
+    Array<
+      { kind: "event"; ts: string; event: ClientEventRecord } | { kind: "mcp-call"; ts: string; call: McpCallRecord }
+    >
+  > {
+    if (this.readBackend === "sqlite")
+      return await this.sqlite!.getSessionTimeline({ actorId: principalId, tenantId, sessionId });
     const events = (await this.listClientEvents(this.maxEntries))
       .filter((item) => item.actorId === principalId && item.tenantId === tenantId && item.sessionId === sessionId)
       .map((event) => ({ kind: "event" as const, ts: event.ts, event }));
@@ -861,13 +911,13 @@ export class McpObservabilityStore {
   }
 
   async recordCandidateDetection(
-    input: Omit<CandidateDetectionRecord, "id" | "ts">
+    input: Omit<CandidateDetectionRecord, "id" | "ts">,
   ): Promise<CandidateDetectionRecord> {
     const record: CandidateDetectionRecord = {
       ...input,
       id: "det_" + randomUUID().replaceAll("-", ""),
       ts: new Date().toISOString(),
-      reason: redactText(input.reason, 500)
+      reason: redactText(input.reason, 500),
     };
     await this.persistRecord("candidate-detections.jsonl", record, () => this.sqlite!.recordCandidateDetection(record));
     return record;
@@ -880,12 +930,14 @@ export class McpObservabilityStore {
 
   async getCandidateDetection(id: string): Promise<CandidateDetectionRecord | undefined> {
     if (this.readBackend === "sqlite") return await this.sqlite!.getCandidateDetection(id);
-    return (await this.read<CandidateDetectionRecord>("candidate-detections.jsonl", this.maxEntries)).find((item) => item.id === id);
+    return (await this.read<CandidateDetectionRecord>("candidate-detections.jsonl", this.maxEntries)).find(
+      (item) => item.id === id,
+    );
   }
 
   async submitFeedback(
     principal: Principal,
-    input: Omit<FeedbackRecord, "id" | "ts" | "actorId" | "tenantId">
+    input: Omit<FeedbackRecord, "id" | "ts" | "actorId" | "tenantId">,
   ): Promise<FeedbackRecord> {
     const record: FeedbackRecord = {
       ...input,
@@ -893,7 +945,7 @@ export class McpObservabilityStore {
       ts: new Date().toISOString(),
       actorId: principal.id,
       tenantId: principal.tenantId,
-      reason: input.reason ? redactText(input.reason, 1000) : undefined
+      reason: input.reason ? redactText(input.reason, 1000) : undefined,
     };
     await this.persistRecord("feedback.jsonl", record, () => this.sqlite!.recordFeedback(record));
     return record;
@@ -904,15 +956,12 @@ export class McpObservabilityStore {
     return this.read<FeedbackRecord>("feedback.jsonl", limit);
   }
 
-  async findExactCandidateDuplicate(
-    title: string,
-    content: string
-  ): Promise<KnowledgeCandidate | undefined> {
+  async findExactCandidateDuplicate(title: string, content: string): Promise<KnowledgeCandidate | undefined> {
     const fingerprint = candidateFingerprint(redactText(title, 200), redactText(content, 50_000));
     return (await this.listCandidates(this.maxEntries)).find(
       (item) =>
         (item.fingerprint ?? candidateFingerprint(item.title, item.content)) === fingerprint &&
-        item.status !== "rejected"
+        item.status !== "rejected",
     );
   }
 
@@ -921,7 +970,7 @@ export class McpObservabilityStore {
     content: string,
     repository?: string,
     threshold = 0.78,
-    excludeId?: string
+    excludeId?: string,
   ): Promise<{ candidate: KnowledgeCandidate; score: number } | undefined> {
     let best: { candidate: KnowledgeCandidate; score: number } | undefined;
     for (const item of await this.listCandidates(this.maxEntries)) {
@@ -936,8 +985,32 @@ export class McpObservabilityStore {
 
   async createCandidate(
     principal: Principal,
-    input: Pick<KnowledgeCandidate, "title" | "content" | "sourceType" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "traceId"> &
-      Partial<Pick<KnowledgeCandidate, "sourceSessionId" | "sourceTurnId" | "sourceGapKey" | "submissionSpecVersion" | "validationSpecVersion" | "submissionSpecSchemaVersion" | "submissionMode" | "automation" | "relatedKnowledge" | "relationHint">>
+    input: Pick<
+      KnowledgeCandidate,
+      | "title"
+      | "content"
+      | "sourceType"
+      | "suggestedType"
+      | "skillCollection"
+      | "repository"
+      | "suggestedPath"
+      | "traceId"
+    > &
+      Partial<
+        Pick<
+          KnowledgeCandidate,
+          | "sourceSessionId"
+          | "sourceTurnId"
+          | "sourceGapKey"
+          | "submissionSpecVersion"
+          | "validationSpecVersion"
+          | "submissionSpecSchemaVersion"
+          | "submissionMode"
+          | "automation"
+          | "relatedKnowledge"
+          | "relationHint"
+        >
+      >,
   ): Promise<KnowledgeCandidate> {
     const ts = new Date().toISOString();
     const title = redactText(input.title, 200);
@@ -946,7 +1019,7 @@ export class McpObservabilityStore {
     const duplicate = (await this.listCandidates(this.maxEntries)).find(
       (item) =>
         (item.fingerprint ?? candidateFingerprint(item.title, item.content)) === fingerprint &&
-        item.status !== "rejected"
+        item.status !== "rejected",
     );
     const nearDuplicate = duplicate
       ? undefined
@@ -964,7 +1037,7 @@ export class McpObservabilityStore {
       fingerprint,
       duplicateOf: duplicate?.id,
       possibleDuplicateOf: nearDuplicate?.candidate.id,
-      duplicateSimilarity: nearDuplicate ? Number(nearDuplicate.score.toFixed(3)) : undefined
+      duplicateSimilarity: nearDuplicate ? Number(nearDuplicate.score.toFixed(3)) : undefined,
     };
     await this.persistRecord("knowledge-candidates.jsonl", record, () => this.sqlite!.recordKnowledgeCandidate(record));
     return record;
@@ -1018,20 +1091,42 @@ export class McpObservabilityStore {
       const temporary = file + ".delete-" + randomUUID();
       await writeFile(temporary, kept.length ? kept.map((row) => row.raw).join("\n") + "\n" : "", {
         encoding: "utf8",
-        mode: 0o600
+        mode: 0o600,
       });
       await rename(temporary, file);
       return true;
     });
-    this.writeQueue = operation.then(() => undefined, () => undefined);
+    this.writeQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     const jsonlDeleted = await operation;
     if (this.writeBackend !== "dual") return jsonlDeleted;
-    try { return (await this.sqlite!.deleteCandidate(id)) || jsonlDeleted; } catch (error) { this.sqliteWriteFailures += 1; if (!jsonlDeleted) throw error; return jsonlDeleted; }
+    try {
+      return (await this.sqlite!.deleteCandidate(id)) || jsonlDeleted;
+    } catch (error) {
+      this.sqliteWriteFailures += 1;
+      if (!jsonlDeleted) throw error;
+      return jsonlDeleted;
+    }
   }
 
   async updateCandidate(
     id: string,
-    input: Partial<Pick<KnowledgeCandidate, "title" | "content" | "suggestedType" | "skillCollection" | "repository" | "suggestedPath" | "knowledgeRelation" | "validationSpecVersion" | "submissionSpecSchemaVersion">>
+    input: Partial<
+      Pick<
+        KnowledgeCandidate,
+        | "title"
+        | "content"
+        | "suggestedType"
+        | "skillCollection"
+        | "repository"
+        | "suggestedPath"
+        | "knowledgeRelation"
+        | "validationSpecVersion"
+        | "submissionSpecSchemaVersion"
+      >
+    >,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -1045,17 +1140,11 @@ export class McpObservabilityStore {
       (item) =>
         item.id !== id &&
         (item.fingerprint ?? candidateFingerprint(item.title, item.content)) === fingerprint &&
-        item.status !== "rejected"
+        item.status !== "rejected",
     );
     const nearDuplicate = duplicate
       ? undefined
-      : await this.findNearCandidateDuplicate(
-          nextTitle,
-          nextContent,
-          input.repository ?? current.repository,
-          0.78,
-          id
-        );
+      : await this.findNearCandidateDuplicate(nextTitle, nextContent, input.repository ?? current.repository, 0.78, id);
     const next: KnowledgeCandidate = {
       ...current,
       title: nextTitle,
@@ -1070,10 +1159,12 @@ export class McpObservabilityStore {
       ...(input.repository !== undefined ? { repository: input.repository || undefined } : {}),
       ...(input.suggestedPath !== undefined ? { suggestedPath: input.suggestedPath || undefined } : {}),
       ...(input.validationSpecVersion !== undefined ? { validationSpecVersion: input.validationSpecVersion } : {}),
-      ...(input.submissionSpecSchemaVersion !== undefined ? { submissionSpecSchemaVersion: input.submissionSpecSchemaVersion } : {}),
+      ...(input.submissionSpecSchemaVersion !== undefined
+        ? { submissionSpecSchemaVersion: input.submissionSpecSchemaVersion }
+        : {}),
       status: current.status === "pending" ? "pending" : "approved",
       publishError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1089,7 +1180,7 @@ export class McpObservabilityStore {
       ...current,
       status: "publishing",
       publishError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1097,7 +1188,7 @@ export class McpObservabilityStore {
 
   async markCandidatePublished(
     id: string,
-    publication: NonNullable<KnowledgeCandidate["publication"]>
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -1109,7 +1200,7 @@ export class McpObservabilityStore {
       status: "published",
       publication,
       publishError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1117,7 +1208,7 @@ export class McpObservabilityStore {
 
   async updateCandidatePublication(
     id: string,
-    publication: NonNullable<KnowledgeCandidate["publication"]>
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -1127,7 +1218,7 @@ export class McpObservabilityStore {
     const next: KnowledgeCandidate = {
       ...current,
       publication,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1137,7 +1228,7 @@ export class McpObservabilityStore {
     id: string,
     publication: NonNullable<KnowledgeCandidate["publication"]>,
     status: "publishing" | "publish_failed",
-    error?: string
+    error?: string,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -1147,7 +1238,7 @@ export class McpObservabilityStore {
       status,
       publication,
       publishError: status === "publish_failed" ? redactText(error ?? "Publication was not merged", 2000) : undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1163,7 +1254,7 @@ export class McpObservabilityStore {
       ...current,
       status: "deleting",
       deletionError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1171,31 +1262,36 @@ export class McpObservabilityStore {
 
   async updateCandidateDeletionPublication(
     id: string,
-    publication: NonNullable<KnowledgeCandidate["publication"]>
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
     if (!["deleting", "deleted"].includes(current.status)) {
       throw new Error("Knowledge candidate must be deleting or deleted before deletion publication can be updated");
     }
-    const next: KnowledgeCandidate = { ...current, deletionPublication: publication, updatedAt: new Date().toISOString() };
+    const next: KnowledgeCandidate = {
+      ...current,
+      deletionPublication: publication,
+      updatedAt: new Date().toISOString(),
+    };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
   }
 
   async markCandidateDeleted(
     id: string,
-    publication: NonNullable<KnowledgeCandidate["publication"]>
+    publication: NonNullable<KnowledgeCandidate["publication"]>,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
-    if (current.status !== "deleting") throw new Error("Knowledge candidate must be deleting before it can be marked deleted");
+    if (current.status !== "deleting")
+      throw new Error("Knowledge candidate must be deleting before it can be marked deleted");
     const next: KnowledgeCandidate = {
       ...current,
       status: "deleted",
       deletionPublication: publication,
       deletionError: undefined,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1209,7 +1305,7 @@ export class McpObservabilityStore {
       ...current,
       status: "delete_failed",
       deletionError: redactText(error, 2000),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1225,7 +1321,7 @@ export class McpObservabilityStore {
       ...current,
       status: "publish_failed",
       publishError: redactText(error, 2000),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1236,7 +1332,7 @@ export class McpObservabilityStore {
     status: "approved" | "rejected",
     reviewer: string,
     reviewNote?: string,
-    reviewReason?: CandidateReviewReason
+    reviewReason?: CandidateReviewReason,
   ): Promise<KnowledgeCandidate> {
     const current = (await this.listCandidates(this.maxEntries)).find((item) => item.id === id);
     if (!current) throw new Error("Knowledge candidate not found");
@@ -1252,7 +1348,7 @@ export class McpObservabilityStore {
       reviewer,
       reviewNote: reviewNote ? redactText(reviewNote, 2000) : undefined,
       reviewReason,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
     await this.persistRecord("knowledge-candidates.jsonl", next, () => this.sqlite!.recordKnowledgeCandidate(next));
     return next;
@@ -1266,7 +1362,26 @@ export class McpObservabilityStore {
       .replace(/[^\p{L}\p{N}\u4e00-\u9fff]+/gu, " ")
       .replace(/\s+/g, " ")
       .trim();
-    const stopWords = new Set(["the","a","an","is","are","of","to","for","and","or","how","what","policy","rule","document","文档","规则","策略"]);
+    const stopWords = new Set([
+      "the",
+      "a",
+      "an",
+      "is",
+      "are",
+      "of",
+      "to",
+      "for",
+      "and",
+      "or",
+      "how",
+      "what",
+      "policy",
+      "rule",
+      "document",
+      "文档",
+      "规则",
+      "策略",
+    ]);
     const tokens = new Set<string>();
     for (const token of normalized.split(" ")) {
       if (token.length >= 2 && !stopWords.has(token)) tokens.add(token);
@@ -1285,14 +1400,19 @@ export class McpObservabilityStore {
   }
 
   async knowledgeGaps(unmatchedQueries: Array<{ query: string; count: number }>): Promise<KnowledgeGap[]> {
-    const inputs: Array<{ query: string; occurrences: number; lastSeenAt: string; source: "unmatched-query" | "negative-feedback" }> = [];
+    const inputs: Array<{
+      query: string;
+      occurrences: number;
+      lastSeenAt: string;
+      source: "unmatched-query" | "negative-feedback";
+    }> = [];
     const now = new Date().toISOString();
     for (const item of unmatchedQueries) {
       inputs.push({
         query: redactText(item.query, 500),
         occurrences: item.count,
         lastSeenAt: now,
-        source: "unmatched-query"
+        source: "unmatched-query",
       });
     }
     for (const feedback of await this.listFeedback(this.maxEntries)) {
@@ -1301,7 +1421,7 @@ export class McpObservabilityStore {
         query: redactText(feedback.reason, 500),
         occurrences: 1,
         lastSeenAt: feedback.ts,
-        source: "negative-feedback"
+        source: "negative-feedback",
       });
     }
 
@@ -1324,8 +1444,7 @@ export class McpObservabilityStore {
       if (bestIndex >= 0 && bestScore >= 0.6) {
         const cluster = clusters[bestIndex]!;
         cluster.gap.occurrences += input.occurrences;
-        cluster.gap.lastSeenAt =
-          cluster.gap.lastSeenAt > input.lastSeenAt ? cluster.gap.lastSeenAt : input.lastSeenAt;
+        cluster.gap.lastSeenAt = cluster.gap.lastSeenAt > input.lastSeenAt ? cluster.gap.lastSeenAt : input.lastSeenAt;
         cluster.gap.members = [...new Set([...(cluster.gap.members ?? [cluster.gap.query]), input.query])];
         if (cluster.gap.source !== input.source) cluster.gap.source = "unmatched-query";
         for (const token of normalized.tokens) cluster.tokens.add(token);
@@ -1341,8 +1460,8 @@ export class McpObservabilityStore {
             occurrences: input.occurrences,
             lastSeenAt: input.lastSeenAt,
             source: input.source,
-            members: [input.query]
-          }
+            members: [input.query],
+          },
         });
       }
     }
@@ -1364,14 +1483,15 @@ export class McpObservabilityStore {
 
   async updateKnowledgeGapManagement(
     gapKey: string,
-    input: Partial<Pick<KnowledgeGapManagement, "status" | "keywords" | "candidateId" | "knowledge" | "commit">>
+    input: Partial<Pick<KnowledgeGapManagement, "status" | "keywords" | "candidateId" | "knowledge" | "commit">>,
   ): Promise<KnowledgeGapManagement> {
     const current = (await this.listKnowledgeGapManagement()).get(gapKey);
     const now = new Date().toISOString();
     const status = input.status ?? current?.status ?? "active";
-    const keywords = input.keywords === undefined
-      ? current?.keywords ?? []
-      : [...new Set(input.keywords.map((item) => redactText(item.trim(), 100)).filter(Boolean))].slice(0, 50);
+    const keywords =
+      input.keywords === undefined
+        ? (current?.keywords ?? [])
+        : [...new Set(input.keywords.map((item) => redactText(item.trim(), 100)).filter(Boolean))].slice(0, 50);
     const next: KnowledgeGapManagement = {
       gapKey,
       status,
@@ -1380,10 +1500,12 @@ export class McpObservabilityStore {
       knowledge: input.knowledge ?? current?.knowledge,
       commit: input.commit ?? current?.commit,
       updatedAt: now,
-      ignoredAt: status === "ignored" ? current?.ignoredAt ?? now : undefined,
-      resolvedAt: status === "resolved" ? current?.resolvedAt ?? now : undefined
+      ignoredAt: status === "ignored" ? (current?.ignoredAt ?? now) : undefined,
+      resolvedAt: status === "resolved" ? (current?.resolvedAt ?? now) : undefined,
     };
-    await this.persistRecord("knowledge-gap-management.jsonl", next, () => this.sqlite!.recordKnowledgeGapManagement(next));
+    await this.persistRecord("knowledge-gap-management.jsonl", next, () =>
+      this.sqlite!.recordKnowledgeGapManagement(next),
+    );
     return next;
   }
 }

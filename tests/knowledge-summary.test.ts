@@ -5,7 +5,7 @@ import {
   MAX_KNOWLEDGE_SUMMARY_CHARS,
   MAX_KNOWLEDGE_TITLE_CHARS,
   normalizeKnowledgeCandidateSummary,
-  parseKnowledgeSummary
+  parseKnowledgeSummary,
 } from "../src/knowledge-summary.js";
 
 const validSummary = [
@@ -27,7 +27,7 @@ const validSummary = [
   "适用于支持断电恢复的 OTA 升级流程。",
   "",
   "## 约束/限制",
-  "仍需在目标硬件上验证掉电时序。"
+  "仍需在目标硬件上验证掉电时序。",
 ].join("\n");
 
 test("parses and canonicalizes the fixed knowledge summary format", () => {
@@ -63,7 +63,7 @@ test("caps knowledge titles at the documented limit", () => {
 test("manual candidate normalization rejects raw notes and returns canonical content", () => {
   assert.deepEqual(normalizeKnowledgeCandidateSummary("raw notes from the session"), {
     ok: false,
-    reason: "missing-title"
+    reason: "missing-title",
   });
   const result = normalizeKnowledgeCandidateSummary(validSummary);
   assert.equal(result.ok, true);
@@ -73,27 +73,29 @@ test("manual candidate normalization rejects raw notes and returns canonical con
 });
 
 test("accepts English section aliases and emits Chinese canonical headings", () => {
-  const result = parseKnowledgeSummary([
-    "# Verified Docker smoke test",
-    "",
-    "## Problem",
-    "The MCP server must be reachable from WSL2.",
-    "",
-    "## Root Cause",
-    "The client was using a stale endpoint.",
-    "",
-    "## Solution",
-    "Configure the current MCP endpoint.",
-    "",
-    "## Verification",
-    "The container reported 1 passed, 0 failed.",
-    "",
-    "## Applicability",
-    "WSL2 Codex users.",
-    "",
-    "## Constraints",
-    "Human review is still required."
-  ].join("\n"));
+  const result = parseKnowledgeSummary(
+    [
+      "# Verified Docker smoke test",
+      "",
+      "## Problem",
+      "The MCP server must be reachable from WSL2.",
+      "",
+      "## Root Cause",
+      "The client was using a stale endpoint.",
+      "",
+      "## Solution",
+      "Configure the current MCP endpoint.",
+      "",
+      "## Verification",
+      "The container reported 1 passed, 0 failed.",
+      "",
+      "## Applicability",
+      "WSL2 Codex users.",
+      "",
+      "## Constraints",
+      "Human review is still required.",
+    ].join("\n"),
+  );
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.match(result.summary.markdown, /## 问题/);
@@ -106,23 +108,25 @@ test("rejects prose that is not an explicitly structured summary", () => {
 });
 
 test("rejects summaries missing a required section", () => {
-  const result = parseKnowledgeSummary([
-    "# Incomplete",
-    "",
-    "## 问题",
-    "A problem.",
-    "",
-    "## 根因",
-    "A cause.",
-    "",
-    "## 解决方案",
-    "A solution.",
-    "",
-    "## 验证结果",
-    "A passing test.",
-    "",
-    "## 适用范围",
-    "A scope."
-  ].join("\n"));
+  const result = parseKnowledgeSummary(
+    [
+      "# Incomplete",
+      "",
+      "## 问题",
+      "A problem.",
+      "",
+      "## 根因",
+      "A cause.",
+      "",
+      "## 解决方案",
+      "A solution.",
+      "",
+      "## 验证结果",
+      "A passing test.",
+      "",
+      "## 适用范围",
+      "A scope.",
+    ].join("\n"),
+  );
   assert.deepEqual(result, { ok: false, reason: "missing-constraints" });
 });

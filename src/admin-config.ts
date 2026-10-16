@@ -24,7 +24,7 @@ function cloneRepositories(repositories: RepositoryConfig[]): RepositoryConfig[]
     syncRoles: [...repository.syncRoles],
     knowledge: normalizeKnowledgeConfig(repository.knowledge),
     knowledgePublishing: repository.knowledgePublishing ? { ...repository.knowledgePublishing } : undefined,
-    skillPublishing: repository.skillPublishing ? { ...repository.skillPublishing } : undefined
+    skillPublishing: repository.skillPublishing ? { ...repository.skillPublishing } : undefined,
   }));
 }
 
@@ -37,7 +37,7 @@ function cloneProjects(projects: ProjectConfig[] | undefined): ProjectConfig[] {
     preferredKnowledgeRepositories: [...project.preferredKnowledgeRepositories],
     tools: [...project.tools],
     environments: [...project.environments],
-    aliases: [...project.aliases]
+    aliases: [...project.aliases],
   }));
 }
 
@@ -48,7 +48,7 @@ export function editableConfigFromApp(config: AppConfig): AdminEditableConfig {
     webhookDedupMaxEntries: config.webhookDedupMaxEntries ?? 1000,
     webhookDedupTtlSeconds: config.webhookDedupTtlSeconds ?? 604800,
     repositories: cloneRepositories(config.repositories),
-    projects: cloneProjects(config.projects)
+    projects: cloneProjects(config.projects),
   };
 }
 
@@ -92,8 +92,10 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
       throw new Error(`Repository ${repository.id}: GitHub publishing projectPath is required`);
     }
     if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: publishing tokenEnv is required`);
-    if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: publishing targetBranch is required`);
-    if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: publishing branchPrefix is required`);
+    if (!publishing.targetBranch?.trim())
+      throw new Error(`Repository ${repository.id}: publishing targetBranch is required`);
+    if (!publishing.branchPrefix?.trim())
+      throw new Error(`Repository ${repository.id}: publishing branchPrefix is required`);
   }
   if (repository.skillPublishing) {
     const publishing = repository.skillPublishing;
@@ -103,9 +105,12 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
     if (publishing.provider === "github" && !publishing.projectPath?.trim()) {
       throw new Error(`Repository ${repository.id}: GitHub skill publishing projectPath is required`);
     }
-    if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: skill publishing tokenEnv is required`);
-    if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: skill publishing targetBranch is required`);
-    if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: skill publishing branchPrefix is required`);
+    if (!publishing.tokenEnv?.trim())
+      throw new Error(`Repository ${repository.id}: skill publishing tokenEnv is required`);
+    if (!publishing.targetBranch?.trim())
+      throw new Error(`Repository ${repository.id}: skill publishing targetBranch is required`);
+    if (!publishing.branchPrefix?.trim())
+      throw new Error(`Repository ${repository.id}: skill publishing branchPrefix is required`);
   }
 }
 
@@ -118,7 +123,8 @@ function validateProjects(projects: ProjectConfig[] | undefined, repositories: R
     seen.add(project.id);
     if (!project.repositoryPatterns.length) throw new Error(`Project ${project.id}: repositoryPatterns is required`);
     for (const repositoryId of [...project.preferredSkillRepositories, ...project.preferredKnowledgeRepositories]) {
-      if (!repositoryIds.has(repositoryId)) throw new Error(`Project ${project.id}: unknown preferred repository ${repositoryId}`);
+      if (!repositoryIds.has(repositoryId))
+        throw new Error(`Project ${project.id}: unknown preferred repository ${repositoryId}`);
     }
     return {
       ...project,
@@ -130,7 +136,7 @@ function validateProjects(projects: ProjectConfig[] | undefined, repositories: R
       preferredKnowledgeRepositories: [...new Set(project.preferredKnowledgeRepositories)],
       tools: [...new Set(project.tools.map((item) => item.trim()).filter(Boolean))],
       environments: [...new Set(project.environments.map((item) => item.trim()).filter(Boolean))],
-      aliases: [...new Set(project.aliases.map((item) => item.trim()).filter(Boolean))]
+      aliases: [...new Set(project.aliases.map((item) => item.trim()).filter(Boolean))],
     };
   });
 }
@@ -145,7 +151,7 @@ export function validateAdminConfig(value: AdminEditableConfig): AdminEditableCo
     webhookDedupMaxEntries: Math.max(100, Number(value.webhookDedupMaxEntries ?? 1000)),
     webhookDedupTtlSeconds: Math.max(3600, Number(value.webhookDedupTtlSeconds ?? 604800)),
     repositories,
-    projects: validateProjects(value.projects ?? [], repositories)
+    projects: validateProjects(value.projects ?? [], repositories),
   };
 }
 

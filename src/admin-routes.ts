@@ -3,10 +3,32 @@ export type AdminRoute =
   | { kind: "governance"; path: "/admin/governance" }
   | { kind: "module-index"; module: "review" | "gaps"; path: string }
   | { kind: "review-list"; path: "/admin/review/items" }
-  | { kind: "review-detail"; reviewKind: "candidate" | "skill-bundle"; id: string; subresource?: "history"; path: string }
-  | { kind: "module"; module: "review" | "gaps" | "governance"; resource: string; id?: string; subresource?: string; path: string }
-  | { kind: "list"; resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures"; path: string }
-  | { kind: "detail"; resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures"; id: string; path: string }
+  | {
+      kind: "review-detail";
+      reviewKind: "candidate" | "skill-bundle";
+      id: string;
+      subresource?: "history";
+      path: string;
+    }
+  | {
+      kind: "module";
+      module: "review" | "gaps" | "governance";
+      resource: string;
+      id?: string;
+      subresource?: string;
+      path: string;
+    }
+  | {
+      kind: "list";
+      resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures";
+      path: string;
+    }
+  | {
+      kind: "detail";
+      resource: "sessions" | "hooks" | "candidate-detections" | "mcp-calls" | "reuse" | "failures";
+      id: string;
+      path: string;
+    }
   | { kind: "legacy"; path: string };
 
 const resources = new Set(["sessions", "hooks", "candidate-detections", "mcp-calls", "reuse", "failures"]);
@@ -24,7 +46,9 @@ export function redactAdminValue(value: unknown, key?: string): unknown {
   if (key && sensitiveAdminKey.test(key)) return "[redacted]";
   if (Array.isArray(value)) return value.map((item) => redactAdminValue(item));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, redactAdminValue(childValue, childKey)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [childKey, redactAdminValue(childValue, childKey)]),
+    );
   }
   return value;
 }
@@ -42,7 +66,7 @@ export function parseAdminRoute(input: string | URL): AdminRoute {
       reviewKind: reviewDetailMatch[1] as "candidate" | "skill-bundle",
       id: decodeAdminRouteId(reviewDetailMatch[2]!),
       ...(reviewDetailMatch[3] ? { subresource: "history" as const } : {}),
-      path
+      path,
     };
   }
   const moduleMatch = path.match(/^\/admin\/(review|gaps|governance)(?:\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?)?$/);
@@ -50,7 +74,14 @@ export function parseAdminRoute(input: string | URL): AdminRoute {
     const module = moduleMatch[1] as "review" | "gaps" | "governance";
     if (!moduleMatch[2]) return { kind: "module-index", module: module as "review" | "gaps", path };
     return moduleMatch[3]
-      ? { kind: "module", module, resource: moduleMatch[2]!, id: decodeAdminRouteId(moduleMatch[3]), ...(moduleMatch[4] ? { subresource: moduleMatch[4] } : {}), path }
+      ? {
+          kind: "module",
+          module,
+          resource: moduleMatch[2]!,
+          id: decodeAdminRouteId(moduleMatch[3]),
+          ...(moduleMatch[4] ? { subresource: moduleMatch[4] } : {}),
+          path,
+        }
       : { kind: "module", module, resource: moduleMatch[2]!, path };
   }
   const match = path.match(/^\/admin\/observability\/([^/]+)(?:\/([^/]+))?$/);
@@ -76,13 +107,11 @@ export function normalizeAdminLimit(value: string | number | null | undefined): 
 export function paginateAdminRows<T>(
   rows: T[],
   query: { limit?: string; cursor?: string; q?: string },
-  searchableText: (row: T) => string
+  searchableText: (row: T) => string,
 ) {
   const limit = normalizeAdminLimit(query.limit);
   const q = query.q?.trim().toLowerCase();
-  const filtered = q
-    ? rows.filter((row) => searchableText(row).toLowerCase().includes(q))
-    : rows;
+  const filtered = q ? rows.filter((row) => searchableText(row).toLowerCase().includes(q)) : rows;
   const parsedCursor = Number(query.cursor ?? 0);
   const offset = Number.isFinite(parsedCursor) && parsedCursor > 0 ? Math.floor(parsedCursor) : 0;
   const items = filtered.slice(offset, offset + limit);
@@ -93,15 +122,15 @@ export function paginateAdminRows<T>(
       limit,
       cursor: String(offset),
       nextCursor: offset + limit < filtered.length ? String(offset + limit) : undefined,
-      previousCursor: offset > 0 ? String(Math.max(0, offset - limit)) : undefined
-    }
+      previousCursor: offset > 0 ? String(Math.max(0, offset - limit)) : undefined,
+    },
   };
 }
 
 export function safeAdminReturnPath(
   value: string | null | undefined,
   fallback: string,
-  allowedPrefix = "/admin/"
+  allowedPrefix = "/admin/",
 ): string {
   if (!value) return fallback;
   try {

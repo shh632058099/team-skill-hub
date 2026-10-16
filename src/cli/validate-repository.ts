@@ -5,7 +5,7 @@ import {
   SkillDependencyRule,
   UniqueNameRule,
   scanSkills,
-  validateSkills
+  validateSkills,
 } from "../skills.js";
 import type { RepositoryConfig } from "../types.js";
 import { scanAgents, scanPrompts, validateArtifactPolicies } from "../artifacts.js";
@@ -40,7 +40,7 @@ const repository: RepositoryConfig = {
   visibility,
   pollingIntervalSeconds: 0,
   readRoles: [],
-  syncRoles: []
+  syncRoles: [],
 };
 
 try {
@@ -52,13 +52,13 @@ try {
     new RequiredFieldsRule(),
     new UniqueNameRule(),
     new SkillDependencyRule(),
-    new RepositoryVisibilityRule()
+    new RepositoryVisibilityRule(),
   ]);
   const artifactIssues = validateArtifactPolicies(
     repository,
     prompts,
     agents,
-    skills.map((skill) => skill.name)
+    skills.map((skill) => skill.name),
   );
   for (const message of artifactIssues) {
     issues.push({ rule: "artifact", message });
@@ -76,11 +76,11 @@ try {
           promptCount: prompts.length,
           agentCount: agents.length,
           evaluationSuiteCount: evaluationSuites.length,
-          issues
+          issues,
         },
         null,
-        2
-      )
+        2,
+      ),
     );
     process.exit(1);
   }
@@ -91,12 +91,12 @@ try {
         repository: id,
         skillCount: skills.length,
         promptCount: prompts.length,
-        agentCount: agents.length
-        ,evaluationSuiteCount: evaluationSuites.length
+        agentCount: agents.length,
+        evaluationSuiteCount: evaluationSuites.length,
       },
       null,
-      2
-    )
+      2,
+    ),
   );
 } catch (error) {
   console.error(
@@ -104,11 +104,11 @@ try {
       {
         ok: false,
         repository: id,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       },
       null,
-      2
-    )
+      2,
+    ),
   );
   process.exit(1);
 }

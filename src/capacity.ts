@@ -50,13 +50,11 @@ function syntheticChunks(count: number): KnowledgeChunk[] {
     content:
       `Synthetic engineering knowledge topic-${index} checkpoint-${index % 97} ` +
       "recovery firmware validation release workflow deterministic search payload",
-    metadata: { owner: "benchmark", status: "active" }
+    metadata: { owner: "benchmark", status: "active" },
   }));
 }
 
-export async function runCapacityBenchmark(
-  options: CapacityBenchmarkOptions = {}
-): Promise<CapacityBenchmarkResult> {
+export async function runCapacityBenchmark(options: CapacityBenchmarkOptions = {}): Promise<CapacityBenchmarkResult> {
   const users = Math.max(1, Math.min(Math.floor(options.users ?? 30), 200));
   const chunks = Math.max(100, Math.min(Math.floor(options.chunks ?? 10000), 100000));
   const searchesPerUser = Math.max(1, Math.min(Math.floor(options.searchesPerUser ?? 20), 200));
@@ -78,15 +76,11 @@ export async function runCapacityBenchmark(
           await new Promise<void>((resolve) => setImmediate(resolve));
           const start = performance.now();
           const target = (user * searchesPerUser + round) % chunks;
-          const results = index.search(
-            `checkpoint-${target % 97} topic-${target}`,
-            ["capacity"],
-            5
-          );
+          const results = index.search(`checkpoint-${target % 97} topic-${target}`, ["capacity"], 5);
           latencies.push(performance.now() - start);
           if (!results.length) throw new Error("Synthetic capacity search returned no results");
         }
-      })
+      }),
     );
     const searchDurationMs = performance.now() - searchStarted;
 
@@ -104,13 +98,13 @@ export async function runCapacityBenchmark(
               tenantId: "capacity",
               latencyMs: round + 1,
               success: true,
-              args: { round, query: `topic-${user}` }
+              args: { round, query: `topic-${user}` },
             });
           } catch {
             writeErrors += 1;
           }
         }
-      })
+      }),
     );
     const writeDurationMs = performance.now() - writeStarted;
     const persistedWrites = (await store.listCalls(users * writesPerUser + 100)).length;
@@ -132,7 +126,7 @@ export async function runCapacityBenchmark(
       totalWrites,
       persistedWrites,
       writeDurationMs,
-      writeErrors
+      writeErrors,
     };
   } finally {
     index.close();

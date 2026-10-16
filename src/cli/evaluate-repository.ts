@@ -3,7 +3,7 @@ import {
   evaluateGate,
   loadEvaluationSnapshot,
   runEvaluationSuite,
-  type EvaluationGateThresholds
+  type EvaluationGateThresholds,
 } from "../evaluation.js";
 
 function arg(name: string): string | undefined {
@@ -24,7 +24,7 @@ function ratioArg(name: string): number | undefined {
 const repositoryPath = arg("--path");
 if (!repositoryPath) {
   console.error(
-    "Usage: npm run evaluate:repo -- --path <repo> [--id <id>] [--suite <suite>] [--baseline-path <repo>] [--revision <label>] [--baseline-revision <label>] [--min-pass-rate 0..1] [--warn-pass-rate 0..1] [--min-hit-at-1 0..1] [--warn-hit-at-1 0..1] [--min-hit-at-3 0..1] [--warn-hit-at-3 0..1] [--min-hit-at-5 0..1] [--warn-hit-at-5 0..1] [--min-mrr 0..1] [--warn-mrr 0..1]"
+    "Usage: npm run evaluate:repo -- --path <repo> [--id <id>] [--suite <suite>] [--baseline-path <repo>] [--revision <label>] [--baseline-revision <label>] [--min-pass-rate 0..1] [--warn-pass-rate 0..1] [--min-hit-at-1 0..1] [--warn-hit-at-1 0..1] [--min-hit-at-3 0..1] [--warn-hit-at-3 0..1] [--min-hit-at-5 0..1] [--warn-hit-at-5 0..1] [--min-mrr 0..1] [--warn-mrr 0..1]",
   );
   process.exit(2);
 }
@@ -44,23 +44,15 @@ const thresholds: EvaluationGateThresholds = {
   minHitAt5: ratioArg("--min-hit-at-5"),
   warnHitAt5: ratioArg("--warn-hit-at-5"),
   minMrr: ratioArg("--min-mrr"),
-  warnMrr: ratioArg("--warn-mrr")
+  warnMrr: ratioArg("--warn-mrr"),
 };
 
 try {
-  const candidate = await loadEvaluationSnapshot(
-    path.resolve(repositoryPath),
-    repositoryId,
-    revision
-  );
-  const selectedSuites = suiteFilter
-    ? candidate.suites.filter((suite) => suite.id === suiteFilter)
-    : candidate.suites;
+  const candidate = await loadEvaluationSnapshot(path.resolve(repositoryPath), repositoryId, revision);
+  const selectedSuites = suiteFilter ? candidate.suites.filter((suite) => suite.id === suiteFilter) : candidate.suites;
   if (selectedSuites.length === 0) {
     throw new Error(
-      suiteFilter
-        ? `Evaluation suite not found: ${suiteFilter}`
-        : "Repository contains no EVALUATION.yaml"
+      suiteFilter ? `Evaluation suite not found: ${suiteFilter}` : "Repository contains no EVALUATION.yaml",
     );
   }
 
@@ -95,9 +87,9 @@ try {
       total,
       passed,
       failed,
-      regressions
-      ,missingBaselineSuites: missingBaselineSuites.length
-    }
+      regressions,
+      missingBaselineSuites: missingBaselineSuites.length,
+    },
   };
   console.log(JSON.stringify(output, null, 2));
   if (!output.ok) process.exit(1);
@@ -107,11 +99,11 @@ try {
       {
         ok: false,
         repository: repositoryId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       },
       null,
-      2
-    )
+      2,
+    ),
   );
   process.exit(1);
 }

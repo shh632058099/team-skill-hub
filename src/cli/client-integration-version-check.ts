@@ -12,19 +12,25 @@ function argument(name: string): string | undefined {
 export function requiresClientVersionBump(paths: string[]): boolean {
   return paths.some((file) => {
     if (file === "client-integration/release.json") return false;
-    return file.startsWith("client-integration/") ||
+    return (
+      file.startsWith("client-integration/") ||
       /^scripts\/setup-(?:codex|claude)-/.test(file) ||
       /^scripts\/team-skill-hub-(?:hook|claude-stop)/.test(file) ||
-      /^scripts\/bootstrap-client-integration\./.test(file);
+      /^scripts\/bootstrap-client-integration\./.test(file)
+    );
   });
 }
 
 type ClientReleaseMetadata = Record<string, unknown> & { version?: number; minimumSupportedVersion?: number };
 
-export function releaseMetadataRequiresClientVersionBump(before: ClientReleaseMetadata, after: ClientReleaseMetadata): boolean {
-  const normalize = (value: ClientReleaseMetadata) => Object.entries(value)
-    .filter(([key]) => key !== "version" && key !== "minimumSupportedVersion")
-    .sort(([a], [b]) => a.localeCompare(b));
+export function releaseMetadataRequiresClientVersionBump(
+  before: ClientReleaseMetadata,
+  after: ClientReleaseMetadata,
+): boolean {
+  const normalize = (value: ClientReleaseMetadata) =>
+    Object.entries(value)
+      .filter(([key]) => key !== "version" && key !== "minimumSupportedVersion")
+      .sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify(normalize(before)) !== JSON.stringify(normalize(after));
 }
 
@@ -56,7 +62,9 @@ async function main(): Promise<void> {
   const before = await baseRelease(base);
   const after = await currentRelease();
   const releaseChanged = changed.includes("client-integration/release.json");
-  const metadataNeedsBump = Boolean(before && releaseChanged && releaseMetadataRequiresClientVersionBump(before, after));
+  const metadataNeedsBump = Boolean(
+    before && releaseChanged && releaseMetadataRequiresClientVersionBump(before, after),
+  );
   const sourceNeedsBump = requiresClientVersionBump(changed);
   if (!sourceNeedsBump && !metadataNeedsBump) {
     console.log(JSON.stringify({ ok: true, base, clientOwnedChanges: false }));
@@ -68,10 +76,19 @@ async function main(): Promise<void> {
   }
   const beforeVersion = Number(before.version);
   const afterVersion = Number(after.version);
-  if (beforeVersion === afterVersion) throw new Error(`client integration sources or release metadata changed but version remained ${afterVersion}`);
-  if (afterVersion < beforeVersion) throw new Error(`client integration version regressed from ${beforeVersion} to ${afterVersion}`);
-  console.log(JSON.stringify({ ok: true, base, previousVersion: beforeVersion, version: afterVersion }));}
+  if (beforeVersion === afterVersion)
+    throw new Error(`client integration sources or release metadata changed but version remained ${afterVersion}`);
+  if (afterVersion < beforeVersion)
+    throw new Error(`client integration version regressed from ${beforeVersion} to ${afterVersion}`);
+  console.log(JSON.stringify({ ok: true, base, previousVersion: beforeVersion, version: afterVersion }));
+}
 
-if (process.argv[1]?.endsWith("client-integration-version-check.ts") || process.argv[1]?.endsWith("client-integration-version-check.js")) {
-  main().catch((error) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+if (
+  process.argv[1]?.endsWith("client-integration-version-check.ts") ||
+  process.argv[1]?.endsWith("client-integration-version-check.js")
+) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
 }
