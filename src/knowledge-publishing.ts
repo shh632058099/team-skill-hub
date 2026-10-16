@@ -170,7 +170,8 @@ export function resolveKnowledgePublishTarget(
   if (config.provider !== "gitlab" && config.provider !== "github") throw new Error("Unsupported knowledge publisher");
   return {
     filePath: assertSafePath(candidate.suggestedPath ?? defaultCandidatePath(candidate)),
-    targetBranch: config.provider === "gitlab" ? config.targetBranch || repository.branch || "main" : config.targetBranch || "main",
+    targetBranch:
+      config.provider === "gitlab" ? config.targetBranch || repository.branch || "main" : config.targetBranch || "main",
     desiredContent: markdownForCandidate(candidate),
   };
 }

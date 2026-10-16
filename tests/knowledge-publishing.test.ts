@@ -574,17 +574,29 @@ test("provider target readers do not expose raw provider response bodies", async
     const gitlabRepo = repository();
     const gitlabTarget = resolveKnowledgePublishTarget(candidate(), gitlabRepo);
     await assert.rejects(
-      () => new GitLabKnowledgePublisher(async () => new Response(secret, { status: 500 })).readTargetFile(gitlabTarget, gitlabRepo),
+      () =>
+        new GitLabKnowledgePublisher(async () => new Response(secret, { status: 500 })).readTargetFile(
+          gitlabTarget,
+          gitlabRepo,
+        ),
       (error: unknown) =>
-        error instanceof Error && /GitLab target file read failed \(500\)/.test(error.message) && !error.message.includes(secret),
+        error instanceof Error &&
+        /GitLab target file read failed \(500\)/.test(error.message) &&
+        !error.message.includes(secret),
     );
 
     const githubRepo = githubRepository();
     const githubTarget = resolveKnowledgePublishTarget(candidate(), githubRepo);
     await assert.rejects(
-      () => new GitHubKnowledgePublisher(async () => new Response(secret, { status: 500 })).readTargetFile(githubTarget, githubRepo),
+      () =>
+        new GitHubKnowledgePublisher(async () => new Response(secret, { status: 500 })).readTargetFile(
+          githubTarget,
+          githubRepo,
+        ),
       (error: unknown) =>
-        error instanceof Error && /GitHub target file read failed \(500\)/.test(error.message) && !error.message.includes(secret),
+        error instanceof Error &&
+        /GitHub target file read failed \(500\)/.test(error.message) &&
+        !error.message.includes(secret),
     );
   } finally {
     delete process.env.TEST_GITLAB_WRITE_TOKEN;

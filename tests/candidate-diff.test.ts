@@ -114,11 +114,15 @@ test("pending Candidate diff reports create without mutating Candidate state", a
 
 test("Candidate diff normalizes CRLF and reports no_change for equal content", async () => {
   const desired = "# Example note\r\n\r\nalpha\r\nbeta\r\ngamma\r\n";
-  const ctx = await fixture(async () =>
-    new Response(JSON.stringify({ content: Buffer.from(desired).toString("base64"), encoding: "base64", type: "file" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
+  const ctx = await fixture(
+    async () =>
+      new Response(
+        JSON.stringify({ content: Buffer.from(desired).toString("base64"), encoding: "base64", type: "file" }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
   );
   try {
     const candidate = await createCandidate(ctx.service);
@@ -147,11 +151,15 @@ test("Candidate diff preserves Unicode and multiple separated update hunks", asy
     "旧结尾",
     "",
   ].join("\n");
-  const ctx = await fixture(async () =>
-    new Response(JSON.stringify({ content: Buffer.from(baseline).toString("base64"), encoding: "base64", type: "file" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
+  const ctx = await fixture(
+    async () =>
+      new Response(
+        JSON.stringify({ content: Buffer.from(baseline).toString("base64"), encoding: "base64", type: "file" }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
   );
   try {
     const candidate = await createCandidate(ctx.service, {
