@@ -133,7 +133,7 @@ if (-not $SkipMcp) {
     $root['permissions']['additionalDirectories'] = @($root['permissions']['additionalDirectories'])
   }
   $permissionRule = 'mcp__' + $ServerName + '__*'
-  $allow = @($root['permissions']['allow'])
+  $allow = @($root['permissions']['allow']) | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) }
   if ($allow -notcontains $permissionRule) { $allow += $permissionRule }
   $root['permissions']['allow'] = @($allow)
 }

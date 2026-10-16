@@ -57,6 +57,11 @@ test("Claude setup allows every tool from the configured Team Skill Hub without 
   }
 });
 
+test("PowerShell Claude setup does not emit null when permissions.allow is missing", async () => {
+  const source = await readFile("scripts/setup-claude-code.ps1", "utf8");
+  assert.match(source, /Where-Object \{ \$_ -is \[string\] -and -not \[string\]::IsNullOrWhiteSpace\(\$_\) \}/);
+});
+
 test("Claude setup --skip-mcp does not grant Team Skill Hub MCP permissions", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "team-skill-hub-claude-skip-"));
   const configDir = path.join(root, "claude");
