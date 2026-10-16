@@ -185,6 +185,9 @@ export async function applyManagedConfig(context) {
     const settingsFile = path.join(claude.config_home, "settings.json");
     const mdFile = path.join(claude.config_home, "CLAUDE.md");
     claudeSettings.permissions ||= {}; const allow = Array.isArray(claudeSettings.permissions.allow) ? claudeSettings.permissions.allow : [];
+    if (typeof claudeSettings.permissions.additionalDirectories === "string") {
+      claudeSettings.permissions.additionalDirectories = [claudeSettings.permissions.additionalDirectories];
+    }
     const rule = `mcp__${claude.server_name}__*`; if (!allow.includes(rule)) allow.push(rule); claudeSettings.permissions.allow = allow;
     claudeSettings.hooks ||= {};
     const session = { type: "command", command: `${sessionLauncher} session-start --client claude`, timeout: 2 };

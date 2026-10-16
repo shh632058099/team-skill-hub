@@ -90,7 +90,7 @@ function Convert-ToHashtable($Value) {
     return $result
   }
   if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
-    return @($Value | ForEach-Object { Convert-ToHashtable $_ })
+    return ,@($Value | ForEach-Object { Convert-ToHashtable $_ })
   }
   return $Value
 }
@@ -128,6 +128,9 @@ if (-not $root.ContainsKey('hooks')) { $root['hooks'] = @{} }
 if (-not $SkipMcp) {
   if (-not $root.ContainsKey('permissions') -or -not ($root['permissions'] -is [System.Collections.IDictionary])) {
     $root['permissions'] = @{}
+  }
+  if ($root['permissions'].ContainsKey('additionalDirectories') -and $root['permissions']['additionalDirectories'] -is [string]) {
+    $root['permissions']['additionalDirectories'] = @($root['permissions']['additionalDirectories'])
   }
   $permissionRule = 'mcp__' + $ServerName + '__*'
   $allow = @($root['permissions']['allow'])

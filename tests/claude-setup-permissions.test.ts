@@ -81,6 +81,13 @@ test("PowerShell Claude setup includes the same server-scoped MCP allow rule", a
   assert.match(source, /allow/i);
 });
 
+test("PowerShell Claude setup preserves single-item arrays and migrates additionalDirectories", async () => {
+  const source = await readFile("scripts/setup-claude-code.ps1", "utf8");
+  assert.match(source, /return ,@\(\$Value \| ForEach-Object/);
+  assert.match(source, /additionalDirectories.*-is \[string\]/s);
+  assert.match(source, /additionalDirectories'\] = @\(\$root\['permissions'\]\['additionalDirectories'\]\)/);
+});
+
 test("Claude setup registers HTTP MCP with the supported add command", async () => {
   const shellSource = await readFile("scripts/setup-claude-code.sh", "utf8");
   const powerShellSource = await readFile("scripts/setup-claude-code.ps1", "utf8");
