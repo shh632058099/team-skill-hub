@@ -1,315 +1,179 @@
-# Candidate Publish Diff Preview Design
+# Candidate Pre-Approval Diff Design
 
 Date: 2026-10-16
 Status: Proposed
 
 ## 1. Background
 
-The unified Review Center currently lets an administrator inspect a Knowledge Candidate's metadata and full candidate body before approval and publication. After approval, the administrator can create the publication PR/MR, but the detail page does not clearly show the exact repository-level change that publication is expected to create.
+The Review Center currently shows Candidate metadata and the full Candidate body, but an administrator cannot easily see what repository content would change before approving the Candidate.
 
-This is especially important for `KnowledgeCandidate` records because publication can either create a new Markdown file or update an existing file. The reviewer should be able to answer, before clicking **发布 PR/MR**:
+The desired workflow is intentionally simple:
 
-- Which repository and target branch will be changed?
-- Which path will be written?
-- Is this a create or update operation?
-- What lines will be added and removed?
-- Is the preview based on the same target and desired content that the publisher will actually use?
+```text
+Pending Candidate
+  -> review metadata/content
+  -> review Diff
+  -> approve or reject
 
-The application already exposes `GET /admin/api/knowledge-candidates/:id/preview`, but that endpoint answers a different, semantic question: it compares the Candidate with its indexed Knowledge relation target. That behavior is useful and should remain intact. It is not guaranteed to be the same file/revision that `publishKnowledgeCandidate()` will operate on in the configured target repository, so publish-oriented Diff uses a separate endpoint.
+Approved Candidate
+  -> publish PR/MR
+  -> use the existing PR/MR link to inspect the real remote Diff
 
-Skill Bundle imports already have a preview concept, although today that preview is mostly a changed-file summary rather than a GitHub-style line diff.
+Published Candidate
+  -> delete published content
+  -> use the existing deletion PR/MR link to inspect the deletion Diff
+```
 
-This design adds a publish-oriented Diff view to Candidate review and aligns preview target resolution with publication target resolution so that the preview represents the expected PR/MR content as closely as practical.
+The system does not need to maintain its own Diff view after approval. Once a PR/MR exists, GitHub/GitLab is the authoritative review surface.
 
 ## 2. Goals
 
-- Add a dedicated **Diff 预览** view to Candidate details in the Review Center.
-- Show repository, target branch, target path, operation (`create` / `update`), and line-level changes before publication.
-- Use the same target-resolution rules for preview and publish.
-- Compare candidate publication content against the current target branch content, not only against an indexed Knowledge relation target.
-- Keep preview read-only; opening the Diff view must not create branches, commits, PRs, or MRs.
-- Keep existing approval and publication state transitions unchanged.
-- Preserve current Candidate detail and history views.
-- Make the backend preview payload provider-neutral so the Admin UI does not need GitHub/GitLab-specific logic.
-- Support both existing Candidate publishing types (`knowledge` and legacy `skill`) through the same publish-preview contract.
-- Preserve the existing semantic Candidate preview endpoint and behavior.
-- Make preview failure visible without preventing the reviewer from viewing the candidate itself.
+- Show a repository-oriented line Diff while a Candidate is still `pending`.
+- Let the reviewer understand the expected file change before clicking **批准**.
+- Show the effective repository, target branch, target path, and create/update operation.
+- Keep the preview read-only: no branch, commit, push, PR, or MR may be created.
+- Preserve the existing approval, publish, reconcile, and deletion workflows.
+- After publication or deletion publication is created, rely on the existing PR/MR links instead of maintaining a second local Diff view.
+- Keep the implementation small and focused on the review-before-approval use case.
 
 ## 3. Non-goals
 
-- Do not change the Candidate approval rules.
-- Do not require a reviewer to open the Diff tab before publishing in the first version.
-- Do not introduce a new persistent review-baseline model for Knowledge Candidates in the first version.
-- Do not guarantee that the target branch cannot change between preview and publication.
-- Do not create a temporary publication branch just to calculate the preview.
-- Do not replace the existing semantic relation preview (`knowledgeRelation`, `relationHint`) as a domain concept.
-- Do not redesign Skill Bundle publication in this change.
-- Do not embed a full third-party diff editor component unless a future requirement justifies the dependency.
+The first version explicitly does **not** add:
+
+- Diff review after Candidate approval.
+- Diff review after a publication PR/MR exists.
+- Diff review for deletion PR/MR content.
+- stale-preview detection or revision locking.
+- source-branch comparison or retry-branch analysis.
+- a persistent Candidate Diff snapshot.
+- a second PR/MR viewer inside Team Skill Hub.
+- changes to Skill Bundle review.
+- changes to publish or delete state machines.
+
+If a target branch changes between approval and later publication, the resulting PR/MR remains the authoritative result. This feature is an approval aid, not a publication lock.
 
 ## 4. User experience
 
-### 4.1 Candidate navigation
+### 4.1 Pending Candidate
 
-Candidate detail navigation becomes:
+For `status=pending`, Candidate detail keeps the existing information and adds a **变更预览** section before the approval buttons.
 
-```text
-候选详情 | Diff 预览 | 历史记录
-```
-
-Canonical routes:
+Recommended layout:
 
 ```text
-/admin/review/items/candidate/:id
-/admin/review/items/candidate/:id/diff
-/admin/review/items/candidate/:id/history
-```
+候选详情
 
-The existing `return` query parameter continues to be preserved across tabs.
+ID              kc_...
+标题            ...
+仓库            rd-knowledges
+建议路径        knowledge/example.md
+状态            待审核
+...
 
-### 4.2 Diff header
+候选正文
+...
 
-The Diff view first shows a compact publication target summary:
+变更预览
+Repository       rd-knowledges
+Target branch    main
+Path             knowledge/example.md
+Operation        update
+Summary          +12 -4
 
-```text
-Repository      rd-knowledges
-Target branch   main
-Path            knowledge/codex-v6-guidance-e2e-2026-10-15-d6036b6b55d1.md
-Operation       update
-Baseline        <provider revision / commit SHA when available>
-Summary         +12 -4
-```
-
-For a new file, `Operation` is `create`. If the final desired content is byte-for-byte equal to the target file, the view shows `no_change` and a clear message that publication currently has no content change to commit.
-
-### 4.3 Diff body
-
-The first version uses a server-generated, provider-neutral unified diff model rendered by the existing Admin UI. The visual treatment should resemble common Git review tools:
-
-- file header
-- hunk header (`@@ ... @@`)
-- unchanged context lines
-- removed lines
-- added lines
-- line numbers for old/new sides when available
-
-Default context is 3 lines around each hunk. A small amount of extra context may be included by the backend implementation, but the first version does not need an interactive arbitrary-context loader.
-
-Example:
-
-```diff
---- a/knowledge/example.md
-+++ b/knowledge/example.md
 @@ -10,7 +10,9 @@
- Existing context
+ existing context
 -old sentence
 +replacement sentence
 +new detail
- Existing context
+ existing context
+
+[批准] [拒绝] [删除 Candidate]
 ```
 
-For a created file:
+There is no separate Diff tab in the first version. Keeping Diff on the pending Candidate detail page makes the approval workflow direct and avoids adding another route solely for one review step.
+
+### 4.2 New file
+
+If the target file does not exist, the preview shows a create Diff:
 
 ```diff
 --- /dev/null
 +++ b/knowledge/example.md
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,4 @@
 +# Example
-+...
++
++New content
 ```
 
-### 4.4 State behavior
+### 4.3 No content change
 
-The Diff tab is primarily a pre-publication review surface:
-
-- `pending`: reviewer can inspect expected repository change before approval.
-- `approved` / `publish_failed`: reviewer can inspect immediately before publication/retry.
-- `publishing`, `published`, and deletion-related states: the page should prefer the existing PR/MR link and clearly state that the remote PR/MR Diff is authoritative. It must not present a newly recomputed live preview as though it were the content of an already-created PR/MR.
-- deleted Candidate records are naturally unavailable because the Candidate no longer exists.
-
-The first version does not lock the preview baseline. Therefore every pre-publication preview must label the baseline as a live read from the configured target branch and must not imply that an earlier preview is permanently frozen.
-
-### 4.5 Failure behavior
-
-If target content cannot be read, the Diff tab shows a focused error with enough context to act on it:
-
-- repository
-- target branch
-- path
-- error category/message
-
-The Candidate detail page itself remains usable. Publication behavior is not silently changed by preview failure.
-
-## 5. Publish target model
-
-### 5.1 Problem in the current flow
-
-`publishKnowledgeCandidate()` independently resolves:
-
-- repository
-- publication route
-- target branch
-- publish path
-- desired Markdown content
-
-The existing Candidate preview instead starts with `knowledgeRelation` / `relationHint`, looks up the indexed Knowledge document, and compares that document content to `candidate.content`.
-
-Those are different questions:
-
-1. **Semantic relation preview:** how does the candidate relate to an indexed Knowledge document?
-2. **Publish diff preview:** what repository change will publication attempt to create now?
-
-The new Diff tab answers the second question.
-
-### 5.2 Shared target resolution
-
-Introduce a shared application-level publication target resolver used by both preview and publish.
-
-Conceptual model:
-
-```ts
-interface KnowledgePublishTarget {
-  repositoryId: string;
-  repository: RepositoryConfig;
-  publishingType: "knowledge" | "skill";
-  targetBranch: string;
-  path: string;
-  desiredContent: string;
-}
-```
-
-The exact type may remain internal rather than being exported.
-
-The resolver owns the existing rules for:
-
-- repository fallback
-- relation-target repository compatibility
-- default publish path
-- configured publication route
-- target branch selection
-- final Markdown serialization used by the publisher
-
-Target-branch resolution must preserve current provider behavior unless a separate compatibility change is approved. In particular, the current GitLab publisher falls back through `knowledgePublishing.targetBranch -> repository.branch -> main`, while the current GitHub publisher falls back through `knowledgePublishing.targetBranch -> main`. Moving this logic into a shared resolver must not silently make those semantics identical.
-
-The key invariant is:
-
-> Given the same Candidate and configuration, preview and publish must resolve the same repository, branch, path, and desired file content.
-
-### 5.3 Desired content serialization
-
-Today publisher implementations derive `desiredContent` internally through `markdownForCandidate(candidate)`. To prevent preview/publish drift, desired-content construction should be promoted to a shared provider-neutral helper or passed into the publisher from the resolved publication target.
-
-Preferred direction:
+If the target file already matches the expected Candidate publication content, show:
 
 ```text
-Candidate
-  -> resolveKnowledgePublishTarget()
-       -> repository
-       -> targetBranch
-       -> path
-       -> desiredContent
-  -> preview reads baseline and diffs it
-  -> publish writes desiredContent to the same target
+目标文件内容与候选发布内容一致，没有内容差异。
 ```
 
-Avoid implementing one Markdown formatter in preview and another in publisher code.
+This is informational only. The first version does not change approval or publish behavior because of this condition.
 
-## 6. Provider-neutral baseline reader
+### 4.4 Approved and later states
 
-### 6.1 Read contract
+For `approved` and `publish_failed`, the Candidate detail keeps the existing **发布 PR/MR** action. The local pre-approval Diff section is no longer shown.
 
-Add a read-only publication-preview capability alongside publishing. The exact interface may be a separate reader or a method on the publisher abstraction, but it must not mutate the remote repository.
+For `publishing` and `published`, show the existing publication PR/MR link. The reviewer opens that PR/MR to inspect the actual Diff.
 
-Recommended shape:
+For deletion flow, once **删除已发布内容** creates a deletion PR/MR, show the existing deletion PR/MR link. The reviewer opens that PR/MR to inspect the deletion Diff.
 
-```ts
-interface KnowledgePublishBaseline {
-  exists: boolean;
-  content?: string;
-  revision?: string;
-}
+Team Skill Hub does not duplicate GitHub/GitLab Diff rendering after a PR/MR exists.
 
-interface KnowledgePublisher {
-  readBaseline(
-    target: KnowledgePublishTarget,
-    repository: RepositoryConfig,
-  ): Promise<KnowledgePublishBaseline>;
+## 5. Preview semantics
 
-  publish(...): Promise<KnowledgePublicationResult>;
-  deletePublished(...): Promise<KnowledgePublicationResult>;
-  reconcile(...): Promise<...>;
-}
+The pending Candidate preview answers one question:
+
+> If this Candidate were published against the configured target branch now, what would the target file change look like?
+
+The preview compares:
+
+```text
+current target-branch file
+        ↓
+expected Candidate publication content
 ```
 
-If exposing `KnowledgePublishTarget` directly to publishers creates an undesirable public dependency, the method can receive only `path` and `targetBranch`. The architectural requirement is provider-neutral read behavior, not this exact TypeScript signature.
+It does not compare an existing publication source branch and does not claim to represent a future PR after the target branch moves.
 
-### 6.2 GitHub
+The UI should label it as a current approval preview, not a frozen publication snapshot.
 
-For GitHub publishing, preview should read the configured target branch without creating a worktree branch or pushing anything.
+## 6. Backend design
 
-Preferred implementation choices, in order:
+### 6.1 Keep the existing semantic preview
 
-1. GitHub Contents API for a single file at `ref=<targetBranch>`.
-2. Existing Git clone machinery only if the API approach cannot satisfy configured GitHub Enterprise/base URL behavior.
+The existing endpoint remains unchanged:
 
-Expected result:
+```text
+GET /admin/api/knowledge-candidates/:id/preview
+```
 
-- `404` => file does not exist, operation is `create`.
-- successful file read => decode UTF-8 content, operation is `update` unless unchanged.
-- capture blob SHA or commit-ish metadata when cheaply available as `revision`.
-- if the Contents API cannot return inline UTF-8 content because of provider size/encoding behavior, fail with a typed preview error or use a bounded read-only blob/raw-content fallback; do not silently treat the file as missing.
+It continues to describe the Candidate in relation to indexed Knowledge content.
 
-### 6.3 GitLab
+### 6.2 Add one publish-oriented preview endpoint
 
-For GitLab publishing, reuse the repository-files API already used by publication logic:
+Add:
 
-- GET file at the target branch when present.
-- `404` => create.
-- decode base64 file content.
-- include available blob/commit metadata as `revision`.
+```text
+GET /admin/api/knowledge-candidates/:id/publish-preview
+```
 
-### 6.4 Read-only guarantee
+The Admin UI calls this endpoint only for a `pending` Candidate.
 
-Preview code must never:
-
-- create a branch
-- write/update a file
-- commit
-- push
-- create/reopen a PR/MR
-- update Candidate publication state
-
-Tests must verify that provider preview only performs read calls / read-only Git operations.
-
-## 7. Diff generation
-
-### 7.1 Server-side generation
-
-Generate line diff data on the server. The browser should receive structured data rather than implementing its own diff algorithm.
-
-Reasons:
-
-- keeps behavior deterministic across clients
-- makes API tests straightforward
-- avoids shipping a large client diff library into the inline Admin page
-- allows the same preview model to be reused by future clients
-
-### 7.2 Diff model
-
-Recommended response shape:
+Recommended response:
 
 ```ts
 interface CandidatePublishPreview {
-  candidate: {
-    id: string;
-    title: string;
-    status: string;
-  };
   target: {
     repositoryId: string;
     targetBranch: string;
     path: string;
     operation: "create" | "update" | "no_change";
-    baselineRevision?: string;
   };
   summary: {
     addedLines: number;
@@ -330,284 +194,171 @@ interface CandidatePublishPreview {
 }
 ```
 
-The API should not return credentials, authenticated clone URLs, tokens, request headers, or provider-internal secret-bearing errors.
+No branch metadata, PR metadata, stale token, snapshot ID, or approval token is required.
 
-### 7.3 Diff implementation
+### 6.3 Resolve the same basic publication target
 
-Prefer a small, established line-diff dependency already present in the dependency graph if one exists. Otherwise add the smallest suitable dependency rather than implementing a fragile diff algorithm from scratch.
+Preview must reuse the current Candidate publication rules needed to determine:
 
-The implementation must correctly handle:
+- repository
+- publication route
+- target branch
+- publish path
+- final serialized Candidate content
 
-- empty old file
-- empty new file
+The implementation does not need a large new publishing abstraction. Small shared helpers are enough, especially for final Candidate serialization and target/path resolution, so preview does not independently invent different rules.
+
+Existing provider-specific target-branch behavior must remain unchanged.
+
+### 6.4 Read the current target file
+
+The provider preview path is read-only.
+
+For GitHub:
+
+- read the configured target file from the target branch through the GitHub API;
+- `404` means create;
+- decode text content for update comparison.
+
+For GitLab:
+
+- read the configured target file from the target branch through the repository-files API;
+- `404` means create;
+- decode base64 content for update comparison.
+
+Preview must never create or modify a remote branch, file, commit, PR, or MR.
+
+## 7. Diff generation
+
+Generate the line Diff on the server and return structured hunks to the Admin UI.
+
+Use a small established Diff dependency if needed rather than implementing a custom Diff algorithm.
+
+Required cases:
+
 - create
 - update
 - no change
-- final newline differences
-- CRLF/LF normalization policy
-- multiple separated hunks
-- non-ASCII Markdown content
+- multiple hunks
+- non-ASCII Markdown
+- LF/CRLF normalization
 
-Line-ending policy must be explicit. Recommended first-version behavior: compare decoded text after normalizing CRLF to LF, because publication writes logical UTF-8 Markdown content and the preview is meant to communicate content changes rather than repository line-ending noise. If the repository intentionally preserves CRLF, this choice should be revisited before implementation.
+Use approximately 3 context lines around each hunk.
 
-## 8. API changes
+The UI renders a Git-style unified Diff with escaped text and simple added/removed/context styling.
 
-Preserve the existing semantic preview endpoint:
+## 8. Error behavior
 
-```text
-GET /admin/api/knowledge-candidates/:id/preview
-```
+Diff preview failure must not make the Candidate detail unusable.
 
-Add a separate publish-oriented endpoint:
+If the preview cannot be generated, the page still shows the Candidate and approval controls, with a focused message in the preview section such as:
 
 ```text
-GET /admin/api/knowledge-candidates/:id/publish-preview
+无法加载变更预览：读取目标仓库文件失败。
 ```
 
-The new endpoint returns `CandidatePublishPreview` from Section 7. Keeping the two endpoints separate prevents a semantic/API break and makes the distinction explicit:
+Do not expose tokens, Authorization headers, authenticated clone URLs, or raw secret-bearing provider responses.
 
-- `/preview` = Candidate vs indexed Knowledge relation target.
-- `/publish-preview` = current repository target file vs content the publisher intends to write.
-
-HTTP behavior:
-
-- `200`: preview generated, including `no_change`.
-- `404`: Candidate does not exist.
-- `400` or `409`: Candidate exists, but target cannot be resolved because repository/path/configuration is incomplete or inconsistent.
-- `502`: remote provider read failed after target resolution.
-
-The exact error status for remote failures should follow existing server conventions if introducing `502` would be inconsistent with the current application, but the response must distinguish `not found Candidate` from `preview target/read failure`.
-
-Do not return raw provider response bodies directly from this endpoint. Map failures to stable Admin-facing error codes/messages (for example `preview_target_unresolved`, `preview_remote_read_failed`, `preview_content_unsupported`) while retaining bounded provider detail only in server-side diagnostics.
+The reviewer may still approve or reject based on the normal Candidate information. This feature does not introduce a hard approval gate.
 
 ## 9. Admin UI changes
 
-### 9.1 Route parser
+The main UI change stays inside the existing Candidate detail renderer.
 
-Extend Candidate review detail subresources to support:
+For `pending` Candidate detail:
 
-```ts
-subresource?: "diff" | "history";
-```
+1. load Candidate detail;
+2. separately request `/publish-preview`;
+3. render the **变更预览** section;
+4. keep existing approval/rejection buttons.
 
-Legacy Candidate review routes continue to redirect to the canonical Review Center route where applicable.
+For every other Candidate status:
 
-### 9.2 Candidate navigation renderer
+- do not request `/publish-preview`;
+- retain existing Candidate detail behavior;
+- retain publication and deletion PR/MR links.
 
-Extend `candidateNav()` to render three tabs:
+No new Candidate route is required.
 
-```text
-候选详情 | Diff 预览 | 历史记录
-```
+## 10. Testing strategy
 
-### 9.3 Diff renderer
+### 10.1 Application/provider tests
 
-Add a dedicated `candidateDiff(id)` loader that calls the publish-preview endpoint and renders:
+Cover:
 
-1. publication target summary
-2. added/removed counters
-3. unified diff hunks
-4. empty/no-change state
-5. focused preview error state
-
-The renderer must use existing HTML escaping for every provider/candidate-derived string.
-
-CSS should use the existing Admin design language. Added/removed/context lines need visually distinct backgrounds and prefixes, but no external CSS framework is required.
-
-### 9.4 Publish action placement
-
-Keep the Publish button on the Candidate detail page in the first version. Do not add a hard client-side gate requiring the Diff tab to be visited.
-
-Optionally add a nearby **查看 Diff** link for `approved` and `publish_failed` states to make the preview discoverable immediately before publication.
-
-## 10. Publication integration
-
-Refactor `publishKnowledgeCandidate()` so target resolution occurs before state mutation and returns a reusable target object.
-
-Recommended high-level flow:
-
-```text
-load Candidate
-  -> validate candidate relationship constraints
-  -> resolve publication target
-  -> persist missing repository/suggestedPath defaults when needed
-  -> mark Candidate publishing
-  -> publisher.publish(candidate, resolvedTarget)
-  -> persist publication
-```
-
-Preview flow:
-
-```text
-load Candidate
-  -> resolve publication target with the same resolver
-  -> publisher.readBaseline(resolvedTarget)
-  -> diff baseline.content against resolvedTarget.desiredContent
-  -> return structured preview
-```
-
-The resolver itself must not mutate Candidate state. If publish currently persists default repository/path values, that remains a publish-specific step after resolution. Preview reports the effective values without persisting them.
-
-This preserves an important property: simply viewing Diff must not change Candidate history or updated timestamps.
-
-## 11. Consistency and race behavior
-
-The preview is a live snapshot, not a lock. It is a **single target-file preview**, not a guarantee that an already-existing deterministic publication branch contains no unrelated or stale changes.
-
-Race example:
-
-```text
-T1 reviewer opens Diff against main@A
-T2 another PR updates the same file, main becomes B
-T3 reviewer clicks Publish
-T4 publication operates against current target behavior
-```
-
-The first version accepts this race and labels preview baseline metadata clearly. The generated PR/MR remains the authoritative publication artifact.
-
-Publication branches are deterministic per Candidate and current publisher implementations may reuse an existing remote branch on retry. If such a branch already exists, the preview must surface that fact when it can be determined cheaply, or at minimum show a warning that retry publication may reuse an existing source branch. The first version still previews the Candidate's target file only; it does not claim to enumerate unrelated files that might already exist on that branch.
-
-A future version may add a `baselineRevision` confirmation and mark preview stale if target HEAD changed before publish, similar to Skill Bundle review baselines. That is deliberately out of scope here because it changes publication semantics and introduces a stronger approval contract.
-
-## 12. Security and privacy
-
-- Preview requires the same Admin access check as Candidate detail and publication APIs.
-- Provider credentials stay server-side.
-- No token, Authorization header, authenticated remote URL, SSH private material, or secret environment-variable value may appear in the preview response.
-- Remote error bodies must continue to be bounded and should be sanitized before returning to Admin UI.
-- File paths and external text must be HTML-escaped in the Admin UI.
-- The path validation used for publication must also apply to preview.
-
-## 13. Performance
-
-Candidate Diff is loaded only when the Diff tab is opened; Candidate detail should not automatically fetch remote repository content.
-
-This keeps normal review-list/detail navigation cheap and moves network cost to explicit preview usage.
-
-The preview reads one target file and computes one text diff. No repository-wide tree diff is required for a Knowledge Candidate.
-
-A reasonable provider-read timeout should reuse existing publishing request conventions. Preview failures should fail quickly enough that the Admin UI remains usable.
-
-## 14. Testing strategy
-
-### 14.1 Application tests
-
-Cover target resolution and preview generation:
-
-- explicit Candidate repository/path
-- default repository/path resolution
-- relation target repository/path behavior
-- invalid cross-repository relation target
+- repository/path resolution
+- GitHub target-file read
+- GitLab target-file read
 - create preview
 - update preview
 - no-change preview
 - non-ASCII content
-- multiple diff hunks
-- preview does not mutate Candidate
+- preview performs no remote mutation
+- preview performs no Candidate state mutation
 
-### 14.2 Publisher tests
-
-GitHub and GitLab preview tests should verify:
-
-- target branch/path are correct
-- existing file content is decoded correctly
-- missing file maps to `exists=false`
-- provider read errors are bounded/sanitized
-- no branch creation, commit, push, file-write API, or PR/MR creation occurs
-
-### 14.3 Server/API tests
+### 10.2 API tests
 
 Cover:
 
-- Admin auth required
+- Admin authentication required
 - Candidate not found
-- existing semantic `/preview` response remains unchanged
-- successful structured `/publish-preview` response
-- unresolved publication target
-- provider read failure and sanitized error mapping
+- successful pending Candidate preview
+- target resolution failure
+- remote target read failure
+- existing `/preview` endpoint remains unchanged
 
-### 14.4 Admin UI tests
+### 10.3 Admin UI tests
 
-Extend structure/routing tests to cover:
+Cover:
 
-- Diff tab exists
-- `/candidate/:id/diff` route resolves correctly
-- preview endpoint is called only on the Diff view
-- create/update/no-change rendering
-- HTML escaping
-- error rendering
-- existing Candidate detail/history routes remain functional
+- pending Candidate loads and renders **变更预览**
+- added/removed lines are escaped and styled correctly
+- preview failure does not hide approval controls
+- non-pending Candidate does not call `/publish-preview`
+- publishing/published states still show publication PR/MR link
+- deletion states still show deletion PR/MR link
 
-### 14.5 Regression validation
+## 11. Expected implementation scope
 
-Run the focused Candidate/publishing/Admin tests first, then the repository's normal full test suite and type checking.
+Likely files:
 
-## 15. Files expected to change
-
-Likely implementation files:
-
-- `src/admin-routes.ts`
 - `src/admin-ui.ts`
 - `src/application.ts`
 - `src/knowledge-publishing.ts`
-- Candidate publishing / server / Admin UI test files
-- package manifest/lock only if a new diff dependency is required
+- `src/server.ts`
+- related publishing/Admin tests
+- `package.json` / lock file only if a Diff dependency is added
 
-`src/review-center.ts` should not need a domain-model change unless the implementation chooses to expose Diff availability in list projections, which is not required by this design.
+No changes should be required to:
 
-Skill Bundle code should remain unchanged except for shared UI helpers if reuse is genuinely beneficial.
+- Candidate persistence model
+- Review Center list projection
+- Skill Bundle workflow
+- publication/deletion state machines
 
-## 16. Alternatives considered
+## 12. Acceptance criteria
 
-### 16.1 Frontend-only diff using the existing preview endpoint
+The feature is complete when:
 
-Rejected as the primary design.
+1. A `pending` Candidate detail page shows a line-level repository Diff before approval.
+2. The preview clearly shows repository, target branch, path, create/update/no-change state, and added/removed counts.
+3. Preview reads the current target branch and performs no remote or Candidate mutation.
+4. Approval and rejection continue to work even if preview fails.
+5. After approval, Team Skill Hub stops showing its own Candidate Diff preview.
+6. After publish, the existing publication PR/MR link is the review surface for the actual publication Diff.
+7. After delete publication is created, the existing deletion PR/MR link is the review surface for the actual deletion Diff.
+8. Existing Candidate publishing and deletion behavior remains unchanged.
+9. Existing semantic `/preview` behavior remains backward-compatible.
+10. GitHub and GitLab preview paths have focused tests.
 
-It would be easy to render, but it would compare against an indexed relation target rather than necessarily against the configured publication target branch/path. That creates a misleading "looks like PR diff" interface without guaranteeing PR-oriented semantics.
+## 13. Future extensions
 
-### 16.2 Clone the repository and run `git diff` for every preview
+Only add these if later needed:
 
-Viable but not preferred for a single-file Candidate.
+- require Diff success before approval
+- freeze the approved Diff baseline
+- stale-preview detection
+- side-by-side Diff rendering
+- Skill Bundle per-file line Diff
 
-It gives exact Git semantics but adds clone latency, filesystem work, SSH dependency, cleanup requirements, and higher operational cost. Provider file APIs are simpler for one target file.
-
-### 16.3 Create the publication branch first and show the remote PR diff
-
-Rejected.
-
-Preview must be read-only. Creating a branch/commit/PR before the reviewer clicks Publish would collapse the distinction between review and publication.
-
-### 16.4 Freeze Candidate preview baseline at approval time
-
-Deferred.
-
-This provides stronger audit guarantees but introduces a new persistent baseline, stale state, and re-approval behavior. Skill Bundle already has such concepts, but adding them to Knowledge Candidates should be a separate workflow decision.
-
-## 17. Acceptance criteria
-
-The feature is complete when all of the following are true:
-
-1. Candidate details expose a dedicated **Diff 预览** tab.
-2. The preview identifies the effective repository, target branch, target path, and create/update/no-change operation.
-3. The preview compares the current configured target-branch file against the exact content publication intends to write for both Knowledge and legacy Skill Candidates.
-4. Preview and publish share target/path/content resolution rather than duplicating those rules, while preserving existing provider-specific target-branch fallback semantics.
-5. The UI renders line-level unified diff hunks with added/removed counts.
-6. Opening preview performs no remote mutation and no Candidate state/history mutation.
-7. Preview errors do not make Candidate detail unusable.
-8. Existing approval, publish, reconcile, delete, and history workflows continue to behave as before.
-9. GitHub and GitLab provider paths are covered by read-only preview tests.
-10. The existing semantic `/preview` endpoint remains backward-compatible; publish Diff uses `/publish-preview`.
-11. Retried publication with a pre-existing deterministic source branch is not misrepresented as a complete full-PR diff.
-12. Existing unrelated worktree changes are preserved.
-
-## 18. Future extensions
-
-Possible follow-ups, intentionally excluded from the first implementation:
-
-- require a reviewer to confirm a specific preview revision before Publish
-- stale-preview detection when the target branch moves
-- side-by-side diff mode
-- expandable arbitrary context / full-file view
-- syntax highlighting for Markdown/code fences
-- reuse the same structured hunk renderer for Skill Bundle per-file diffs
-- compare an already-created PR/MR head against target after publication
+They are deliberately excluded from this change.
