@@ -3520,8 +3520,7 @@ export class SkillHubApplicationService {
   async deleteSkillBundle(principal: Principal, id: string) {
     const record = this.skillBundles.getImport(id);
     if (!record) return false;
-    const repository = this.config.repositories.find((item) => item.id === record.repository);
-    if (!repository) throw new Error("Repository not found");
+    const repository = this.skillBundlePublishingRepository(principal, record.repository);
     const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
     const deleted = await this.skillBundles.delete(principal, repository, id);
     if (deleted) {

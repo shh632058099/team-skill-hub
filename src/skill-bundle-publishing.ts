@@ -249,7 +249,12 @@ export class SkillBundlePublisher {
     return files;
   }
 
-  private async gitLabBranchHead(baseUrl: string, projectPath: string, token: string, branch: string): Promise<string> {
+  private async gitLabBranchHeadIfExists(
+    baseUrl: string,
+    projectPath: string,
+    token: string,
+    branch: string,
+  ): Promise<string | undefined> {
     const project = encodeURIComponent(projectPath);
     const response = await this.request(
       `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(branch)}`,
@@ -257,10 +262,17 @@ export class SkillBundlePublisher {
       "gitlab",
       { method: "GET" },
     );
+    if (response.status === 404) return undefined;
     if (!response.ok) throw new Error(`GitLab branch lookup failed (${response.status})`);
     const value = (await response.json()) as { commit?: { id?: string } };
     if (!value.commit?.id) throw new Error("GitLab branch response is incomplete");
     return value.commit.id;
+  }
+
+  private async gitLabBranchHead(baseUrl: string, projectPath: string, token: string, branch: string): Promise<string> {
+    const revision = await this.gitLabBranchHeadIfExists(baseUrl, projectPath, token, branch);
+    if (!revision) throw new Error("GitLab branch lookup failed (404)");
+    return revision;
   }
 
   private async publishGitLab(
@@ -329,12 +341,30 @@ export class SkillBundlePublisher {
     }
 
     const project = encodeURIComponent(projectPath);
+    const existingBranchRevision = await this.gitLabBranchHeadIfExists(baseUrl, projectPath, token, branch);
+    if (!existingBranchRevision) {
+      const createBranch = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/repository/branches`,
+        token,
+        "gitlab",
+        {
+          method: "POST",
+          body: JSON.stringify({ branch, ref: targetRevision }),
+        },
+      );
+      if (!createBranch.ok) {
+        const detail = await createBranch.text().catch(() => "");
+        throw new Error(
+          `GitLab Skill Bundle branch creation failed (${createBranch.status}): ${detail.slice(0, 1000)}`,
+        );
+      }
+    }
+
     const commit = await this.request(`${baseUrl}/api/v4/projects/${project}/repository/commits`, token, "gitlab", {
       method: "POST",
       body: JSON.stringify({
         branch,
-        start_sha: targetRevision,
-        force: true,
+        ...(existingBranchRevision ? { start_sha: targetRevision, force: true } : {}),
         commit_message: `feat: sync skill bundle ${record.namespace} from ${record.id}`,
         actions,
       }),

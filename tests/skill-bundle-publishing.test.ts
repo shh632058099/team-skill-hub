@@ -219,6 +219,12 @@ test("GitLab publisher uses publishing token and repository API without git clon
     if (url.endsWith("/repository/branches/skill-hub-skill-1234567890ab")) {
       return new Response("", { status: 404 });
     }
+    if (url.endsWith("/repository/branches")) {
+      assert.equal(init?.method, "POST");
+      const body = JSON.parse(String(init?.body)) as { branch: string; ref: string };
+      assert.deepEqual(body, { branch: "skill-hub-skill-1234567890ab", ref: "target-sha" });
+      return Response.json({ name: body.branch, commit: { id: "target-sha" } }, { status: 201 });
+    }
     if (url.endsWith("/repository/commits")) {
       const body = JSON.parse(String(init?.body)) as {
         branch: string;
@@ -234,8 +240,8 @@ test("GitLab publisher uses publishing token and repository API without git clon
         }>;
       };
       assert.equal(body.branch, "skill-hub-skill-1234567890ab");
-      assert.equal(body.start_sha, "target-sha");
-      assert.equal(body.force, true);
+      assert.equal(body.start_sha, undefined);
+      assert.equal(body.force, undefined);
       assert.deepEqual(
         body.actions.map((action) => [action.action, action.file_path]),
         [
@@ -264,7 +270,65 @@ test("GitLab publisher uses publishing token and repository API without git clon
     }).publish(record, snapshot, gitlabRepository);
     assert.equal(result.kind, "pull-request");
     assert.equal(result.kind === "pull-request" ? result.mergeRequestIid : 0, 9);
+    assert.ok(requests.some(({ url, init }) => url.endsWith("/repository/branches") && init?.method === "POST"));
     assert.ok(requests.some(({ url }) => url.endsWith("/repository/commits")));
+  } finally {
+    delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
+test("GitLab publisher resets an existing import branch from the reviewed target revision", async () => {
+  process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
+  const gitlabRepository: RepositoryConfig = {
+    ...repository,
+    skillPublishing: {
+      ...repository.skillPublishing!,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.com",
+      projectPath: "example/rd-skills",
+    },
+  };
+  const { snapshot, record: rawRecord } = bundle();
+  const record = approvedAgainst(rawRecord, [{ path: "SKILL.md", content: "old skill\n" }]);
+  let branchCreateCalled = false;
+  let commitBody: { start_sha?: string; force?: boolean } | undefined;
+  const fetchMock: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/repository/branches/master")) {
+      return Response.json({ commit: { id: "target-sha" } });
+    }
+    if (url.endsWith("/repository/branches/skill-hub-skill-1234567890ab")) {
+      return Response.json({ commit: { id: "old-import-sha" } });
+    }
+    if (url.endsWith("/repository/branches")) {
+      branchCreateCalled = true;
+      return Response.json({}, { status: 201 });
+    }
+    if (url.includes("/repository/tree?")) {
+      return Response.json([{ type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" }]);
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2FSKILL.md?")) {
+      return Response.json({ content: Buffer.from("old skill\n").toString("base64"), encoding: "base64" });
+    }
+    if (url.endsWith("/repository/commits")) {
+      commitBody = JSON.parse(String(init?.body)) as { start_sha?: string; force?: boolean };
+      return Response.json({ id: "commit-sha" }, { status: 201 });
+    }
+    if (url.endsWith("/merge_requests")) {
+      return Response.json(
+        { iid: 10, web_url: "https://gitlab.example.com/example/rd-skills/-/merge_requests/10", state: "opened" },
+        { status: 201 },
+      );
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  try {
+    await new SkillBundlePublisher(fetchMock, async () => {
+      throw new Error("git should not be called for GitLab publishing");
+    }).publish(record, snapshot, gitlabRepository);
+    assert.equal(branchCreateCalled, false);
+    assert.equal(commitBody?.start_sha, "target-sha");
+    assert.equal(commitBody?.force, true);
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }

@@ -48,6 +48,88 @@ async function addSkillToRemote(work: string, relative: string, content: string)
   await git(["push", "origin", "master"], work);
 }
 
+test("deleteSkillBundle resolves the configured publishing route for publish_failed bundles", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-delete-route-"));
+  const dataDir = path.join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const targetRepository: RepositoryConfig = {
+    id: "rd-skills",
+    name: "RD Skills",
+    provider: "git",
+    gitUrl: "git@github.com:acme/rd-skills.git",
+    branch: "master",
+    gitAuth: { type: "none" },
+    webhookAliases: ["acme/rd-skills"],
+    enabled: true,
+    audience: ["developer"],
+    visibility: ["internal"],
+    pollingIntervalSeconds: 0,
+    readRoles: [],
+    syncRoles: [],
+  };
+  const publishingConfigRepository: RepositoryConfig = {
+    ...targetRepository,
+    id: "skill-publishing-config",
+    name: "Skill Publishing Config",
+    gitUrl: "git@github.com:acme/config.git",
+    webhookAliases: ["acme/config"],
+    skillPublishing: {
+      enabled: true,
+      provider: "github",
+      baseUrl: "https://github.com",
+      projectPath: "acme/rd-skills",
+      tokenEnv: "TEST_UNUSED_SKILL_TOKEN",
+      targetBranch: "master",
+      branchPrefix: "skill-hub-skill",
+    },
+  };
+  const config: AppConfig = {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    defaultRoles: ["developer", "internal"],
+    authentication: { mode: "development", apiKeys: {} },
+    repositories: [targetRepository, publishingConfigRepository],
+  };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    config,
+    [],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [],
+    { emit() {} },
+  );
+  const record = {
+    id: "sbi_publish_failed",
+    repository: "rd-skills",
+    snapshotId: "sbs_publish_failed",
+    status: "publish_failed",
+  };
+  let passedRepository: RepositoryConfig | undefined;
+  (service as any).skillBundles = {
+    getImport: () => record,
+    getSnapshot: () => undefined,
+    delete: async (_principal: Principal, repository: RepositoryConfig) => {
+      passedRepository = repository;
+      return true;
+    },
+  };
+  try {
+    const admin: Principal = { id: "bundle-admin", tenantId: "rd", roles: ["admin", "developer", "internal"] };
+    assert.equal(await service.deleteSkillBundle(admin, record.id), true);
+    assert.equal(passedRepository?.id, "rd-skills");
+    assert.equal(passedRepository?.skillPublishing?.enabled, true);
+    assert.equal(passedRepository?.skillPublishing?.projectPath, "acme/rd-skills");
+  } finally {
+    search.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("real application flow keeps ota/design when later submitting ota/usage and honors idempotency/legacy mapping", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-integration-"));
   const dataDir = path.join(root, "data");
