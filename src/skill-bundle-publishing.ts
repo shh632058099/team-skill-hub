@@ -275,6 +275,25 @@ export class SkillBundlePublisher {
     return revision;
   }
 
+  private async deleteGitLabBranch(
+    baseUrl: string,
+    projectPath: string,
+    token: string,
+    branch: string,
+    errorLabel: string,
+  ): Promise<void> {
+    const project = encodeURIComponent(projectPath);
+    const response = await this.request(
+      `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(branch)}`,
+      token,
+      "gitlab",
+      { method: "DELETE" },
+    );
+    if (response.ok || response.status === 404) return;
+    const detail = await response.text().catch(() => "");
+    throw new Error(`${errorLabel} (${response.status}): ${detail.slice(0, 1000)}`);
+  }
+
   private async publishGitLab(
     record: SkillBundleImport,
     snapshot: SkillBundleSnapshot,
@@ -341,39 +360,69 @@ export class SkillBundlePublisher {
     }
 
     const project = encodeURIComponent(projectPath);
+    const suffix = branchSuffix(record.id);
+    const baselineBranch = `skill-hub-base-${suffix}`;
     const existingBranchRevision = await this.gitLabBranchHeadIfExists(baseUrl, projectPath, token, branch);
-    if (!existingBranchRevision) {
-      const createBranch = await this.request(
-        `${baseUrl}/api/v4/projects/${project}/repository/branches`,
-        token,
-        "gitlab",
-        {
-          method: "POST",
-          body: JSON.stringify({ branch, ref: targetRevision }),
-        },
+
+    await this.deleteGitLabBranch(
+      baseUrl,
+      projectPath,
+      token,
+      baselineBranch,
+      "GitLab Skill Bundle baseline branch reset failed",
+    );
+    const createBaseline = await this.request(
+      `${baseUrl}/api/v4/projects/${project}/repository/branches`,
+      token,
+      "gitlab",
+      {
+        method: "POST",
+        body: JSON.stringify({ branch: baselineBranch, ref: targetRevision }),
+      },
+    );
+    if (!createBaseline.ok) {
+      const detail = await createBaseline.text().catch(() => "");
+      throw new Error(
+        `GitLab Skill Bundle baseline branch creation failed (${createBaseline.status}): ${detail.slice(0, 1000)}`,
       );
-      if (!createBranch.ok) {
-        const detail = await createBranch.text().catch(() => "");
-        throw new Error(
-          `GitLab Skill Bundle branch creation failed (${createBranch.status}): ${detail.slice(0, 1000)}`,
-        );
+    }
+
+    let publicationError: unknown;
+    try {
+      if (existingBranchRevision) {
+        await this.deleteGitLabBranch(baseUrl, projectPath, token, branch, "GitLab Skill Bundle branch reset failed");
       }
+      const commit = await this.request(`${baseUrl}/api/v4/projects/${project}/repository/commits`, token, "gitlab", {
+        method: "POST",
+        body: JSON.stringify({
+          branch,
+          start_branch: baselineBranch,
+          commit_message: `feat: sync skill bundle ${record.namespace} from ${record.id}`,
+          actions,
+        }),
+      });
+      if (!commit.ok) {
+        const detail = await commit.text().catch(() => "");
+        throw new Error(`GitLab Skill Bundle commit failed (${commit.status}): ${detail.slice(0, 1000)}`);
+      }
+    } catch (error) {
+      publicationError = error;
     }
 
-    const commit = await this.request(`${baseUrl}/api/v4/projects/${project}/repository/commits`, token, "gitlab", {
-      method: "POST",
-      body: JSON.stringify({
-        branch,
-        ...(existingBranchRevision ? { start_sha: targetRevision, force: true } : {}),
-        commit_message: `feat: sync skill bundle ${record.namespace} from ${record.id}`,
-        actions,
-      }),
-    });
-    if (!commit.ok) {
-      const detail = await commit.text().catch(() => "");
-      throw new Error(`GitLab Skill Bundle commit failed (${commit.status}): ${detail.slice(0, 1000)}`);
+    let cleanupError: unknown;
+    try {
+      await this.deleteGitLabBranch(
+        baseUrl,
+        projectPath,
+        token,
+        baselineBranch,
+        "GitLab Skill Bundle baseline branch cleanup failed",
+      );
+    } catch (error) {
+      cleanupError = error;
     }
-
+    if (publicationError) throw publicationError;
+    if (cleanupError) throw cleanupError;
     const create = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, "gitlab", {
       method: "POST",
       body: JSON.stringify({

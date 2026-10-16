@@ -219,10 +219,21 @@ test("GitLab publisher uses publishing token and repository API without git clon
     if (url.endsWith("/repository/branches/skill-hub-skill-1234567890ab")) {
       return new Response("", { status: 404 });
     }
+    if (url.endsWith("/repository/branches/skill-hub-base-1234567890ab")) {
+      assert.equal(init?.method, "DELETE");
+      return new Response(null, {
+        status:
+          requests.filter(({ url: requestUrl }) =>
+            requestUrl.endsWith("/repository/branches/skill-hub-base-1234567890ab"),
+          ).length === 1
+            ? 404
+            : 204,
+      });
+    }
     if (url.endsWith("/repository/branches")) {
       assert.equal(init?.method, "POST");
       const body = JSON.parse(String(init?.body)) as { branch: string; ref: string };
-      assert.deepEqual(body, { branch: "skill-hub-skill-1234567890ab", ref: "target-sha" });
+      assert.deepEqual(body, { branch: "skill-hub-base-1234567890ab", ref: "target-sha" });
       return Response.json({ name: body.branch, commit: { id: "target-sha" } }, { status: 201 });
     }
     if (url.endsWith("/repository/commits")) {
@@ -240,6 +251,7 @@ test("GitLab publisher uses publishing token and repository API without git clon
         }>;
       };
       assert.equal(body.branch, "skill-hub-skill-1234567890ab");
+      assert.equal(body.start_branch, "skill-hub-base-1234567890ab");
       assert.equal(body.start_sha, undefined);
       assert.equal(body.force, undefined);
       assert.deepEqual(
@@ -270,8 +282,22 @@ test("GitLab publisher uses publishing token and repository API without git clon
     }).publish(record, snapshot, gitlabRepository);
     assert.equal(result.kind, "pull-request");
     assert.equal(result.kind === "pull-request" ? result.mergeRequestIid : 0, 9);
-    assert.ok(requests.some(({ url, init }) => url.endsWith("/repository/branches") && init?.method === "POST"));
+    assert.ok(
+      requests.some(
+        ({ url, init }) =>
+          url.endsWith("/repository/branches") &&
+          init?.method === "POST" &&
+          String(init.body).includes("skill-hub-base-1234567890ab"),
+      ),
+    );
     assert.ok(requests.some(({ url }) => url.endsWith("/repository/commits")));
+    assert.equal(
+      requests.filter(
+        ({ url, init }) =>
+          url.endsWith("/repository/branches/skill-hub-base-1234567890ab") && init?.method === "DELETE",
+      ).length,
+      2,
+    );
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }
@@ -290,19 +316,33 @@ test("GitLab publisher resets an existing import branch from the reviewed target
   };
   const { snapshot, record: rawRecord } = bundle();
   const record = approvedAgainst(rawRecord, [{ path: "SKILL.md", content: "old skill\n" }]);
-  let branchCreateCalled = false;
-  let commitBody: { start_sha?: string; force?: boolean } | undefined;
+  const calls: string[] = [];
+  let baselineDeleteCount = 0;
+  let commitBody: { start_branch?: string; start_sha?: string; force?: boolean } | undefined;
   const fetchMock: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url.endsWith("/repository/branches/master")) {
       return Response.json({ commit: { id: "target-sha" } });
     }
+    if (url.endsWith("/repository/branches/skill-hub-skill-1234567890ab") && init?.method === "DELETE") {
+      calls.push("delete-import");
+      return new Response(null, { status: 204 });
+    }
     if (url.endsWith("/repository/branches/skill-hub-skill-1234567890ab")) {
+      calls.push("lookup-import");
       return Response.json({ commit: { id: "old-import-sha" } });
     }
+    if (url.endsWith("/repository/branches/skill-hub-base-1234567890ab")) {
+      assert.equal(init?.method, "DELETE");
+      baselineDeleteCount += 1;
+      calls.push(`delete-baseline-${baselineDeleteCount}`);
+      return new Response(null, { status: baselineDeleteCount === 1 ? 404 : 204 });
+    }
     if (url.endsWith("/repository/branches")) {
-      branchCreateCalled = true;
-      return Response.json({}, { status: 201 });
+      calls.push("create-baseline");
+      const body = JSON.parse(String(init?.body)) as { branch: string; ref: string };
+      assert.deepEqual(body, { branch: "skill-hub-base-1234567890ab", ref: "target-sha" });
+      return Response.json({ name: body.branch, commit: { id: "target-sha" } }, { status: 201 });
     }
     if (url.includes("/repository/tree?")) {
       return Response.json([{ type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" }]);
@@ -311,10 +351,12 @@ test("GitLab publisher resets an existing import branch from the reviewed target
       return Response.json({ content: Buffer.from("old skill\n").toString("base64"), encoding: "base64" });
     }
     if (url.endsWith("/repository/commits")) {
-      commitBody = JSON.parse(String(init?.body)) as { start_sha?: string; force?: boolean };
+      calls.push("commit");
+      commitBody = JSON.parse(String(init?.body)) as { start_branch?: string; start_sha?: string; force?: boolean };
       return Response.json({ id: "commit-sha" }, { status: 201 });
     }
     if (url.endsWith("/merge_requests")) {
+      calls.push("merge-request");
       return Response.json(
         { iid: 10, web_url: "https://gitlab.example.com/example/rd-skills/-/merge_requests/10", state: "opened" },
         { status: 201 },
@@ -326,9 +368,18 @@ test("GitLab publisher resets an existing import branch from the reviewed target
     await new SkillBundlePublisher(fetchMock, async () => {
       throw new Error("git should not be called for GitLab publishing");
     }).publish(record, snapshot, gitlabRepository);
-    assert.equal(branchCreateCalled, false);
-    assert.equal(commitBody?.start_sha, "target-sha");
-    assert.equal(commitBody?.force, true);
+    assert.equal(commitBody?.start_branch, "skill-hub-base-1234567890ab");
+    assert.equal(commitBody?.start_sha, undefined);
+    assert.equal(commitBody?.force, undefined);
+    assert.deepEqual(calls, [
+      "lookup-import",
+      "delete-baseline-1",
+      "create-baseline",
+      "delete-import",
+      "commit",
+      "delete-baseline-2",
+      "merge-request",
+    ]);
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }
