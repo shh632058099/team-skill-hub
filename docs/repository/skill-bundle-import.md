@@ -183,6 +183,9 @@ type SkillBundleImportStatus =
   | "publishing"
   | "publish_failed"
   | "published"
+  | "deleting"
+  | "delete_failed"
+  | "deleted"
   | "published_drifted";
 
 interface SkillBundleFile {
@@ -252,9 +255,7 @@ interface SkillBundleNoopPublication {
   checkedAt: string;
 }
 
-type SkillBundlePublication =
-  | SkillBundlePullRequestPublication
-  | SkillBundleNoopPublication;
+type SkillBundlePublication = SkillBundlePullRequestPublication | SkillBundleNoopPublication;
 
 interface SkillBundleImport {
   id: string;
@@ -377,7 +378,7 @@ Approve 时必须把审核所基于的 `targetRevision`、`replacementRoot` tree
 
 Skill 的审核对象统一为 Bundle Snapshot，不再区分“单文件 Skill Candidate”和“Bundle Candidate”。审核列表/详情显示 Import ID、namespace、来源、submitter、repository / target root、Skill 数和文件数、Skill 列表、文件树、preview diff、note/source metadata、审核历史、PR/MR 地址与状态。只有一个 `SKILL.md` 时，界面自然表现为 1 Skill / 1 File。
 
-`pending` 支持 Approve / Reject。`review_stale` 必须重新 Preview 后再次 Approve 才能发布。PR/MR 创建前必须存在针对当前 target tree/diff 的明确审核通过记录。
+共有审核状态与 Knowledge Candidate 保持一致：`pending` 支持 Approve / Reject；`approved` 可发布或 Reject；`rejected` 可重新 Approve；`publish_failed` 可重试发布或 Reject。Bundle 特有的 `review_stale` 必须重新 Preview 后再次 Approve 才能发布。PR/MR 创建前必须存在针对当前 target tree/diff 的明确审核通过记录。
 
 ## 11. 发布器
 
@@ -399,12 +400,16 @@ GitLab Bundle Publisher 复用 Knowledge Publishing 的 `token_env` / REST API �
 
 ```text
 pending -> approved ----------------> publishing
-   |          |                          |
-   |          +-> review_stale           +-> PR closed/unmerged -> publish_failed -> retry
-   |                -> re-review         |
-   +-> rejected                          +-> PR merged -> final tree verify
-                                                     |-> matches -> published
-                                                     +-> differs -> published_drifted
+   |          |   \                        |
+   |          |    +-> rejected            +-> PR closed/unmerged -> publish_failed -> retry / reject
+   |          +-> review_stale                    |
+   |                -> re-review                 +-> PR merged -> final tree verify
+   +-> rejected -> re-approve                                  |-> matches -> published
+                                                               |                |
+                                                               |                +-> delete-published -> deleting
+                                                               |                                        |-> merged -> deleted
+                                                               |                                        +-> create failure -> delete_failed -> retry
+                                                               +-> differs -> published_drifted
 ```
 
 创建 PR/MR 不等于 `published`。reconciliation 确认 remote PR/MR 已 merged 后，还必须读取 target branch 最新 `replacementRoot`，计算 canonical tree hash，并与本次 Snapshot 的 `expectedTreeSha256` 比较。完全一致才进入 `published`；如果 PR 已 merged 但最终树不同，则进入 `published_drifted`，记录 `finalTreeSha256` / `finalTreeVerifiedAt` 和差异摘要。`published_drifted` 表示 Git merge 已成功但完整快照语义没有精确落地，不应伪装成 `publish_failed`。closed but unmerged 才进入 `publish_failed`。polling/reconciliation 必须覆盖 Bundle publication 和 merge 后最终树验证。
@@ -423,7 +428,11 @@ Reconcile 的传输/API 暂时失败不能改写已经确认的 terminal publica
 
 ## 14. Bundle 删除
 
-第一阶段不提供 `delete_skill_bundle` MCP tool，也禁止空 Bundle，因此不会因误提交空文件列表删除整个 namespace。未来可以由 Admin 页面增加“删除 Bundle”并生成删除整个 namespace 的 PR/MR。
+Skill Bundle 的删除语义与 Knowledge Candidate 对齐，但区分“删除未发布审核记录”和“删除远端已发布内容”。`pending` / `approved` / `rejected` / `publish_failed` / `review_stale` 可以永久删除本地 Import 审核记录；`published` 不能直接删本地记录，而是通过 Admin 创建删除 PR/MR，状态进入 `deleting`，创建失败进入 `delete_failed`，删除 PR/MR 合并后进入 `deleted`。`deleted` 仍保留 Import 与发布历史。
+
+远端删除只删除该 Import 的 `replacementRoot/**`。创建删除 PR/MR 前必须读取 target branch 当前 `replacementRoot` 并计算 canonical tree hash；只有它仍等于原发布 `expectedTreeSha256` 才允许删除，否则拒绝并提示内容已漂移，避免删除别人后续对该 Bundle 的修改。`published_drifted` 默认不允许直接删除，应先人工确认/重新 Import；`kind: "no-op"` 的 published Import 也不允许删除，因为该内容不是本次 Import 创建的。
+
+GitLab 删除发布继续兼容 GitLab 11.x：先把精确 target revision 固定到临时 `skill-hub-base-delete-<id>` branch，清理旧 deletion branch，再由 Commits API 使用 `start_branch=<baseline branch>` 自行创建 `skill-hub-delete-<id>`，一次性提交 replacementRoot 内所有 file delete actions，最后清理临时 baseline 并创建 MR。GitHub 则在临时 clone 上删除 replacementRoot、commit/push 后创建 PR。
 
 ## 15. HTTP / Admin API
 
@@ -437,6 +446,7 @@ GET  /admin/api/skill-bundles/:id
 POST /admin/api/skill-bundles/:id/approve
 POST /admin/api/skill-bundles/:id/reject
 POST /admin/api/skill-bundles/:id/publish
+POST /admin/api/skill-bundles/:id/delete-published
 POST /admin/api/skill-bundles/:id/reconcile
 ```
 

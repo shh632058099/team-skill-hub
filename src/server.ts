@@ -1826,6 +1826,19 @@ export async function startServer(
     }
   });
 
+  app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/delete-published", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { import: await service.deletePublishedSkillBundle(adminPrincipal, request.params.id) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/reconcile", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);

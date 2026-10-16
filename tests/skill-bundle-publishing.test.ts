@@ -479,6 +479,120 @@ test("publisher rejects when target replacementRoot changes after service review
   }
 });
 
+test("GitLab deletes a published Bundle through an exact-SHA baseline branch compatible with GitLab 11", async () => {
+  process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
+  const gitlabRepository: RepositoryConfig = {
+    ...repository,
+    skillPublishing: {
+      ...repository.skillPublishing!,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.com",
+      projectPath: "example/rd-skills",
+    },
+  };
+  const { snapshot, record: rawRecord } = bundle();
+  const record: SkillBundleImport = {
+    ...approvedAgainst(rawRecord, []),
+    status: "published",
+  };
+  const publication = {
+    kind: "pull-request" as const,
+    provider: "gitlab" as const,
+    projectPath: "example/rd-skills",
+    branch: "skill-hub-skill-1234567890ab",
+    targetBranch: "master",
+    targetRoot: record.replacementRoot,
+    mergeRequestIid: 9,
+    mergeRequestUrl: "https://gitlab.example.com/example/rd-skills/-/merge_requests/9",
+    mergeRequestState: "merged" as const,
+    added: 2,
+    modified: 0,
+    deleted: 0,
+    expectedTreeSha256: canonicalTreeHash(snapshot.files),
+    pullRequestCreatedAt: "2026-10-14T00:30:00.000Z",
+    lastCheckedAt: "2026-10-14T01:00:00.000Z",
+  };
+  const calls: string[] = [];
+  let baselineDeleteCount = 0;
+  const fetchMock: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/repository/branches/master")) return Response.json({ commit: { id: "target-sha" } });
+    if (url.includes("/repository/tree?")) {
+      return Response.json([
+        { type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" },
+        { type: "blob", path: "skills/ota/design/scripts/run.sh", mode: "100755" },
+      ]);
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2FSKILL.md?")) {
+      return Response.json({ content: Buffer.from("new skill\n").toString("base64"), encoding: "base64" });
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2Fscripts%2Frun.sh?")) {
+      return Response.json({
+        content: Buffer.from("#!/bin/sh\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: true,
+      });
+    }
+    if (url.endsWith("/repository/branches/skill-hub-delete-1234567890ab") && init?.method === "DELETE") {
+      calls.push("delete-old-delete-branch");
+      return new Response(null, { status: 404 });
+    }
+    if (url.endsWith("/repository/branches/skill-hub-base-delete-1234567890ab")) {
+      baselineDeleteCount += 1;
+      calls.push(`cleanup-baseline-${baselineDeleteCount}`);
+      return new Response(null, { status: baselineDeleteCount === 1 ? 404 : 204 });
+    }
+    if (url.endsWith("/repository/branches")) {
+      calls.push("create-baseline");
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        branch: "skill-hub-base-delete-1234567890ab",
+        ref: "target-sha",
+      });
+      return Response.json({}, { status: 201 });
+    }
+    if (url.endsWith("/repository/commits")) {
+      calls.push("commit-delete");
+      const body = JSON.parse(String(init?.body)) as any;
+      assert.equal(body.branch, "skill-hub-delete-1234567890ab");
+      assert.equal(body.start_branch, "skill-hub-base-delete-1234567890ab");
+      assert.deepEqual(
+        body.actions.map((action: any) => [action.action, action.file_path]),
+        [
+          ["delete", "skills/ota/design/SKILL.md"],
+          ["delete", "skills/ota/design/scripts/run.sh"],
+        ],
+      );
+      return Response.json({ id: "delete-commit" }, { status: 201 });
+    }
+    if (url.endsWith("/merge_requests")) {
+      calls.push("merge-request");
+      return Response.json(
+        { iid: 12, web_url: "https://gitlab.example.com/example/rd-skills/-/merge_requests/12", state: "opened" },
+        { status: 201 },
+      );
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const result = await new SkillBundlePublisher(fetchMock, async () => {
+      throw new Error("git should not be called for GitLab deletion");
+    }).deletePublished(record, publication, gitlabRepository);
+    assert.equal(result.branch, "skill-hub-delete-1234567890ab");
+    assert.equal(result.expectedTreeSha256, canonicalTreeHash([]));
+    assert.deepEqual(calls, [
+      "delete-old-delete-branch",
+      "cleanup-baseline-1",
+      "create-baseline",
+      "commit-delete",
+      "cleanup-baseline-2",
+      "merge-request",
+    ]);
+  } finally {
+    delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
 test("GitLab merged reconciliation verifies the final tree through repository API without git clone", async () => {
   process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
   const gitlabRepository: RepositoryConfig = {

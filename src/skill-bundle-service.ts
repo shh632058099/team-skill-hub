@@ -290,7 +290,9 @@ export class SkillBundleService {
     this.assertAdmin(principal);
     const current = this.options.storage.getImport(id);
     if (!current || current.repository !== repository.id) throw new Error("Skill Bundle import not found");
-    if (!["pending", "review_stale"].includes(current.status)) throw new Error("Skill Bundle import is not reviewable");
+    if (!["pending", "approved", "rejected", "publish_failed", "review_stale"].includes(current.status)) {
+      throw new Error("Skill Bundle import is not reviewable");
+    }
     const now = new Date().toISOString();
     if (status === "rejected") {
       return this.options.storage.updateImport({
@@ -392,6 +394,19 @@ export class SkillBundleService {
     this.assertAdmin(principal);
     const current = this.options.storage.getImport(id);
     if (!current || current.repository !== repository.id) throw new Error("Skill Bundle import not found");
+    if (["deleting", "deleted"].includes(current.status)) {
+      if (!current.deletionPublication) throw new Error("Skill Bundle deletion has not created a PR/MR");
+      const result = await this.publisher.reconcileDeletion(current.deletionPublication, repository);
+      const status: SkillBundleImport["status"] =
+        current.status === "deleting" && result.publication.mergeRequestState === "merged" ? "deleted" : current.status;
+      return this.options.storage.updateImport({
+        ...current,
+        status,
+        deletionPublication: result.publication,
+        deletionError: undefined,
+        updatedAt: new Date().toISOString(),
+      });
+    }
     if (current.publication?.kind === "no-op") return current;
     if (current.publication?.kind !== "pull-request") throw new Error("Skill Bundle import has no PR/MR publication");
     if (!["publishing", "published", "published_drifted", "publish_failed"].includes(current.status)) {
@@ -420,6 +435,71 @@ export class SkillBundleService {
         ...current,
         status: "publish_failed",
         publishError: message,
+        updatedAt: new Date().toISOString(),
+      });
+      throw error;
+    }
+  }
+
+  async deletePublished(principal: Principal, repository: RepositoryConfig, id: string): Promise<SkillBundleImport> {
+    this.assertAuthorized(principal, repository);
+    this.assertAdmin(principal);
+    const current = this.options.storage.getImport(id);
+    if (!current || current.repository !== repository.id) throw new Error("Skill Bundle import not found");
+    if (!["published", "delete_failed"].includes(current.status)) {
+      throw new Error("Skill Bundle import must be published before deleting its remote asset");
+    }
+    if (current.publication?.kind === "no-op") {
+      throw new Error("No-op Skill Bundle publications cannot delete pre-existing remote content");
+    }
+    if (current.publication?.kind !== "pull-request") {
+      throw new Error("Skill Bundle import has no PR/MR publication");
+    }
+    const snapshot = this.options.storage.getSnapshot(current.snapshotId);
+    if (!snapshot) throw new Error("Skill Bundle snapshot not found");
+
+    const verified = await this.publisher.reconcile(current.publication, snapshot, repository);
+    const verifiedPublication = verified.publication;
+    if (verifiedPublication.mergeRequestState !== "merged") {
+      if (current.status !== "published") {
+        throw new Error("Original Skill Bundle publication is no longer merged; deletion cannot proceed");
+      }
+      const status: SkillBundleImport["status"] =
+        verifiedPublication.mergeRequestState === "closed" ? "publish_failed" : "publishing";
+      return this.options.storage.updateImport({
+        ...current,
+        status,
+        publication: verifiedPublication,
+        publishError: status === "publish_failed" ? "Original PR/MR was closed without merge" : undefined,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const deleting = this.options.storage.updateImport({
+      ...current,
+      status: "deleting",
+      publication: verifiedPublication,
+      deletionError: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    try {
+      const deletionPublication = await this.publisher.deletePublished(
+        { ...current, status: "published", publication: verifiedPublication },
+        verifiedPublication,
+        repository,
+      );
+      return this.options.storage.updateImport({
+        ...deleting,
+        deletionPublication,
+        deletionError: undefined,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.storage.updateImport({
+        ...deleting,
+        status: "delete_failed",
+        deletionError: message,
         updatedAt: new Date().toISOString(),
       });
       throw error;

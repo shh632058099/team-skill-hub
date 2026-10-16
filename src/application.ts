@@ -3586,6 +3586,28 @@ export class SkillHubApplicationService {
     }
   }
 
+  async deletePublishedSkillBundle(principal: Principal, id: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) throw new Error("Skill Bundle import not found");
+    const repository = this.skillBundlePublishingRepository(principal, record.repository);
+    try {
+      const deleting = await this.skillBundles.deletePublished(principal, repository, id);
+      if (deleting.status === "deleting" && deleting.deletionPublication) {
+        this.emitSkillBundleEvent("skill_bundle.deletion.change_request.created", deleting, {
+          provider: deleting.deletionPublication.provider,
+          mergeRequestIid: deleting.deletionPublication.mergeRequestIid,
+          mergeRequestUrl: deleting.deletionPublication.mergeRequestUrl,
+          deleted: deleting.deletionPublication.deleted,
+        });
+      }
+      return deleting;
+    } catch (error) {
+      const failed = this.skillBundles.getImport(id);
+      if (failed) this.emitSkillBundleEvent("skill_bundle.delete.failed", failed, { error: failed.deletionError });
+      throw error;
+    }
+  }
+
   async reconcileSkillBundle(principal: Principal, id: string) {
     const record = this.skillBundles.getImport(id);
     if (!record) throw new Error("Skill Bundle import not found");
@@ -3607,6 +3629,12 @@ export class SkillHubApplicationService {
         });
       } else if (reconciled.status === "publish_failed") {
         this.emitSkillBundleEvent("skill_bundle.remote.closed", reconciled, { error: reconciled.publishError });
+      }
+      if (record.status === "deleting" && reconciled.status === "deleted") {
+        this.emitSkillBundleEvent("skill_bundle.deleted", reconciled, {
+          mergeRequestIid: reconciled.deletionPublication?.mergeRequestIid,
+          mergeRequestUrl: reconciled.deletionPublication?.mergeRequestUrl,
+        });
       }
       return reconciled;
     } catch (error) {

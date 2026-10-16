@@ -564,6 +564,233 @@ export class SkillBundlePublisher {
     }
   }
 
+  async deletePublished(
+    record: SkillBundleImport,
+    publication: SkillBundlePullRequestPublication,
+    repository: RepositoryConfig,
+  ): Promise<SkillBundlePullRequestPublication> {
+    const { config, baseUrl, projectPath, token, remoteUrl, targetBranch } = this.resolve(repository);
+    if (publication.projectPath !== projectPath) {
+      throw new Error("Skill Bundle publication project does not match repository configuration");
+    }
+    if (publication.mergeRequestState !== "merged") {
+      throw new Error("Skill Bundle publication must be merged before remote deletion");
+    }
+
+    const expectedPublishedTreeSha256 = publication.expectedTreeSha256;
+    const expectedDeletedTreeSha256 = canonicalTreeHash([]);
+    const suffix = branchSuffix(record.id);
+    const branch = `skill-hub-delete-${suffix}`;
+
+    if (config.provider === "gitlab") {
+      const targetRevision = await this.gitLabBranchHead(baseUrl, projectPath, token, targetBranch);
+      const current = await this.readGitLabReplacementRoot(
+        baseUrl,
+        projectPath,
+        token,
+        record.replacementRoot,
+        targetRevision,
+      );
+      if (canonicalTreeHash(current) !== expectedPublishedTreeSha256) {
+        throw new Error("Published Skill Bundle has drifted; refresh/review before deletion");
+      }
+      const project = encodeURIComponent(projectPath);
+      const baselineBranch = `skill-hub-base-delete-${suffix}`;
+      await this.deleteGitLabBranch(
+        baseUrl,
+        projectPath,
+        token,
+        branch,
+        "GitLab Skill Bundle deletion branch reset failed",
+      );
+      await this.deleteGitLabBranch(
+        baseUrl,
+        projectPath,
+        token,
+        baselineBranch,
+        "GitLab Skill Bundle deletion baseline reset failed",
+      );
+      const createBaseline = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/repository/branches`,
+        token,
+        "gitlab",
+        {
+          method: "POST",
+          body: JSON.stringify({ branch: baselineBranch, ref: targetRevision }),
+        },
+      );
+      if (!createBaseline.ok) {
+        const detail = await createBaseline.text().catch(() => "");
+        throw new Error(
+          `GitLab Skill Bundle deletion baseline creation failed (${createBaseline.status}): ${detail.slice(0, 1000)}`,
+        );
+      }
+
+      let publicationError: unknown;
+      try {
+        const actions = [...current]
+          .sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)))
+          .map((file) => ({ action: "delete" as const, file_path: `${record.replacementRoot}/${file.path}` }));
+        const commit = await this.request(`${baseUrl}/api/v4/projects/${project}/repository/commits`, token, "gitlab", {
+          method: "POST",
+          body: JSON.stringify({
+            branch,
+            start_branch: baselineBranch,
+            commit_message: `chore: delete skill bundle ${record.namespace} from ${record.id}`,
+            actions,
+          }),
+        });
+        if (!commit.ok) {
+          const detail = await commit.text().catch(() => "");
+          throw new Error(`GitLab Skill Bundle deletion commit failed (${commit.status}): ${detail.slice(0, 1000)}`);
+        }
+      } catch (error) {
+        publicationError = error;
+      }
+
+      let cleanupError: unknown;
+      try {
+        await this.deleteGitLabBranch(
+          baseUrl,
+          projectPath,
+          token,
+          baselineBranch,
+          "GitLab Skill Bundle deletion baseline cleanup failed",
+        );
+      } catch (error) {
+        cleanupError = error;
+      }
+      if (publicationError) throw publicationError;
+      if (cleanupError) throw cleanupError;
+
+      const create = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, "gitlab", {
+        method: "POST",
+        body: JSON.stringify({
+          source_branch: branch,
+          target_branch: targetBranch,
+          title: `Delete Skill Bundle: ${record.namespace}`,
+          description: `Delete Skill Bundle Import: ${record.id}\nReplacement root: ${record.replacementRoot}`,
+        }),
+      });
+      let mr: { iid?: number; web_url?: string; state?: string } | undefined;
+      if (create.ok) mr = (await create.json()) as typeof mr;
+      else if (create.status === 409) {
+        const list = await this.request(
+          `${baseUrl}/api/v4/projects/${project}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&target_branch=${encodeURIComponent(targetBranch)}`,
+          token,
+          "gitlab",
+          { method: "GET" },
+        );
+        if (list.ok) mr = ((await list.json()) as Array<NonNullable<typeof mr>>)[0];
+      }
+      if (!mr?.iid || !mr.web_url) throw new Error(`GitLab deletion merge request creation failed (${create.status})`);
+      const now = new Date().toISOString();
+      return {
+        kind: "pull-request",
+        provider: "gitlab",
+        projectPath,
+        branch,
+        targetBranch,
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: mr.iid,
+        mergeRequestUrl: mr.web_url,
+        mergeRequestState: mr.state === "closed" || mr.state === "locked" ? mr.state : "opened",
+        added: 0,
+        modified: 0,
+        deleted: current.length,
+        expectedTreeSha256: expectedDeletedTreeSha256,
+        pullRequestCreatedAt: now,
+        lastCheckedAt: now,
+      };
+    }
+
+    const parent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-delete-"));
+    const worktree = path.join(parent, "repo");
+    try {
+      await this.gitRun(["clone", "--depth", "1", "--no-tags", "--branch", targetBranch, remoteUrl, worktree]);
+      const targetPath = path.join(worktree, ...record.replacementRoot.split("/"));
+      const current = await readTree(targetPath);
+      if (canonicalTreeHash(current) !== expectedPublishedTreeSha256) {
+        throw new Error("Published Skill Bundle has drifted; refresh/review before deletion");
+      }
+      const remoteBranch = await this.gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], worktree);
+      const remoteBranchSha = remoteBranch.trim() ? remoteBranch.trim().split(/\s+/)[0] : undefined;
+      await this.gitRun(["checkout", "-B", branch], worktree);
+      await rm(targetPath, { recursive: true, force: true });
+      await this.gitRun(["add", "-A", "--", record.replacementRoot], worktree);
+      await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
+      await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
+      await this.gitRun(["commit", "-m", `chore: delete skill bundle ${record.namespace} from ${record.id}`], worktree);
+      if (remoteBranchSha) {
+        await this.gitRun(
+          ["push", `--force-with-lease=refs/heads/${branch}:${remoteBranchSha}`, "origin", `HEAD:refs/heads/${branch}`],
+          worktree,
+        );
+      } else {
+        await this.gitRun(["push", "--set-upstream", "origin", `HEAD:refs/heads/${branch}`], worktree);
+      }
+      const api = githubApiBase(baseUrl);
+      const create = await this.request(`${api}/repos/${projectPath}/pulls`, token, "github", {
+        method: "POST",
+        body: JSON.stringify({
+          title: `Delete Skill Bundle: ${record.namespace}`,
+          head: branch,
+          base: targetBranch,
+          body: `Delete Skill Bundle Import: ${record.id}\nReplacement root: ${record.replacementRoot}`,
+        }),
+      });
+      let pr: { number?: number; html_url?: string; state?: string } | undefined;
+      if (create.ok) pr = (await create.json()) as typeof pr;
+      else if (create.status === 422) {
+        const list = await this.request(
+          `${api}/repos/${projectPath}/pulls?state=open&head=${encodeURIComponent(projectPath.split("/")[0] + ":" + branch)}&base=${encodeURIComponent(targetBranch)}`,
+          token,
+          "github",
+          { method: "GET" },
+        );
+        if (list.ok) pr = ((await list.json()) as Array<NonNullable<typeof pr>>)[0];
+      }
+      if (!pr?.number || !pr.html_url)
+        throw new Error(`GitHub deletion pull request creation failed (${create.status})`);
+      const now = new Date().toISOString();
+      return {
+        kind: "pull-request",
+        provider: "github",
+        projectPath,
+        branch,
+        targetBranch,
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: pr.number,
+        mergeRequestUrl: pr.html_url,
+        mergeRequestState: pr.state === "closed" ? "closed" : "opened",
+        added: 0,
+        modified: 0,
+        deleted: current.length,
+        expectedTreeSha256: expectedDeletedTreeSha256,
+        pullRequestCreatedAt: now,
+        lastCheckedAt: now,
+      };
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  }
+
+  async reconcileDeletion(
+    publication: SkillBundlePullRequestPublication,
+    repository: RepositoryConfig,
+  ): Promise<SkillBundleReconcileResult> {
+    const emptySnapshot: SkillBundleSnapshot = {
+      id: "skill-bundle-deletion-empty",
+      files: [],
+      skills: [],
+      sha256: canonicalTreeHash([]),
+      fileCount: 0,
+      totalBytes: 0,
+      createdAt: new Date().toISOString(),
+    };
+    return await this.reconcile(publication, emptySnapshot, repository);
+  }
+
   async reconcile(
     publication: SkillBundlePullRequestPublication,
     snapshot: SkillBundleSnapshot,

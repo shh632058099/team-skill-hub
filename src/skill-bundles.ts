@@ -11,6 +11,9 @@ export type SkillBundleImportStatus =
   | "publishing"
   | "publish_failed"
   | "published"
+  | "deleting"
+  | "delete_failed"
+  | "deleted"
   | "published_drifted";
 
 export interface SkillBundleFile {
@@ -103,6 +106,8 @@ export interface SkillBundleImport {
   review?: SkillBundleReview;
   publication?: SkillBundlePublication;
   publishError?: string;
+  deletionPublication?: SkillBundlePullRequestPublication;
+  deletionError?: string;
   driftSummary?: SkillBundleDiff;
   createdAt: string;
   updatedAt: string;

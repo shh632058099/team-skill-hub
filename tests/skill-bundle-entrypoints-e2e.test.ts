@@ -89,6 +89,10 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
     calls.push("delete:" + id);
     return true;
   };
+  (service as any).deletePublishedSkillBundle = async (_p: any, id: string) => {
+    calls.push("delete-published:" + id);
+    return { ...record, status: "deleting" };
+  };
   const app = await startServer(config, service);
   try {
     const address = app.server.address();
@@ -172,6 +176,12 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
       body: JSON.stringify({ reason: "ok" }),
     });
     assert.equal(((await approve.json()) as any).import.status, "approved");
+    const deletePublished = await fetch(base + "/admin/api/skill-bundles/sbi_http/delete-published", {
+      method: "POST",
+      headers: { "x-skill-hub-admin-key": "skill-bundle-admin" },
+    });
+    assert.equal(deletePublished.status, 200);
+    assert.equal(((await deletePublished.json()) as any).import.status, "deleting");
     const deleted = await fetch(base + "/admin/api/skill-bundles/sbi_http", {
       method: "DELETE",
       headers: { "x-skill-hub-admin-key": "skill-bundle-admin" },
@@ -184,6 +194,7 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
       "preview:ota:design",
       "preview:ota:design",
       "import:web-files",
+      "delete-published:sbi_http",
       "delete:sbi_http",
     ]);
   } finally {

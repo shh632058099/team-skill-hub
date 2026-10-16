@@ -94,6 +94,38 @@ async function publisherFixture(finalTreeMatches = true) {
         finalTreeMatches,
       };
     },
+    async deletePublished(record: any) {
+      calls.push("deletePublished");
+      return {
+        kind: "pull-request" as const,
+        provider: "github" as const,
+        projectPath: "example/rd-skills",
+        branch: "skill-hub-delete-test",
+        targetBranch: "master",
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: 10,
+        mergeRequestUrl: "https://github.com/example/rd-skills/pull/10",
+        mergeRequestState: "opened" as const,
+        added: 0,
+        modified: 0,
+        deleted: 1,
+        expectedTreeSha256: "empty-tree",
+        pullRequestCreatedAt: "2026-10-14T03:00:00.000Z",
+        lastCheckedAt: "2026-10-14T03:00:00.000Z",
+      };
+    },
+    async reconcileDeletion(publication: any) {
+      calls.push("reconcileDeletion");
+      return {
+        publication: {
+          ...publication,
+          mergeRequestState: "merged" as const,
+          mergedAt: "2026-10-14T04:00:00.000Z",
+          lastCheckedAt: "2026-10-14T04:00:00.000Z",
+        },
+        finalTreeMatches: true,
+      };
+    },
   } as unknown as SkillBundlePublisher;
   const service = new SkillBundleService({
     storage: (base.service as any).options.storage,
@@ -305,6 +337,130 @@ test("admin can delete only unpublished Bundle states", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+test("Bundle review transitions align with Knowledge for approved, rejected and publish_failed states", async () => {
+  const { dir, db, service } = await fixture();
+  try {
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "review-transitions",
+      files: [{ path: "SKILL.md", content: skill("ota-review-transitions") }],
+      sourceType: "mcp",
+    });
+    const approved = await service.review(adminPrincipal, repository, created.id, "approved");
+    const rejected = await service.review(adminPrincipal, repository, approved.id, "rejected", "changed mind");
+    assert.equal(rejected.status, "rejected");
+
+    const reopened = await service.review(adminPrincipal, repository, rejected.id, "approved", "reopen");
+    assert.equal(reopened.status, "approved");
+    assert.equal(reopened.review?.targetRevision, "rev-1");
+
+    const storage = (service as any).options.storage as SqliteSkillBundleRepository;
+    const failed = storage.updateImport({
+      ...reopened,
+      status: "publish_failed",
+      publishError: "remote failure",
+      updatedAt: "2026-10-16T04:00:00.000Z",
+    });
+    const rejectedAfterFailure = await service.review(
+      adminPrincipal,
+      repository,
+      failed.id,
+      "rejected",
+      "stop retrying",
+    );
+    assert.equal(rejectedAfterFailure.status, "rejected");
+    assert.equal(rejectedAfterFailure.publishError, undefined);
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("published Bundle deletion follows deleting to deleted lifecycle and can retry delete_failed", async () => {
+  const { dir, db, service, calls } = await publisherFixture(true);
+  try {
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "delete-published",
+      files: [{ path: "SKILL.md", content: skill("ota-delete-published") }],
+      sourceType: "mcp",
+    });
+    await service.review(adminPrincipal, repository, created.id, "approved");
+    await service.publish(adminPrincipal, repository, created.id);
+    const published = await service.reconcile(adminPrincipal, repository, created.id);
+    assert.equal(published.status, "published");
+
+    const deleting = await service.deletePublished(adminPrincipal, repository, created.id);
+    assert.equal(deleting.status, "deleting");
+    assert.equal(deleting.deletionPublication?.kind, "pull-request");
+
+    const deleted = await service.reconcile(adminPrincipal, repository, created.id);
+    assert.equal(deleted.status, "deleted");
+    assert.deepEqual(calls, ["publish", "reconcile", "reconcile", "deletePublished", "reconcileDeletion"]);
+
+    const second = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "delete-retry",
+      files: [{ path: "SKILL.md", content: skill("ota-delete-retry") }],
+      sourceType: "mcp",
+    });
+    await service.review(adminPrincipal, repository, second.id, "approved");
+    await service.publish(adminPrincipal, repository, second.id);
+    await service.reconcile(adminPrincipal, repository, second.id);
+    (service as any).publisher.deletePublished = async () => {
+      throw new Error("delete transport failed");
+    };
+    await assert.rejects(
+      () => service.deletePublished(adminPrincipal, repository, second.id),
+      /delete transport failed/,
+    );
+    assert.equal(service.getImport(second.id)?.status, "delete_failed");
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("remote deletion rejects no-op and drifted Bundle publications", async () => {
+  const { dir, db, service } = await fixture();
+  try {
+    const storage = (service as any).options.storage as SqliteSkillBundleRepository;
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "delete-guards",
+      files: [{ path: "SKILL.md", content: skill("ota-delete-guards") }],
+      sourceType: "mcp",
+    });
+    const noOp = storage.updateImport({
+      ...created,
+      status: "published",
+      publication: {
+        kind: "no-op",
+        targetRevision: "rev-1",
+        targetRoot: created.replacementRoot,
+        checkedAt: "2026-10-16T04:00:00.000Z",
+        expectedTreeSha256: created.snapshotSha256,
+      },
+      updatedAt: "2026-10-16T04:00:00.000Z",
+    });
+    await assert.rejects(() => service.deletePublished(adminPrincipal, repository, noOp.id), /no-op/i);
+
+    const drifted = storage.updateImport({
+      ...noOp,
+      status: "published_drifted",
+      updatedAt: "2026-10-16T04:01:00.000Z",
+    });
+    await assert.rejects(() => service.deletePublished(adminPrincipal, repository, drifted.id), /published/i);
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("publisher-time target drift returns review_stale instead of publish_failed", async () => {
   const base = await fixture();
   const service = new SkillBundleService({
