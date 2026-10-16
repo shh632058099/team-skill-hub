@@ -91,10 +91,68 @@ test("admin candidate actions support approve then publish over HTTP", async () 
     await app.close();
     search.close();
     await rm(dataDir, { recursive: true, force: true });
+
     delete process.env.ADMIN_API_KEY;
   }
 });
 
+test("admin candidate diff endpoint requires admin access and returns service diff", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-candidate-diff-"));
+  const search = new SqliteFtsSearchBackend();
+  process.env.ADMIN_API_KEY = "candidate-diff-admin";
+  const config: AppConfig = {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    defaultRoles: ["developer", "internal"],
+    authentication: { mode: "development", apiKeys: {} },
+    repositories: [],
+  };
+  const service = new SkillHubApplicationService(
+    config,
+    [],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [],
+    new LoggingEventSink(),
+  );
+  await service.initialize();
+  const id = "kc_diff_http";
+  const expectedDiff = {
+    target: { repositoryId: "rd-knowledges", targetBranch: "main", path: "knowledge/example.md", operation: "update" },
+    summary: { addedLines: 1, removedLines: 1 },
+    hunks: [],
+  };
+  let requestedId = "";
+  const originalDiff = service.getKnowledgeCandidateDiff.bind(service);
+  (service as any).getKnowledgeCandidateDiff = async (candidateId: string) => {
+    requestedId = candidateId;
+    return expectedDiff;
+  };
+  const app = await startServer(config, service);
+  try {
+    const address = app.server.address();
+    assert.ok(address && typeof address !== "string");
+    const url = `http://127.0.0.1:${address.port}/admin/api/knowledge-candidates/${encodeURIComponent(id)}/diff`;
+
+    const denied = await fetch(url);
+    assert.equal(denied.status, 403);
+
+    const response = await fetch(url, { headers: { "x-skill-hub-admin-key": "candidate-diff-admin" } });
+    assert.equal(response.status, 200);
+    assert.equal(requestedId, id);
+    assert.deepEqual(await response.json(), expectedDiff);
+  } finally {
+    (service as any).getKnowledgeCandidateDiff = originalDiff;
+    await app.close();
+    search.close();
+    await rm(dataDir, { recursive: true, force: true });
+    delete process.env.ADMIN_API_KEY;
+  }
+});
 test("admin candidate actions support reject, reapprove, and delete over HTTP", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-admin-candidate-manage-"));
   const search = new SqliteFtsSearchBackend();

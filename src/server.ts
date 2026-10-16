@@ -2092,6 +2092,20 @@ export async function startServer(
     }
   });
 
+  app.get<{ Params: { id: string } }>("/admin/api/knowledge-candidates/:id/diff", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return await service.getKnowledgeCandidateDiff(request.params.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reply.code(message === "Knowledge candidate not found" ? 404 : 400);
+      return { error: message };
+    }
+  });
+
   app.get("/admin/api/knowledge-curator", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
