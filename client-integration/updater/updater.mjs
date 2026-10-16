@@ -58,9 +58,12 @@ function removeLegacyTomlServer(content, serverName) {
   return out.join("\n");
 }
 export function ensureCodexWritableRoot(content, clientRoot) {
-  const root = path.resolve(clientRoot).replaceAll("\\", "/");
+  const fullRoot = /^[A-Za-z]:[\\/]/.test(clientRoot) ? clientRoot : path.resolve(clientRoot);
+  const root = fullRoot.replaceAll("\\", "/");
   const quotedRoot = JSON.stringify(root);
-  const normalized = content.replace(/\r\n/g, "\n");
+  const legacyQuotedRoot = `"${fullRoot.replaceAll('"', '\\"')}"`;
+  const migrated = legacyQuotedRoot === quotedRoot ? content : content.replaceAll(legacyQuotedRoot, quotedRoot);
+  const normalized = migrated.replace(/\r\n/g, "\n");
   const header = /^\[sandbox_workspace_write\]\s*$/m.exec(normalized);
   if (!header) {
     const base = normalized.trimEnd();

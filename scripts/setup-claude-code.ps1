@@ -245,9 +245,9 @@ if (-not $SkipMcp) {
     Write-Warning "claude CLI not found; Hooks installed, MCP registration skipped."
   } else {
     try { & claude mcp remove $ServerName --scope user 2>$null | Out-Null } catch {}
-    $mcpJson = '{"type":"http","url":"' + $McpUrl + '","headers":{"Authorization":"Bearer ${' + $ApiKeyEnv + '}"}}'
-    & claude mcp add-json $ServerName $mcpJson --scope user
-    if ($LASTEXITCODE -ne 0) { throw "claude mcp add-json failed" }
+    $AuthorizationHeader = 'Authorization: Bearer ${' + $ApiKeyEnv + '}'
+    & claude mcp add --transport http $ServerName $McpUrl --header $AuthorizationHeader --scope user
+    if ($LASTEXITCODE -ne 0) { throw "claude mcp add failed" }
   }
 }
 

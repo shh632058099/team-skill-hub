@@ -11,6 +11,15 @@ const execFileAsync = promisify(execFile);
 const updaterUrl = new URL("../client-integration/updater/updater.mjs", import.meta.url);
 const runtimeUrl = new URL("../client-integration/runtime/client-runtime.mjs", import.meta.url);
 
+test("Codex writable root migration repairs legacy Windows TOML paths", async () => {
+  const { ensureCodexWritableRoot } = await import(updaterUrl.href + `?windows-path=${Date.now()}`);
+  const legacyRoot = "C:\\Users\\bst\\.team-skill-hub";
+  const content = `[sandbox_workspace_write]\nwritable_roots = ["${legacyRoot}"]\n`;
+  const updated = ensureCodexWritableRoot(content, legacyRoot);
+  assert.match(updated, /C:\/Users\/bst\/\.team-skill-hub/);
+  assert.doesNotMatch(updated, /C:\\Users\\bst/);
+});
+
 test("managed config apply is idempotent and preserves unrelated content in custom homes", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-updater-"));
   const codex = path.join(root, "custom-codex");

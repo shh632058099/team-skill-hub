@@ -216,8 +216,7 @@ if [[ "$SKIP_MCP" != "true" ]]; then
     echo "Warning: claude CLI not found; Hooks installed, MCP registration skipped." >&2
   else
     claude mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || true
-    mcp_json="$(printf '{"type":"http","url":"%s","headers":{"Authorization":"Bearer ${%s}"}}' "$MCP_URL" "$API_KEY_ENV")"
-    claude mcp add-json "$SERVER_NAME" "$mcp_json" --scope user
+    claude mcp add --transport http "$SERVER_NAME" "$MCP_URL" --header "Authorization: Bearer \${$API_KEY_ENV}" --scope user
   fi
 fi
 

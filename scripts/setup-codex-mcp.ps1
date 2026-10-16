@@ -98,8 +98,13 @@ function Write-Utf8NoBom {
 
 function Ensure-CodexWritableRoot {
     param([string]$Content, [string]$ClientRoot)
-    $root = ([System.IO.Path]::GetFullPath($ClientRoot)).Replace('\\', '/')
+    $fullRoot = [System.IO.Path]::GetFullPath($ClientRoot)
+    $root = $fullRoot.Replace('\', '/')
     $quotedRoot = '"' + $root.Replace('"', '\\"') + '"'
+    $legacyQuotedRoot = '"' + $fullRoot.Replace('"', '\\"') + '"'
+    if ($legacyQuotedRoot -ne $quotedRoot -and $Content.Contains($legacyQuotedRoot)) {
+        $Content = $Content.Replace($legacyQuotedRoot, $quotedRoot)
+    }
     $sectionPattern = '(?ms)^\[sandbox_workspace_write\]\s*$.*?(?=^\[[^\]]+\]\s*$|\z)'
     $sectionMatch = [regex]::Match($Content, $sectionPattern)
     if (-not $sectionMatch.Success) {

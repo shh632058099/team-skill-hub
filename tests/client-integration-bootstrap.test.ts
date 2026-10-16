@@ -157,6 +157,14 @@ test("setup scripts support remote bootstrap fallback from the Hub", async () =>
   }
 });
 
+test("PowerShell Codex setup normalizes Windows writable roots for TOML", async () => {
+  const source = await readFile("scripts/setup-codex-mcp.ps1", "utf8");
+  assert.match(source, /\.Replace\('\\', '\/'\)/);
+  assert.doesNotMatch(source, /\.Replace\('\\\\', '\/'\)/);
+  assert.match(source, /legacyQuotedRoot/);
+  assert.match(source, /\.Replace\(\$legacyQuotedRoot, \$quotedRoot\)/);
+});
+
 test("bash setup rejects API key values containing HTTP header control characters", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "skill-hub-invalid-key-"));
   const codex = path.join(home, "codex");

@@ -80,3 +80,12 @@ test("PowerShell Claude setup includes the same server-scoped MCP allow rule", a
   assert.match(source, /permissions/i);
   assert.match(source, /allow/i);
 });
+
+test("Claude setup registers HTTP MCP with the supported add command", async () => {
+  const shellSource = await readFile("scripts/setup-claude-code.sh", "utf8");
+  const powerShellSource = await readFile("scripts/setup-claude-code.ps1", "utf8");
+  assert.match(shellSource, /claude mcp add --transport http/);
+  assert.doesNotMatch(shellSource, /claude mcp add-json/);
+  assert.match(powerShellSource, /claude mcp add --transport http/);
+  assert.doesNotMatch(powerShellSource, /claude mcp add-json/);
+});
