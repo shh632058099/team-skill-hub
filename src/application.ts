@@ -3339,34 +3339,19 @@ export class SkillHubApplicationService {
       | "traceId"
     > & { submittedSpecVersion?: number; submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]> },
   ) {
-    let candidateInput: Parameters<McpObservabilityStore["createCandidate"]>[1] = input;
     if (input.suggestedType === "skill") {
-      const body = input.content.trim();
-      if (
-        !body.startsWith("---") ||
-        !/\bschema_version:\s*1\b/.test(body) ||
-        !/\bname:\s*[^\s]+/.test(body) ||
-        !/\bmetadata:\s*$/m.test(body)
-      ) {
-        throw new Error(
-          "Skill candidate content must be a complete SKILL.md with schema_version: 1, name, and metadata front matter",
-        );
-      }
-      candidateInput = { ...input, skillCollection: input.skillCollection ?? "custom-skills" };
+      throw new Error("Skills must use Skill Bundle submission; Knowledge Candidate accepts Knowledge only");
     }
-    const publishingType = candidateInput.suggestedType === "skill" ? "skill" : "knowledge";
+    let candidateInput: Parameters<McpObservabilityStore["createCandidate"]>[1] = input;
     const allowedRepositories = this.allowedRepositories(principal);
     if (!candidateInput.repository) {
-      const repository = this.defaultPublishingRepository(publishingType, allowedRepositories);
+      const repository = this.defaultPublishingRepository("knowledge", allowedRepositories);
       if (repository) candidateInput = { ...candidateInput, repository };
     }
     if (candidateInput.repository) {
       const allowed = allowedRepositories.some((repo) => repo.id === candidateInput.repository);
       if (!allowed) throw new Error("Repository not found");
-      this.assertPublishingTarget(publishingType, candidateInput.repository);
-    }
-    if (candidateInput.suggestedType === "skill") {
-      return await this.observability.createCandidate(principal, candidateInput);
+      this.assertPublishingTarget("knowledge", candidateInput.repository);
     }
     return await this.persistKnowledgeCandidate(principal, candidateInput, {
       submittedSpecVersion: input.submittedSpecVersion,
@@ -3476,16 +3461,7 @@ export class SkillHubApplicationService {
         });
       }
     }
-    return await this.submitKnowledgeCandidate(principal, {
-      traceId: input.traceId,
-      title: input.title,
-      content: input.content,
-      sourceType: "mcp-session",
-      suggestedType: "skill",
-      skillCollection: input.skillCollection,
-      repository: input.repository ?? "rd-skills",
-      suggestedPath: input.suggestedPath,
-    });
+    throw new Error("Skills must use Skill Bundle submission; legacy Skill Candidate fallback is no longer supported");
   }
 
   listSkillBundleImports(

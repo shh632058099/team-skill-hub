@@ -191,6 +191,28 @@ test("real application flow keeps ota/design when later submitting ota/usage and
     });
     assert.match(design.id, /^sbi_/);
     assert.equal((design as any).replacementRoot, "skills/ota/design");
+    await assert.rejects(
+      () =>
+        service.submitSkillCandidateCompat(principal, {
+          title: "Legacy custom skill",
+          content: skill("legacy-custom"),
+          skillCollection: "custom-skills",
+          repository: "rd-skills",
+          suggestedPath: "legacy-custom/SKILL.md",
+        }),
+      /Skills must use Skill Bundle/,
+    );
+    await assert.rejects(
+      () =>
+        service.submitSkillCandidateCompat(principal, {
+          title: "Unmappable rd skill",
+          content: skill("unmappable-rd"),
+          skillCollection: "rd-skills",
+          repository: "rd-skills",
+          suggestedPath: "not-a-standard-skill-path.md",
+        }),
+      /Skills must use Skill Bundle/,
+    );
 
     await addSkillToRemote(work, "skills/ota/design/SKILL.md", skill("ota-design"));
 

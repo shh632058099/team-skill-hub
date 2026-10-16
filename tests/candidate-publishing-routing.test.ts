@@ -142,14 +142,17 @@ test("candidate repository defaults come from publishing project_path and reject
     });
     assert.equal(knowledge.repository, "knowledge-destination");
 
-    const skill = await service.submitKnowledgeCandidate(principal, {
-      title: "Skill routing",
-      content:
-        "---\nschema_version: 1\nname: routing-skill\nmetadata:\n  audience: [developer]\n---\n\n# Routing skill\n",
-      sourceType: "review",
-      suggestedType: "skill",
-    });
-    assert.equal(skill.repository, "skill-destination");
+    await assert.rejects(
+      () =>
+        service.submitKnowledgeCandidate(principal, {
+          title: "Skill routing",
+          content:
+            "---\nschema_version: 1\nname: routing-skill\nmetadata:\n  audience: [developer]\n---\n\n# Routing skill\n",
+          sourceType: "review",
+          suggestedType: "skill",
+        }),
+      /Skills must use Skill Bundle/,
+    );
 
     await assert.rejects(
       () =>
@@ -161,18 +164,6 @@ test("candidate repository defaults come from publishing project_path and reject
           repository: "skill-destination",
         }),
       /not a configured Knowledge publishing target/,
-    );
-    await assert.rejects(
-      () =>
-        service.submitKnowledgeCandidate(principal, {
-          title: "Wrong Skill target",
-          content:
-            "---\nschema_version: 1\nname: wrong-skill\nmetadata:\n  audience: [developer]\n---\n\n# Wrong target\n",
-          sourceType: "review",
-          suggestedType: "skill",
-          repository: "knowledge-destination",
-        }),
-      /not a configured Skill publishing target/,
     );
     const bypassed = await (service as any).observability.createCandidate(principal, {
       title: "Persisted wrong route",

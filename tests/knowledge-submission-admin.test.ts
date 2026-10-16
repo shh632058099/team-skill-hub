@@ -163,6 +163,17 @@ test("admin manages versioned Knowledge submission spec and hot-applies changes"
       body: JSON.stringify({ title: "Admin edit validation", content: candidateContent, suggestedType: "knowledge" }),
     });
     assert.equal(createdResponse.status, 201);
+    const rejectedSkillResponse = await fetch(f.base + "/admin/api/knowledge-candidates", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        title: "Legacy skill candidate",
+        content: "---\nschema_version: 1\nname: legacy-skill\nmetadata:\n---\n",
+        suggestedType: "skill",
+      }),
+    });
+    assert.equal(rejectedSkillResponse.status, 400);
+    assert.match(((await rejectedSkillResponse.json()) as any).error, /Skills must use Skill Bundle/);
     const created = (await createdResponse.json()) as any;
     const invalidEdit = await fetch(
       f.base + "/admin/api/knowledge-candidates/" + encodeURIComponent(created.candidate.id),
