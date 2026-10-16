@@ -169,6 +169,10 @@ test("candidate and bundle details share the unified review shell with clickable
 
 test("pending Candidate diff is collapsed and loaded lazily on click", () => {
   assertContainsAll(ADMIN_MODULE_HTML, [
+    ".candidate-diff-line.add{background:#dafbe1;color:#116329}",
+    ".candidate-diff-line.remove{background:#ffebe9;color:#82071e}",
+  ]);
+  assertContainsAll(ADMIN_MODULE_HTML, [
     "查看变更 Diff",
     "收起变更 Diff",
     "candidateDiffToggle",
