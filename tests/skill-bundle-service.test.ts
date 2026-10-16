@@ -235,6 +235,42 @@ test("non-admin submitter cannot review or publish a Bundle", async () => {
   } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test("admin can delete only unpublished Bundle states", async () => {
+  const { dir, db, service } = await fixture();
+  try {
+    const first = await service.submit(principal, repository, {
+      namespace: "ota", importType: "skill", skillPath: "auth-check",
+      files: [{ path: "SKILL.md", content: skill("ota-auth-check") }], sourceType: "mcp"
+    });
+    await assert.rejects(() => service.delete(principal, repository, first.id), /administrator role/i);
+
+    const storage = (service as any).options.storage as SqliteSkillBundleRepository;
+    const allowed = ["pending", "approved", "rejected", "publish_failed", "review_stale"] as const;
+    for (const [index, status] of allowed.entries()) {
+      const created = await service.submit(principal, repository, {
+        namespace: "ota", importType: "skill", skillPath: `delete-${index}`,
+        files: [{ path: "SKILL.md", content: skill(`ota-delete-${index}`) }], sourceType: "mcp"
+      });
+      const current = status === "pending" ? created : storage.updateImport({ ...created, status, updatedAt: `2026-10-14T03:0${index}:00.000Z` });
+      assert.equal(await service.delete(adminPrincipal, repository, current.id), true, `${status} should be deletable`);
+      assert.equal(service.getImport(current.id), undefined);
+    }
+
+    const forbidden = ["publishing", "published", "published_drifted"] as const;
+    for (const [index, status] of forbidden.entries()) {
+      const created = await service.submit(principal, repository, {
+        namespace: "ota", importType: "skill", skillPath: `keep-${index}`,
+        files: [{ path: "SKILL.md", content: skill(`ota-keep-${index}`) }], sourceType: "mcp"
+      });
+      const current = storage.updateImport({ ...created, status, updatedAt: `2026-10-14T04:0${index}:00.000Z` });
+      await assert.rejects(() => service.delete(adminPrincipal, repository, current.id), /cannot be deleted/i);
+      assert.equal(service.getImport(current.id)?.status, status);
+    }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test("publisher-time target drift returns review_stale instead of publish_failed", async () => {
   const base = await fixture();
   const service = new SkillBundleService({

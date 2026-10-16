@@ -145,6 +145,27 @@ export class SqliteSkillBundleRepository {
     };
   }
 
+  deleteImport(id: string, expectedRevision?: number): boolean {
+    return this.database.transaction(() => {
+      const row = this.database.raw.prepare("SELECT snapshot_id,revision FROM skill_bundle_import WHERE id=?").get(id) as { snapshot_id?: string; revision?: number | bigint } | undefined;
+      if (!row?.snapshot_id) return false;
+      const revision = Number(row.revision ?? 0);
+      if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error("Skill Bundle import state conflict");
+
+      this.database.raw.prepare("DELETE FROM skill_bundle_import_history WHERE import_id=?").run(id);
+      const deleted = this.database.raw.prepare("DELETE FROM skill_bundle_import WHERE id=? AND revision=?").run(id, revision);
+      if (Number(deleted.changes) !== 1) throw new Error("Skill Bundle import state conflict");
+
+      const snapshotId = String(row.snapshot_id);
+      const currentRefs = this.database.raw.prepare("SELECT count(*) AS n FROM skill_bundle_import WHERE snapshot_id=?").get(snapshotId) as { n: number | bigint };
+      const historyRefs = this.database.raw.prepare("SELECT count(*) AS n FROM skill_bundle_import_history WHERE snapshot_id=?").get(snapshotId) as { n: number | bigint };
+      if (Number(currentRefs.n) === 0 && Number(historyRefs.n) === 0) {
+        this.database.raw.prepare("DELETE FROM skill_bundle_snapshot WHERE id=?").run(snapshotId);
+      }
+      return true;
+    });
+  }
+
   findBySubmissionKey(principal: string, key: string): SkillBundleImport | undefined {
     const row = this.database.raw.prepare("SELECT revision,record_json FROM skill_bundle_import WHERE submission_principal=? AND submission_key=?").get(principal, key) as any;
     return row ? { ...parse<SkillBundleImport>(row.record_json), revision: Number(row.revision) } : undefined;

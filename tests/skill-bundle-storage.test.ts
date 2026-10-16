@@ -168,6 +168,29 @@ test("submission key lookup preserves request semantics for conflict detection",
   }
 });
 
+test("deleting imports removes history and only deletes an unreferenced snapshot", async () => {
+  const { dir, db, repo } = await fixture();
+  try {
+    const snapshot = createSkillBundleSnapshot(normalizeSkillBundleInput({ namespace: "ota", importType: "skill", skillPath: "design", files: [{ path: "SKILL.md", content: "x" }] }));
+    repo.saveSnapshot(snapshot);
+    const first = repo.createImport(sampleImport(snapshot.id, snapshot.sha256));
+    const second = repo.createImport({ ...sampleImport(snapshot.id, snapshot.sha256), id: "sbi_second", submissionKey: "retry-2" });
+
+    assert.equal(repo.deleteImport(first.id), true);
+    assert.equal(repo.getImport(first.id), undefined);
+    assert.equal(repo.getImportHistory(first.id).length, 0);
+    assert.ok(repo.getSnapshot(snapshot.id), "shared snapshot must remain while another import references it");
+
+    assert.equal(repo.deleteImport(second.id), true);
+    assert.equal(repo.getImportHistory(second.id).length, 0);
+    assert.equal(repo.getSnapshot(snapshot.id), undefined, "orphaned snapshot should be removed");
+    assert.equal(repo.deleteImport(second.id), false);
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("admin import paging filters in SQLite before applying the page limit", async () => {
   const { dir, db, repo } = await fixture();
   try {

@@ -390,6 +390,17 @@ export class SkillBundleService {
     }
   }
 
+  async delete(principal: Principal, repository: RepositoryConfig, id: string): Promise<boolean> {
+    this.assertAuthorized(principal, repository);
+    this.assertAdmin(principal);
+    const current = this.options.storage.getImport(id);
+    if (!current || current.repository !== repository.id) return false;
+    if (!["pending", "approved", "rejected", "publish_failed", "review_stale"].includes(current.status)) {
+      throw new Error(`Skill Bundle import in status ${current.status} cannot be deleted`);
+    }
+    return this.options.storage.deleteImport(id, current.revision);
+  }
+
   getImport(id: string): SkillBundleImport | undefined { return this.options.storage.getImport(id); }
   getSnapshot(id: string) { return this.options.storage.getSnapshot(id); }
   getHistory(id: string): SkillBundleImport[] { return this.options.storage.getImportHistory(id); }

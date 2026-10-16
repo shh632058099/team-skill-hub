@@ -3482,6 +3482,23 @@ export class SkillHubApplicationService {
   getSkillBundleSnapshot(id: string) { return this.skillBundles.getSnapshot(id); }
   getSkillBundleHistory(id: string) { return this.skillBundles.getHistory(id); }
 
+  async deleteSkillBundle(principal: Principal, id: string) {
+    const record = this.skillBundles.getImport(id);
+    if (!record) return false;
+    const repository = this.config.repositories.find((item) => item.id === record.repository);
+    if (!repository) throw new Error("Repository not found");
+    const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
+    const deleted = await this.skillBundles.delete(principal, repository, id);
+    if (deleted) {
+      this.emitSkillBundleEvent("skill_bundle.import.deleted", record, {
+        skillCount: snapshot?.skills.length ?? 0,
+        fileCount: snapshot?.fileCount ?? 0,
+        deletedBy: principal.id
+      });
+    }
+    return deleted;
+  }
+
   async getSkillBundlePreview(principal: Principal, id: string) {
     const record = this.skillBundles.getImport(id);
     if (!record) throw new Error("Skill Bundle import not found");

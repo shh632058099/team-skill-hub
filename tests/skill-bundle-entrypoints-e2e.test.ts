@@ -71,6 +71,10 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
   (service as any).getSkillBundleImport = () => record;
   (service as any).getSkillBundleSnapshot = () => ({ id: "sbs_http", files: [{ path: "SKILL.md" }], skills: [{ rootPath: "", skillFilePath: "SKILL.md" }], fileCount: 1, totalBytes: 10 });
   (service as any).reviewSkillBundle = async (_p: any, _id: string, status: string) => ({ ...record, status });
+  (service as any).deleteSkillBundle = async (_p: any, id: string) => {
+    calls.push("delete:" + id);
+    return true;
+  }; 
   const app = await startServer(config, service);
   try {
     const address = app.server.address();
@@ -129,7 +133,10 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
     assert.equal(((await detail.json()) as any).import.skills.length, 1);
     const approve = await fetch(base + "/admin/api/skill-bundles/sbi_http/approve", { method: "POST", headers, body: JSON.stringify({ reason: "ok" }) });
     assert.equal(((await approve.json()) as any).import.status, "approved");
-    assert.deepEqual(calls, ["preview:ota:design", "preview:skill-creator:-", "preview:ota:design", "preview:ota:design", "import:web-files"]);
+    const deleted = await fetch(base + "/admin/api/skill-bundles/sbi_http", { method: "DELETE", headers: { "x-skill-hub-admin-key": "skill-bundle-admin" } });
+    assert.equal(deleted.status, 200);
+    assert.equal(((await deleted.json()) as any).deleted, true);
+    assert.deepEqual(calls, ["preview:ota:design", "preview:skill-creator:-", "preview:ota:design", "preview:ota:design", "import:web-files", "delete:sbi_http"]);
   } finally {
     await app.close();
     search.close();

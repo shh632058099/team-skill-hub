@@ -146,6 +146,10 @@ test("real application flow keeps ota/design when later submitting ota/usage and
       submissionKey: "usage-once",
       repository: "rd-skills"
     }), /submission_key conflicts/i);
+    const admin: Principal = { id: "bundle-admin", tenantId: "rd", roles: ["admin", "developer", "internal"] };
+    assert.equal(await service.deleteSkillBundle(admin, usage.id), true);
+    assert.equal(service.getSkillBundleImport(usage.id), undefined);
+    assert.equal(emitted.filter((item) => item.event === "skill_bundle.import.deleted" && item.payload.importId === usage.id).length, 1);
   } finally {
     search.close();
     await rm(root, { recursive: true, force: true });

@@ -1299,6 +1299,18 @@ export async function startServer(
     };
   });
 
+  app.delete<{ Params: { id: string } }>("/admin/api/skill-bundles/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
+    try {
+      const deleted = await service.deleteSkillBundle(adminPrincipal, request.params.id);
+      if (!deleted) { reply.code(404); return { error: "Skill Bundle import not found" }; }
+      return { deleted: true };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   app.get<{ Params: { id: string } }>("/admin/api/skill-bundles/:id/preview", async (request, reply) => {
     if (!hasAdminAccess(request)) { reply.code(403); return { error: "admin API access denied" }; }
     try { return await service.getSkillBundlePreview(adminPrincipal, request.params.id); }
