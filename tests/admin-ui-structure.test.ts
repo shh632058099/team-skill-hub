@@ -168,6 +168,32 @@ test("candidate and bundle details share the unified review shell with clickable
   assertContainsAll(ADMIN_MODULE_HTML, ['target="_blank"', 'rel="noopener noreferrer"']);
 });
 
+test("pending Candidate diff is collapsed and loaded lazily on click", () => {
+  assertContainsAll(ADMIN_MODULE_HTML, [
+    "查看变更 Diff",
+    "收起变更 Diff",
+    "candidateDiffToggle",
+    "candidateDiffPanel",
+    "toggleCandidateDiff",
+    "/diff",
+    "addedLines",
+    "removedLines",
+    "candidate-diff-line",
+  ]);
+  assert.ok(
+    ADMIN_MODULE_HTML.includes("status==='pending'"),
+    "Diff control should be wired from the pending Candidate branch",
+  );
+  assert.ok(
+    ADMIN_MODULE_HTML.includes("if(panel.dataset.loaded==='true')"),
+    "re-expanding a loaded Diff should reuse the same page result",
+  );
+  assert.ok(
+    ADMIN_MODULE_HTML.includes("requestJson('/admin/api/knowledge-candidates/'+encodeURIComponent(id)+'/diff')"),
+    "Diff request should use the dedicated endpoint",
+  );
+});
+
 test("review landing cards remain categories but all statuses target one list", () => {
   assertContainsAll(ADMIN_MODULE_INDEX_HTML, [
     "审核中心",
