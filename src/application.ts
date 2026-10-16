@@ -45,6 +45,7 @@ import {
 import { UsageAnalyticsStore } from "./analytics.js";
 import { HttpKnowledgeCurator } from "./knowledge-curation.js";
 import { EvaluationRunStore, loadEvaluationSnapshot, runEvaluationSuite, scanEvaluationSuites } from "./evaluation.js";
+import { structuredPatch } from "diff";
 import {
   auditKnowledgeLifecycle,
   chunksForDocuments,
@@ -60,7 +61,12 @@ import {
   type FeedbackRecord,
   type KnowledgeCandidate,
 } from "./observability.js";
-import { createKnowledgePublisher, defaultCandidatePath } from "./knowledge-publishing.js";
+import {
+  createKnowledgePublisher,
+  defaultCandidatePath,
+  resolveKnowledgePublishTarget,
+  type KnowledgePublishTarget,
+} from "./knowledge-publishing.js";
 import {
   ClientEventPipeline,
   CURRENT_HOOK_RUNTIME_VERSION,
@@ -3854,15 +3860,12 @@ export class SkillHubApplicationService {
     return await this.observability.reviewCandidate(id, status, reviewer, reviewNote, reviewReason);
   }
 
-  async publishKnowledgeCandidate(id: string) {
-    const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
-    if (!candidate) throw new Error("Knowledge candidate not found");
-    if (candidate.knowledgeRelation?.type === "conflicts_with") {
-      throw new Error("Conflicting Knowledge candidate must be resolved before publishing");
-    }
-    if (candidate.knowledgeRelation?.type === "duplicate_of") {
-      throw new Error("Duplicate Knowledge candidate should not be published");
-    }
+  private resolveKnowledgeCandidatePublishContext(candidate: KnowledgeCandidate): {
+    repositoryId: string;
+    publishPath: string;
+    publishingRepository: RepositoryConfig;
+    target: KnowledgePublishTarget;
+  } {
     const relationTarget =
       candidate.knowledgeRelation?.type === "updates" || candidate.knowledgeRelation?.type === "supersedes"
         ? candidate.knowledgeRelation.target
@@ -3880,6 +3883,96 @@ export class SkillHubApplicationService {
       throw new Error("Knowledge update target must be in the candidate repository");
     }
     const publishPath = candidate.suggestedPath || relationTarget?.path || defaultCandidatePath(candidate);
+    const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
+    const route = this.requirePublishingRoute(publishingType, repositoryId);
+    const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
+    const target = resolveKnowledgePublishTarget({ ...candidate, suggestedPath: publishPath }, publishingRepository);
+    return { repositoryId, publishPath, publishingRepository, target };
+  }
+
+  async getKnowledgeCandidateDiff(id: string) {
+    const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
+    if (!candidate) throw new Error("Knowledge candidate not found");
+    if (candidate.status !== "pending") throw new Error("Knowledge candidate must be pending to preview diff");
+
+    const { repositoryId, publishingRepository, target } = this.resolveKnowledgeCandidatePublishContext(candidate);
+    const publisher = createKnowledgePublisher(publishingRepository);
+    const baseline = await publisher.readTargetFile(target, publishingRepository);
+    const currentContent = baseline.content.replace(/\r\n/g, "\n");
+    const desiredContent = target.desiredContent.replace(/\r\n/g, "\n");
+    if (baseline.exists && currentContent === desiredContent) {
+      return {
+        target: {
+          repositoryId,
+          targetBranch: target.targetBranch,
+          path: target.filePath,
+          operation: "no_change" as const,
+        },
+        summary: { addedLines: 0, removedLines: 0 },
+        hunks: [],
+      };
+    }
+
+    const patch = structuredPatch(
+      baseline.exists ? `a/${target.filePath}` : "/dev/null",
+      `b/${target.filePath}`,
+      baseline.exists ? currentContent : "",
+      desiredContent,
+      "",
+      "",
+      { context: 3 },
+    );
+    let addedLines = 0;
+    let removedLines = 0;
+    const hunks = patch.hunks.map((hunk) => {
+      let oldLine = hunk.oldStart;
+      let newLine = hunk.newStart;
+      const lines = hunk.lines
+        .filter((line) => line !== "\\ No newline at end of file")
+        .map((line) => {
+          const prefix = line[0];
+          const text = line.slice(1);
+          if (prefix === "+") {
+            addedLines += 1;
+            return { kind: "add" as const, text, newLine: newLine++ };
+          }
+          if (prefix === "-") {
+            removedLines += 1;
+            return { kind: "remove" as const, text, oldLine: oldLine++ };
+          }
+          return { kind: "context" as const, text, oldLine: oldLine++, newLine: newLine++ };
+        });
+      return {
+        oldStart: hunk.oldStart,
+        oldLines: hunk.oldLines,
+        newStart: hunk.newStart,
+        newLines: hunk.newLines,
+        lines,
+      };
+    });
+
+    return {
+      target: {
+        repositoryId,
+        targetBranch: target.targetBranch,
+        path: target.filePath,
+        operation: baseline.exists ? ("update" as const) : ("create" as const),
+      },
+      summary: { addedLines, removedLines },
+      hunks,
+    };
+  }
+
+  async publishKnowledgeCandidate(id: string) {
+    const candidate = (await this.observability.listCandidates(2000)).find((item) => item.id === id);
+    if (!candidate) throw new Error("Knowledge candidate not found");
+    if (candidate.knowledgeRelation?.type === "conflicts_with") {
+      throw new Error("Conflicting Knowledge candidate must be resolved before publishing");
+    }
+    if (candidate.knowledgeRelation?.type === "duplicate_of") {
+      throw new Error("Duplicate Knowledge candidate should not be published");
+    }
+    const { repositoryId, publishPath, publishingRepository } = this.resolveKnowledgeCandidatePublishContext(candidate);
 
     const candidatePatch: Partial<KnowledgeCandidate> = {};
     if (!candidate.repository) candidatePatch.repository = repositoryId;
@@ -3888,9 +3981,6 @@ export class SkillHubApplicationService {
       ? await this.observability.updateCandidate(id, candidatePatch)
       : candidate;
 
-    const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
-    const route = this.requirePublishingRoute(publishingType, repositoryId);
-    const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
     await this.observability.markCandidatePublishing(id);
     try {
       const publisher = createKnowledgePublisher(publishingRepository);

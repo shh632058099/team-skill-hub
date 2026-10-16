@@ -518,11 +518,11 @@ test("publication target resolver preserves provider branch rules and serialized
   });
 
   const github = githubRepository();
-  github.knowledgePublishing = { ...github.knowledgePublishing!, targetBranch: undefined };
+  github.knowledgePublishing = { ...github.knowledgePublishing!, targetBranch: "" };
   assert.equal(resolveKnowledgePublishTarget(candidate(), github).targetBranch, "main");
 
   const gitlabFallback = repository();
-  gitlabFallback.knowledgePublishing = { ...gitlabFallback.knowledgePublishing!, targetBranch: undefined };
+  gitlabFallback.knowledgePublishing = { ...gitlabFallback.knowledgePublishing!, targetBranch: "" };
   assert.equal(resolveKnowledgePublishTarget(candidate(), gitlabFallback).targetBranch, "master");
 });
 
