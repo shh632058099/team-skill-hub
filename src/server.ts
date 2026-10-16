@@ -144,6 +144,7 @@ export async function startServer(
     process.env.CLIENT_INTEGRATION_DIR ?? path.join(process.cwd(), "dist", "client-integration"),
   );
   const clientReleaseFiles = new Set(["linux.tar.gz", "windows.zip", "checksums.json"]);
+  const clientBootstrapFiles = new Set(["bootstrap-client-integration.sh", "bootstrap-client-integration.ps1"]);
   app.get("/client-integration/manifest.json", async (_request, reply) => {
     try {
       const body = await readFile(path.join(clientIntegrationDir, "manifest.json"));
@@ -153,6 +154,24 @@ export async function startServer(
       if (error?.code === "ENOENT") {
         reply.code(404);
         return { error: "client integration manifest not found" };
+      }
+      throw error;
+    }
+  });
+  app.get<{ Params: { file: string } }>("/client-integration/:file", async (request, reply) => {
+    const { file } = request.params;
+    if (!clientBootstrapFiles.has(file)) {
+      reply.code(404);
+      return { error: "client integration bootstrap not found" };
+    }
+    try {
+      const body = await readFile(path.join(clientIntegrationDir, file));
+      reply.header("cache-control", "no-cache, max-age=0").type("text/plain; charset=utf-8");
+      return reply.send(body);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        reply.code(404);
+        return { error: "client integration bootstrap not found" };
       }
       throw error;
     }

@@ -49,6 +49,8 @@ test("serves unauthenticated manifest and immutable platform package safely", as
     }),
   );
   await writeFile(path.join(releases, "releases", "5", "linux.tar.gz"), "package-body");
+  await writeFile(path.join(releases, "bootstrap-client-integration.ps1"), "Write-Output 'bootstrap'\n");
+  await writeFile(path.join(releases, "bootstrap-client-integration.sh"), "#!/usr/bin/env bash\necho bootstrap\n");
   process.env.CLIENT_INTEGRATION_DIR = releases;
   const { config, service } = await makeService(dataDir);
   const app = await startServer(config, service);
@@ -64,6 +66,13 @@ test("serves unauthenticated manifest and immutable platform package safely", as
     assert.equal(pkg.status, 200);
     assert.match(pkg.headers.get("cache-control") ?? "", /immutable/);
     assert.equal(await pkg.text(), "package-body");
+    const psBootstrap = await fetch(base + "/client-integration/bootstrap-client-integration.ps1");
+    assert.equal(psBootstrap.status, 200);
+    assert.match(psBootstrap.headers.get("cache-control") ?? "", /no-cache/);
+    assert.match(await psBootstrap.text(), /bootstrap/);
+    const shBootstrap = await fetch(base + "/client-integration/bootstrap-client-integration.sh");
+    assert.equal(shBootstrap.status, 200);
+    assert.match(await shBootstrap.text(), /bootstrap/);
     assert.equal((await fetch(base + "/client-integration/releases/5/unknown.txt")).status, 404);
     assert.notEqual((await fetch(base + "/client-integration/releases/5/..%2Fmanifest.json")).status, 200);
   } finally {

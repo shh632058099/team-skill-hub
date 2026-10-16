@@ -105,6 +105,8 @@ async function main(): Promise<void> {
       windowsSha256,
     });
     await writeFile(path.join(outRoot, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+    await cp(path.join(repoRoot, "scripts", "bootstrap-client-integration.sh"), path.join(outRoot, "bootstrap-client-integration.sh"));
+    await cp(path.join(repoRoot, "scripts", "bootstrap-client-integration.ps1"), path.join(outRoot, "bootstrap-client-integration.ps1"));
     await writeFile(
       path.join(releaseDir, "checksums.json"),
       JSON.stringify({ linux: linuxSha256, windows: windowsSha256 }, null, 2) + "\n",

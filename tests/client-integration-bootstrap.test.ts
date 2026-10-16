@@ -65,7 +65,7 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     assert.doesNotMatch(guidance, /## 问题/);
     assert.doesNotMatch(guidance, /exact six-section/i);
   }
-  assert.ok(releaseVersion >= 6, "dynamic Knowledge spec guidance requires a new client integration release");
+  assert.ok(releaseVersion >= 7, "single-file remote bootstrap requires client integration v7 or newer");
 });
 
 test("second client targeting a different Hub fails before setup mutation", async () => {
@@ -140,11 +140,32 @@ test("bootstrap refuses to downgrade a newer installed runtime", async () => {
   assert.equal((await readFile(path.join(root, "current"), "utf8")).trim(), String(newerVersion));
 });
 
-test("PowerShell setup scripts contain runtime bootstrap and SessionStart integration", async () => {
-  for (const file of ["scripts/setup-codex-mcp.ps1", "scripts/setup-claude-code.ps1"]) {
+test("setup scripts support remote bootstrap fallback from the Hub", async () => {
+  for (const file of [
+    "scripts/setup-codex-mcp.ps1",
+    "scripts/setup-claude-code.ps1",
+    "scripts/setup-codex-mcp.sh",
+    "scripts/setup-claude-code.sh",
+  ]) {
     const source = await readFile(file, "utf8");
-    assert.match(source, /bootstrap-client-integration\.ps1/);
+    assert.match(source, /bootstrap-client-integration\.(?:ps1|sh)/);
+    assert.match(source, /client-integration\/bootstrap-client-integration/);
+    assert.match(source, /control characters.*HTTP header/i);
+    assert.match(source, /ClientReleaseDir|CLIENT_RELEASE_DIR/);
     assert.match(source, /session-start/);
-    if (file.endsWith("setup-claude-code.ps1")) assert.match(source, /session-start-display/);
+    if (file.includes("claude-code")) assert.match(source, /session-start-display/);
   }
+});
+
+test("bash setup rejects API key values containing HTTP header control characters", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "skill-hub-invalid-key-"));
+  const codex = path.join(home, "codex");
+  await assert.rejects(
+    () => execFileAsync("bash", ["scripts/setup-codex-mcp.sh", "--url", "http://127.0.0.1:8080/mcp"], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home, CODEX_HOME: codex, TEAM_SKILL_HUB_API_KEY: "bad\nkey" },
+    }),
+    /API key.*control|HTTP header/i,
+  );
+  await assert.rejects(() => stat(path.join(codex, "config.toml")));
 });

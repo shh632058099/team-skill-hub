@@ -28,6 +28,8 @@ test("builds versioned linux and windows client packages with matching hashes", 
   assert.equal(await hash(linux), manifest.packages.linux.sha256);
   assert.equal(await hash(windows), manifest.packages.windows.sha256);
   assert.equal(manifest.packages.linux.path, `releases/${version}/linux.tar.gz`);
+  await stat(path.join(out, "bootstrap-client-integration.sh"));
+  await stat(path.join(out, "bootstrap-client-integration.ps1"));
   const zip = await JSZip.loadAsync(await readFile(windows));
   assert.ok(zip.file("release.json"));
   assert.ok(zip.file("scripts/setup-codex-mcp.ps1"));

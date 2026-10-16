@@ -59,11 +59,31 @@ fi
 [[ "$MCP_URL" =~ ^https?:// ]] || { echo "MCP URL must start with http:// or https://" >&2; exit 2; }
 [[ "$SERVER_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Invalid server name" >&2; exit 2; }
 [[ "$API_KEY_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "Invalid API key env name" >&2; exit 2; }
+api_key_value="${!API_KEY_ENV-}"
+if [[ -n "$api_key_value" && "$api_key_value" =~ [[:cntrl:]] ]]; then
+  echo "API key environment variable $API_KEY_ENV contains control characters that are invalid in an HTTP header" >&2
+  exit 2
+fi
 MCP_BASE="${MCP_URL%/}"
 EVENT_URL="${MCP_BASE%/mcp}/client-events"
 HUB_BASE_URL="${MCP_BASE%/mcp}"
 CLIENT_ROOT="${TEAM_SKILL_HUB_CLIENT_ROOT:-$HOME/.team-skill-hub}"
-bash "$SCRIPT_DIR/bootstrap-client-integration.sh" --client codex --config-home "$CODEX_DIR" --hub-base-url "$HUB_BASE_URL" --server-name "$SERVER_NAME" --api-key-env "$API_KEY_ENV"
+BOOTSTRAP_PATH="$SCRIPT_DIR/bootstrap-client-integration.sh"
+BOOTSTRAP_TEMP=""
+if [[ ! -f "$BOOTSTRAP_PATH" ]]; then
+  command -v node >/dev/null 2>&1 || { echo "node is required to download Team Skill Hub bootstrap" >&2; exit 2; }
+  BOOTSTRAP_TEMP="$(mktemp)"
+  BOOTSTRAP_URL="${HUB_BASE_URL}/client-integration/bootstrap-client-integration.sh"
+  node - "$BOOTSTRAP_URL" "$BOOTSTRAP_TEMP" <<'NODE'
+const fs=require('fs');
+const [url,out]=process.argv.slice(2);
+fetch(url).then(async r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);fs.writeFileSync(out,Buffer.from(await r.arrayBuffer()))}).catch(e=>{console.error(`Failed to download Team Skill Hub bootstrap from ${url}: ${e.message}`);process.exit(1)});
+NODE
+  BOOTSTRAP_PATH="$BOOTSTRAP_TEMP"
+fi
+cleanup_bootstrap(){ if [[ -n "$BOOTSTRAP_TEMP" ]]; then rm -f "$BOOTSTRAP_TEMP"; fi; return 0; }
+trap cleanup_bootstrap EXIT
+bash "$BOOTSTRAP_PATH" --client codex --config-home "$CODEX_DIR" --hub-base-url "$HUB_BASE_URL" --server-name "$SERVER_NAME" --api-key-env "$API_KEY_ENV"
 CLIENT_LAUNCHER="$CLIENT_ROOT/bin/team-skill-hub-client"
 CLIENT_RELEASE_FILE="$CLIENT_ROOT/releases/v$(tr -d '\r\n' < "$CLIENT_ROOT/current")/release.json"
 CLIENT_RELEASE_DIR="$(dirname "$CLIENT_RELEASE_FILE")"
@@ -178,8 +198,8 @@ EOF
 replace_block "$AGENTS_FILE" "$AGENTS_BEGIN" "$AGENTS_END" "$agents_block"
 rm -f "$agents_block"
 
-cp "$SCRIPT_DIR/team-skill-hub-hook.sh" "$SH_HOOK"
-cp "$SCRIPT_DIR/team-skill-hub-hook.ps1" "$PS_HOOK"
+cp "$CLIENT_RELEASE_DIR/scripts/team-skill-hub-hook.sh" "$SH_HOOK"
+cp "$CLIENT_RELEASE_DIR/scripts/team-skill-hub-hook.ps1" "$PS_HOOK"
 chmod +x "$SH_HOOK"
 printf 'event_url=%s\nserver_name=%s\napi_key_env=%s\ncapture_stop_message=%s\nruntime_version=%s\nhook_schema_version=%s\n' "$EVENT_URL" "$SERVER_NAME" "$API_KEY_ENV" "$AUTO_KNOWLEDGE" "$HOOK_RUNTIME_VERSION" "$HOOK_SCHEMA_VERSION" > "$HOOK_CONF"
 

@@ -43,16 +43,33 @@ if ([string]::IsNullOrWhiteSpace($Url)) { $Url = Read-Host "Team Skill Hub MCP U
 if ($Url -notmatch '^https?://') { throw "URL must start with http:// or https://" }
 if ($ServerName -notmatch '^[A-Za-z0-9_-]+$') { throw "Invalid server name" }
 if ($ApiKeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "Invalid API key env name" }
+$ApiKeyValue = [Environment]::GetEnvironmentVariable($ApiKeyEnv)
+if ($null -ne $ApiKeyValue -and $ApiKeyValue -match '[\x00-\x1F\x7F]') { throw "API key environment variable $ApiKeyEnv contains control characters that are invalid in an HTTP header" }
 
 $McpUrl = $Url.TrimEnd('/')
 if (-not $McpUrl.EndsWith('/mcp')) { $McpUrl = $McpUrl.TrimEnd('/') + '/mcp' }
 $BaseUrl = $McpUrl.Substring(0, $McpUrl.Length - 4)
 $EventUrl = $BaseUrl + '/client-events/claude-code'
 $ClientRoot = if ($env:TEAM_SKILL_HUB_CLIENT_ROOT) { $env:TEAM_SKILL_HUB_CLIENT_ROOT } else { Join-Path $HOME '.team-skill-hub' }
-& (Join-Path $PSScriptRoot 'bootstrap-client-integration.ps1') -Client claude -ConfigHome $ClaudeDir -HubBaseUrl $BaseUrl -ServerName $ServerName -ApiKeyEnv $ApiKeyEnv
+$LocalBootstrap = Join-Path $PSScriptRoot 'bootstrap-client-integration.ps1'
+$TempBootstrap = $null
+try {
+    if (Test-Path $LocalBootstrap) {
+        $BootstrapPath = $LocalBootstrap
+    } else {
+        $TempBootstrap = Join-Path ([System.IO.Path]::GetTempPath()) ("team-skill-hub-bootstrap-" + [guid]::NewGuid().ToString('N') + ".ps1")
+        $BootstrapUrl = $BaseUrl + '/client-integration/bootstrap-client-integration.ps1'
+        try { Invoke-WebRequest -UseBasicParsing -Uri $BootstrapUrl -OutFile $TempBootstrap } catch { throw "Failed to download Team Skill Hub bootstrap from $BootstrapUrl`: $($_.Exception.Message)" }
+        $BootstrapPath = $TempBootstrap
+    }
+    & $BootstrapPath -Client claude -ConfigHome $ClaudeDir -HubBaseUrl $BaseUrl -ServerName $ServerName -ApiKeyEnv $ApiKeyEnv
+} finally {
+    if ($TempBootstrap) { Remove-Item -Force $TempBootstrap -ErrorAction SilentlyContinue }
+}
 $ClientLauncher = Join-Path $ClientRoot 'bin\team-skill-hub-client.ps1'
 $ClientVersion = (Get-Content -Raw (Join-Path $ClientRoot 'current')).Trim()
 $ClientRelease = Get-Content -Raw (Join-Path $ClientRoot ("releases\v$ClientVersion\release.json")) | ConvertFrom-Json
+$ClientReleaseDir = Join-Path $ClientRoot ("releases\v$ClientVersion")
 $HookRuntimeVersion = [string]$ClientRelease.hookRuntimeVersion
 $HookSchemaVersion = [string]$ClientRelease.hookSchemaVersion
 
@@ -182,7 +199,7 @@ $root['hooks']['Stop'] = @($kept)
 $json = $root | ConvertTo-Json -Depth 20
 Write-Utf8NoBom -Path $SettingsFile -Content $json
 
-Copy-Item -Force (Join-Path $PSScriptRoot "team-skill-hub-claude-stop.sh") $StopGate
+Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-claude-stop.sh") $StopGate
 
 $confContent = "event_url=$EventUrl" + [Environment]::NewLine +
   "mcp_url=$McpUrl" + [Environment]::NewLine +

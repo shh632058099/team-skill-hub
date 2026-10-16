@@ -45,13 +45,30 @@ if ([string]::IsNullOrWhiteSpace($Url)) { $Url = Read-Host "Team Skill Hub MCP U
 if ($Url -notmatch '^https?://') { throw "MCP URL must start with http:// or https://" }
 if ($ServerName -notmatch '^[A-Za-z0-9_-]+$') { throw "Invalid server name" }
 if ($ApiKeyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "Invalid API key env name" }
+$ApiKeyValue = [Environment]::GetEnvironmentVariable($ApiKeyEnv)
+if ($null -ne $ApiKeyValue -and $ApiKeyValue -match '[\x00-\x1F\x7F]') { throw "API key environment variable $ApiKeyEnv contains control characters that are invalid in an HTTP header" }
 $EventUrl = ($Url -replace '/mcp/?$', '') + "/client-events"
 $HubBaseUrl = ($Url -replace '/mcp/?$', '').TrimEnd('/')
 $ClientRoot = if ($env:TEAM_SKILL_HUB_CLIENT_ROOT) { $env:TEAM_SKILL_HUB_CLIENT_ROOT } else { Join-Path $HOME '.team-skill-hub' }
-& (Join-Path $PSScriptRoot 'bootstrap-client-integration.ps1') -Client codex -ConfigHome $CodexDir -HubBaseUrl $HubBaseUrl -ServerName $ServerName -ApiKeyEnv $ApiKeyEnv
+$LocalBootstrap = Join-Path $PSScriptRoot 'bootstrap-client-integration.ps1'
+$TempBootstrap = $null
+try {
+    if (Test-Path $LocalBootstrap) {
+        $BootstrapPath = $LocalBootstrap
+    } else {
+        $TempBootstrap = Join-Path ([System.IO.Path]::GetTempPath()) ("team-skill-hub-bootstrap-" + [guid]::NewGuid().ToString('N') + ".ps1")
+        $BootstrapUrl = $HubBaseUrl + '/client-integration/bootstrap-client-integration.ps1'
+        try { Invoke-WebRequest -UseBasicParsing -Uri $BootstrapUrl -OutFile $TempBootstrap } catch { throw "Failed to download Team Skill Hub bootstrap from $BootstrapUrl`: $($_.Exception.Message)" }
+        $BootstrapPath = $TempBootstrap
+    }
+    & $BootstrapPath -Client codex -ConfigHome $CodexDir -HubBaseUrl $HubBaseUrl -ServerName $ServerName -ApiKeyEnv $ApiKeyEnv
+} finally {
+    if ($TempBootstrap) { Remove-Item -Force $TempBootstrap -ErrorAction SilentlyContinue }
+}
 $ClientLauncher = Join-Path $ClientRoot 'bin\team-skill-hub-client.ps1'
 $ClientVersion = (Get-Content -Raw (Join-Path $ClientRoot 'current')).Trim()
 $ClientRelease = Get-Content -Raw (Join-Path $ClientRoot ("releases\v$ClientVersion\release.json")) | ConvertFrom-Json
+$ClientReleaseDir = Join-Path $ClientRoot ("releases\v$ClientVersion")
 $HookRuntimeVersion = [string]$ClientRelease.hookRuntimeVersion
 $HookSchemaVersion = [string]$ClientRelease.hookSchemaVersion
 
@@ -161,8 +178,8 @@ $AgentsContent = $AgentsContent.TrimStart([char]0xFEFF)
 $AgentsContent = Replace-ManagedBlock $AgentsContent $AgentsBegin $AgentsEnd $AgentsBlock
 Write-Utf8NoBom -Path $AgentsFile -Content $AgentsContent
 
-Copy-Item -Force (Join-Path $PSScriptRoot "team-skill-hub-hook.sh") $ShHook
-Copy-Item -Force (Join-Path $PSScriptRoot "team-skill-hub-hook.ps1") $PsHook
+Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-hook.sh") $ShHook
+Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-hook.ps1") $PsHook
 $AutoKnowledgeValue = if ($NoAutoKnowledge.IsPresent) { "false" } elseif ($AutoKnowledge.IsPresent) { "true" } elseif ($Upgrade.IsPresent -and $Existing -and $Existing["capture_stop_message"]) { [string]$Existing["capture_stop_message"] } else { "true" }
 Write-Utf8NoBom -Path $HookConf -Content ("event_url=" + $EventUrl + [Environment]::NewLine + "server_name=" + $ServerName + [Environment]::NewLine + "api_key_env=" + $ApiKeyEnv + [Environment]::NewLine + "capture_stop_message=" + $AutoKnowledgeValue + [Environment]::NewLine + "runtime_version=" + $HookRuntimeVersion + [Environment]::NewLine + "hook_schema_version=" + $HookSchemaVersion + [Environment]::NewLine)
 
