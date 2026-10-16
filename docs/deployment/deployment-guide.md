@@ -47,6 +47,7 @@ Keep these credentials separate:
 - admin HTTP key: `ADMIN_API_KEY`;
 - GitLab webhook token: `GITLAB_WEBHOOK_TOKEN`;
 - GitLab repository credential: SSH Deploy Key, or HTTPS token when SSH is unavailable.
+- GitLab publishing credential: `knowledge_publishing.token_env` / `skill_publishing.token_env` points to a token with repository-write and merge-request permissions; GitLab Skill Bundle publication and post-merge verification use this token through the GitLab API and do not require a writable SSH Deploy Key.
 
 Never commit private keys, GitLab tokens, API keys, or generated environment files to GitHub. The repository ignores `secrets/` and `.env`.
 

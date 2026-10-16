@@ -383,9 +383,9 @@ Skill 的审核对象统一为 Bundle Snapshot，不再区分“单文件 Skill 
 
 Skill Publisher 应升级为 Bundle Publisher。现有单文件 Skill 发布也走该 Publisher，只是 Snapshot 中只有一个 Skill root / 一个文件。Knowledge 单文件发布逻辑暂不需要强制迁移。
 
-发布时先把 target branch 解析为一个确定 commit SHA，并针对该 SHA 执行审核漂移检查；只有该 commit 上当前 `replacementRoot` tree 与审核记录一致时，才从同一个已校验 commit 创建/重建确定性 Import branch，删除工作区中 `replacementRoot` 当前内容，写入完整 Snapshot，并恢复每个文件规范化后的 `0644` / `0755` mode，然后只对 `replacementRoot` 执行 `git add -A`。这样避免“先检查移动分支、随后又从另一个分支状态创建 branch”的 check/use race。target branch 在 PR/MR 创建以后继续前进属于正常 Git 集成并发，由 PR/MR 冲突和人工 Review 处理。有实际 diff 时只创建一个 commit、push 一个 branch、创建或复用一个 PR/MR，并记录 diff counts。
+发布时先把 target branch 解析为一个确定 commit SHA，并针对该 SHA 执行审核漂移检查；只有该 commit 上当前 `replacementRoot` tree 与审核记录一致时，才从同一个已校验 commit 创建/重建确定性 Import branch。target branch 在 PR/MR 创建以后继续前进属于正常 Git 集成并发，由 PR/MR 冲突和人工 Review 处理。有实际 diff 时只创建一个 commit、一个 branch、一个 PR/MR，并记录 diff counts。
 
-Bundle Publisher 对 GitHub 和 GitLab 推荐统一采用临时 clone/worktree + filesystem Snapshot + `git add -A -- <replacementRoot>` + push 的实现路径，再分别调用 GitHub PR / GitLab MR API。不要让 GitLab Bundle Publisher 沿用当前单文件 Repository Files API 逐文件写入，因为完整 Snapshot 的批量删除、mode 保留、原子 commit 和幂等重建更适合统一 Git worktree 语义。
+GitLab Bundle Publisher 复用 Knowledge Publishing 的 `token_env` / REST API 认证模型：通过 Repository Tree / Files API 读取审核基线，通过 Commits API 的批量 `actions[]` 原子应用 create/update/delete/chmod，并用 `start_sha + force` 从已校验 target revision 确定性重建 Import branch，最后调用 MR API。GitLab 发布与 merge 后 final-tree 校验均不依赖 SSH clone/push。GitHub Bundle Publisher 仍可使用临时 clone/worktree + filesystem Snapshot + `git add -A -- <replacementRoot>` + push，再调用 GitHub PR API。
 
 创建 publication 时同时保存 `expectedTreeSha256`，它表示把本次 Snapshot materialize 到 `replacementRoot` 后按规范化 path/mode/content hash 计算出的期望最终树 hash，供 merge 后 reconciliation 做精确校验。
 
@@ -393,7 +393,7 @@ Bundle Publisher 对 GitHub 和 GitLab 推荐统一采用临时 clone/worktree +
 
 如果最新 target branch 与 Snapshot 完全一致，则不创建空 PR/MR，直接进入 `published`，写入 `kind: "no-op"` 的 publication outcome，并记录目标 revision 与 no-op 审计信息。
 
-发布重试必须幂等：branch 名由 Import ID 稳定派生；远端 open PR/MR 可复用，但 Import branch 必须被视为可重建产物。每次 publish/retry 都应先获取并校验当前 approved target revision，再把 Import branch reset/rebase 到该 target revision，重新应用完整 `replacementRoot` Snapshot。更新已存在的远端 Import branch 时必须先读取其当前 SHA，并使用 `--force-with-lease=refs/heads/<branch>:<observed-sha>` 这种绑定明确 expected SHA 的 lease；不能只调用没有 remote-tracking baseline 的裸 `--force-with-lease`，也不能简单 checkout 旧 remote Import branch 后继续增量写入。`publish_failed` 可重试。
+发布重试必须幂等：branch 名由 Import ID 稳定派生；远端 open PR/MR 可复用，但 Import branch 必须被视为可重建产物。每次 publish/retry 都应先获取并校验当前 approved target revision，再从该 revision 重新应用完整 `replacementRoot` Snapshot。GitLab 使用 Commits API 的 `start_sha + force` 重建 Import branch；GitHub 更新已存在的远端 Import branch 时仍使用绑定明确 expected SHA 的 `--force-with-lease=refs/heads/<branch>:<observed-sha>`。`publish_failed` 可重试。
 
 ## 12. PR/MR 合并后的状态
 

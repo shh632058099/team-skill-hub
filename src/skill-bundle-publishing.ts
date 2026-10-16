@@ -168,6 +168,223 @@ export class SkillBundlePublisher {
     });
   }
 
+  private async readGitLabReplacementRoot(
+    baseUrl: string,
+    projectPath: string,
+    token: string,
+    replacementRoot: string,
+    ref: string,
+  ): Promise<SkillBundleFile[]> {
+    const project = encodeURIComponent(projectPath);
+    const entries: Array<{ type?: string; path?: string; mode?: string }> = [];
+    let page = 1;
+    while (true) {
+      const query = new URLSearchParams({
+        path: replacementRoot,
+        ref,
+        recursive: "true",
+        per_page: "100",
+        page: String(page),
+      });
+      const response = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/repository/tree?${query.toString()}`,
+        token,
+        "gitlab",
+        { method: "GET" },
+      );
+      if (response.status === 404) return [];
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`GitLab repository tree lookup failed (${response.status}): ${detail.slice(0, 500)}`);
+      }
+      const rows = (await response.json()) as Array<{ type?: string; path?: string; mode?: string }>;
+      entries.push(...rows);
+      const nextPage = response.headers.get("x-next-page");
+      if (nextPage) {
+        page = Number(nextPage);
+        continue;
+      }
+      if (rows.length < 100) break;
+      page += 1;
+    }
+
+    const files: SkillBundleFile[] = [];
+    const crypto = await import("node:crypto");
+    for (const entry of entries) {
+      if (entry.type !== "blob" || !entry.path) continue;
+      const response = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/repository/files/${encodeURIComponent(entry.path)}?ref=${encodeURIComponent(ref)}`,
+        token,
+        "gitlab",
+        { method: "GET" },
+      );
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`GitLab repository file lookup failed (${response.status}): ${detail.slice(0, 500)}`);
+      }
+      const file = (await response.json()) as {
+        content?: string;
+        encoding?: string;
+        execute_filemode?: boolean;
+      };
+      if (typeof file.content !== "string")
+        throw new Error(`GitLab repository file response is incomplete: ${entry.path}`);
+      const bytes = Buffer.from(file.content, file.encoding === "base64" ? "base64" : "utf8");
+      const relativePath = entry.path.startsWith(`${replacementRoot}/`)
+        ? entry.path.slice(replacementRoot.length + 1)
+        : entry.path;
+      let content: string | undefined;
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        if (!decoded.includes("\0")) content = decoded;
+      } catch {}
+      files.push({
+        path: relativePath,
+        ...(content !== undefined ? { content } : { contentBase64: bytes.toString("base64") }),
+        sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+        sizeBytes: bytes.byteLength,
+        mode: file.execute_filemode === true || entry.mode === "100755" ? "0755" : "0644",
+      });
+    }
+    return files;
+  }
+
+  private async gitLabBranchHead(baseUrl: string, projectPath: string, token: string, branch: string): Promise<string> {
+    const project = encodeURIComponent(projectPath);
+    const response = await this.request(
+      `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(branch)}`,
+      token,
+      "gitlab",
+      { method: "GET" },
+    );
+    if (!response.ok) throw new Error(`GitLab branch lookup failed (${response.status})`);
+    const value = (await response.json()) as { commit?: { id?: string } };
+    if (!value.commit?.id) throw new Error("GitLab branch response is incomplete");
+    return value.commit.id;
+  }
+
+  private async publishGitLab(
+    record: SkillBundleImport,
+    snapshot: SkillBundleSnapshot,
+    baseUrl: string,
+    projectPath: string,
+    token: string,
+    targetBranch: string,
+    branch: string,
+  ): Promise<SkillBundlePublication> {
+    const targetRevision = await this.gitLabBranchHead(baseUrl, projectPath, token, targetBranch);
+    const before = await this.readGitLabReplacementRoot(
+      baseUrl,
+      projectPath,
+      token,
+      record.replacementRoot,
+      targetRevision,
+    );
+    if (canonicalTreeHash(before) !== record.review?.targetTreeSha256) throw new SkillBundleReviewStaleError();
+
+    const expectedTreeSha256 = canonicalTreeHash(snapshot.files);
+    if (canonicalTreeHash(before) === expectedTreeSha256) {
+      return {
+        kind: "no-op",
+        targetRevision,
+        targetRoot: record.replacementRoot,
+        checkedAt: new Date().toISOString(),
+        expectedTreeSha256,
+      };
+    }
+
+    const diff = diffSkillBundleTrees(before, snapshot.files);
+    const beforeByPath = new Map(before.map((file) => [file.path, file]));
+    const snapshotByPath = new Map(snapshot.files.map((file) => [file.path, file]));
+    const actions: Array<{
+      action: "create" | "update" | "delete" | "chmod";
+      file_path: string;
+      content?: string;
+      encoding?: "base64";
+      execute_filemode?: boolean;
+    }> = [];
+    const addWriteAction = (action: "create" | "update", relativePath: string) => {
+      const file = snapshotByPath.get(relativePath);
+      if (!file) throw new Error(`Skill Bundle snapshot file is missing: ${relativePath}`);
+      const filePath = `${record.replacementRoot}/${relativePath}`;
+      actions.push({
+        action,
+        file_path: filePath,
+        content: skillBundleFileBytes(file).toString("base64"),
+        encoding: "base64",
+      });
+      const previousMode = beforeByPath.get(relativePath)?.mode ?? "0644";
+      if (file.mode !== previousMode) {
+        actions.push({
+          action: "chmod",
+          file_path: filePath,
+          execute_filemode: file.mode === "0755",
+        });
+      }
+    };
+    for (const relativePath of diff.modified) addWriteAction("update", relativePath);
+    for (const relativePath of diff.added) addWriteAction("create", relativePath);
+    for (const relativePath of diff.deleted) {
+      actions.push({ action: "delete", file_path: `${record.replacementRoot}/${relativePath}` });
+    }
+
+    const project = encodeURIComponent(projectPath);
+    const commit = await this.request(`${baseUrl}/api/v4/projects/${project}/repository/commits`, token, "gitlab", {
+      method: "POST",
+      body: JSON.stringify({
+        branch,
+        start_sha: targetRevision,
+        force: true,
+        commit_message: `feat: sync skill bundle ${record.namespace} from ${record.id}`,
+        actions,
+      }),
+    });
+    if (!commit.ok) {
+      const detail = await commit.text().catch(() => "");
+      throw new Error(`GitLab Skill Bundle commit failed (${commit.status}): ${detail.slice(0, 1000)}`);
+    }
+
+    const create = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, "gitlab", {
+      method: "POST",
+      body: JSON.stringify({
+        source_branch: branch,
+        target_branch: targetBranch,
+        title: `Sync Skill Bundle: ${record.namespace}`,
+        description: `Skill Bundle Import: ${record.id}\nReplacement root: ${record.replacementRoot}`,
+      }),
+    });
+    let mr: { iid?: number; web_url?: string; state?: string } | undefined;
+    if (create.ok) mr = (await create.json()) as typeof mr;
+    else if (create.status === 409) {
+      const list = await this.request(
+        `${baseUrl}/api/v4/projects/${project}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&target_branch=${encodeURIComponent(targetBranch)}`,
+        token,
+        "gitlab",
+        { method: "GET" },
+      );
+      if (list.ok) mr = ((await list.json()) as Array<NonNullable<typeof mr>>)[0];
+    }
+    if (!mr?.iid || !mr.web_url) throw new Error(`GitLab merge request creation failed (${create.status})`);
+    const now = new Date().toISOString();
+    return {
+      kind: "pull-request",
+      provider: "gitlab",
+      projectPath,
+      branch,
+      targetBranch,
+      targetRoot: record.replacementRoot,
+      mergeRequestIid: mr.iid,
+      mergeRequestUrl: mr.web_url,
+      mergeRequestState: mr.state === "closed" || mr.state === "locked" ? mr.state : "opened",
+      added: diff.added.length,
+      modified: diff.modified.length,
+      deleted: diff.deleted.length,
+      expectedTreeSha256,
+      pullRequestCreatedAt: now,
+      lastCheckedAt: now,
+    };
+  }
+
   async publish(
     record: SkillBundleImport,
     snapshot: SkillBundleSnapshot,
@@ -180,6 +397,9 @@ export class SkillBundlePublisher {
     }
     const { config, baseUrl, projectPath, token, remoteUrl, targetBranch } = this.resolve(repository);
     const branch = `${config.branchPrefix || "skill-hub-skill"}-${branchSuffix(record.id)}`;
+    if (config.provider === "gitlab") {
+      return await this.publishGitLab(record, snapshot, baseUrl, projectPath, token, targetBranch, branch);
+    }
     const parent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-publish-"));
     const worktree = path.join(parent, "repo");
     try {
@@ -259,45 +479,7 @@ export class SkillBundlePublisher {
           lastCheckedAt: now,
         };
       }
-      const project = encodeURIComponent(projectPath);
-      const create = await this.request(`${baseUrl}/api/v4/projects/${project}/merge_requests`, token, "gitlab", {
-        method: "POST",
-        body: JSON.stringify({
-          source_branch: branch,
-          target_branch: targetBranch,
-          title: `Sync Skill Bundle: ${record.namespace}`,
-          description: `Skill Bundle Import: ${record.id}\nReplacement root: ${record.replacementRoot}`,
-        }),
-      });
-      let mr: { iid?: number; web_url?: string; state?: string } | undefined;
-      if (create.ok) mr = (await create.json()) as typeof mr;
-      else if (create.status === 409) {
-        const list = await this.request(
-          `${baseUrl}/api/v4/projects/${project}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&target_branch=${encodeURIComponent(targetBranch)}`,
-          token,
-          "gitlab",
-          { method: "GET" },
-        );
-        if (list.ok) mr = ((await list.json()) as Array<NonNullable<typeof mr>>)[0];
-      }
-      if (!mr?.iid || !mr.web_url) throw new Error(`GitLab merge request creation failed (${create.status})`);
-      return {
-        kind: "pull-request",
-        provider: "gitlab",
-        projectPath,
-        branch,
-        targetBranch,
-        targetRoot: record.replacementRoot,
-        mergeRequestIid: mr.iid,
-        mergeRequestUrl: mr.web_url,
-        mergeRequestState: mr.state === "closed" || mr.state === "locked" ? mr.state : "opened",
-        added: diff.added.length,
-        modified: diff.modified.length,
-        deleted: diff.deleted.length,
-        expectedTreeSha256,
-        pullRequestCreatedAt: now,
-        lastCheckedAt: now,
-      };
+      throw new Error(`Unsupported Skill publishing provider: ${config.provider}`);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
@@ -361,6 +543,23 @@ export class SkillBundlePublisher {
       };
     }
     if (next.mergeRequestState !== "merged") return { publication: next };
+    if (config.provider === "gitlab") {
+      const tree = await this.readGitLabReplacementRoot(
+        baseUrl,
+        projectPath,
+        token,
+        next.targetRoot,
+        next.mergeCommitSha ?? targetBranch,
+      );
+      const finalTreeSha256 = canonicalTreeHash(tree);
+      next = { ...next, finalTreeSha256, finalTreeVerifiedAt: new Date().toISOString() };
+      const finalTreeMatches = finalTreeSha256 === next.expectedTreeSha256;
+      return {
+        publication: next,
+        finalTreeMatches,
+        ...(finalTreeMatches ? {} : { finalDiff: diffSkillBundleTrees(snapshot.files, tree) }),
+      };
+    }
     const parent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-reconcile-"));
     const worktree = path.join(parent, "repo");
     try {

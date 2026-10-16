@@ -351,6 +351,7 @@ Skill 仓库访问使用只读 SSH Deploy Key。不要给 Hub 写权限。
 - 管理 HTTP Key：`ADMIN_API_KEY`；
 - GitLab Webhook Token：`GITLAB_WEBHOOK_TOKEN`；
 - GitLab 仓库凭据：SSH Deploy Key；如果无法使用 SSH，则使用 HTTPS Token。
+- GitLab 发布凭据：`knowledge_publishing.token_env` / `skill_publishing.token_env` 指向具备仓库写入与 MR 权限的 Token；Skill Bundle 的 GitLab 发布与合并后校验使用该 Token 调用 GitLab API，不要求可写 SSH Deploy Key。
 
 绝不要把私钥、GitLab Token、API Key 或生成后的环境配置文件提交到 GitHub。仓库已忽略 `secrets/` 和 `.env`。
 

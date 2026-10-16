@@ -161,10 +161,11 @@ test("bash setup rejects API key values containing HTTP header control character
   const home = await mkdtemp(path.join(os.tmpdir(), "skill-hub-invalid-key-"));
   const codex = path.join(home, "codex");
   await assert.rejects(
-    () => execFileAsync("bash", ["scripts/setup-codex-mcp.sh", "--url", "http://127.0.0.1:8080/mcp"], {
-      cwd: process.cwd(),
-      env: { ...process.env, HOME: home, CODEX_HOME: codex, TEAM_SKILL_HUB_API_KEY: "bad\nkey" },
-    }),
+    () =>
+      execFileAsync("bash", ["scripts/setup-codex-mcp.sh", "--url", "http://127.0.0.1:8080/mcp"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, CODEX_HOME: codex, TEAM_SKILL_HUB_API_KEY: "bad\nkey" },
+      }),
     /API key.*control|HTTP header/i,
   );
   await assert.rejects(() => stat(path.join(codex, "config.toml")));

@@ -168,6 +168,108 @@ test("publisher rebuilds replacementRoot snapshot, deletes stale files and creat
   }
 });
 
+test("GitLab publisher uses publishing token and repository API without git clone or push", async () => {
+  process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
+  const gitlabRepository: RepositoryConfig = {
+    ...repository,
+    gitUrl: "https://gitlab.example.com/example/rd-skills.git",
+    gitAuth: { type: "https-token", tokenEnv: "IGNORED_GIT_TOKEN" },
+    skillPublishing: {
+      ...repository.skillPublishing!,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.com",
+      projectPath: "example/rd-skills",
+    },
+  };
+  const { snapshot, record: rawRecord } = bundle();
+  const reviewedFiles = [
+    { path: "SKILL.md", content: "old skill\n" },
+    { path: "old.txt", content: "stale\n" },
+  ];
+  const record = approvedAgainst(rawRecord, reviewedFiles);
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchMock: typeof fetch = async (input, init) => {
+    const url = String(input);
+    requests.push({ url, init });
+    assert.equal(new Headers(init?.headers).get("private-token"), "gitlab-write-token");
+
+    if (url.endsWith("/repository/branches/master")) {
+      return Response.json({ commit: { id: "target-sha" } });
+    }
+    if (url.includes("/repository/tree?")) {
+      return Response.json([
+        { type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" },
+        { type: "blob", path: "skills/ota/design/old.txt", mode: "100644" },
+      ]);
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2FSKILL.md?")) {
+      return Response.json({
+        content: Buffer.from("old skill\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: false,
+      });
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2Fold.txt?")) {
+      return Response.json({
+        content: Buffer.from("stale\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: false,
+      });
+    }
+    if (url.endsWith("/repository/branches/skill-hub-skill-1234567890ab")) {
+      return new Response("", { status: 404 });
+    }
+    if (url.endsWith("/repository/commits")) {
+      const body = JSON.parse(String(init?.body)) as {
+        branch: string;
+        start_branch: string;
+        start_sha: string;
+        force: boolean;
+        actions: Array<{
+          action: string;
+          file_path: string;
+          content?: string;
+          encoding?: string;
+          execute_filemode?: boolean;
+        }>;
+      };
+      assert.equal(body.branch, "skill-hub-skill-1234567890ab");
+      assert.equal(body.start_sha, "target-sha");
+      assert.equal(body.force, true);
+      assert.deepEqual(
+        body.actions.map((action) => [action.action, action.file_path]),
+        [
+          ["update", "skills/ota/design/SKILL.md"],
+          ["create", "skills/ota/design/scripts/run.sh"],
+          ["chmod", "skills/ota/design/scripts/run.sh"],
+          ["delete", "skills/ota/design/old.txt"],
+        ],
+      );
+      assert.ok(body.actions.slice(0, 2).every((action) => action.encoding === "base64" && action.content));
+      assert.equal(body.actions[2]?.execute_filemode, true);
+      return Response.json({ id: "commit-sha" }, { status: 201 });
+    }
+    if (url.endsWith("/merge_requests")) {
+      return Response.json(
+        { iid: 9, web_url: "https://gitlab.example.com/example/rd-skills/-/merge_requests/9", state: "opened" },
+        { status: 201 },
+      );
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const result = await new SkillBundlePublisher(fetchMock, async () => {
+      throw new Error("git should not be called for GitLab publishing");
+    }).publish(record, snapshot, gitlabRepository);
+    assert.equal(result.kind, "pull-request");
+    assert.equal(result.kind === "pull-request" ? result.mergeRequestIid : 0, 9);
+    assert.ok(requests.some(({ url }) => url.endsWith("/repository/commits")));
+  } finally {
+    delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
 test("publisher preserves binary asset bytes from snapshot", async () => {
   process.env.TEST_SKILL_BUNDLE_TOKEN = "token";
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
@@ -257,6 +359,87 @@ test("publisher rejects when target replacementRoot changes after service review
       git.calls.some(({ args }) => args[0] === "commit"),
       false,
     );
+  } finally {
+    delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
+test("GitLab merged reconciliation verifies the final tree through repository API without git clone", async () => {
+  process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
+  const gitlabRepository: RepositoryConfig = {
+    ...repository,
+    gitUrl: "https://gitlab.example.com/example/rd-skills.git",
+    gitAuth: { type: "https-token", tokenEnv: "IGNORED_GIT_TOKEN" },
+    skillPublishing: {
+      ...repository.skillPublishing!,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.com",
+      projectPath: "example/rd-skills",
+    },
+  };
+  const { snapshot, record } = bundle();
+  const fetchMock: typeof fetch = async (input, init) => {
+    const url = String(input);
+    assert.equal(new Headers(init?.headers).get("private-token"), "gitlab-write-token");
+    if (url.endsWith("/merge_requests/9")) {
+      return Response.json({
+        state: "merged",
+        merged_at: "2026-10-14T01:00:00.000Z",
+        closed_at: "2026-10-14T01:00:00.000Z",
+        merge_commit_sha: "merge-sha",
+      });
+    }
+    if (url.includes("/repository/tree?")) {
+      assert.match(url, /ref=merge-sha/);
+      return Response.json([
+        { type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" },
+        { type: "blob", path: "skills/ota/design/scripts/run.sh", mode: "100755" },
+      ]);
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2FSKILL.md?")) {
+      return Response.json({
+        content: Buffer.from("new skill\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: false,
+      });
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2Fscripts%2Frun.sh?")) {
+      return Response.json({
+        content: Buffer.from("#!/bin/sh\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: true,
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const result = await new SkillBundlePublisher(fetchMock, async () => {
+      throw new Error("git should not be called for GitLab reconciliation");
+    }).reconcile(
+      {
+        kind: "pull-request",
+        provider: "gitlab",
+        projectPath: "example/rd-skills",
+        branch: "skill-hub-skill-1234567890ab",
+        targetBranch: "master",
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: 9,
+        mergeRequestUrl: "https://gitlab.example.com/example/rd-skills/-/merge_requests/9",
+        mergeRequestState: "opened",
+        added: 1,
+        modified: 1,
+        deleted: 0,
+        expectedTreeSha256: snapshot.sha256,
+        pullRequestCreatedAt: "2026-10-14T00:30:00.000Z",
+        lastCheckedAt: "2026-10-14T00:30:00.000Z",
+      },
+      snapshot,
+      gitlabRepository,
+    );
+    assert.equal(result.publication.mergeRequestState, "merged");
+    assert.equal(result.finalTreeMatches, true);
+    assert.equal(result.publication.finalTreeSha256, snapshot.sha256);
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }

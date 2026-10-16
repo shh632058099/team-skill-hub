@@ -18,7 +18,7 @@
 - Preview/approval stores target/tree/diff hashes; stale reviewed diffs become `review_stale` before publication.
 - PR/MR merge is not enough for success: final `replacementRoot` tree must equal `expectedTreeSha256`, otherwise status is `published_drifted`.
 - Bundle publishing never auto-merges and never introduces namespace ownership/locking.
-- GitHub/GitLab Bundle publishing uses temporary git worktrees and `git add -A -- <replacementRoot>`.
+- GitHub Bundle publishing uses temporary git worktrees; GitLab Bundle publishing reuses the configured publishing token and GitLab Repository/Commits/MR APIs, without SSH clone/push.
 - Existing Knowledge Candidate publishing remains intact; `custom-skills` remains legacy in phase 1.
 
 ## Review Focus
