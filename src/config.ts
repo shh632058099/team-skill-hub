@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
 import type { AppConfig, Principal, ProjectConfig, RepositoryConfig } from "./types.js";
+import { normalizePublishingTokenEnv } from "./publishing-config.js";
 
 interface RawConfig {
   server?: {
@@ -154,9 +155,10 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         provider: repo.knowledge_publishing?.provider ?? "gitlab",
         baseUrl: repo.knowledge_publishing?.base_url,
         projectPath: repo.knowledge_publishing?.project_path,
-        tokenEnv:
-          repo.knowledge_publishing?.token_env ??
-          (repo.knowledge_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
+        tokenEnv: normalizePublishingTokenEnv(
+          repo.knowledge_publishing?.provider ?? "gitlab",
+          repo.knowledge_publishing?.token_env
+        ),
         targetBranch: repo.knowledge_publishing?.target_branch ?? repo.branch ?? "main",
         branchPrefix: repo.knowledge_publishing?.branch_prefix ?? "skill-hub-knowledge"
       },
@@ -165,9 +167,10 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         provider: repo.skill_publishing?.provider ?? "gitlab",
         baseUrl: repo.skill_publishing?.base_url,
         projectPath: repo.skill_publishing?.project_path,
-        tokenEnv:
-          repo.skill_publishing?.token_env ??
-          (repo.skill_publishing?.provider === "github" ? "GITHUB_TOKEN" : "GITLAB_WRITE_TOKEN"),
+        tokenEnv: normalizePublishingTokenEnv(
+          repo.skill_publishing?.provider ?? "gitlab",
+          repo.skill_publishing?.token_env
+        ),
         targetBranch: repo.skill_publishing?.target_branch ?? repo.branch ?? "main",
         branchPrefix: repo.skill_publishing?.branch_prefix ?? "skill-hub-skill"
       }

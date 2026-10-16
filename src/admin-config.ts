@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig, ProjectConfig, RepositoryConfig } from "./types.js";
 import { normalizeKnowledgeConfig } from "./knowledge.js";
+import { normalizePublishingTokenEnv } from "./publishing-config.js";
 
 export interface AdminEditableConfig {
   defaultRoles: string[];
@@ -91,6 +92,7 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
     if (publishing.provider === "github" && !publishing.projectPath?.trim()) {
       throw new Error(`Repository ${repository.id}: GitHub publishing projectPath is required`);
     }
+    publishing.tokenEnv = normalizePublishingTokenEnv(publishing.provider, publishing.tokenEnv);
     if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: publishing tokenEnv is required`);
     if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: publishing targetBranch is required`);
     if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: publishing branchPrefix is required`);
@@ -103,6 +105,7 @@ function validateRepository(repository: RepositoryConfig, seen: Set<string>): vo
     if (publishing.provider === "github" && !publishing.projectPath?.trim()) {
       throw new Error(`Repository ${repository.id}: GitHub skill publishing projectPath is required`);
     }
+    publishing.tokenEnv = normalizePublishingTokenEnv(publishing.provider, publishing.tokenEnv);
     if (!publishing.tokenEnv?.trim()) throw new Error(`Repository ${repository.id}: skill publishing tokenEnv is required`);
     if (!publishing.targetBranch?.trim()) throw new Error(`Repository ${repository.id}: skill publishing targetBranch is required`);
     if (!publishing.branchPrefix?.trim()) throw new Error(`Repository ${repository.id}: skill publishing branchPrefix is required`);

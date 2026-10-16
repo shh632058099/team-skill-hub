@@ -9,6 +9,7 @@ import {
 } from "../src/skill-bundle-publishing.js";
 import { canonicalTreeHash, createSkillBundleSnapshot, normalizeSkillBundleInput, type SkillBundleImport } from "../src/skill-bundles.js";
 import type { RepositoryConfig } from "../src/types.js";
+import { validateAdminConfig } from "../src/admin-config.js";
 
 const repository: RepositoryConfig = {
   id: "rd-skills",
@@ -146,6 +147,50 @@ test("publisher rebuilds replacementRoot snapshot, deletes stale files and creat
     assert.ok(git.calls.some(({ args }) => args[0] === "push" && args.includes("--force-with-lease=refs/heads/skill-hub-skill-1234567890ab:abc")));
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
+test("GitLab publisher uses normalized GitLab token env and private-token auth", async () => {
+  process.env.GITLAB_WRITE_TOKEN = "gitlab-token";
+  delete process.env.GITHUB_TOKEN;
+  const normalized = validateAdminConfig({
+    defaultRoles: [],
+    revisionRetentionMax: 20,
+    webhookDedupMaxEntries: 1000,
+    webhookDedupTtlSeconds: 604800,
+    repositories: [{
+      ...repository,
+      gitUrl: "git@gitlab.example.invalid:ai/rd-skills.git",
+      skillPublishing: {
+        enabled: true,
+        provider: "gitlab",
+        baseUrl: "https://gitlab.example.invalid",
+        projectPath: "ai/rd-skills",
+        tokenEnv: "GITHUB_TOKEN",
+        targetBranch: "master",
+        branchPrefix: "skill-hub-skill"
+      }
+    }],
+    projects: []
+  }).repositories[0]!;
+  const { snapshot, record: rawRecord } = bundle();
+  const record = approvedAgainst(rawRecord, [{ path: "SKILL.md", content: "old skill\n" }]);
+  const git = fakeGit({ "skills/ota/design/SKILL.md": "old skill\n" });
+  const fetchMock: typeof fetch = async (input, init) => {
+    assert.equal(String(input), "https://gitlab.example.invalid/api/v4/projects/ai%2Frd-skills/merge_requests");
+    assert.equal(init?.method, "POST");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("private-token"), "gitlab-token");
+    assert.equal(headers.get("authorization"), null);
+    return new Response(JSON.stringify({ iid: 9, web_url: "https://gitlab.example.invalid/ai/rd-skills/-/merge_requests/9", state: "opened" }), { status: 201, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await new SkillBundlePublisher(fetchMock, git.run).publish(record, snapshot, normalized);
+    assert.equal(result.kind, "pull-request");
+    assert.equal(result.kind === "pull-request" ? result.provider : undefined, "gitlab");
+    assert.equal(result.kind === "pull-request" ? result.mergeRequestIid : 0, 9);
+  } finally {
+    delete process.env.GITLAB_WRITE_TOKEN;
   }
 });
 

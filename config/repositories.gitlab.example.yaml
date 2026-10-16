@@ -60,6 +60,14 @@ repositories:
       token_env: GITLAB_WRITE_TOKEN
       target_branch: master
       branch_prefix: skill-hub-knowledge
+    skill_publishing:
+      enabled: true
+      provider: gitlab
+      base_url: https://gitlab.company.example
+      project_path: ai/rd-skills
+      token_env: GITLAB_WRITE_TOKEN
+      target_branch: master
+      branch_prefix: skill-hub-skill
 
   - id: customer-skills
     name: Customer Skills

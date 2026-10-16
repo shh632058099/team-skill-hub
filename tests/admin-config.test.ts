@@ -126,6 +126,52 @@ test("admin config rejects unknown project preferred repositories", () => {
   );
 });
 
+test("admin config normalizes provider default token env without overwriting custom env names", () => {
+  const repository = {
+    id: "rd-skills",
+    name: "RD Skills",
+    provider: "git" as const,
+    gitUrl: "git@gitlab.example.invalid:ai/rd-skills.git",
+    branch: "master",
+    gitAuth: { type: "none" as const },
+    webhookAliases: [],
+    enabled: true,
+    audience: ["developer"],
+    visibility: ["internal"],
+    pollingIntervalSeconds: 60,
+    readRoles: ["developer"],
+    syncRoles: ["admin"],
+    skillPublishing: {
+      enabled: true,
+      provider: "gitlab" as const,
+      baseUrl: "https://gitlab.example.invalid",
+      projectPath: "ai/rd-skills",
+      tokenEnv: "GITHUB_TOKEN",
+      targetBranch: "master",
+      branchPrefix: "skill-hub-skill"
+    }
+  };
+  const normalized = validateAdminConfig({
+    defaultRoles: [],
+    revisionRetentionMax: 20,
+    webhookDedupMaxEntries: 1000,
+    webhookDedupTtlSeconds: 604800,
+    repositories: [repository],
+    projects: []
+  });
+  assert.equal(normalized.repositories[0]?.skillPublishing?.tokenEnv, "GITLAB_WRITE_TOKEN");
+
+  const custom = validateAdminConfig({
+    defaultRoles: [],
+    revisionRetentionMax: 20,
+    webhookDedupMaxEntries: 1000,
+    webhookDedupTtlSeconds: 604800,
+    repositories: [{ ...repository, skillPublishing: { ...repository.skillPublishing, tokenEnv: "CORP_GITLAB_TOKEN" } }],
+    projects: []
+  });
+  assert.equal(custom.repositories[0]?.skillPublishing?.tokenEnv, "CORP_GITLAB_TOKEN");
+});
+
 test("admin config rejects duplicate repository ids", () => {
   const repository = {
     id: "same",
