@@ -4,6 +4,7 @@ import {
   defaultCandidatePath,
   GitHubKnowledgePublisher,
   GitLabKnowledgePublisher,
+  resolveKnowledgePublishTarget,
 } from "../src/knowledge-publishing.js";
 import type { RepositoryConfig } from "../src/types.js";
 import type { KnowledgeCandidate } from "../src/observability.js";
@@ -384,6 +385,7 @@ test("GitHub publisher reopens an existing closed pull request when retrying a c
       method: init?.method ?? "GET",
       body: typeof init?.body === "string" ? init.body : undefined,
     });
+
     const response = responses.shift();
     if (!response) throw new Error("unexpected request");
     return response;
@@ -503,6 +505,89 @@ test("GitHub publisher reconciles pull request state", async () => {
     assert.equal(result.hasConflicts, false);
     assert.equal(result.sourceBranchExists, false);
   } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
+  }
+});
+
+test("publication target resolver preserves provider branch rules and serialized content", () => {
+  const gitlab = resolveKnowledgePublishTarget(candidate(), repository());
+  assert.deepEqual(gitlab, {
+    filePath: "docs/ota/recovery-note.md",
+    targetBranch: "master",
+    desiredContent: "# OTA recovery note\n\nRecovery behavior learned during troubleshooting.\n",
+  });
+
+  const github = githubRepository();
+  github.knowledgePublishing = { ...github.knowledgePublishing!, targetBranch: undefined };
+  assert.equal(resolveKnowledgePublishTarget(candidate(), github).targetBranch, "main");
+
+  const gitlabFallback = repository();
+  gitlabFallback.knowledgePublishing = { ...gitlabFallback.knowledgePublishing!, targetBranch: undefined };
+  assert.equal(resolveKnowledgePublishTarget(candidate(), gitlabFallback).targetBranch, "master");
+});
+
+test("GitLab target reader is read-only and decodes base64 content", async () => {
+  process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
+  const calls: Array<{ url: string; method: string }> = [];
+  const fetchMock: typeof fetch = async (input, init) => {
+    calls.push({ url: String(input), method: init?.method ?? "GET" });
+    return responseJson({ content: Buffer.from("existing\n").toString("base64"), encoding: "base64" });
+  };
+  try {
+    const repo = repository();
+    const target = resolveKnowledgePublishTarget(candidate(), repo);
+    const result = await new GitLabKnowledgePublisher(fetchMock).readTargetFile(target, repo);
+    assert.deepEqual(result, { exists: true, content: "existing\n" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.method, "GET");
+    assert.match(calls[0]?.url ?? "", /repository\/files\/docs%2Fota%2Frecovery-note\.md\?ref=master$/);
+  } finally {
+    delete process.env.TEST_GITLAB_WRITE_TOKEN;
+  }
+});
+
+test("GitHub target reader preserves nested path separators and maps 404 to missing", async () => {
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const calls: Array<{ url: string; method: string }> = [];
+  const fetchMock: typeof fetch = async (input, init) => {
+    calls.push({ url: String(input), method: init?.method ?? "GET" });
+    return new Response(null, { status: 404 });
+  };
+  try {
+    const repo = githubRepository();
+    const target = resolveKnowledgePublishTarget(candidate(), repo);
+    const result = await new GitHubKnowledgePublisher(fetchMock).readTargetFile(target, repo);
+    assert.deepEqual(result, { exists: false, content: "" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.method, "GET");
+    assert.match(calls[0]?.url ?? "", /\/contents\/docs\/ota\/recovery-note\.md\?ref=main$/);
+  } finally {
+    delete process.env.TEST_GITHUB_TOKEN;
+  }
+});
+
+test("provider target readers do not expose raw provider response bodies", async () => {
+  process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
+  process.env.TEST_GITHUB_TOKEN = "github-token";
+  const secret = "token=super-secret";
+  try {
+    const gitlabRepo = repository();
+    const gitlabTarget = resolveKnowledgePublishTarget(candidate(), gitlabRepo);
+    await assert.rejects(
+      () => new GitLabKnowledgePublisher(async () => new Response(secret, { status: 500 })).readTargetFile(gitlabTarget, gitlabRepo),
+      (error: unknown) =>
+        error instanceof Error && /GitLab target file read failed \(500\)/.test(error.message) && !error.message.includes(secret),
+    );
+
+    const githubRepo = githubRepository();
+    const githubTarget = resolveKnowledgePublishTarget(candidate(), githubRepo);
+    await assert.rejects(
+      () => new GitHubKnowledgePublisher(async () => new Response(secret, { status: 500 })).readTargetFile(githubTarget, githubRepo),
+      (error: unknown) =>
+        error instanceof Error && /GitHub target file read failed \(500\)/.test(error.message) && !error.message.includes(secret),
+    );
+  } finally {
+    delete process.env.TEST_GITLAB_WRITE_TOKEN;
     delete process.env.TEST_GITHUB_TOKEN;
   }
 });

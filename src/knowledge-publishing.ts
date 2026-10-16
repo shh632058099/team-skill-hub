@@ -29,7 +29,19 @@ export interface KnowledgePublicationResult {
   sourceBranchExists?: boolean;
 }
 
+export interface KnowledgePublishTarget {
+  filePath: string;
+  targetBranch: string;
+  desiredContent: string;
+}
+
+export interface KnowledgePublishBaseline {
+  exists: boolean;
+  content: string;
+}
+
 export interface KnowledgePublisher {
+  readTargetFile(target: KnowledgePublishTarget, repository: RepositoryConfig): Promise<KnowledgePublishBaseline>;
   publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult>;
   deletePublished(
     candidate: KnowledgeCandidate,
@@ -149,6 +161,20 @@ function markdownForCandidate(candidate: KnowledgeCandidate): string {
   return "# " + candidate.title.trim() + "\n\n" + body + "\n";
 }
 
+export function resolveKnowledgePublishTarget(
+  candidate: KnowledgeCandidate,
+  repository: RepositoryConfig,
+): KnowledgePublishTarget {
+  const config = repository.knowledgePublishing;
+  if (!config?.enabled) throw new Error("Knowledge publishing is disabled for this repository");
+  if (config.provider !== "gitlab" && config.provider !== "github") throw new Error("Unsupported knowledge publisher");
+  return {
+    filePath: assertSafePath(candidate.suggestedPath ?? defaultCandidatePath(candidate)),
+    targetBranch: config.provider === "gitlab" ? config.targetBranch || repository.branch || "main" : config.targetBranch || "main",
+    desiredContent: markdownForCandidate(candidate),
+  };
+}
+
 function candidateLabel(candidate: KnowledgeCandidate): string {
   return candidate.suggestedType === "skill" ? "Skill" : "Knowledge";
 }
@@ -202,6 +228,23 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
     });
   }
 
+  async readTargetFile(
+    target: KnowledgePublishTarget,
+    repository: RepositoryConfig,
+  ): Promise<KnowledgePublishBaseline> {
+    const { baseUrl, projectPath, token } = this.resolve(repository);
+    const project = encodeURIComponent(projectPath);
+    const fileUrl = `${baseUrl}/api/v4/projects/${project}/repository/files/${encodeURIComponent(target.filePath)}?ref=${encodeURIComponent(target.targetBranch)}`;
+    const response = await this.request(fileUrl, token, { method: "GET" });
+    if (response.status === 404) return { exists: false, content: "" };
+    if (!response.ok) throw new Error(`GitLab target file read failed (${response.status})`);
+    const file = (await response.json()) as { content?: string; encoding?: string };
+    if (file.encoding !== "base64" || typeof file.content !== "string") {
+      throw new Error("GitLab target file read failed: unsupported content encoding");
+    }
+    return { exists: true, content: Buffer.from(file.content, "base64").toString("utf8") };
+  }
+
   async publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult> {
     if (candidate.status !== "approved" && candidate.status !== "publish_failed") {
       throw new Error("Candidate must be approved before publishing");
@@ -209,12 +252,10 @@ export class GitLabKnowledgePublisher implements KnowledgePublisher {
 
     const { config, baseUrl, projectPath, token } = this.resolve(repository);
     const project = encodeURIComponent(projectPath);
-    const filePath = assertSafePath(candidate.suggestedPath ?? defaultCandidatePath(candidate));
+    const { filePath, targetBranch, desiredContent } = resolveKnowledgePublishTarget(candidate, repository);
     const encodedFile = encodeURIComponent(filePath);
-    const targetBranch = config.targetBranch || repository.branch || "main";
     const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
     const branch = `${prefix}-${candidate.id.replace(/^kc_/, "").slice(0, 12)}`;
-    const desiredContent = markdownForCandidate(candidate);
 
     const fileUrl = `${baseUrl}/api/v4/projects/${project}/repository/files/${encodedFile}`;
     const branchUrl = `${baseUrl}/api/v4/projects/${project}/repository/branches/${encodeURIComponent(branch)}`;
@@ -580,17 +621,35 @@ export class GitHubKnowledgePublisher implements KnowledgePublisher {
     });
   }
 
+  async readTargetFile(
+    target: KnowledgePublishTarget,
+    repository: RepositoryConfig,
+  ): Promise<KnowledgePublishBaseline> {
+    const { apiBase, projectPath, token } = this.resolve(repository);
+    const encodedPath = target.filePath
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    const url = `${apiBase}/repos/${projectPath}/contents/${encodedPath}?ref=${encodeURIComponent(target.targetBranch)}`;
+    const response = await this.request(url, token, { method: "GET" });
+    if (response.status === 404) return { exists: false, content: "" };
+    if (!response.ok) throw new Error(`GitHub target file read failed (${response.status})`);
+    const file = (await response.json()) as { content?: string; encoding?: string; type?: string };
+    if ((file.type && file.type !== "file") || file.encoding !== "base64" || typeof file.content !== "string") {
+      throw new Error("GitHub target file read failed: unsupported content encoding");
+    }
+    return { exists: true, content: Buffer.from(file.content.replace(/\s+/g, ""), "base64").toString("utf8") };
+  }
+
   async publish(candidate: KnowledgeCandidate, repository: RepositoryConfig): Promise<KnowledgePublicationResult> {
     if (candidate.status !== "approved" && candidate.status !== "publish_failed") {
       throw new Error("Candidate must be approved before publishing");
     }
 
     const { config, apiBase, projectPath, token, sshUrl } = this.resolve(repository);
-    const filePath = assertSafePath(candidate.suggestedPath ?? defaultCandidatePath(candidate));
-    const targetBranch = config.targetBranch || "main";
+    const { filePath, targetBranch, desiredContent } = resolveKnowledgePublishTarget(candidate, repository);
     const prefix = slugify(config.branchPrefix || "skill-hub-knowledge");
     const branch = `${prefix}-${candidate.id.replace(/^kc_/, "").slice(0, 12)}`;
-    const desiredContent = markdownForCandidate(candidate);
     const worktree = await mkdtemp(path.join(os.tmpdir(), "skill-hub-github-publish-"));
     let action: "create" | "update" = "create";
 
