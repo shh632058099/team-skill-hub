@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { structuredPatch } from "diff";
 import type { Principal, RepositoryConfig, Skill, ValidationRule } from "./types.js";
 import { scanSkills, validateSkills } from "./skills.js";
 import {
@@ -33,7 +34,34 @@ export interface SkillBundlePreview {
   targetTreeSha256: string;
   expectedTreeSha256: string;
   diff: SkillBundleDiff;
+  fileDiffs: SkillBundleFileDiff[];
   skills: Skill[];
+}
+
+export interface SkillBundleFileDiffLine {
+  kind: "context" | "add" | "remove";
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+}
+
+export interface SkillBundleFileDiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: SkillBundleFileDiffLine[];
+}
+
+export interface SkillBundleFileDiff {
+  path: string;
+  operation: "add" | "modify" | "delete";
+  binary: boolean;
+  oldMode?: "0644" | "0755";
+  newMode?: "0644" | "0755";
+  addedLines: number;
+  removedLines: number;
+  hunks: SkillBundleFileDiffHunk[];
 }
 
 export interface SubmitSkillBundleServiceInput {
@@ -128,6 +156,99 @@ async function writeSnapshotRoot(repositoryRoot: string, normalized: NormalizedS
   }
 }
 
+function decodeBundleText(file: SkillBundleFile): string | undefined {
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(skillBundleFileBytes(file));
+    return decoded.includes("\0") ? undefined : decoded;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildSkillBundleFileDiffs(
+  before: SkillBundleFile[],
+  after: SkillBundleFile[],
+  treeDiff: SkillBundleDiff,
+): SkillBundleFileDiff[] {
+  const left = new Map(before.map((file) => [file.path, file]));
+  const right = new Map(after.map((file) => [file.path, file]));
+  const operations = new Map<string, SkillBundleFileDiff["operation"]>([
+    ...treeDiff.added.map((path) => [path, "add"] as const),
+    ...treeDiff.modified.map((path) => [path, "modify"] as const),
+    ...treeDiff.deleted.map((path) => [path, "delete"] as const),
+  ]);
+
+  return [...operations.keys()]
+    .sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
+    .map((filePath) => {
+      const oldFile = left.get(filePath);
+      const newFile = right.get(filePath);
+      const oldText = oldFile ? decodeBundleText(oldFile) : "";
+      const newText = newFile ? decodeBundleText(newFile) : "";
+      const binary = oldText === undefined || newText === undefined;
+      if (binary) {
+        return {
+          path: filePath,
+          operation: operations.get(filePath)!,
+          binary: true,
+          ...(oldFile ? { oldMode: oldFile.mode } : {}),
+          ...(newFile ? { newMode: newFile.mode } : {}),
+          addedLines: 0,
+          removedLines: 0,
+          hunks: [],
+        };
+      }
+
+      const patch = structuredPatch(
+        oldFile ? `a/${filePath}` : "/dev/null",
+        newFile ? `b/${filePath}` : "/dev/null",
+        oldText,
+        newText,
+        "",
+        "",
+        { context: 3 },
+      );
+      let addedLines = 0;
+      let removedLines = 0;
+      const hunks = patch.hunks.map((hunk) => {
+        let oldLine = hunk.oldStart;
+        let newLine = hunk.newStart;
+        const lines = hunk.lines
+          .filter((line) => line !== "\\ No newline at end of file")
+          .map((line): SkillBundleFileDiffLine => {
+            const prefix = line[0];
+            const text = line.slice(1);
+            if (prefix === "+") {
+              addedLines += 1;
+              return { kind: "add", text, newLine: newLine++ };
+            }
+            if (prefix === "-") {
+              removedLines += 1;
+              return { kind: "remove", text, oldLine: oldLine++ };
+            }
+            return { kind: "context", text, oldLine: oldLine++, newLine: newLine++ };
+          });
+        return {
+          oldStart: hunk.oldStart,
+          oldLines: hunk.oldLines,
+          newStart: hunk.newStart,
+          newLines: hunk.newLines,
+          lines,
+        };
+      });
+      return {
+        path: filePath,
+        operation: operations.get(filePath)!,
+        binary: false,
+        ...(oldFile ? { oldMode: oldFile.mode } : {}),
+        ...(newFile ? { newMode: newFile.mode } : {}),
+        addedLines,
+        removedLines,
+        hunks,
+      };
+    });
+}
+
 export class SkillBundleService {
   private readonly publisher: SkillBundlePublisher;
 
@@ -169,6 +290,7 @@ export class SkillBundleService {
           `Skill Bundle validation failed: ${issues.map((issue) => `${issue.skillPath ?? "repo"}: ${issue.message}`).join("; ")}`,
         );
       }
+      const diff = diffSkillBundleTrees(before, normalized.files);
       return {
         namespace: normalized.namespace,
         importType: normalized.importType,
@@ -177,7 +299,8 @@ export class SkillBundleService {
         targetRevision: materialized.revision,
         targetTreeSha256: canonicalTreeHash(before),
         expectedTreeSha256: normalized.expectedTreeSha256,
-        diff: diffSkillBundleTrees(before, normalized.files),
+        diff,
+        fileDiffs: buildSkillBundleFileDiffs(before, normalized.files, diff),
         skills,
       };
     } finally {

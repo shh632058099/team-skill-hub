@@ -156,7 +156,6 @@ test("candidate and bundle details share the unified review shell with clickable
     "Snapshot",
     "Skill",
     "Files",
-    "当前 Preview",
     "基于最新 Target 新建 Import",
     "runCandidateAction",
     "runBundleAction",
@@ -191,6 +190,29 @@ test("pending Candidate diff is collapsed and loaded lazily on click", () => {
   assert.ok(
     ADMIN_MODULE_HTML.includes("requestJson('/admin/api/knowledge-candidates/'+encodeURIComponent(id)+'/diff')"),
     "Diff request should use the dedicated endpoint",
+  );
+});
+
+test("pending Skill Bundle diff is collapsed and loaded lazily on click", () => {
+  assertContainsAll(ADMIN_MODULE_HTML, [
+    "bundleDiffToggle",
+    "bundleDiffPanel",
+    "toggleBundleDiff",
+    "fileDiffs",
+    "查看变更 Diff",
+    "/preview",
+  ]);
+  assert.ok(
+    ADMIN_MODULE_HTML.includes("['pending','review_stale'].includes(x.status)"),
+    "Bundle Diff control should only be shown while review is pending or stale",
+  );
+  assert.ok(
+    ADMIN_MODULE_HTML.includes("if(panel.dataset.loaded==='true')"),
+    "Bundle Diff should reuse the already loaded preview when expanded again",
+  );
+  assert.ok(
+    !ADMIN_MODULE_HTML.includes("<h3>当前 Preview</h3>"),
+    "Bundle detail should not eagerly render the legacy preview block",
   );
 });
 

@@ -153,6 +153,14 @@ test("submit validates the whole repository while replacing only the skill root"
     const preview = await service.previewImport(principal, repository, created.id);
     assert.deepEqual(preview.diff.added, ["SKILL.md"]);
     assert.equal(preview.targetRevision, "rev-1");
+    assert.equal(preview.fileDiffs.length, 1);
+    assert.equal(preview.fileDiffs[0]?.path, "SKILL.md");
+    assert.equal(preview.fileDiffs[0]?.operation, "add");
+    assert.equal(preview.fileDiffs[0]?.binary, false);
+    assert.ok((preview.fileDiffs[0]?.addedLines ?? 0) > 0);
+    assert.ok(
+      preview.fileDiffs[0]?.hunks.flatMap((hunk) => hunk.lines).some((line) => line.text.includes("# ota-design")),
+    );
     assert.deepEqual(preview.skills.map((item) => item.name).sort(), ["ota-design", "ota-usage"]);
   } finally {
     db.close();
