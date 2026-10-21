@@ -1,0 +1,25 @@
+# Copy this file to the Worker host and set EXPERT_CODEX_CONFIG_FILE to its
+# absolute path. Replace the provider name, endpoint, model, and API-key env.
+# This Codex CLI version requires the provider to support the Responses API.
+# Do not put the API key itself in this file.
+
+model = "your-model-id"
+model_provider = "custom-router"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.custom-router]
+name = "Custom OpenAI-compatible provider"
+base_url = "https://your-router.example/v1"
+wire_api = "responses"
+env_key = "MY_ROUTER_API_KEY"
+requires_openai_auth = false
+supports_websockets = false
+
+# Do not pass variables containing KEY, SECRET, or TOKEN to shell commands.
+[shell_environment_policy]
+ignore_default_excludes = false
+
+# Expert analysis does not need to fetch remote Codex plugin catalogs.
+[features]
+remote_plugin = false

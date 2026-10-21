@@ -30,6 +30,7 @@ RUN if [ "$INSTALL_GIT" = "1" ]; then \
 COPY package.json package-lock.json* ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/src/expert-platform/proto ./src/expert-platform/proto
 COPY config ./config
 COPY scripts ./scripts
 RUN chmod +x /app/scripts/docker-entrypoint.sh

@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package expert.v1;
+
+service ExpertWorkerService {
+  rpc ClaimTask(ClaimTaskRequest) returns (ClaimTaskResponse);
+  rpc RenewLease(LeaseRequest) returns (Empty);
+  rpc CompleteTask(CompleteTaskRequest) returns (Empty);
+  rpc FailTask(FailTaskRequest) returns (Empty);
+}
+
+message ClaimTaskRequest {
+  string worker_id = 1;
+  string capability = 2;
+  string expert_id = 3;
+}
+
+message ClaimTaskResponse {
+  bool has_task = 1;
+  string task_id = 2;
+  string run_id = 3;
+  uint64 fencing = 4;
+  string problem = 5;
+}
+
+message LeaseRequest {
+  string worker_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  uint64 fencing = 4;
+}
+
+message CompleteTaskRequest {
+  LeaseRequest claim = 1;
+  string result = 2;
+}
+
+message FailTaskRequest {
+  LeaseRequest claim = 1;
+  string reason = 2;
+}
+
+message Empty {}

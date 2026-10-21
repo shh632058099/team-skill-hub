@@ -3,6 +3,15 @@ import { observeReuse } from "./reuse-observability.js";
 import * as z from "zod/v4";
 import type { SkillHubApplicationService } from "./application.js";
 import { loadClientIntegrationStatus } from "./client-integration/release.js";
+import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service.js";
+import { ExpertStore } from "./expert-platform/expert-store.js";
+import { ExpertTaskStore } from "./expert-platform/task-store.js";
+
+// The experimental task API is opt-in until an isolated Worker runtime is provisioned.
+const expertTaskStore = process.env.EXPERT_RUNTIME_DB ? new ExpertTaskStore(process.env.EXPERT_RUNTIME_DB) : null;
+const expertStore = process.env.EXPERT_RUNTIME_DB ? new ExpertStore(process.env.EXPERT_RUNTIME_DB) : null;
+const expertDispatchService =
+  expertTaskStore && expertStore ? new ExpertDispatchService(expertStore, expertTaskStore) : null;
 
 const filterSchema = {
   repositories: z.array(z.string()).optional(),
@@ -998,6 +1007,71 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           events: await appService.listAuditEvents(limit ?? 100, repository, principal),
         }),
     );
+
+    if (expertTaskStore) {
+      registerTool(
+        "submit_expert_task",
+        {
+          description:
+            "Queue a read-only expert analysis task for an authorized Worker. This experimental endpoint does not itself launch an Agent. Provide a stable idempotency key when retrying.",
+          inputSchema: z.object({
+            problem: z.string().trim().min(1).max(10000),
+            idempotencyKey: z.string().min(1).max(200),
+            expertId: z.string().trim().min(1).max(200).optional(),
+            repositoryId: z.string().trim().min(1).max(200).optional(),
+          }),
+        },
+        async ({ problem, idempotencyKey, expertId, repositoryId }) => {
+          if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
+          return toolResult({
+            ...expertDispatchService.submit({
+              principalId: principal.id,
+              scope: principal.tenantId,
+              idempotencyKey,
+              problem,
+              expertId,
+              repositoryId,
+            }),
+          });
+        },
+      );
+
+      registerTool(
+        "get_expert_task_status",
+        {
+          description:
+            "Check a queued or running Expert task using its task ID. Authorization is checked on every request.",
+          inputSchema: z.object({ taskId: z.string().uuid() }),
+        },
+        async ({ taskId }) => toolResult({ ...expertTaskStore.get(taskId, principal.id, principal.tenantId) }),
+      );
+
+      registerTool(
+        "get_expert_task_result",
+        {
+          description: "Read the persisted result of an Expert task; queued tasks do not yet have a report.",
+          inputSchema: z.object({ taskId: z.string().uuid() }),
+        },
+        async ({ taskId }) => {
+          const task = expertTaskStore.get(taskId, principal.id, principal.tenantId);
+          if (task.status !== "succeeded") throw new Error("TASK_NOT_READY");
+          return toolResult({ ...task });
+        },
+      );
+
+      registerTool(
+        "cancel_expert_task",
+        {
+          description: "Cancel a queued Expert task. Cancellation of running tasks is not yet supported.",
+          inputSchema: z.object({ taskId: z.string().uuid() }),
+        },
+        async ({ taskId }) => {
+          const task = expertTaskStore.get(taskId, principal.id, principal.tenantId);
+          if (task.status === "running") throw new Error("CANCEL_UNAVAILABLE");
+          return toolResult({ ...expertTaskStore.cancel(taskId, principal.id, principal.tenantId) });
+        },
+      );
+    }
 
     return server;
   });

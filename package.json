@@ -13,6 +13,9 @@
     "build:client-integration": "tsx src/cli/build-client-integration.ts",
     "client-integration:version-check": "tsx src/cli/client-integration-version-check.ts",
     "start": "node dist/src/index.js",
+    "expert-worker": "tsx src/cli/expert-worker.ts",
+    "expert-worker-admin": "tsx src/cli/expert-worker-admin.ts",
+    "expert-admin": "tsx src/cli/expert-admin.ts",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" eslint.config.js package.json tsconfig.json .prettierrc.json",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" eslint.config.js package.json tsconfig.json .prettierrc.json",
@@ -34,6 +37,8 @@
     "benchmark:sqlite-observability": "tsx src/cli/benchmark-sqlite-observability.ts"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.6",
+    "@grpc/proto-loader": "^0.8.1",
     "@modelcontextprotocol/fastify": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",

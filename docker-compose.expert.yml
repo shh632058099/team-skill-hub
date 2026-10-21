@@ -1,0 +1,8 @@
+services:
+  team-skill-hub:
+    ports:
+      - "${EXPERT_GRPC_PUBLISH_BIND:-127.0.0.1}:7443:7443"
+    environment:
+      EXPERT_RUNTIME_DB: /var/lib/team-skill-hub/expert-runtime.sqlite
+      EXPERT_WORKER_REGISTRY_DB: /var/lib/team-skill-hub/expert-workers.sqlite
+      EXPERT_GRPC_ADDRESS: 0.0.0.0:7443
