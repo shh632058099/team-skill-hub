@@ -1,431 +1,369 @@
-# 新增 Expert：傻瓜式操作手册
+# 新增 Expert 和 Worker：手把手操作手册
 
-只想新增 OTA / Yocto / MsgBox Expert 时，按下面顺序复制执行即可。示例使用 OTA。
+本文面向第一次使用 Team Skill Hub 专家平台的管理员，介绍如何新增一个专家、配置它可访问的 Git 仓库、注册独立 Worker，并从 Codex CLI/MCP 验证真实任务。所有配置均按当前代码和 Admin 页面实现编写。
 
-## 0. 先准备
+> **先理解两个概念：**
+>
+> - **专家配置（Expert Definition）**：定义“它是谁、擅长什么、用哪个模型”。例如 `ota`、`code-review`。
+> - **执行配置（Deployment）**：定义“谁可以调用这个专家、它能访问哪些仓库、使用什么运行环境”。一个专家可以绑定一个或多个仓库。
+> - **Worker 执行配置**：Worker 主机上的本地环境文件，定义 Worker 身份、能力、Hub 地址、Docker、Git 凭据和模型凭据映射。它不是 Admin 页面中的 Deployment，也不应把密钥写入数据库或 Git。
 
-需要：
+下面优先使用 Admin 页面管理专家和执行配置；Worker 的注册/审批/签发凭据目前通过 CLI 完成。
 
-- Hub 已部署。
-- Worker 机器已安装 Docker。
-- Worker 机器已有源码目录。
-- 一个 Codex 支持的 provider（官方 OpenAI 或自定义 provider），以及该 provider 对应的认证方式。
-- 如使用自定义 provider，准备一份独立的 Codex `config.toml`；不要直接挂载宿主机默认的 `~/.codex/config.toml`。
+## 0. 准备工作
 
-示例：
+开始前确认：
 
-- capability：`ota`
-- Worker ID：`ota-worker-01`
-- 源码：`/srv/repos/ota`
-- Hub gRPC：`192.168.1.10:7443`
+- Team Skill Hub 已部署并能打开 Admin 页面。
+- Hub 的 Expert Runtime 已启用，且 Hub 与 Worker 使用同一套运行时/Worker 注册数据库。
+- 已有可用的 Codex Responses API Provider、模型名称和 API Key。每个专家可选择不同模型配置。
+- Worker 主机可以访问 Hub 的 gRPC 地址、Docker Engine 和 Git 仓库；私有仓库还需准备 SSH key 或 HTTPS Token。
+- 你知道要允许哪些 MCP 调用者访问该专家。请从已授权的 MCP 会话中调用 `get_server_info` 获取准确的 `principal.id`，不要使用显示名称或 tenant ID 代替。
 
-## 1. Hub：开启 Expert Runtime
+以下示例使用 `yocto` 专家、`yocto-worker-01` Worker 和 `https://github.com/your-org/yocto-layer.git` 仓库。请将示例仓库、分支、模型和 principal 替换为实际值。不要把 API Key、Worker credential 或 Git Token 粘贴到聊天、文档或命令历史中。
 
-从项目根目录使用 Expert Compose override 部署。gRPC 端口默认只绑定到 WSL2 本机 `127.0.0.1`，Expert 数据保存在已有的持久化 volume 中：
+## 1. 打开专家管理页面
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.expert.yml up -d --build
-```
+1. 登录 Team Skill Hub Admin。
+2. 打开 **专家平台**，页面地址通常为 `/admin/experts`。
+3. 页面分为 **专家配置** 和 **执行配置** 两部分。
+4. 如果页面提示 `EXPERT_RUNTIME_DB_NOT_CONFIGURED`，说明 Hub 未配置专家运行时数据库；先修复 Hub 部署配置，不要尝试反复保存表单。
 
-如需让其他机器上的 Worker 连接，部署前将 `EXPERT_GRPC_PUBLISH_BIND` 设置为 Hub 主机可达的地址，并配置防火墙；不需要远程访问时不要绑定 `0.0.0.0`。
+## 2. 创建专家配置
 
-重新部署 Hub 后检查：
+在“专家配置”区域选择创建专家，填写以下字段：
 
-```bash
-docker logs team-skill-hub 2>&1 | grep expert.grpc.started
-```
+| 字段              | 示例                                          | 填写原则                                                         |
+| ----------------- | --------------------------------------------- | ---------------------------------------------------------------- |
+| 专家 ID           | `yocto`                                       | 稳定、唯一，建议小写英文和连字符；创建后作为调用/路由标识使用    |
+| 显示名称          | `Yocto 构建专家`                              | 给管理员和用户看的名称                                           |
+| Capabilities      | `yocto,build,linux`                           | 专家能处理的能力标签；多个值用逗号或换行分隔                     |
+| Keywords          | `bitbake,recipe,layer,CVE`                    | 描述典型任务的关键词，帮助自动路由                               |
+| Provider ID       | `bst`                                         | 与当前 Provider 配置约定一致；不是 API Key                       |
+| Model             | `gpt-5.6-luna`                                | 填写你的 Router/Provider 实际支持的模型名                        |
+| Base URL          | `https://route.briancs.shop/v1`               | 填写实际 API 入口，不要附带密钥                                  |
+| Wire API          | `responses`                                   | 当前 Worker 的 Codex 执行链路使用 Responses API                  |
+| Credential Ref    | `bst-router`                                  | 逻辑凭据引用；它不是密钥本身，后续要在 Worker 主机映射到环境变量 |
+| Allowed Env Names | `TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY` | 允许传入执行容器的环境变量名白名单；不要填写变量值               |
+| 启用              | 勾选                                          | 保存后专家配置应处于启用状态                                     |
 
-必须看到类似：
+**模型配置注意事项**
 
-```text
-{"event":"expert.grpc.started","address":"0.0.0.0:7443"}
-```
+- Provider 必须兼容 Codex CLI 使用的 Responses API；只有 `/chat/completions` 的服务不能直接套用。
+- `Credential Ref` 应与 Worker 的 `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 中的 key 完全一致。
+- `Allowed Env Names` 只填变量名。密钥实际值由 Worker 主机的受保护环境文件提供。
+- 如果不填写模型配置，会走兼容旧 Worker 配置的路径；新建专家建议显式配置模型，避免不同 Worker 意外使用旧默认值。
+- 点击保存后，在列表中确认专家 ID、能力、关键词、模型和状态正确。
 
-看不到就先不要继续。
+## 3. 创建执行配置并配置仓库地址
 
-## 2. Hub：创建 Expert 定义和 Deployment
+在“执行配置”区域选择创建执行配置，将刚才创建的专家绑定到可访问仓库。
 
-先创建 OTA Expert：
+| 字段                    | 示例                                          | 填写原则                                                             |
+| ----------------------- | --------------------------------------------- | -------------------------------------------------------------------- |
+| 执行配置 ID             | `yocto-default`                               | 唯一、稳定的标识                                                     |
+| 专家配置                | `yocto · Yocto 构建专家`                      | 选择第 2 步创建的专家                                                |
+| 源码仓库地址            | `https://github.com/your-org/yocto-layer.git` | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码          |
+| 分支                    | `main`                                        | 与仓库地址逐行对应；留空默认 `main`                                  |
+| 仓库凭据引用            | `yocto-github-readonly`                       | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                 |
+| Git 代理地址            | `http://proxy-host:7890`                      | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息 |
+| 允许调用者 Principal ID | `实际的 principal.id`                         | 每行一个；只授权确实需要使用此 Deployment 的调用者                   |
+| Runtime Profile         | `linux-yocto`                                 | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`              |
+| 启用执行配置            | 勾选                                          | 只有启用的 Deployment 才能参与任务派发                               |
 
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-admin.js define ota "OTA Expert" ota upgrade,rollback,firmware,power-loss
-```
+可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。
 
-再创建 Deployment：
+点击“保存执行配置”后，确认列表中的专家、仓库 URL、分支、调用者、Runtime Profile 和启用状态正确。
 
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-admin.js deploy ota-default ota ota-repo YOUR_USER_ID codex-readonly
-```
+### 仓库 ID 是什么？
 
-需要修改：
+仓库地址由 Admin 页面配置，Worker 会在执行任务时自行 clone/fetch。Hub 会根据仓库 URL 和分支生成内部 `repositoryId`，形式类似 `repo-...`；它不是 GitHub 的仓库数字 ID，也不需要人工猜测。
 
-```text
-ota-repo       -> OTA 仓库 ID
-YOUR_USER_ID   -> 允许使用这个 Expert 的用户 ID
-```
-
-检查：
+提交 MCP 任务时，`repositoryId` 必须使用该 Deployment 对应的内部仓库标识。请从执行配置 API/CLI 返回的 Deployment 数据中读取 `repositories[].id`，不要把仓库 URL 或 GitHub 仓库 ID 当成 `repositoryId`。如果 Admin 页面列表只展示 URL，可使用下面的 CLI 查看完整 Deployment 数据：
 
 ```bash
 docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 ```
 
-## 3. Hub：注册 Worker
+如果 CLI 提示缺少 `EXPERT_RUNTIME_DB`，请先检查 `docker-compose.expert.yml` 是否已应用并重建/启动 Hub；不要手动指向一个新的空数据库。
 
-注册：
+## 4. 在 Worker 主机配置 Git 仓库凭据
 
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll ota-worker-01 ota
-```
+公开仓库不需要此步骤。私有仓库需要为 Worker 准备只读权限的 Git 凭据。
 
-应看到 `status: pending`。
+### 方案 A：SSH key
 
-审批：
-
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js approve ota-worker-01
-```
-
-应看到 `status: active`。
-
-生成 credential：
+1. 在 Worker 主机放置专用只读私钥，例如 `/etc/expert/keys/yocto-readonly`。
+2. 确认公钥已添加到 GitHub/GitLab 对应账号或 Deploy Key。
+3. 限制文件权限：
 
 ```bash
-docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-credential ota-worker-01
+sudo install -d -m 700 /etc/expert/keys
+sudo chown root:root /etc/expert/keys/yocto-readonly
+sudo chmod 600 /etc/expert/keys/yocto-readonly
 ```
 
-记下输出里的：
+4. 在 Worker 环境配置中设置引用映射：
 
-```text
-ewc_xxxxxxxxx
+```dotenv
+EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/expert/keys/yocto-readonly"}'
 ```
 
-credential 只显示这一次。
+SSH key 路径必须是 Worker 主机上的绝对路径；仓库地址应使用 `git@github.com:org/repo.git` 形式。
 
-## 4. Worker：构建运行镜像
+### 方案 B：HTTPS Token
 
-在 `team-skill-hub` 目录执行：
+在 Worker 受保护的环境文件中设置 Token 环境变量，并将凭据引用映射到变量名。下面的值只是变量名示例，不是 Token：
+
+```dotenv
+YOCTO_GIT_TOKEN=在本机安全地设置实际Token
+EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":{"type":"https-token","tokenEnv":"YOCTO_GIT_TOKEN"}}'
+```
+
+Deployment 的仓库 URL 必须使用 `https://`。Token 本身不要写进 JSON、Git URL 或本手册；`tokenEnv` 只能填写环境变量名。建议 Token 仅有目标仓库只读权限。
+
+如果配置了 Git 代理，代理地址必须从 Worker 主机/Docker 所在网络可达；Windows 上的代理设置不会自动让 WSL2 或 Docker 使用该代理。
+
+## 5. 注册、审批 Worker 并签发凭据
+
+Worker 注册管理目前通过 CLI 操作。在运行 Hub 的主机上执行以下命令；命令由容器内环境读取 `EXPERT_WORKER_REGISTRY_DB`，确保已使用 `docker-compose.expert.yml` 启动运行时。
+
+### 5.1 注册 Worker
+
+```bash
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll yocto-worker-01 yocto
+```
+
+参数含义：`enroll <worker-id> <capabilities>`。Worker ID 应唯一且稳定；capability 必须与它实际能执行的任务一致。若一个 Worker 只服务 Yocto 专家，使用 `yocto` 即可。
+
+### 5.2 审批 Worker
+
+```bash
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js approve yocto-worker-01
+```
+
+### 5.3 签发 Worker credential
+
+```bash
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-credential yocto-worker-01
+```
+
+命令会返回一次性显示的 credential。立即复制到 Worker 主机受保护的环境文件中，不要提交 Git、不要粘贴到聊天或终端工单。若遗失，应重新签发并更新 Worker 配置；旧 credential 会失效。
+
+可以检查注册状态，但不要在共享日志中保留 credential：
+
+```bash
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll yocto-worker-01 yocto
+```
+
+如果 Worker 已存在，按实际返回错误处理，不要反复 enroll 同名 Worker。当前 Worker Admin CLI 没有独立的 list 子命令；请查看 Hub 注册数据库/现有运维查询方式，或使用已知 Worker ID 执行 approve、issue-credential 等有明确用途的操作，不要用重复注册来探测状态。
+
+## 6. 准备 Worker 主机和 Docker 镜像
+
+在 Worker 所在的 Linux/WSL2 主机准备项目代码与 Node.js 运行环境。Worker 可与 Hub 在同一台主机，也可运行在另一台主机；跨主机时必须使用 Worker 能访问的 Hub 地址，而不是 `127.0.0.1`。
+
+在 Team Skill Hub 仓库根目录构建 Worker 镜像：
 
 ```bash
 docker build -t team-skill-hub-expert-worker:prototype docker/expert-worker
-```
-
-验证：
-
-```bash
 docker run --rm team-skill-hub-expert-worker:prototype --version
 ```
 
-应看到：
+Worker 运行进程通过 `npm run expert-worker` 启动；Docker 镜像用于执行任务的 Codex 环境，两者用途不同。
 
-```text
-codex-cli 0.162.1
-```
+## 7. 创建 Worker 本地环境文件
 
-## 5. Worker：创建配置文件
-
-在 Worker 主机的 Linux 文件系统创建环境文件。**不要把 API Key 放在 `/mnt/d` 下的文件中再依赖 `chmod 600`**；WSL 对 Windows 盘的权限显示可能仍是 `777`。在 WSL2 上建议使用 `/etc/expert/ota-worker.env`：
+在 Worker 主机 Linux 文件系统创建配置文件。不要把带密钥的文件放在 `/mnt/c`、`/mnt/d` 等 Windows 挂载盘后依赖 `chmod 600`；建议使用 `/etc/expert/`。
 
 ```bash
 sudo install -d -m 700 /etc/expert
-sudoedit /etc/expert/ota-worker.env
-sudo chown root:root /etc/expert/ota-worker.env
-sudo chmod 600 /etc/expert/ota-worker.env
+sudoedit /etc/expert/yocto-worker.env
+sudo chown root:root /etc/expert/yocto-worker.env
+sudo chmod 600 /etc/expert/yocto-worker.env
 ```
 
-文件内容示例：
+填写下面的模板并替换示例值。不要把此文件提交到 Git：
 
 ```dotenv
-EXPERT_HUB_ADDRESS=192.168.1.10:7443
-EXPERT_WORKER_ID=ota-worker-01
-EXPERT_WORKER_CREDENTIAL=ewc_xxxxxxxxx
-EXPERT_CAPABILITY=ota
-EXPERT_ID=ota
+# Hub 的 gRPC 地址。同机运行时可用 127.0.0.1；跨主机时填写 Hub 主机名/IP 和可达端口。
+EXPERT_HUB_ADDRESS=127.0.0.1:7443
+EXPERT_WORKER_ID=yocto-worker-01
+EXPERT_WORKER_CREDENTIAL=替换为刚签发的credential
+EXPERT_CAPABILITY=yocto
+EXPERT_ID=yocto
 
-EXPERT_SOURCE_PATH=/srv/repos/ota
+# 关键：此处是仓库父目录，不是多个 Worker 共用的 checkout。
+# Worker 会自动在其下追加自己的 ID，并为每个仓库 ID 建立独立 clone。
+EXPERT_REPOSITORY_ROOT=/srv/expert-repositories
+
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:prototype
 EXPERT_DOCKER_NETWORK=bridge
-EXPERT_DOCKER_SECCOMP_PROFILE=unconfined
+EXPERT_DOCKER_SECCOMP_PROFILE=default
 
-EXPERT_CODEX_CONFIG_FILE=/etc/expert/ota-codex.toml
-EXPERT_MODEL_ENV_NAMES=MY_ROUTER_API_KEY,HTTPS_PROXY,NO_PROXY
+# 允许传入执行容器的环境变量名白名单，不是密钥值。
+EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
+# Expert 配置中的 credentialRef -> Worker 上真实存在的环境变量名。
+EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
+
+# 私有 Git 仓库需要时设置；公开仓库可不设置。
+EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/expert/keys/yocto-readonly"}'
+
 EXPERT_HEARTBEAT_MS=10000
 EXPERT_POLL_MS=3000
 EXPERT_TASK_TIMEOUT_MS=120000
 
-MY_ROUTER_API_KEY=你的_provider_API_Key
+# 可选代理：必须是 Worker 主机能访问的代理。
+HTTPS_PROXY=http://proxy-host:7890
+NO_PROXY=127.0.0.1,localhost
+TEAM_SKILL_HUB_API_KEY=在本机安全地设置实际APIKey
 ```
 
-先准备独立的 provider 配置文件。可从 `docs/expert-platform/codex-provider.example.toml` 复制为 `/etc/expert/ota-codex.toml`，并按 provider 文档修改 `model`、`base_url`、`wire_api` 和 `env_key`。当前 Worker 镜像的 Codex CLI 使用 Responses API；provider 必须兼容该 API，只有 `/chat/completions` 接口的服务不能直接套用此示例。API Key 只放在受保护的环境文件中，不要写进 TOML。
+说明：
 
-Worker 镜像安装了系统 `ca-certificates`，供 Codex 的原生 HTTPS 客户端验证服务端证书。`EXPERT_DOCKER_SECCOMP_PROFILE` 默认使用 Docker 默认 seccomp；若 WSL2 下 Codex 报告 `bwrap: No permissions to create a new namespace`，可显式设置为 `unconfined`，让内层只读沙箱创建用户命名空间。外层容器仍禁用 capabilities、使用只读根文件系统和只读源码挂载，但 `unconfined` 会降低 seccomp 这一层防护，应只在理解权衡后启用。
+- `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 只映射“凭据引用 → 环境变量名”，不能包含 API Key 明文。映射目标必须同时出现在 `EXPERT_MODEL_ENV_NAMES` 中。
+- `TEAM_SKILL_HUB_API_KEY`、`HTTPS_PROXY` 等值在 Worker 进程环境中提供。使用 `source` 加载配置时，确保 JSON 字符串被正确引用；含特殊字符的密钥不要直接拼进 shell 命令。
+- 如果不用 Git 私钥，把 `EXPERT_GIT_CREDENTIALS_JSON` 整行删掉即可。若使用 HTTPS Token，则按第 4 节的 JSON 格式配置，并确保 Token 环境变量在 Worker 进程中可用。
+- 新建专家已在 Admin 的专家配置中填写 `modelConfig` 时，Worker 会按所选专家动态生成本次任务的 Codex 模型配置；通常不需要设置 `EXPERT_CODEX_CONFIG_FILE`。该变量用于未配置 `modelConfig` 的兼容旧路径。若你确实使用静态 TOML，可复制 `docs/expert-platform/codex-provider.example.toml`，并确保 `env_key` 指向 Worker 白名单中的环境变量；不要把密钥写进 TOML。
+- `EXPERT_REPOSITORY_ROOT` 会自动追加 Worker ID，例如最终目录是 `/srv/expert-repositories/yocto-worker-01/`。不同 Worker 必须使用不同 ID，不要共享同一份 `.git` 或工作树。
+- 若 Worker 位于另一台主机，Hub gRPC 默认的 `127.0.0.1:7443` 发布地址不可从远端访问。需通过 `EXPERT_GRPC_PUBLISH_BIND` 将端口绑定到受控的私有网卡地址，并配置仅允许该 Worker 主机访问的防火墙规则；不要为了省事将服务无条件暴露到公网。TLS 参数要么全部配置，要么全部省略；跨不可信网络建议启用 TLS/mTLS。
 
-```bash
-sudo install -d -m 700 /etc/expert
-sudo install -m 600 docs/expert-platform/codex-provider.example.toml /etc/expert/ota-codex.toml
-sudoedit /etc/expert/ota-codex.toml
-```
+## 8. 启动 Worker
 
-只改这些项：
-
-1. `EXPERT_HUB_ADDRESS`
-2. `EXPERT_WORKER_CREDENTIAL`
-3. `EXPERT_SOURCE_PATH`
-4. `EXPERT_CODEX_CONFIG_FILE`：该 Worker 专属的 Codex 配置文件绝对路径
-5. `EXPERT_MODEL_ENV_NAMES`：把 provider 配置中的 `env_key` 对应环境变量名列入白名单，并按需加入代理变量
-6. 对应的 provider API Key 环境变量
-
-例如，另一个 Worker 可以设置自己的 `EXPERT_CODEX_CONFIG_FILE`、`model_provider`、`base_url`、`wire_api` 和 API Key 环境变量。不同 Worker 不需要共享同一个 provider。
-
-如果使用 Codex 登录认证而非 API Key，可通过 `EXPERT_CODEX_AUTH_FILE` 指定独立 `auth.json` 文件；认证文件和 provider 配置文件分开挂载。不要把认证文件提交到 Git。
-
-如果 Worker 与 Hub 在同一个 WSL2：
-
-```bash
-EXPERT_HUB_ADDRESS=127.0.0.1:7443
-```
-
-## 6. Worker：启动
+确保 `/etc/expert/yocto-worker.env` 的权限正确，并且环境变量已安全注入。交互式手动启动示例：
 
 ```bash
 set -a
-source /etc/expert/ota-worker.env
+source /etc/expert/yocto-worker.env
 set +a
-
 npm run expert-worker
 ```
 
-命令会一直运行，这是正常的。停止时按 `Ctrl+C`。
+此终端应保持运行。生产环境建议用受控的 service/supervisor 管理进程，避免把密钥放进命令行参数或日志。当前 WSL2 示例环境使用独立 tmux 会话与启动脚本维护已有 Worker；新增 Worker 时先确认该脚本是否已显式纳入新 Worker，不要假设所有 Worker 会自动启动。
 
-## 7. 手动端到端测试（推荐）
-
-这一步验证完整真实链路，而不只是 Provider 能返回 HTTP 200：
-
-```text
-Windows Codex CLI
-  → teamSkillHub MCP
-  → submit_expert_task
-  → Hub 按当前 MCP principal 自动路由到 Expert
-  → Worker 通过 gRPC 领取任务
-  → Docker 内的真实 Codex CLI 分析只读源码
-  → get_expert_task_status / get_expert_task_result
-```
-
-### 7.1 检查 Codex MCP 配置和 Hub
-
-在你平常使用 Codex 的 Windows PowerShell 中执行：
-
-```powershell
-codex mcp list
-```
-
-确认列表中有 `teamSkillHub`，URL 指向 `http://127.0.0.1:8080/mcp`（或你实际配置的 Hub 地址），状态为 `enabled`。不要输出或截图暴露 Bearer Token / API Key。
-
-确认 Hub 健康、Worker 仍在运行：
+启动前可只检查变量是否存在，不要打印变量值：
 
 ```bash
-curl -fsS http://127.0.0.1:8080/health/ready
+test -n "${EXPERT_WORKER_CREDENTIAL:-}" && echo WORKER_CREDENTIAL_PRESENT || echo WORKER_CREDENTIAL_MISSING
+test -n "${TEAM_SKILL_HUB_API_KEY:-}" && echo MODEL_KEY_PRESENT || echo MODEL_KEY_MISSING
+test -d "${EXPERT_REPOSITORY_ROOT:-/nonexistent}" && echo REPOSITORY_ROOT_PRESENT || echo REPOSITORY_ROOT_WILL_BE_CREATED
+docker run --rm "$EXPERT_DOCKER_IMAGE" --version
+```
+
+只有在当前 WSL2/Docker 环境确认 Codex 的 `bwrap` 沙箱无法启动，且理解其降低 seccomp 防护的影响后，才考虑将 `EXPERT_DOCKER_SECCOMP_PROFILE=unconfined`。优先使用默认 `default`。
+
+## 9. 端到端验收：用 Codex CLI 发一个只读任务
+
+先在已连接 Team Skill Hub MCP 的 Codex CLI 会话中调用 `get_server_info`，确认当前 principal；再通过 Admin 执行配置列表或 API 结果取得对应的 `repositories[].id`。不要猜测仓库 ID。
+
+提交任务时使用实际生成的 `repositoryId`，并且先做只读分析：
+
+```json
+{
+  "problem": "请只读分析这个仓库的目录结构、主要模块、构建方式和测试组织，并指出三个有具体源码依据的技术风险。每个结论必须引用真实文件路径和函数；不要修改文件、构建、运行测试、提交代码或创建 PR。",
+  "idempotencyKey": "yocto-readonly-review-请替换为本次唯一值",
+  "repositoryId": "替换为Deployment中repositories[].id的实际值"
+}
+```
+
+调用 `submit_expert_task` 时**不要传 `expertId`**，用于验收自动路由。然后：
+
+1. 记录返回的 `taskId`、`expertId`、`selectionMode` 和 `repositoryId`。
+2. 轮询 `get_expert_task_status`，直到 `succeeded` 或 `failed`。
+3. 只有任务 `succeeded` 后才调用 `get_expert_task_result`。
+4. 检查结果是否引用真实文件路径、函数和行号，并确认分析使用了预期分支/Commit。
+5. 检查仓库没有被修改。只读任务不应触发修复、提交或 PR。
+
+### 通过标准
+
+- [ ] Admin 中专家配置和执行配置均启用。
+- [ ] Worker 已注册、审批并使用有效 credential 连接 Hub。
+- [ ] Worker 领取了任务，任务状态经历 `queued → running → succeeded`。
+- [ ] 未指定 `expertId` 时返回 `selectionMode=auto`，且自动选择的是预期专家。
+- [ ] 返回的仓库标识与执行配置一致，结果引用真实源码。
+- [ ] 仓库没有被修改。
+
+若 `selectionMode=explicit`，说明调用时显式指定了专家，不能算自动路由验收成功。
+
+## 10. 常见问题排查
+
+### 页面报 `EXPERT_RUNTIME_DB_NOT_CONFIGURED`
+
+检查 Hub 是否使用 `docker-compose.expert.yml`，以及容器内 `EXPERT_RUNTIME_DB` 是否指向预期数据库。不要通过新建空数据库绕过问题。
+
+### 任务返回 `EXPERT_UNAVAILABLE`
+
+依次检查：专家是否 active、Deployment 是否 active、`principals` 是否包含 `get_server_info` 返回的准确 `principal.id`、仓库是否绑定、Worker capability 是否匹配。
+
+### `repositoryId` 不匹配
+
+从 `list-deployments` 的返回数据中读取 `repositories[].id`。仓库 ID 根据 URL 与分支生成；改动 URL 或分支后应重新读取当前 Deployment 数据。
+
+### Worker 返回 `WORKER_UNAUTHENTICATED`
+
+重新签发 credential，并同步更新 Worker 的受保护环境文件。旧 credential 失效后应重启/重载对应 Worker 进程使新值生效；不要把 credential 写入日志。
+
+### `SOURCE_REPOSITORY_CREDENTIAL_NOT_CONFIGURED`
+
+检查 Deployment 中的 `credentialRef` 是否与 `EXPERT_GIT_CREDENTIALS_JSON` 的 key 完全一致、SSH key 文件是否存在，或 HTTPS Token 环境变量是否由 Worker 进程实际继承。不要打印 Token 来排查。
+
+### Clone/fetch 失败或超时
+
+从 Worker 主机检查 Git URL、分支、DNS、TLS/CA、代理连通性及凭据类型。SSH key 对应 SSH URL；HTTPS Token 对应 HTTPS URL。代理 URL 不能包含用户名、密码或 Token。
+
+### `INVALID_WORKER_CONFIG`
+
+检查必需变量 `EXPERT_HUB_ADDRESS`、`EXPERT_WORKER_ID`、`EXPERT_WORKER_CREDENTIAL`、`EXPERT_CAPABILITY`、`EXPERT_DOCKER_IMAGE`、`EXPERT_DOCKER_NETWORK`、`EXPERT_MODEL_ENV_NAMES`，并确认 JSON 环境变量语法有效。排障时打印变量名或脱敏状态，不要输出秘密值。
+
+### `EXECUTION_FAILED`
+
+检查 Worker 日志、Docker 镜像、Codex 配置文件、Responses API 兼容性、API Key 环境变量映射和网络代理。不要把失败任务直接标成验收通过；记录实际错误码并复测。
+
+### Worker 能连接 Hub，但拿不到任务
+
+确认 Worker 已审批、capability 与专家匹配、Deployment 启用、调用者 principal 有权限、目标仓库 ID 正确。不要通过放宽全部授权或关闭权限校验来解决。
+
+## 11. CLI 备用操作
+
+Admin 页面用于日常维护专家配置和执行配置。以下 CLI 主要用于 Worker 注册/审批/凭据操作，以及在需要时查询或兼容旧式 Deployment 数据。
+
+```bash
+# 查看执行配置
+
 docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
+
+# CLI 创建基础专家定义（不包含 Admin 页面中的 modelConfig）
+docker exec team-skill-hub node dist/src/cli/expert-admin.js define yocto "Yocto 构建专家" yocto,build,linux bitbake,recipe,layer,CVE
+
+# Worker 注册、审批、签发凭据
+
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll yocto-worker-01 yocto
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js approve yocto-worker-01
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-credential yocto-worker-01
+
+# 吊销 Worker credential/注册状态
+
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke yocto-worker-01
 ```
 
-还要通过 Hub 管理界面、Worker 管理命令或 Hub 日志确认 Worker 为 `active`，不要只凭进程存在就认为 Worker 已连接。
+CLI 的 `define` 命令只创建基础定义，不支持完整模型配置表单；建议在 Admin 页面创建/编辑专家模型设置。CLI 的 `deploy` 命令使用旧式 `repositoryIds` 参数，不支持 Admin 页面直接填写仓库 URL、分支、Git 凭据引用和代理的完整体验，因此新建执行配置应优先使用 Admin 页面。
 
-在提交任务前记录源码仓库状态。这样即使仓库原本就有未提交文件，也能比较测试前后是否发生变化：
+## 12. 新增第二个 Worker 的注意事项
+
+若为同一个专家增加并行 Worker：
+
+- 给新 Worker 使用新的、唯一的 `EXPERT_WORKER_ID`，例如 `yocto-worker-02`。
+- 单独执行 enroll、approve、issue-credential。
+- 为它准备独立的环境文件与本地 clone 根目录；不要复制第一台 Worker 的 credential。
+- 可使用同一个 capability，但每个 Worker 的 Git/模型凭据应按最小权限单独配置。
+- 验证两个 Worker 的实际仓库路径分别位于 `.../yocto-worker-01/` 与 `.../yocto-worker-02/`，绝不能共享同一个 `.git` 目录。
+- 若使用 WSL 启动脚本或 systemd/supervisor，必须显式配置新 Worker 的启动和日志管理。
+
+## 13. 撤销与清理
+
+不再使用 Worker 时，先确认没有任务正在运行，再执行：
 
 ```bash
-git -C "$EXPERT_SOURCE_PATH" status --short > /tmp/ota-status-before.txt
+docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke yocto-worker-01
 ```
 
-### 7.2 在真实 Codex CLI 会话中提交任务
-
-启动你平常使用的 Codex CLI（不要换成临时 API 客户端），将下面这段提示词发给它：
-
-```text
-请使用 teamSkillHub MCP 做一次真实 Expert 端到端验收。
-
-1. 先调用 get_server_info，记录返回的 principal.id、tenant_id。
-2. 调用 submit_expert_task，提交一个只读的 OTA 升级与断电恢复分析任务，repositoryId 使用 otalib；不要传 expertId，以验证 Hub 自动路由。
-3. 本次 idempotencyKey 使用一个全新的值，例如 ota-manual-20261021-1400；每次重新测试都换一个唯一值，避免幂等键复用旧任务。
-4. 提交成功后，记下 taskId，并报告 taskId、principal.id、expertId、selectionMode、repositoryId。
-5. 本轮先停止，不要高频轮询状态，也不要提前调用 get_expert_task_result。
-
-分析要求：检查 otalib 中 OTA 状态机、升级写入、完整性校验、启动槽切换、持久化和断电恢复路径，指出有证据支持的风险和测试缺口。严禁修改文件、配置、Git 历史或远程仓库。必须实际调用上述 MCP 工具，不要模拟结果，也不要只给我命令。
-```
-
-提交后等约 30～60 秒，再在**同一个 Codex 会话**发送下面的后续提示词；如果状态仍为 `running`，再等一会儿重复查询，不要快速连续轮询：
-
-```text
-请使用 teamSkillHub MCP 查询 taskId=替换成上一步返回的真实 taskId。
-
-调用一次 get_expert_task_status，并报告 status、expertId、selectionMode 和 repositoryId。
-- 如果 status=succeeded，继续调用 get_expert_task_result，概括实际报告，并列出报告引用的真实文件路径/函数。
-- 如果 status=running，只告诉我稍后需要再次查询，不要连续轮询。
-- 如果 status=failed，报告可见的失败信息和下一步排查方向。
-
-不要修改任何文件、配置、Git 历史或远程仓库；不要编造任务状态或结果。
-```
-
-### 7.3 判断是否真正跑通
-
-必须同时满足以下条件，才算端到端验收通过：
-
-1. `get_server_info` 返回当前 Codex 实际使用的 `principal.id`。
-2. `submit_expert_task` 返回 `taskId`，且 `expertId=ota`、`selectionMode=auto`、`repositoryId=otalib`。
-3. Worker 确实领取该任务；最终状态为 `succeeded`，不是只创建成功或一直 `running`。若第一次查询仍是 `running`，等待 30～60 秒后再查，不要高频轮询。
-4. `get_expert_task_result` 返回非空的实际分析报告，包含可在源码中核对的路径、函数或测试。
-5. 比较测试前后的仓库状态，确认没有新增变化：
-
-   ```bash
-   git -C "$EXPERT_SOURCE_PATH" status --short > /tmp/ota-status-after.txt
-   diff -u /tmp/ota-status-before.txt /tmp/ota-status-after.txt
-   ```
-
-   `diff` 没有输出且退出码为 `0` 表示状态列表一致。Worker 的 Docker Executor 还应以只读方式挂载源码；如果仓库本来就有未提交变更，不要为了验收而清理或重置它们。
-
-**注意：** 仅 `codex mcp list` 显示 enabled、`get_server_info` 成功、Provider HTTP 200，或者 MCP 返回一个 `taskId`，都不能单独算作端到端成功。必须等 Worker 执行完成并取回结果。
-
-### 7.4 常见错误如何处理
-
-| 错误 / 现象                   | 检查方式与处理                                                                                                                                                                                                                                                            |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `EXPERT_UNAVAILABLE`          | 在 Codex 中调用 `get_server_info`，确认 `principal.id`；再看 `list-deployments` 中对应 Deployment 的 `principals` 是否包含该 ID、Deployment 是否 active、`otalib` 是否在仓库列表中，以及问题描述是否包含 OTA 的相关关键词。不要用显示名称或 tenant ID 代替 principal ID。 |
-| `EXPERT_FORBIDDEN`            | 指定的 Expert 不允许当前 principal 使用。自动路由测试应省略 `expertId`，并检查部署授权。                                                                                                                                                                                  |
-| 提交失败，没有 `taskId`       | 没有任务可轮询；先修复提交错误，不要继续调用状态/结果工具。                                                                                                                                                                                                               |
-| 状态一直 `running`            | 检查 Worker 进程、Hub lease/心跳、Docker 容器日志和任务超时设置。不要把 running 当作成功。                                                                                                                                                                                |
-| `failed` / `EXECUTION_FAILED` | 检查 Provider 的 `base_url`、`wire_api=responses`、`env_key` 与 `EXPERT_MODEL_ENV_NAMES`、API Key、代理、CA 证书和 Codex 沙箱日志。                                                                                                                                       |
-| `TASK_NOT_READY`              | 任务尚未 succeeded；先继续查询状态，不能提前取结果。                                                                                                                                                                                                                      |
-
-如需把新的 MCP principal 加入允许列表，先确认它来自 `get_server_info`，然后用 `deploy` 更新完整授权列表。例如：
-
-```bash
-# 第四个参数是完整 allowlist；更新时必须保留所有仍应有权限的现有 ID。
-docker exec team-skill-hub node dist/src/cli/expert-admin.js deploy ota-default ota otalib developer,YOUR_MCP_PRINCIPAL_ID codex-readonly
-docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
-```
-
-不要为了消除 `EXPERT_UNAVAILABLE` 而关闭授权检查或把不必要的用户加入列表。
-
-### 7.5 不使用 Codex CLI 时的辅助检查
-
-可以直接查看 Worker 镜像和源码挂载是否可用，但这些只是诊断步骤，不能替代 7.2 的真实 MCP 测试：
-
-```bash
-docker run --rm team-skill-hub-expert-worker:prototype --version
-test -d "$EXPERT_SOURCE_PATH" && echo SOURCE_OK || echo SOURCE_MISSING
-docker logs team-skill-hub 2>&1 | grep expert.grpc.started
-```
-
-## 8. 怎么判断成功
-
-满足下面 5 条：
-
-```text
-[ ] Hub 日志有 expert.grpc.started
-[ ] Worker 已 active
-[ ] npm run expert-worker 持续运行
-[ ] Worker 能 Claim task
-[ ] Task 最终 succeeded
-```
-
-如果前 4 项通过、最后是 `EXECUTION_FAILED`：
-
-```bash
-test -n "$MY_ROUTER_API_KEY" && echo PROVIDER_KEY_OK || echo PROVIDER_KEY_MISSING
-```
-
-优先检查 provider 配置文件、`env_key` 与 `EXPERT_MODEL_ENV_NAMES` 是否一致，以及 API Key 和代理。
-
-如果 Provider 需要代理，必须确认代理端口实际在监听，并且能从 Worker 所在的 WSL2/Docker 网络访问；仅设置 Windows 系统代理并不会自动让 Docker Worker 获得可用的 `HTTPS_PROXY`。
-
-## 9. 常见错误
-
-### INVALID_WORKER_CONFIG
-
-```bash
-env | grep '^EXPERT_'
-```
-
-检查环境变量是否缺失。
-
-### WORKER_UNAUTHENTICATED
-
-重新签发 credential：
-
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-credential ota-worker-01
-```
-
-然后更新 `.env.ota-expert`。旧 credential 立即失效。
-
-### Worker 连不上 Hub
-
-Worker 上：
-
-```bash
-nc -vz 192.168.1.10 7443
-```
-
-Hub 上：
-
-```bash
-docker logs team-skill-hub 2>&1 | grep expert.grpc.started
-```
-
-### Docker Codex 起不来
-
-```bash
-docker run --rm team-skill-hub-expert-worker:prototype --version
-test -d "$EXPERT_SOURCE_PATH" && echo SOURCE_OK || echo SOURCE_MISSING
-```
-
-## 10. 新增 Yocto / MsgBox
-
-重复步骤 2～5，并替换：
-
-```text
-ota
-ota-worker-01
-/srv/repos/ota
-```
-
-例如 Yocto：
-
-```text
-yocto
-yocto-worker-01
-/srv/repos/yocto
-```
-
-不需要复制 Worker 代码。
-
-## 11. 吊销 Worker
-
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke ota-worker-01
-```
-
-立即生效。
-
-## 12. 流程跑通后再开 mTLS
-
-Hub：
-
-```bash
-EXPERT_GRPC_TLS_CA_PATH=/etc/team-skill-hub/expert-ca.pem
-EXPERT_GRPC_TLS_CERT_PATH=/etc/team-skill-hub/expert-server.pem
-EXPERT_GRPC_TLS_KEY_PATH=/etc/team-skill-hub/expert-server-key.pem
-```
-
-Worker：
-
-```bash
-EXPERT_TLS_CA_PATH=/etc/expert/ca.pem
-EXPERT_TLS_CERT_PATH=/etc/expert/worker.pem
-EXPERT_TLS_KEY_PATH=/etc/expert/worker-key.pem
-```
-
-3 个 Worker TLS 参数必须一起配置。
-
----
-
-一句话：**新增 Expert = 创建 ExpertDefinition/Deployment + 注册 Worker + 配置受保护的 Worker 环境文件 + 启动 `npm run expert-worker`。**
+随后停止对应 Worker 进程，并按组织的密钥轮换流程删除主机上的旧 credential/Git Token。清理仓库 clone 前，必须确认任务已结束并且日志/证据已保留；只清理该 Worker 自己的目录，不要删除其他 Worker 的工作区。
