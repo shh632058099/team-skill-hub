@@ -170,17 +170,17 @@ MCP 提交输入示例（说明性接口，正式字段以代码 / Schema 审核
 
 **原型仅收缩业务功能，不临时化核心架构边界。** 采用可运行的纵向切片，未来扩展自动修复、Merge Request、多专家 DAG、多 Worker、插件化 Runtime 时，不重写已有 Task / Router / Worker 核心。
 
-| 领域 | 原型实现 | 长期扩展契约 |
-|---|---|---|
-| MCP / Task | 自动匹配或显式专家，analyze-only 异步任务 | 固定 taskId/runId；后续增加 executionMode、WorkflowNode 关联，不改变现有任务身份 |
-| Expert Router | 规则与 Capability、ACL、Deployment 健康检查 | 专家及能力来自注册数据而非 OTA 专用硬编码；路由策略可替换 |
-| Worker / Transport | 一个 Worker、持久任务和状态 | Worker 身份、lease/fencing、事件游标独立；后续多 Worker 无须迁移 Task 语义 |
-| Runtime Adapter | 一个真实 Codex/Claude Adapter | 标准 StartRun/Status/Events/Cancel/Result 接口；新 Runtime 作为插件新增 |
-| Sandbox / Workspace | 一个受限 SandboxProvider、固定 commit 的只读 Workspace | 独立生命周期与工具授权；增加写入 Sandbox 或远程执行无需改 Worker 核心 |
-| SourceRepository | 独立只读 Registry 与 RepositoryBinding | 固定不可变 revision、baseCommit、scope；扩展 Git Broker 和写权限仍与 Skill/Knowledge 发布仓库分离 |
-| Knowledge / Tool | 授权查询与只读工具 | Tool Adapter/Binding 独立，未来可加入构建、测试、设备工具；不可绕过权限和 Sandbox |
-| Result / Artifact | 结构化分析报告与证据 | 带 schemaVersion 和 Artifact 类型；未来追加 patch、verification、merge-request，不破坏旧分析结果 |
-| Workflow | 不实现 WorkflowRun | P1 通过现有 Task/Run 组成 WorkflowRun/DAG，不修改 P0 Task API |
+| 领域                | 原型实现                                               | 长期扩展契约                                                                                      |
+| ------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| MCP / Task          | 自动匹配或显式专家，analyze-only 异步任务              | 固定 taskId/runId；后续增加 executionMode、WorkflowNode 关联，不改变现有任务身份                  |
+| Expert Router       | 规则与 Capability、ACL、Deployment 健康检查            | 专家及能力来自注册数据而非 OTA 专用硬编码；路由策略可替换                                         |
+| Worker / Transport  | 一个 Worker、持久任务和状态                            | Worker 身份、lease/fencing、事件游标独立；后续多 Worker 无须迁移 Task 语义                        |
+| Runtime Adapter     | 一个真实 Codex/Claude Adapter                          | 标准 StartRun/Status/Events/Cancel/Result 接口；新 Runtime 作为插件新增                           |
+| Sandbox / Workspace | 一个受限 SandboxProvider、固定 commit 的只读 Workspace | 独立生命周期与工具授权；增加写入 Sandbox 或远程执行无需改 Worker 核心                             |
+| SourceRepository    | 独立只读 Registry 与 RepositoryBinding                 | 固定不可变 revision、baseCommit、scope；扩展 Git Broker 和写权限仍与 Skill/Knowledge 发布仓库分离 |
+| Knowledge / Tool    | 授权查询与只读工具                                     | Tool Adapter/Binding 独立，未来可加入构建、测试、设备工具；不可绕过权限和 Sandbox                 |
+| Result / Artifact   | 结构化分析报告与证据                                   | 带 schemaVersion 和 Artifact 类型；未来追加 patch、verification、merge-request，不破坏旧分析结果  |
+| Workflow            | 不实现 WorkflowRun                                     | P1 通过现有 Task/Run 组成 WorkflowRun/DAG，不修改 P0 Task API                                     |
 
 ### 6.1 模块边界及依赖规则
 
@@ -219,25 +219,27 @@ MCP 提交输入示例（说明性接口，正式字段以代码 / Schema 审核
 
 ## 8. 原型通过标准
 
-- [ ] 自动模式：真实 Codex CLI 中只输入技术问题，不指定 expertId 或 MCP 工具名，Codex 自动调用 MCP，Hub 匹配 Expert 并返回任务 ID 和可解释的路由理由。
-- [ ] 指定模式：Codex CLI 中明确指定 OTA Expert（或其 ID），Codex 自动传递 expertId，Hub 只能在该专家的授权部署中调度，不能静默改派。
+- [x] 自动模式：真实 WSL2 Linux Codex CLI 中只输入技术问题，不指定 expertId 或 MCP 工具名；Hub 自动路由至 `ota`，返回 taskId、`selectionMode=auto` 和真实分析报告。详见 [原型验收记录](../reviews/2026-10-21-expert-platform-prototype-acceptance.md)。
+- [x] 指定模式：真实 WSL2 Linux Codex CLI 明确指定 OTA Expert，先通过 `list_available_experts` 获取平台 Expert ID，再提交任务；Hub 返回 `selectionMode=explicit` 并成功执行，没有静默改派。详见 [原型验收记录](../reviews/2026-10-21-expert-platform-prototype-acceptance.md)。
 - [ ] 指定了不存在、无权限、能力不符或不可用的专家时，返回清晰错误；自动模式无匹配或多个候选歧义时，也不随意路由或越权。
-- [ ] 两种模式均保留 selectionMode、最终 expertId 和路由审计证据。
-- [ ] 真实 Agent 自主读取授权源码 / Knowledge / Skill、调用只读工具分析，而不是模拟分析结果。
-- [ ] 返回结构化结论，包含明确的源码文件/行号/commit 或日志证据，以及不确定性与修复建议。
+- [x] 两种模式均保留 selectionMode、最终 expertId 和路由审计证据；本次两条真实任务均可从 MCP 状态/结果工具读取。
+- [x] 真实 Agent 在 Worker 的 Docker 执行环境中读取授权源码并完成只读分析，而不是模拟分析结果（Task `8b16dcd4-2b57-4a99-ac56-32dd3880b5f4`，自动路由至 `ota` / `otalib`，由 `ota-worker-01` 执行）。
+- [x] 返回结构化结论，包含真实源码文件/行号、风险分析和测试缺口；本次报告记录在 Hub 的持久化 Task Result 中。
 - [ ] 不修改源码、不创建 Git Commit、不 Push、不创建 MR/PR。
-- [ ] SourceRepository 与 Skill/Knowledge 发布仓库模型、权限和凭证完全独立。
-- [ ] 任务状态持久化，客户端断开后可重新查询。
-- [ ] Hub 在提供完成态结果前，持久化完整报告、结构化摘要和来源证据；CLI 只负责展示，不成为唯一存储。
+- [x] 新执行配置通过 Git URL / branch 定义 SourceRepository，Worker 负责 clone/fetch；它与 Skill/Knowledge 发布仓库注册表独立。旧 repositoryIds 继续兼容。完整安全 Gate 仍暂缓。
+- [x] 任务状态持久化，CLI 执行超时/结束后，可在新的 WSL2 Codex CLI 进程中按 taskId 重新查询状态和报告。
+- [x] Hub 持久化完整报告及其源码证据；新的 CLI 进程可通过 MCP 读取已完成的报告。
 - [ ] 在真实 Codex CLI 原会话中验证：任务在有限等待窗口内完成时，CLI 能自动使用 MCP status/result 取回并展示最终结论；记录真实工具调用轨迹，不以人工调用代替。
-- [ ] 在原始 CLI 退出后重新进入 Codex CLI，能通过 taskId 获取 Hub 已保存的同一份报告；不依赖主动唤醒已关闭会话。
+- [x] 在原始 CLI 进程结束后，新的 Codex CLI 进程已通过 taskId 获取 Hub 已保存的报告；不依赖唤醒原会话。
 - [ ] 取消、失败、越权和重要断线场景有测试或真实演练记录。
-- [ ] 至少一个有已知根因的问题通过人工核查分析质量，另外一个不同问题能够获得非模板式分析。
+- [ ] 至少一个有已知根因的问题通过独立人工核查分析质量，另外一个不同问题能够获得非模板式分析。（已有两份不同主题的真实报告，但 OTA 原生测试环境尚未通过，仍需独立核查。）
 - [ ] 给出下一阶段自动修复 / Merge Request 的扩展建议，但本次不实现。
 - [ ] 新增第二个领域 Expert / 源码仓库不修改通用路由逻辑；自动与显式路由都通过一致的 TaskService。
 - [ ] RuntimeAdapter / SandboxProvider 可替换的接口有契约测试，领域代码不依赖单一实现。
 - [ ] Task/Run/Event/Result 版本化与数据库迁移可测试，新增修复 / MR Artifact 不破坏旧分析结果。
 - [ ] 文档明确从原型升级到完整 Expert Platform 的模块映射、简化项和 ADR，不产生两套重复核心。
+
+- [x] Admin 提供“专家配置”和“执行配置”管理入口，支持创建、编辑、列表和启停；界面与 MCP/Worker 共用 `EXPERT_RUNTIME_DB`，CLI 管理入口继续保留。详见 Admin 专家配置端到端测试。
 
 ## 9. Review 修订：冻结的最小契约与安全边界
 
@@ -262,6 +264,9 @@ MCP 提交输入示例（说明性接口，正式字段以代码 / Schema 审核
 - 取消请求只表示已接受：向当前有效 Attempt 发送协作取消、到期强制杀进程树并核验，再释放租约与沙箱；取消/完成并发由事务状态机仲裁，不承诺撤销外部副作用。
 
 ### 9.3 只读 Sandbox 的强制约束
+
+> **范围决策（2026-10-21）：本轮安全 Gate 暂缓实施，仅保留为未完成的后续验收项。** 当前不开展沙箱加固或安全 Gate 实作，也不得把现有沙箱视为已通过安全验收。以下约束仍是未来处理不可信源码、扩大 Worker 执行权限或进入更广泛部署前的强制门槛；重新排期前应避免将其误解为本轮实施任务。
+
 
 - Prompt 中的“只读”不能当作隔离手段。PoC-0 首先探针验证 SandboxProvider；达不到隔离要求不得运行真实不可信源码。
 - 每个 TaskRun 使用独立 Workspace；指定 commit 的源码快照以文件系统权限**只读挂载**，临时写目录和缓存单独隔离；低权限用户运行 Agent，限制进程、内存、CPU、时长和输出体积。根文件系统/宿主其他目录不可写且不可读未经授权内容。
@@ -292,21 +297,22 @@ MCP 提交输入示例（说明性接口，正式字段以代码 / Schema 审核
 
 本文件保留为 PoC 总体设计与 Gate；实际执行前需按 `superpowers:writing-plans` 形成单独、可执行的 implementation plan。每个 Task 必须写明精确文件路径（基于当前源码确认）、接口输入输出、先失败再通过的测试代码、具体运行命令和预期结果、独立 Review Gate，禁止 TBD/占位实现。按 `superpowers:executing-plans` 或 `subagent-driven-development` 逐任务执行；不因本计划存在而授权部署、commit 或 push。
 
-| Task | 独立交付 | 关键验收 |
-| --- | --- | --- |
-| 0. Runtime Spike | 真实 CLI 非交互调用、受限 Sandbox 探针、结构化输出和进程树取消 | 有可重复命令/日志；隔离验证不过不得前进 |
-| 1. Task 契约及 SQLite | Task/Run/Event/Result/Artifact Schema、事务、迁移、幂等、状态机 | 幂等冲突、重开恢复、非法迁移测试 |
-| 2. Worker 通道 | Enrollment、独立身份、gRPC/Protobuf、Lease/Fencing、ACK/Spool、重连 | 双 Worker 竞争、旧 Attempt、断线补拉测试 |
-| 3. Router 与 SourceRepository | 独立 Registry/Binding、显式与自动模式、ACL、路由版本 | 第二专家接入无通用代码修改 |
-| 4. Sandbox 与 Agent | 真实 Runtime Adapter、工具授权、只读 Workspace、报告/证据 | 真实 Agent 诊断与越权否定测试 |
-| 5. MCP 与 Codex CLI | 提交/status/result/cancel 工具及真实客户端配置 | CLI 自主发现、自动分发、查询与取消 |
-| 6. 完整 Gate | 端到端自动/指定模式、报告一致性、重启恢复、度量和 ADR | Gate A–E 逐条有证据，未通过项如实记录 |
+| Task                          | 独立交付                                                            | 关键验收                                 |
+| ----------------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
+| 0. Runtime Spike              | 真实 CLI 非交互调用、受限 Sandbox 探针、结构化输出和进程树取消      | 有可重复命令/日志；隔离验证不过不得前进  |
+| 1. Task 契约及 SQLite         | Task/Run/Event/Result/Artifact Schema、事务、迁移、幂等、状态机     | 幂等冲突、重开恢复、非法迁移测试         |
+| 2. Worker 通道                | Enrollment、独立身份、gRPC/Protobuf、Lease/Fencing、ACK/Spool、重连 | 双 Worker 竞争、旧 Attempt、断线补拉测试 |
+| 3. Router 与 SourceRepository | 独立 Registry/Binding、显式与自动模式、ACL、路由版本                | 第二专家接入无通用代码修改               |
+| 4. Sandbox 与 Agent           | 真实 Runtime Adapter、工具授权、只读 Workspace、报告/证据           | 真实 Agent 诊断与越权否定测试            |
+| 5. MCP 与 Codex CLI           | 提交/status/result/cancel 工具及真实客户端配置                      | CLI 自主发现、自动分发、查询与取消       |
+| 6. 完整 Gate                  | 端到端自动/指定模式、报告一致性、重启恢复、度量和 ADR               | Gate A–E 逐条有证据，未通过项如实记录    |
 
 执行顺序遵循依赖关系：Task 0 先行；Task 1–2 为异步基础；Task 3–5 形成纵向链路；Task 6 最终验收。原型只分析不创建 PR；日后加入修复/MR 必须复用这些 Task/Run、Worker 和 Sandbox 边界，不建立第二套核心。
 
 ## 11. 下一阶段：自动修复与 Merge Request（非本次 PoC）
 
 待原型通过后，在相同 Task / Worker / Runtime / Sandbox 基础上增加：
+
 - analyze-only 与 propose-fix / apply-fix 等更高权限的任务模式，默认仍为只读；
 - ExpertDeploymentRepositoryBinding 的写入授权与逐任务的 Task Delegation Grant；
 - 代码修改、独立工作分支、单元 / 集成测试、Patch / Diff 审查；

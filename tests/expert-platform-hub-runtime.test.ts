@@ -21,10 +21,11 @@ test("Hub runtime starts gRPC when runtime env is configured", async () => {
   }
 });
 
-test("Hub runtime stays disabled unless runtime DB and gRPC address are both configured", async () => {
+test("Hub runtime leaves gRPC disabled when only the shared runtime DB is configured", async () => {
   assert.equal(await startExpertHubRuntimeFromEnv({}), null);
+  assert.equal(await startExpertHubRuntimeFromEnv({ EXPERT_RUNTIME_DB: "/tmp/runtime.sqlite" }), null);
   await assert.rejects(
-    () => startExpertHubRuntimeFromEnv({ EXPERT_RUNTIME_DB: "/tmp/runtime.sqlite" }),
+    () => startExpertHubRuntimeFromEnv({ EXPERT_GRPC_ADDRESS: "127.0.0.1:0" }),
     /INVALID_EXPERT_HUB_CONFIG/,
   );
 });

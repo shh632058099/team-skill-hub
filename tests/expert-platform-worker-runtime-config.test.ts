@@ -15,6 +15,7 @@ test("worker runtime config parses a cross-host Docker Codex deployment", () => 
     EXPERT_CODEX_AUTH_FILE: "/home/worker/.codex/auth.json",
     EXPERT_CODEX_CONFIG_FILE: "/etc/expert/ota-codex.toml",
     EXPERT_MODEL_ENV_NAMES: "OPENAI_API_KEY,HTTPS_PROXY,NO_PROXY",
+    EXPERT_MODEL_CREDENTIAL_REFS_JSON: '{"ai-router-default":"OPENAI_API_KEY"}',
     EXPERT_HEARTBEAT_MS: "10000",
     EXPERT_POLL_MS: "3000",
     EXPERT_TASK_TIMEOUT_MS: "90000",
@@ -30,6 +31,7 @@ test("worker runtime config parses a cross-host Docker Codex deployment", () => 
   assert.equal(config.codexAuthFilePath, "/home/worker/.codex/auth.json");
   assert.equal(config.codexConfigFilePath, "/etc/expert/ota-codex.toml");
   assert.deepEqual(config.modelEnvNames, ["OPENAI_API_KEY", "HTTPS_PROXY", "NO_PROXY"]);
+  assert.deepEqual(config.modelCredentialEnvNames, { "ai-router-default": "OPENAI_API_KEY" });
   assert.equal(config.heartbeatMs, 10_000);
   assert.equal(config.pollMs, 3_000);
   assert.equal(config.taskTimeoutMs, 90_000);
@@ -96,6 +98,70 @@ test("worker runtime config rejects a relative Codex provider config path", () =
         EXPERT_DOCKER_IMAGE: "worker",
         EXPERT_DOCKER_NETWORK: "expert-egress",
         EXPERT_CODEX_CONFIG_FILE: "provider.toml",
+      }),
+    /INVALID_WORKER_CONFIG/,
+  );
+});
+
+test("worker can use configured repository root without a pre-cloned legacy source path", () => {
+  const config = parseExpertWorkerConfig({
+    EXPERT_HUB_ADDRESS: "hub:7443",
+    EXPERT_WORKER_ID: "ota-worker-02",
+    EXPERT_WORKER_CREDENTIAL: "ewc_example",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_REPOSITORY_ROOT: "/srv/expert-repositories",
+    EXPERT_DOCKER_IMAGE: "worker",
+    EXPERT_DOCKER_NETWORK: "expert-egress",
+  });
+  assert.equal(config.sourcePath, "");
+  assert.equal(config.repositoryRoot, "/srv/expert-repositories/ota-worker-02");
+});
+
+test("worker runtime config rejects credential refs mapped to unapproved environment names", () => {
+  assert.throws(
+    () =>
+      parseExpertWorkerConfig({
+        EXPERT_HUB_ADDRESS: "hub:7443",
+        EXPERT_WORKER_ID: "w",
+        EXPERT_WORKER_CREDENTIAL: "credential",
+        EXPERT_CAPABILITY: "ota",
+        EXPERT_SOURCE_PATH: "/repo",
+        EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_DOCKER_NETWORK: "expert-egress",
+        EXPERT_MODEL_ENV_NAMES: "OPENAI_API_KEY",
+        EXPERT_MODEL_CREDENTIAL_REFS_JSON: '{"router":"HOME"}',
+      }),
+    /INVALID_WORKER_CONFIG/,
+  );
+});
+
+test("different worker IDs receive independent clone roots even with the same configured base", () => {
+  const base = {
+    EXPERT_HUB_ADDRESS: "hub:7443",
+    EXPERT_WORKER_CREDENTIAL: "ewc_example",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_REPOSITORY_ROOT: "/srv/expert-repositories",
+    EXPERT_DOCKER_IMAGE: "worker",
+    EXPERT_DOCKER_NETWORK: "expert-egress",
+  };
+  const workerA = parseExpertWorkerConfig({ ...base, EXPERT_WORKER_ID: "ota-worker-01" });
+  const workerB = parseExpertWorkerConfig({ ...base, EXPERT_WORKER_ID: "ota-worker-02" });
+  assert.equal(workerA.repositoryRoot, "/srv/expert-repositories/ota-worker-01");
+  assert.equal(workerB.repositoryRoot, "/srv/expert-repositories/ota-worker-02");
+  assert.notEqual(workerA.repositoryRoot, workerB.repositoryRoot);
+});
+
+test("worker ID must be a safe stable path component", () => {
+  assert.throws(
+    () =>
+      parseExpertWorkerConfig({
+        EXPERT_HUB_ADDRESS: "hub:7443",
+        EXPERT_WORKER_ID: "../shared",
+        EXPERT_WORKER_CREDENTIAL: "ewc_example",
+        EXPERT_CAPABILITY: "ota",
+        EXPERT_REPOSITORY_ROOT: "/srv/expert-repositories",
+        EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_DOCKER_NETWORK: "expert-egress",
       }),
     /INVALID_WORKER_CONFIG/,
   );

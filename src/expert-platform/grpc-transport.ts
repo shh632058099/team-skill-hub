@@ -16,6 +16,12 @@ interface ClaimTaskResponse {
   run_id?: string;
   fencing?: string;
   problem?: string;
+  repository_id?: string;
+  repository_url?: string;
+  repository_branch?: string;
+  repository_credential_ref?: string;
+  repository_git_proxy_url?: string;
+  model_config_json?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -26,12 +32,18 @@ interface LeaseRequest {
 interface CompleteTaskRequest {
   claim?: LeaseRequest;
   result: string;
+  repository_url?: string;
+  repository_branch?: string;
+  commit_sha?: string;
 }
 interface FailTaskRequest {
   claim?: LeaseRequest;
   reason: string;
 }
 interface Empty {}
+interface LeaseResponse {
+  cancellation_requested: boolean;
+}
 
 type UnaryHandler<Request, Response> = (
   call: grpc.ServerUnaryCall<Request, Response>,
@@ -47,7 +59,7 @@ interface WorkerServiceClient extends grpc.Client {
   RenewLease(
     request: LeaseRequest,
     metadata: grpc.Metadata,
-    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+    callback: (error: grpc.ServiceError | null, response: LeaseResponse) => void,
   ): grpc.ClientUnaryCall;
   CompleteTask(
     request: CompleteTaskRequest,
@@ -163,6 +175,7 @@ export async function startExpertWorkerGrpcServer(
       requireIdentityMatch(authenticatedId, call.request.worker_id);
       requireAuthorized(workers, call.request.worker_id, call.request.capability);
       if (!call.request.expert_id) throw new Error("INVALID_REQUEST");
+      let modelConfigJson = "";
       if (options.experts) {
         let definition;
         try {
@@ -174,6 +187,7 @@ export async function startExpertWorkerGrpcServer(
           throw error;
         }
         if (!definition.active) throw grpcError(grpc.status.PERMISSION_DENIED, "EXPERT_INACTIVE");
+        modelConfigJson = definition.modelConfig ? JSON.stringify(definition.modelConfig) : "";
         if (!definition.capabilities.includes(call.request.capability)) {
           throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_EXPERT_CAPABILITY_MISMATCH");
         }
@@ -182,13 +196,28 @@ export async function startExpertWorkerGrpcServer(
       callback(
         null,
         claim
-          ? {
-              has_task: true,
-              task_id: claim.taskId,
-              run_id: claim.runId,
-              fencing: String(claim.fencing),
-              problem: claim.problem,
-            }
+          ? (() => {
+              const repository =
+                claim.repositoryId && options.experts
+                  ? options.experts
+                      .listDeployments()
+                      .flatMap((deployment) => deployment.repositories ?? [])
+                      .find((item) => item.id === claim.repositoryId)
+                  : undefined;
+              return {
+                has_task: true,
+                task_id: claim.taskId,
+                run_id: claim.runId,
+                fencing: String(claim.fencing),
+                problem: claim.problem,
+                repository_id: claim.repositoryId ?? "",
+                repository_url: repository?.url ?? "",
+                repository_branch: repository?.branch ?? "",
+                repository_credential_ref: repository?.credentialRef ?? "",
+                repository_git_proxy_url: repository?.gitProxyUrl ?? "",
+                model_config_json: modelConfigJson,
+              };
+            })()
           : { has_task: false },
       );
     } catch (error) {
@@ -208,8 +237,8 @@ export async function startExpertWorkerGrpcServer(
       const claim = toClaim(call.request);
       const worker = workers.get(claim.workerId);
       if (worker.status !== "active") throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_FORBIDDEN");
-      tasks.renew(claim);
-      callback(null, {});
+      const cancellationRequested = tasks.renew(claim);
+      callback(null, { cancellation_requested: cancellationRequested });
     } catch (error) {
       callback(
         error instanceof Error && "code" in error
@@ -228,7 +257,12 @@ export async function startExpertWorkerGrpcServer(
       const claim = toClaim(call.request.claim);
       const worker = workers.get(claim.workerId);
       if (worker.status !== "active") throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_FORBIDDEN");
-      tasks.complete(claim, call.request.result);
+      const source = {
+        ...(call.request.repository_url ? { repositoryUrl: call.request.repository_url } : {}),
+        ...(call.request.repository_branch ? { repositoryBranch: call.request.repository_branch } : {}),
+        ...(call.request.commit_sha ? { commitSha: call.request.commit_sha } : {}),
+      };
+      tasks.complete(claim, call.request.result, Date.now(), Object.keys(source).length ? source : undefined);
       callback(null, {});
     } catch (error) {
       callback(
@@ -304,6 +338,32 @@ function unary<Response>(
   });
 }
 
+function parseClaimModelConfig(value: string) {
+  try {
+    const config = JSON.parse(value) as {
+      providerId?: unknown;
+      model?: unknown;
+      baseUrl?: unknown;
+      wireApi?: unknown;
+      credentialRef?: unknown;
+      allowedEnvNames?: unknown;
+    };
+    if (
+      typeof config.providerId !== "string" ||
+      typeof config.model !== "string" ||
+      typeof config.baseUrl !== "string" ||
+      config.wireApi !== "responses" ||
+      !Array.isArray(config.allowedEnvNames) ||
+      config.allowedEnvNames.some((name) => typeof name !== "string")
+    )
+      throw new Error();
+    if (config.credentialRef !== undefined && typeof config.credentialRef !== "string") throw new Error();
+    return config as import("./expert-store.js").ExpertModelConfig;
+  } catch {
+    throw new Error("INVALID_CLAIM_MODEL_CONFIG");
+  }
+}
+
 export class ExpertWorkerClient {
   private readonly client: WorkerServiceClient;
   private readonly metadata: grpc.Metadata;
@@ -337,16 +397,36 @@ export class ExpertWorkerClient {
       runId: response.run_id,
       fencing,
       problem: response.problem,
+      repositoryId: response.repository_id || null,
+      ...(response.repository_url ? { repositoryUrl: response.repository_url } : {}),
+      ...(response.repository_branch ? { repositoryBranch: response.repository_branch } : {}),
+      ...(response.repository_credential_ref ? { repositoryCredentialRef: response.repository_credential_ref } : {}),
+      ...(response.repository_git_proxy_url ? { repositoryGitProxyUrl: response.repository_git_proxy_url } : {}),
+      ...(response.model_config_json ? { modelConfig: parseClaimModelConfig(response.model_config_json) } : {}),
     };
   }
 
-  renewLease(claim: Claim): Promise<Empty> {
+  renewLease(claim: Claim): Promise<LeaseResponse> {
     return unary((callback) => this.client.RenewLease(this.claimRequest(claim), this.metadata, callback));
   }
 
-  completeTask(claim: Claim, result: string): Promise<Empty> {
+  completeTask(
+    claim: Claim,
+    result: string,
+    source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string },
+  ): Promise<Empty> {
     return unary((callback) =>
-      this.client.CompleteTask({ claim: this.claimRequest(claim), result }, this.metadata, callback),
+      this.client.CompleteTask(
+        {
+          claim: this.claimRequest(claim),
+          result,
+          repository_url: source?.repositoryUrl ?? "",
+          repository_branch: source?.repositoryBranch ?? "",
+          commit_sha: source?.commitSha ?? "",
+        },
+        this.metadata,
+        callback,
+      ),
     );
   }
 

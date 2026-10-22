@@ -24,6 +24,7 @@ test("dispatch auto-routes and persists routing metadata on task", () => {
       id: "ota-default",
       expertId: "ota",
       repositoryIds: ["ota-repo"],
+      repositories: [],
       principals: ["alice"],
       runtimeProfile: "codex-readonly",
       active: true,
@@ -66,6 +67,7 @@ test("dispatch preserves strict explicit selection and repository authorization"
       id: "ota-default",
       expertId: "ota",
       repositoryIds: ["ota-repo"],
+      repositories: [],
       principals: ["alice"],
       runtimeProfile: "codex-readonly",
       active: true,
@@ -94,6 +96,152 @@ test("dispatch preserves strict explicit selection and repository authorization"
       repositoryId: "ota-repo",
     });
     assert.equal(task.selectionMode, "explicit");
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch infers the only configured URL repository when caller omits an internal repository ID", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-url-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({ id: "ota", displayName: "OTA Expert", capabilities: ["ota"], keywords: [], active: true });
+    experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["repo-0123456789abcdefabcd"],
+      repositories: [{ id: "repo-0123456789abcdefabcd", url: "https://github.com/example/ota.git", branch: "main" }],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    const task = dispatch.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "url-auto-1",
+      problem: "investigate ota",
+    });
+    assert.equal(task.expertId, "ota");
+    assert.equal(task.repositoryId, "repo-0123456789abcdefabcd");
+    assert.equal(task.selectionMode, "auto");
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch does not combine principals and repositories across deployments", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-acl-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({
+      id: "review",
+      displayName: "Review Expert",
+      capabilities: ["review"],
+      keywords: ["code"],
+      active: true,
+    });
+    experts.putDeployment({
+      id: "alice-a",
+      expertId: "review",
+      repositoryIds: ["repo-a"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    experts.putDeployment({
+      id: "bob-b",
+      expertId: "review",
+      repositoryIds: ["repo-b"],
+      repositories: [],
+      principals: ["bob"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    assert.throws(
+      () =>
+        dispatch.submit({
+          principalId: "alice",
+          scope: "org",
+          idempotencyKey: "acl-cross-product",
+          problem: "review code",
+          expertId: "review",
+          repositoryId: "repo-b",
+        }),
+      /REPOSITORY_FORBIDDEN/,
+    );
+    const allowed = dispatch.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "acl-allowed",
+      problem: "review code",
+      expertId: "review",
+      repositoryId: "repo-a",
+    });
+    assert.equal(allowed.repositoryId, "repo-a");
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch requires an explicit repository when the selected expert has multiple URL repositories", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-multi-repo-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA Expert",
+      capabilities: ["ota"],
+      keywords: ["upgrade"],
+      active: true,
+    });
+    experts.putDeployment({
+      id: "ota-multi",
+      expertId: "ota",
+      repositoryIds: ["repo-aaaaaaaaaaaaaaaaaaaa", "repo-bbbbbbbbbbbbbbbbbbbb"],
+      repositories: [
+        { id: "repo-aaaaaaaaaaaaaaaaaaaa", url: "https://github.com/example/ota-core.git", branch: "main" },
+        { id: "repo-bbbbbbbbbbbbbbbbbbbb", url: "https://github.com/example/ota-tests.git", branch: "main" },
+      ],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    assert.throws(
+      () =>
+        dispatch.submit({
+          principalId: "alice",
+          scope: "org",
+          idempotencyKey: "multi-repo-missing",
+          problem: "investigate ota upgrade failure",
+          expertId: "ota",
+        }),
+      /REPOSITORY_REQUIRED/,
+    );
+    const explicit = dispatch.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "multi-repo-explicit",
+      problem: "investigate ota upgrade failure",
+      expertId: "ota",
+      repositoryId: "repo-bbbbbbbbbbbbbbbbbbbb",
+    });
+    assert.equal(explicit.repositoryId, "repo-bbbbbbbbbbbbbbbbbbbb");
     experts.close();
     tasks.close();
   } finally {

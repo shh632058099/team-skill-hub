@@ -85,3 +85,18 @@ test("Docker Codex executor mounts a per-worker provider config and API key env"
   assert.ok(args.includes("AWS_BEARER_TOKEN_BEDROCK"));
   assert.ok(!args.some((arg) => arg.includes("/root/.codex/config.toml")));
 });
+
+test("Docker executor rejects unsafe per-task container names", () => {
+  assert.throws(
+    () =>
+      buildCodexDockerArgs({
+        image: "expert-worker",
+        containerName: "bad name; rm -rf /",
+        sourcePath: "/work/repo",
+        network: "expert-egress",
+        envNames: [],
+        codexArgs: ["exec", "task"],
+      }),
+    /INVALID_CONTAINER_NAME/,
+  );
+});

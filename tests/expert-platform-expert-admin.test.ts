@@ -20,6 +20,7 @@ test("expert admin can define and deploy an expert", () => {
       id: "ota-default",
       expertId: "ota",
       repositoryIds: ["ota-repo"],
+      repositories: [],
       principals: ["alice", "bob"],
       runtimeProfile: "codex-readonly",
       active: true,

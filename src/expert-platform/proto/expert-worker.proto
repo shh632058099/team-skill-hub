@@ -4,7 +4,7 @@ package expert.v1;
 
 service ExpertWorkerService {
   rpc ClaimTask(ClaimTaskRequest) returns (ClaimTaskResponse);
-  rpc RenewLease(LeaseRequest) returns (Empty);
+  rpc RenewLease(LeaseRequest) returns (LeaseResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
 }
@@ -21,6 +21,12 @@ message ClaimTaskResponse {
   string run_id = 3;
   uint64 fencing = 4;
   string problem = 5;
+  string repository_id = 6;
+  string repository_url = 7;
+  string repository_branch = 8;
+  string repository_credential_ref = 9;
+  string repository_git_proxy_url = 10;
+  string model_config_json = 11;
 }
 
 message LeaseRequest {
@@ -30,9 +36,16 @@ message LeaseRequest {
   uint64 fencing = 4;
 }
 
+message LeaseResponse {
+  bool cancellation_requested = 1;
+}
+
 message CompleteTaskRequest {
   LeaseRequest claim = 1;
   string result = 2;
+  string repository_url = 3;
+  string repository_branch = 4;
+  string commit_sha = 5;
 }
 
 message FailTaskRequest {

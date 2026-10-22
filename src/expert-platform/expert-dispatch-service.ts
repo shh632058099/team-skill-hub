@@ -8,7 +8,16 @@ export interface DispatchInput {
   idempotencyKey: string;
   problem: string;
   expertId?: string;
+  selectionMode?: "explicit" | "auto";
   repositoryId?: string;
+}
+
+export interface AvailableExpert {
+  expertId: string;
+  displayName: string;
+  capabilities: string[];
+  keywords: string[];
+  repositoryIds: string[];
 }
 
 export class ExpertDispatchService {
@@ -17,44 +26,75 @@ export class ExpertDispatchService {
     private readonly tasks: ExpertTaskStore,
   ) {}
 
-  submit(input: DispatchInput): TaskRecord {
-    const deployments = this.experts.listDeployments();
-    const merged = new Map<
-      string,
-      {
-        id: string;
-        capabilities: string[];
-        keywords: string[];
-        repositories: string[];
-        principals: string[];
-        active: boolean;
-      }
-    >();
+  listAvailable(principalId: string): AvailableExpert[] {
+    if (!principalId.trim()) throw new Error("INVALID_REQUEST");
+    const available = new Map<string, AvailableExpert>();
 
-    for (const deployment of deployments) {
-      if (!deployment.active) continue;
+    for (const deployment of this.experts.listDeployments()) {
+      if (!deployment.active || !deployment.principals.includes(principalId)) continue;
       const definition = this.experts.getDefinition(deployment.expertId);
       if (!definition.active) continue;
-      const current = merged.get(definition.id) ?? {
-        id: definition.id,
+
+      const current = available.get(definition.id) ?? {
+        expertId: definition.id,
+        displayName: definition.displayName,
         capabilities: definition.capabilities,
         keywords: definition.keywords,
-        repositories: [],
-        principals: [],
-        active: definition.active,
+        repositoryIds: [],
       };
-      current.repositories = [...new Set([...current.repositories, ...deployment.repositoryIds])];
-      current.principals = [...new Set([...current.principals, ...deployment.principals])];
-      current.active = true;
-      merged.set(definition.id, current);
+      current.repositoryIds = [...new Set([...current.repositoryIds, ...deployment.repositoryIds])].sort();
+      available.set(definition.id, current);
     }
 
-    const route = routeExpert([...merged.values()], {
+    return [...available.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }
+
+  submit(input: DispatchInput): TaskRecord {
+    const deployments = this.experts.listDeployments();
+    const candidates = deployments.flatMap((deployment) => {
+      if (!deployment.active) return [];
+      const definition = this.experts.getDefinition(deployment.expertId);
+      if (!definition.active) return [];
+      // Keep each Deployment as its own authorization tuple. Do not merge principals
+      // and repositories independently, which would grant their cross product.
+      return [
+        {
+          id: definition.id,
+          capabilities: definition.capabilities,
+          keywords: definition.keywords,
+          repositories: deployment.repositoryIds,
+          principals: deployment.principals,
+          active: true,
+        },
+      ];
+    });
+
+    const route = routeExpert(candidates, {
       principal: input.principalId,
       problem: input.problem,
       expertId: input.expertId,
+      selectionMode: input.selectionMode,
       repositoryId: input.repositoryId,
     });
+
+    const availableRepositoryIds = [
+      ...new Set(
+        deployments
+          .filter(
+            (deployment) =>
+              deployment.active &&
+              deployment.expertId === route.expertId &&
+              deployment.principals.includes(input.principalId) &&
+              (!input.repositoryId || deployment.repositoryIds.includes(input.repositoryId)),
+          )
+          .flatMap((deployment) => deployment.repositories ?? [])
+          .map((repository) => repository.id),
+      ),
+    ].sort();
+    if (!input.repositoryId && availableRepositoryIds.length > 1) {
+      throw new Error("REPOSITORY_REQUIRED");
+    }
+    const configuredRepositoryId = input.repositoryId ?? availableRepositoryIds[0];
 
     return this.tasks.submit({
       principalId: input.principalId,
@@ -62,7 +102,7 @@ export class ExpertDispatchService {
       idempotencyKey: input.idempotencyKey,
       problem: input.problem,
       expertId: route.expertId,
-      repositoryId: input.repositoryId,
+      repositoryId: configuredRepositoryId,
       selectionMode: route.selectionMode,
       schemaVersion: 1,
     });

@@ -1010,18 +1010,29 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
 
     if (expertTaskStore) {
       registerTool(
+        "list_available_experts",
+        {
+          description:
+            "List active Expert Platform experts and repositories authorized for the current principal. Call this ONLY when the user explicitly names an Expert and you need to map its display name to expertId, or when the user asks to list available experts. For ordinary technical analysis requests where the user did not name an Expert, do NOT call this tool: call submit_expert_task directly and omit expertId so the Hub performs automatic routing. This catalog is separate from Skill Hub skills and agents returned by discover, resolve_agent, or list_agents. Map an explicitly named Expert to the returned expertId, and use only repositoryIds returned here; never pass a Skill Hub agent name or Skill Hub publishing repository ID as an Expert Platform ID.",
+          inputSchema: z.object({}),
+        },
+        async () => toolResult({ experts: expertDispatchService!.listAvailable(principal.id) }),
+      );
+
+      registerTool(
         "submit_expert_task",
         {
           description:
-            "Queue a read-only expert analysis task for an authorized Worker. This experimental endpoint does not itself launch an Agent. Provide a stable idempotency key when retrying.",
+            'Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode, then check status with backoff and read the report only after status=succeeded. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request.',
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
             expertId: z.string().trim().min(1).max(200).optional(),
+            selectionMode: z.enum(["auto", "explicit"]).optional(),
             repositoryId: z.string().trim().min(1).max(200).optional(),
           }),
         },
-        async ({ problem, idempotencyKey, expertId, repositoryId }) => {
+        async ({ problem, idempotencyKey, expertId, selectionMode, repositoryId }) => {
           if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
           return toolResult({
             ...expertDispatchService.submit({
@@ -1030,6 +1041,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               idempotencyKey,
               problem,
               expertId,
+              selectionMode,
               repositoryId,
             }),
           });
@@ -1040,7 +1052,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "get_expert_task_status",
         {
           description:
-            "Check a queued or running Expert task using its task ID. Authorization is checked on every request.",
+            "Check the status of an Expert Platform task after submit_expert_task or when the user asks to resume a task. Use its taskId; authorization is checked on every request. If status is queued or running, wait and retry with backoff rather than polling rapidly. If status is succeeded, call get_expert_task_result; if failed or cancelled, report that state accurately.",
           inputSchema: z.object({ taskId: z.string().uuid() }),
         },
         async ({ taskId }) => toolResult({ ...expertTaskStore.get(taskId, principal.id, principal.tenantId) }),
@@ -1049,7 +1061,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       registerTool(
         "get_expert_task_result",
         {
-          description: "Read the persisted result of an Expert task; queued tasks do not yet have a report.",
+          description:
+            "Retrieve the persisted report and evidence for an Expert Platform task only after get_expert_task_status reports succeeded. Include the actual taskId and evidence in the answer, and distinguish verified findings from hypotheses. Queued or running tasks do not yet have a report.",
           inputSchema: z.object({ taskId: z.string().uuid() }),
         },
         async ({ taskId }) => {
@@ -1062,12 +1075,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       registerTool(
         "cancel_expert_task",
         {
-          description: "Cancel a queued Expert task. Cancellation of running tasks is not yet supported.",
+          description:
+            "Cancel a queued Expert Platform task immediately, or request cancellation of a running task. For a running task this signals its owning Worker; the task becomes cancelled after the Worker stops its execution. Check status to confirm completion of cancellation.",
           inputSchema: z.object({ taskId: z.string().uuid() }),
         },
         async ({ taskId }) => {
           const task = expertTaskStore.get(taskId, principal.id, principal.tenantId);
-          if (task.status === "running") throw new Error("CANCEL_UNAVAILABLE");
           return toolResult({ ...expertTaskStore.cancel(taskId, principal.id, principal.tenantId) });
         },
       );

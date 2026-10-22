@@ -1,14 +1,47 @@
 import { spawn } from "node:child_process";
 import { parseCodexJsonlResult } from "./codex-runtime.js";
 
+function sanitizedStderrHint(stderr: string): string {
+  if (/install: cannot open .* for reading: Permission denied/i.test(stderr))
+    return "Codex startup cannot read a mounted file";
+  if (/bwrap/i.test(stderr)) return "Codex sandbox initialization failed";
+  if (/mount source path|mounting.*permission denied|permission denied.*mount/i.test(stderr))
+    return "Docker bind mount permission failure";
+  if (/Could not resolve proxy|proxy.*(?:refused|unreachable|timed out)/i.test(stderr))
+    return "proxy connection failed";
+  if (/unauthorized|authentication required|invalid api key/i.test(stderr)) return "authentication rejected";
+  if (/permission denied/i.test(stderr)) return "permission denied";
+  if (/network is unreachable|could not resolve host|connection refused/i.test(stderr))
+    return "network connection failed";
+  return stderr.trim() ? "process wrote stderr; details omitted" : "";
+}
+
+function classifyProcessFailure(stderr: string): string {
+  if (/bwrap/i.test(stderr) || /No permissions to create a new namespace/i.test(stderr)) return "SANDBOX_INIT_FAILED";
+  if (/Could not resolve proxy|proxy.*(?:refused|unreachable|timed out)|ECONNREFUSED.*proxy/i.test(stderr))
+    return "PROXY_CONNECTION_FAILED";
+  if (/pull access denied|manifest unknown|image not found/i.test(stderr)) return "DOCKER_IMAGE_UNAVAILABLE";
+  if (/unauthorized|authentication required|invalid api key/i.test(stderr)) return "AUTHENTICATION_FAILED";
+  if (/no space left on device/i.test(stderr)) return "DISK_FULL";
+  if (/mount source path|mounting.*permission denied|permission denied.*mount/i.test(stderr))
+    return "DOCKER_MOUNT_PERMISSION";
+  if (/permission denied/i.test(stderr)) return "PERMISSION_DENIED";
+  if (
+    /network is unreachable|could not resolve host|connection refused|temporary failure in name resolution/i.test(
+      stderr,
+    )
+  )
+    return "NETWORK_CONNECTION_FAILED";
+  return "PROCESS_EXIT_NONZERO";
+}
 export interface CodexProcessOptions {
   executable: string;
   args: readonly string[];
   timeoutMs: number;
   maxOutputBytes?: number;
   signal?: AbortSignal;
+  onAbort?: () => Promise<void>;
 }
-
 /** Low-level subprocess transport; caller must enforce container isolation. */
 export async function runCodexProcess(options: CodexProcessOptions): Promise<string> {
   const limit = options.maxOutputBytes ?? 4 * 1024 * 1024;
@@ -22,8 +55,10 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
       detached: process.platform !== "win32",
     });
     let settled = false;
+    let terminating = false;
     let output = "";
     let bytes = 0;
+    let stderrOutput = "";
     const kill = () => {
       if (child.pid && process.platform !== "win32") {
         try {
@@ -47,14 +82,31 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
         }
       }
     };
-    const onAbort = () => {
-      kill();
-      finish(new Error("CODEX_CANCELLED"));
+    const terminate = (reason: "CODEX_CANCELLED" | "CODEX_TIMEOUT") => {
+      if (settled || terminating) return;
+      terminating = true;
+      void (async () => {
+        if (options.onAbort) {
+          let timeout: NodeJS.Timeout | undefined;
+          try {
+            await Promise.race([
+              options.onAbort(),
+              new Promise<void>((resolve) => {
+                timeout = setTimeout(resolve, 5_000);
+              }),
+            ]);
+          } catch {
+            /* process-group termination below remains the fallback */
+          } finally {
+            if (timeout) clearTimeout(timeout);
+          }
+        }
+        kill();
+        finish(new Error(reason));
+      })();
     };
-    const timer = setTimeout(() => {
-      kill();
-      finish(new Error("CODEX_TIMEOUT"));
-    }, options.timeoutMs);
+    const onAbort = () => terminate("CODEX_CANCELLED");
+    const timer = setTimeout(() => terminate("CODEX_TIMEOUT"), options.timeoutMs);
     options.signal?.addEventListener("abort", onAbort, { once: true });
     const onChunk = (chunk: Buffer, record: boolean) => {
       bytes += chunk.length;
@@ -64,10 +116,24 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
         return;
       }
       if (record) output += chunk.toString("utf8");
+      else if (stderrOutput.length < 4096) stderrOutput += chunk.toString("utf8").slice(0, 4096 - stderrOutput.length);
     };
     child.stdout.on("data", (chunk: Buffer) => onChunk(chunk, true));
     child.stderr.on("data", (chunk: Buffer) => onChunk(chunk, false));
     child.once("error", () => finish(new Error("CODEX_PROCESS_FAILED")));
-    child.once("close", (code) => finish(code === 0 ? undefined : new Error("CODEX_PROCESS_FAILED")));
+    child.once("close", (code) => {
+      if (terminating) return;
+      if (code !== 0) {
+        console.error(
+          JSON.stringify({
+            event: "expert_worker.codex_process_failed",
+            exitCode: code,
+            errorCode: classifyProcessFailure(stderrOutput),
+            stderrHint: sanitizedStderrHint(stderrOutput),
+          }),
+        );
+      }
+      finish(code === 0 ? undefined : new Error("CODEX_PROCESS_FAILED"));
+    });
   });
 }

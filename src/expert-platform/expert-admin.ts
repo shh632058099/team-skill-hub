@@ -42,6 +42,7 @@ export function runExpertAdmin(dbPath: string, args: readonly string[]): unknown
           id,
           expertId,
           repositoryIds,
+          repositories: [],
           principals,
           runtimeProfile,
           active: true,

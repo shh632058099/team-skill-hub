@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { ExpertModelConfig } from "./expert-store.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type Submission = {
@@ -22,8 +23,26 @@ export type TaskRecord = {
   repositoryId: string | null;
   selectionMode: "explicit" | "auto";
   schemaVersion: number;
+  repositoryUrl?: string | null;
+  repositoryBranch?: string | null;
+  commitSha?: string | null;
+  cancellationRequested?: boolean;
 };
-export type Claim = { taskId: string; runId: string; workerId: string; fencing: number; problem: string };
+export type TaskSourceMetadata = { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
+
+export type Claim = {
+  taskId: string;
+  runId: string;
+  workerId: string;
+  fencing: number;
+  problem: string;
+  repositoryId?: string | null;
+  repositoryUrl?: string;
+  repositoryBranch?: string;
+  repositoryCredentialRef?: string;
+  repositoryGitProxyUrl?: string;
+  modelConfig?: ExpertModelConfig;
+};
 type Row = Record<string, unknown>;
 
 export class ExpertTaskStore {
@@ -45,6 +64,10 @@ export class ExpertTaskStore {
         repository_id TEXT,
         selection_mode TEXT NOT NULL DEFAULT 'explicit' CHECK (selection_mode IN ('explicit','auto')),
         schema_version INTEGER NOT NULL DEFAULT 1,
+        repository_url TEXT,
+        repository_branch TEXT,
+        commit_sha TEXT,
+        cancellation_requested INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed','cancelled')),
         result TEXT,
         run_id TEXT,
@@ -75,6 +98,10 @@ export class ExpertTaskStore {
       "TEXT NOT NULL DEFAULT 'explicit' CHECK (selection_mode IN ('explicit','auto'))",
     );
     this.ensureTaskColumn("schema_version", "INTEGER NOT NULL DEFAULT 1");
+    this.ensureTaskColumn("repository_url", "TEXT");
+    this.ensureTaskColumn("repository_branch", "TEXT");
+    this.ensureTaskColumn("commit_sha", "TEXT");
+    this.ensureTaskColumn("cancellation_requested", "INTEGER NOT NULL DEFAULT 0");
   }
 
   submit(input: Submission): TaskRecord {
@@ -167,6 +194,15 @@ export class ExpertTaskStore {
         return null;
       }
       const taskId = String(row.task_id);
+      // A task may be reclaimed only after its lease expires. Close the previous
+      // run in the same transaction so run history cannot leave it looking active.
+      if (row.status === "running" && row.run_id != null) {
+        const expiredRunId = String(row.run_id);
+        this.db
+          .prepare("UPDATE expert_runs SET status='expired' WHERE run_id=? AND status='running'")
+          .run(expiredRunId);
+        this.event(taskId, expiredRunId, "lease_expired");
+      }
       const runId = randomUUID();
       const fencing = Number(row.fencing) + 1;
       this.db
@@ -179,21 +215,39 @@ export class ExpertTaskStore {
         .run(runId, taskId, workerId, fencing);
       this.event(taskId, runId, "running");
       this.db.exec("COMMIT");
-      return { taskId, runId, workerId, fencing, problem: String(row.problem) };
+      return {
+        taskId,
+        runId,
+        workerId,
+        fencing,
+        problem: String(row.problem),
+        repositoryId: row.repository_id == null ? null : String(row.repository_id),
+      };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
   }
 
-  complete(claim: Claim, result: string, now = Date.now()): void {
+  complete(claim: Claim, result: string, now = Date.now(), sourceMetadata?: TaskSourceMetadata): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const source = sourceMetadata ?? parseSourceMetadata(result) ?? undefined;
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='succeeded',result=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND lease_until>=?",
+          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
         )
-        .run(result, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
+        .run(
+          result,
+          source?.repositoryUrl ?? null,
+          source?.repositoryBranch ?? null,
+          source?.commitSha ?? null,
+          claim.taskId,
+          claim.runId,
+          claim.workerId,
+          claim.fencing,
+          now,
+        );
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
       this.db.prepare("UPDATE expert_runs SET status='succeeded' WHERE run_id=?").run(claim.runId);
       this.event(claim.taskId, claim.runId, "succeeded");
@@ -204,7 +258,7 @@ export class ExpertTaskStore {
     }
   }
 
-  renew(claim: Claim, now = Date.now(), leaseMs = 30_000): void {
+  renew(claim: Claim, now = Date.now(), leaseMs = 30_000): boolean {
     if (!Number.isFinite(now) || !Number.isFinite(leaseMs) || leaseMs <= 0) {
       throw new Error("INVALID_REQUEST");
     }
@@ -214,20 +268,28 @@ export class ExpertTaskStore {
       )
       .run(now + leaseMs, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
     if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
+    return this.cancellationRequested(claim);
   }
 
   fail(claim: Claim, reason: string, now = Date.now()): void {
     if (!reason.trim()) throw new Error("INVALID_REQUEST");
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const current = this.db
+        .prepare(
+          "SELECT cancellation_requested FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running'",
+        )
+        .get(claim.taskId, claim.runId, claim.workerId, claim.fencing) as Row | undefined;
+      const terminalStatus =
+        reason === "TASK_CANCELLED" && Number(current?.cancellation_requested ?? 0) === 1 ? "cancelled" : "failed";
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='failed',result=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND lease_until>=?",
+          "UPDATE expert_tasks SET status=?,result=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND lease_until>=?",
         )
-        .run(reason, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
+        .run(terminalStatus, reason, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
-      this.db.prepare("UPDATE expert_runs SET status='failed' WHERE run_id=?").run(claim.runId);
-      this.event(claim.taskId, claim.runId, "failed");
+      this.db.prepare("UPDATE expert_runs SET status=? WHERE run_id=?").run(terminalStatus, claim.runId);
+      this.event(claim.taskId, claim.runId, terminalStatus);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -244,13 +306,40 @@ export class ExpertTaskStore {
   }
 
   cancel(taskId: string, principalId: string, scope: string): TaskRecord {
-    const changed = this.db
-      .prepare(
-        "UPDATE expert_tasks SET status='cancelled' WHERE task_id=? AND principal_id=? AND scope=? AND status='queued'",
-      )
-      .run(taskId, principalId, scope);
-    if (changed.changes === 1) this.event(taskId, null, "cancelled");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT status,run_id FROM expert_tasks WHERE task_id=? AND principal_id=? AND scope=?")
+        .get(taskId, principalId, scope) as Row | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND_OR_FORBIDDEN");
+      if (row.status === "queued") {
+        this.db.prepare("UPDATE expert_tasks SET status='cancelled' WHERE task_id=? AND status='queued'").run(taskId);
+        this.event(taskId, null, "cancelled");
+      } else if (row.status === "running") {
+        const changed = this.db
+          .prepare(
+            "UPDATE expert_tasks SET cancellation_requested=1 WHERE task_id=? AND status='running' AND cancellation_requested=0",
+          )
+          .run(taskId);
+        if (changed.changes === 1)
+          this.event(taskId, row.run_id == null ? null : String(row.run_id), "cancellation_requested");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return this.get(taskId, principalId, scope);
+  }
+
+  cancellationRequested(claim: Claim): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT cancellation_requested FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running'",
+      )
+      .get(claim.taskId, claim.runId, claim.workerId, claim.fencing) as Row | undefined;
+    if (!row) throw new Error("STALE_ATTEMPT");
+    return Number(row.cancellation_requested) === 1;
   }
 
   close(): void {
@@ -278,6 +367,20 @@ export class ExpertTaskStore {
       repositoryId: row.repository_id == null ? null : String(row.repository_id),
       selectionMode: (row.selection_mode ?? "explicit") as "explicit" | "auto",
       schemaVersion: Number(row.schema_version ?? 1),
+      repositoryUrl: row.repository_url == null ? null : String(row.repository_url),
+      repositoryBranch: row.repository_branch == null ? null : String(row.repository_branch),
+      commitSha: row.commit_sha == null ? null : String(row.commit_sha),
+      cancellationRequested: Number(row.cancellation_requested ?? 0) === 1,
     };
   }
+}
+
+function parseSourceMetadata(
+  result: string,
+): { repositoryUrl: string; repositoryBranch: string; commitSha: string } | null {
+  const match = result.match(
+    /^Source repository: (https?:\/\/[^\s]+)\r?\nBranch: ([^\r\n]+)\r?\nCommit: ([a-f0-9]{40})\r?\n/m,
+  );
+  if (!match) return null;
+  return { repositoryUrl: match[1]!, repositoryBranch: match[2]!, commitSha: match[3]! };
 }

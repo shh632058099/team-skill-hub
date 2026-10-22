@@ -35,6 +35,7 @@ function isAllowedEnvName(name: string): boolean {
 
 export interface CodexDockerConfig {
   image: string;
+  containerName?: string;
   sourcePath: string;
   network: string;
   seccompProfile?: "default" | "unconfined";
@@ -49,6 +50,9 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     throw new Error("INVALID_SOURCE_PATH");
   }
   if (!config.image || config.image.startsWith("-")) throw new Error("INVALID_IMAGE");
+  if (config.containerName !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(config.containerName)) {
+    throw new Error("INVALID_CONTAINER_NAME");
+  }
   if (!config.network || config.network === "host" || config.network === "none") {
     throw new Error("INVALID_NETWORK");
   }
@@ -75,6 +79,7 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
   const args = [
     "run",
     "--rm",
+    ...(config.containerName ? ["--name", config.containerName] : []),
     "--init",
     "--network",
     config.network,

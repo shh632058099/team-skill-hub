@@ -11,11 +11,20 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+      - "127.0.0.1:7443:7443"
     environment:
       HOST: 0.0.0.0
       PORT: 8080
       CONFIG_PATH: /app/config/repositories.yaml
       DATA_DIR: /var/lib/team-skill-hub
+      EXPERT_RUNTIME_DB: ${EXPERT_RUNTIME_DB:-/var/lib/team-skill-hub/expert-runtime.sqlite}
+      EXPERT_GRPC_ADDRESS: ${EXPERT_GRPC_ADDRESS:-0.0.0.0:7443}
+      HTTP_PROXY: ${SKILL_HUB_GIT_PROXY:-}
+      HTTPS_PROXY: ${SKILL_HUB_GIT_PROXY:-}
+      http_proxy: ${SKILL_HUB_GIT_PROXY:-}
+      https_proxy: ${SKILL_HUB_GIT_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,team-skill-hub
+      no_proxy: localhost,127.0.0.1,team-skill-hub
       OBSERVABILITY_WRITE_BACKEND: ${OBSERVABILITY_WRITE_BACKEND:-sqlite}
       OBSERVABILITY_READ_BACKEND: ${OBSERVABILITY_READ_BACKEND:-sqlite}
       OBSERVABILITY_SQLITE_PATH: ${OBSERVABILITY_SQLITE_PATH:-/var/lib/team-skill-hub/db/team-skill-hub.sqlite3}

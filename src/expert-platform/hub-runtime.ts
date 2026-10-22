@@ -10,8 +10,10 @@ export async function startExpertHubRuntimeFromEnv(
 ): Promise<{ address: string; close(): Promise<void> } | null> {
   const runtimeDb = env.EXPERT_RUNTIME_DB?.trim();
   const grpcAddress = env.EXPERT_GRPC_ADDRESS?.trim();
-  if (!runtimeDb && !grpcAddress) return null;
-  if (!runtimeDb || !grpcAddress) throw new Error("INVALID_EXPERT_HUB_CONFIG");
+  // Expert DB is also used by MCP/Admin without starting the Worker gRPC listener.
+  // gRPC remains explicitly opt-in; if requested, it requires the shared runtime DB.
+  if (!grpcAddress) return null;
+  if (!runtimeDb) throw new Error("INVALID_EXPERT_HUB_CONFIG");
 
   const registryDb =
     env.EXPERT_WORKER_REGISTRY_DB?.trim() || path.join(path.dirname(runtimeDb), "expert-workers.sqlite");

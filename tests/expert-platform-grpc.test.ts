@@ -29,8 +29,16 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     assert.equal(claim?.problem, "investigate OTA failure");
     assert.equal(claim?.taskId, submitted.taskId);
     await client.renewLease(claim!);
-    await client.completeTask(claim!, "verified root cause");
-    assert.equal(tasks.get(submitted.taskId, "alice", "org").result, "verified root cause");
+    await client.completeTask(claim!, "verified root cause", {
+      repositoryUrl: "https://github.com/example/ota.git",
+      repositoryBranch: "release",
+      commitSha: "abcdef0123456789abcdef0123456789abcdef01",
+    });
+    const completed = tasks.get(submitted.taskId, "alice", "org");
+    assert.equal(completed.result, "verified root cause");
+    assert.equal(completed.repositoryUrl, "https://github.com/example/ota.git");
+    assert.equal(completed.repositoryBranch, "release");
+    assert.equal(completed.commitSha, "abcdef0123456789abcdef0123456789abcdef01");
 
     client.close();
     await server.close();
