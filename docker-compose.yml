@@ -19,6 +19,9 @@ services:
       DATA_DIR: /var/lib/team-skill-hub
       EXPERT_RUNTIME_DB: ${EXPERT_RUNTIME_DB:-/var/lib/team-skill-hub/expert-runtime.sqlite}
       EXPERT_GRPC_ADDRESS: ${EXPERT_GRPC_ADDRESS:-0.0.0.0:7443}
+      EXPERT_WORKER_BOOTSTRAP_TOKEN: ${EXPERT_WORKER_BOOTSTRAP_TOKEN:-}
+      EXPERT_WORKER_BOOTSTRAP_AUTO_APPROVE: ${EXPERT_WORKER_BOOTSTRAP_AUTO_APPROVE:-false}
+      EXPERT_WORKER_BOOTSTRAP_ALLOWED_CAPABILITIES: ${EXPERT_WORKER_BOOTSTRAP_ALLOWED_CAPABILITIES:-}
       HTTP_PROXY: ${SKILL_HUB_GIT_PROXY:-}
       HTTPS_PROXY: ${SKILL_HUB_GIT_PROXY:-}
       http_proxy: ${SKILL_HUB_GIT_PROXY:-}
@@ -54,7 +57,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+          "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 5s

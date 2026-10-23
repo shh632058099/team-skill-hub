@@ -3,10 +3,22 @@ syntax = "proto3";
 package expert.v1;
 
 service ExpertWorkerService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc ClaimTask(ClaimTaskRequest) returns (ClaimTaskResponse);
   rpc RenewLease(LeaseRequest) returns (LeaseResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  repeated string capabilities = 2;
+  string proposed_credential = 3;
+}
+
+message RegisterWorkerResponse {
+  string status = 1;
+  string credential = 2;
 }
 
 message ClaimTaskRequest {
@@ -14,7 +26,6 @@ message ClaimTaskRequest {
   string capability = 2;
   string expert_id = 3;
 }
-
 message ClaimTaskResponse {
   bool has_task = 1;
   string task_id = 2;

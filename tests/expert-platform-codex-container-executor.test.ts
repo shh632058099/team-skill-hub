@@ -24,7 +24,9 @@ test("Docker Codex executor builds a constrained read-only invocation", () => {
   assert.ok(args.includes("OPENAI_API_KEY"));
   assert.ok(args.includes("HTTPS_PROXY"));
   assert.ok(args.includes("/home/expert:rw,uid=10001,gid=10001,size=64m"));
-  assert.ok(args.includes("HOME=/home/expert"));
+  assert.ok(args.some((arg, index) => arg === "--env" && args[index + 1] === "HOME=/home/expert"));
+  assert.ok(args.some((arg, index) => arg === "--env" && args[index + 1] === "CODEX_HOME=/home/expert/.codex"));
+  assert.ok(!args.some((arg, index) => arg === "--env" && (!args[index + 1] || args[index + 1]!.startsWith("--"))));
   assert.ok(args.includes("no-new-privileges"));
   assert.ok(!args.includes("seccomp=unconfined"));
   assert.ok(args.includes("512m"));

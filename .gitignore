@@ -8,3 +8,5 @@ config/repositories.yaml
 config/repositories.local.yaml
 config/repositories.gitlab.yaml
 *.log
+dist-worker/
+artifacts/

@@ -48,6 +48,11 @@ export class PersistentWorkerRegistry {
     this.db.prepare("UPDATE expert_workers SET status='revoked' WHERE id=?").run(id);
   }
 
+  list(): WorkerRegistration[] {
+    const rows = this.db.prepare("SELECT id FROM expert_workers ORDER BY id").all() as Array<{ id: string }>;
+    return rows.map((row) => this.get(row.id));
+  }
+
   get(id: string): WorkerRegistration {
     const row = this.db.prepare("SELECT id,capabilities_json,status FROM expert_workers WHERE id=?").get(id) as
       Row | undefined;
@@ -69,6 +74,75 @@ export class PersistentWorkerRegistry {
     }
   }
 
+  bootstrapRegister(
+    id: string,
+    capabilities: string[],
+    proposedCredential: string,
+    autoApprove: boolean,
+    allowedCapabilities: readonly string[],
+  ): { worker: WorkerRegistration; credential?: string } {
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(id) ||
+      capabilities.length === 0 ||
+      capabilities.length > 100 ||
+      capabilities.some((capability) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(capability)) ||
+      !/^ewc_[A-Za-z0-9_-]{43}$/.test(proposedCredential)
+    ) {
+      throw new Error("INVALID_WORKER");
+    }
+    const unique = [...new Set(capabilities)];
+    if (unique.length !== capabilities.length) throw new Error("INVALID_WORKER");
+    if (allowedCapabilities.length > 0 && unique.some((capability) => !allowedCapabilities.includes(capability))) {
+      throw new Error("WORKER_CAPABILITY_NOT_ALLOWED");
+    }
+
+    const existing = this.db
+      .prepare("SELECT id,capabilities_json,status,credential_hash FROM expert_workers WHERE id=?")
+      .get(id) as (Row & { credential_hash: string | null }) | undefined;
+
+    if (!existing) {
+      const status: WorkerStatus = autoApprove ? "active" : "pending";
+      this.db
+        .prepare("INSERT INTO expert_workers(id,capabilities_json,status) VALUES(?,?,?)")
+        .run(id, JSON.stringify(unique), status);
+      const worker = { id, capabilities: unique, status };
+      return status === "active"
+        ? { worker, credential: this.storeProposedCredential(id, proposedCredential) }
+        : { worker };
+    }
+
+    const stored = JSON.parse(existing.capabilities_json) as unknown;
+    if (
+      !Array.isArray(stored) ||
+      stored.length !== unique.length ||
+      unique.some((capability) => !stored.includes(capability))
+    ) {
+      throw new Error("WORKER_CONFIGURATION_MISMATCH");
+    }
+    if (existing.status === "revoked") throw new Error("WORKER_REVOKED");
+    const worker = { id: existing.id, capabilities: unique, status: existing.status };
+    if (existing.status !== "active") return { worker };
+
+    const proposedHash = this.hashCredential(proposedCredential);
+    if (existing.credential_hash) {
+      if (existing.credential_hash !== proposedHash) throw new Error("WORKER_CREDENTIAL_ALREADY_ISSUED");
+      return { worker, credential: proposedCredential };
+    }
+    return { worker, credential: this.storeProposedCredential(id, proposedCredential) };
+  }
+
+  private storeProposedCredential(id: string, token: string): string {
+    const digest = this.hashCredential(token);
+    const result = this.db
+      .prepare("UPDATE expert_workers SET credential_hash=? WHERE id=? AND status='active' AND credential_hash IS NULL")
+      .run(digest, id);
+    if (result.changes === 0) {
+      if (this.authenticate(id, token)) return token;
+      throw new Error("WORKER_CREDENTIAL_ALREADY_ISSUED");
+    }
+    if (!this.authenticate(id, token)) throw new Error("WORKER_CREDENTIAL_ISSUE_FAILED");
+    return token;
+  }
   issueCredential(id: string): string {
     const worker = this.get(id);
     if (worker.status !== "active") throw new Error("WORKER_NOT_ACTIVE");
@@ -77,7 +151,6 @@ export class PersistentWorkerRegistry {
     this.db.prepare("UPDATE expert_workers SET credential_hash=? WHERE id=?").run(digest, id);
     return token;
   }
-
   authenticate(id: string, token: string): boolean {
     if (!id.trim() || !token.trim()) return false;
     const row = this.db.prepare("SELECT status,credential_hash FROM expert_workers WHERE id=?").get(id) as

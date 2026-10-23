@@ -22,6 +22,7 @@ import {
 import { ADMIN_EXPERTS_HTML } from "./expert-admin-ui.js";
 import { ExpertStore, type ExpertDefinition, type ExpertDeploymentRecord } from "./expert-platform/expert-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
+import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
 import {
   applyAdminConfig,
   editableConfigFromApp,
@@ -879,6 +880,19 @@ export async function startServer(
         ]),
       ],
     }));
+  const withWorkerRegistry = <T>(fn: (registry: PersistentWorkerRegistry) => T): T => {
+    const runtimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+    const registryDb =
+      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
+      (runtimeDb ? path.join(path.dirname(runtimeDb), "expert-workers.sqlite") : "");
+    if (!registryDb) throw new Error("EXPERT_WORKER_REGISTRY_DB_NOT_CONFIGURED");
+    const registry = new PersistentWorkerRegistry(registryDb);
+    try {
+      return fn(registry);
+    } finally {
+      registry.close();
+    }
+  };
   const expertAdminError = (error: unknown, reply: any) => {
     const message = error instanceof Error ? error.message : String(error);
     reply.code(message === "EXPERT_RUNTIME_DB_NOT_CONFIGURED" ? 503 : message === "EXPERT_NOT_FOUND" ? 404 : 400);
@@ -1010,6 +1024,106 @@ export async function startServer(
       }
     },
   );
+
+  const workerAdminError = (error: unknown, reply: any) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const status =
+      message === "EXPERT_WORKER_REGISTRY_DB_NOT_CONFIGURED"
+        ? 503
+        : message === "WORKER_NOT_FOUND"
+          ? 404
+          : message === "WORKER_ALREADY_EXISTS"
+            ? 409
+            : 400;
+    reply.code(status);
+    return { error: message };
+  };
+  app.get("/admin/api/expert-workers", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { workers: withWorkerRegistry((registry) => registry.list()) };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Body: { id: string; capabilities: string[] } }>("/admin/api/expert-workers", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const parsed = z
+      .object({
+        id: z
+          .string()
+          .trim()
+          .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+        capabilities: z.array(z.string().trim().min(1).max(100)).min(1).max(100),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "INVALID_WORKER", issues: parsed.error.issues };
+    }
+    try {
+      const worker = withWorkerRegistry((registry) => registry.enroll(parsed.data.id, parsed.data.capabilities));
+      reply.code(201);
+      return { worker };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-workers/:id/approve", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return {
+        worker: withWorkerRegistry((registry) => {
+          registry.approve(request.params.id);
+          return registry.get(request.params.id);
+        }),
+      };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-workers/:id/issue-credential", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      const result = withWorkerRegistry((registry) => ({
+        worker: registry.get(request.params.id),
+        credential: registry.issueCredential(request.params.id),
+      }));
+      reply.header("cache-control", "no-store, no-cache, must-revalidate");
+      reply.header("pragma", "no-cache");
+      return result;
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-workers/:id/revoke", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return {
+        worker: withWorkerRegistry((registry) => {
+          registry.revoke(request.params.id);
+          return registry.get(request.params.id);
+        }),
+      };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
 
   app.get("/admin/*", async (request, reply) => {
     if (!requireAdminPage(request, reply)) return "";

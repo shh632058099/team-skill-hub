@@ -342,3 +342,11 @@ Hub 在 Docker 中运行。WSL 关闭或 Worker 退出后，需要重新启动 W
 - 新增代码审查专家路由单测后，`npm run format:check`、`npm run lint`、`npm run build` 均退出成功；lint 保留仓库既有 warnings（209 warnings，0 errors）。完整 `npm run check` 中测试阶段报告 451 passed、0 failed。`git diff --check` 通过。
 - 回归期间发现当前 Hub readiness 从此前的 HTTP 200 变为 HTTP 503，响应为 3 个仓库中 2 healthy、1 error。日志显示定时同步 GitHub 时 `rd-skills` / `rd-knowledges` 的 `git fetch` 出现 GnuTLS/TLS 连接错误；另一次同步仍成功更新其中一个仓库。该问题与本轮路由单测变更没有直接关联，但当前服务应标记为 readiness degraded，不能沿用旧的 3/3 healthy 结论。
 - 为避免扩大影响，没有重启 Hub/Worker，没有更改代理或仓库配置；两个 Worker tmux 会话仍在。需要后续单独排查 Docker 内 GitHub 代理/TLS 稳定性，并在 readiness 恢复后复验。
+
+### 2026-10-22：OTA 原生测试环境初步验收（隔离 clone）
+
+- 在 `/tmp/skillhub-ota-native-acceptance.rOuGwK/otalib` 克隆 `https://github.com/shh632058099/otalib.git`，固定到 `ae46ce477699157de6eccb53f9b222b89d344461`。原始 checkout 的 Git 工作区干净；所有构建产物仅写入该临时 clone 的 `build/`，未修改上游或已有 `/mnt/d/wsl/.codex/workspace/otalib`。
+- WSL 运行环境本身缺少 `cmake`、`ninja` 和 `pkg-config`。通过一次性 `ubuntu:24.04` Docker 容器安装 `build-essential`、CMake、OpenSSL/Zlib 开发包后，项目 CMake 配置和编译成功，生成主库、示例和测试二进制。
+- CTest 共 14 项：12 项通过，2 项失败（`unit_package` 与 `all_tests`），整体 86% 通过。失败原因已定位到仓库测试 fixture 不完整：`tests/unit/test_package.c` 将 `EXAMPLE_MMC` 指向 `examples/mmcblk0`，但固定 commit 的 `examples/mmcblk0` 文件不存在；多个包升级/回滚用例因此在复制 fixture 时报告 `No such file or directory`。包测试报告 23 个用例中 16 通过、7 失败。不能将该结果描述为 OTA 原生测试全部通过，也不应把缺 fixture 导致的失败误判为 OTA 核心实现回归。
+- 下一步应检查 `examples/mmcblk0` 是否原本应由 LFS/子模块/生成脚本提供，或测试是否使用了错误的 fixture 路径；随后修复测试环境/fixture 组织并重新跑全套测试。当前不修改 OTA 仓库来掩盖失败。
+- 跨主机 Worker 尚未完成真实验收：本轮未注册新主机、未轮换凭据、未触碰现有 Worker；当前证据仍限于本机 WSL2 Worker 及 MCP/gRPC 的自动化/真实任务链路。

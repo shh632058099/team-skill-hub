@@ -6,7 +6,114 @@ import { test } from "node:test";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { PersistentWorkerRegistry } from "../src/expert-platform/persistent-worker-registry.js";
-import { ExpertWorkerClient, startExpertWorkerGrpcServer } from "../src/expert-platform/grpc-transport.js";
+import {
+  ExpertWorkerClient,
+  requestWorkerBootstrap,
+  startExpertWorkerGrpcServer,
+} from "../src/expert-platform/grpc-transport.js";
+
+test("bootstrap registration waits for approval and returns a one-time credential after activation", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-bootstrap-"));
+  const tasks = new ExpertTaskStore(path.join(dir, "tasks.sqlite"));
+  const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+  const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0", {
+    bootstrapToken: "bootstrap-test-token",
+    bootstrapAllowedCapabilities: ["ota"],
+  });
+  try {
+    await assert.rejects(
+      () => requestWorkerBootstrap(server.address, "wrong-token", "ota-worker-01", ["ota"], `ewc_${"z".repeat(43)}`),
+      /WORKER_BOOTSTRAP_UNAUTHENTICATED/,
+    );
+    const proposedCredential = `ewc_${"a".repeat(43)}`;
+    const pending = await requestWorkerBootstrap(
+      server.address,
+      "bootstrap-test-token",
+      "ota-worker-01",
+      ["ota"],
+      proposedCredential,
+    );
+    assert.equal(pending.status, "pending");
+    assert.equal(pending.credential, "");
+    assert.equal(workers.get("ota-worker-01").status, "pending");
+
+    workers.approve("ota-worker-01");
+    const active = await requestWorkerBootstrap(
+      server.address,
+      "bootstrap-test-token",
+      "ota-worker-01",
+      ["ota"],
+      proposedCredential,
+    );
+    assert.equal(active.status, "active");
+    assert.match(active.credential ?? "", /^ewc_[A-Za-z0-9_-]+$/);
+    assert.equal(active.credential, proposedCredential);
+    assert.equal(workers.authenticate("ota-worker-01", active.credential ?? ""), true);
+    const retry = await requestWorkerBootstrap(
+      server.address,
+      "bootstrap-test-token",
+      "ota-worker-01",
+      ["ota"],
+      proposedCredential,
+    );
+    assert.equal(retry.credential, proposedCredential);
+    await assert.rejects(
+      () =>
+        requestWorkerBootstrap(
+          server.address,
+          "bootstrap-test-token",
+          "ota-worker-01",
+          ["ota"],
+          `ewc_${"b".repeat(43)}`,
+        ),
+      /WORKER_CREDENTIAL_ALREADY_ISSUED/,
+    );
+    await assert.rejects(
+      () =>
+        requestWorkerBootstrap(
+          server.address,
+          "bootstrap-test-token",
+          "ota-worker-02",
+          ["admin"],
+          `ewc_${"c".repeat(43)}`,
+        ),
+      /WORKER_CAPABILITY_NOT_ALLOWED/,
+    );
+  } finally {
+    await server.close();
+    tasks.close();
+    workers.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap can auto-activate only capabilities in its explicit allowlist", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-bootstrap-"));
+  const tasks = new ExpertTaskStore(path.join(dir, "tasks.sqlite"));
+  const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+  const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0", {
+    bootstrapToken: "bootstrap-test-token",
+    bootstrapAutoApprove: true,
+    bootstrapAllowedCapabilities: ["ota"],
+  });
+  try {
+    const response = await requestWorkerBootstrap(
+      server.address,
+      "bootstrap-test-token",
+      "ota-worker-02",
+      ["ota"],
+      `ewc_${"d".repeat(43)}`,
+    );
+    assert.equal(response.status, "active");
+    assert.equal(response.credential, `ewc_${"d".repeat(43)}`);
+    assert.equal(workers.isAuthorized("ota-worker-02", "ota"), true);
+  } finally {
+    await server.close();
+    tasks.close();
+    workers.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("gRPC worker identity is bound to metadata credential", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-auth-"));

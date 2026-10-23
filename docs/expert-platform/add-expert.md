@@ -93,20 +93,22 @@ docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 
 ### 方案 A：SSH key
 
-1. 在 Worker 主机放置专用只读私钥，例如 `/etc/expert/keys/yocto-readonly`。
+1. 在 Worker 主机放置专用只读私钥，例如 `/etc/team-skill-hub-worker/keys/yocto-readonly`。
 2. 确认公钥已添加到 GitHub/GitLab 对应账号或 Deploy Key。
-3. 限制文件权限：
+3. 首次放置私钥时先仅允许 root 访问。若 Worker 尚未安装，先使用以下命令安全保存密钥：
 
 ```bash
-sudo install -d -m 700 /etc/expert/keys
-sudo chown root:root /etc/expert/keys/yocto-readonly
-sudo chmod 600 /etc/expert/keys/yocto-readonly
+sudo install -d -o root -g root -m 700 /etc/team-skill-hub-worker/keys
+sudo chown root:root /etc/team-skill-hub-worker/keys/yocto-readonly
+sudo chmod 600 /etc/team-skill-hub-worker/keys/yocto-readonly
 ```
 
-4. 在 Worker 环境配置中设置引用映射：
+4. 安装 Worker 后，Worker 服务以 `expert-worker` 用户和组运行。要让它读取私钥，同时保持 root 管理权，在第 8 节安装完成后执行该节提供的授权命令。不要把私钥设置为全局可读。
+
+5. 在 Worker 环境配置中设置引用映射：
 
 ```dotenv
-EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/expert/keys/yocto-readonly"}'
+EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/team-skill-hub-worker/keys/yocto-readonly"}'
 ```
 
 SSH key 路径必须是 Worker 主机上的绝对路径；仓库地址应使用 `git@github.com:org/repo.git` 形式。
@@ -124,89 +126,117 @@ Deployment 的仓库 URL 必须使用 `https://`。Token 本身不要写进 JSON
 
 如果配置了 Git 代理，代理地址必须从 Worker 主机/Docker 所在网络可达；Windows 上的代理设置不会自动让 WSL2 或 Docker 使用该代理。
 
-## 5. 注册、审批 Worker 并签发凭据
+## 5. Worker 自动注册、审批与凭据
 
-Worker 注册管理目前通过 CLI 操作。在运行 Hub 的主机上执行以下命令；命令由容器内环境读取 `EXPERT_WORKER_REGISTRY_DB`，确保已使用 `docker-compose.expert.yml` 启动运行时。
+推荐使用 Bootstrap Token 自动注册。首次启动时 Worker 会向 Hub 注册；默认状态为 `pending`，管理员在 Admin 网页批准后，Worker 自动取得正式 credential 并保存到本机凭据文件。Worker 会先在本机受保护目录生成待交换凭据，再通过配置的 gRPC 连接将凭据提交给 Hub；Hub 只保存凭据的哈希。若交换请求因网络中断未收到响应，Worker 会使用同一个待交换凭据重试，不会因响应丢失而卡死。后续重启不需要再手工复制 `ewc_...`。
 
-### 5.1 注册 Worker
+### 5.1 配置 Hub 的 Bootstrap Token
+
+在 Hub 部署环境（例如项目根目录受保护的 `.env`）设置一个随机、高熵的部署级 Token：
+
+可在受信任的管理终端生成随机值（不要把生成结果贴到聊天或提交到 Git）：
+
+```bash
+openssl rand -hex 32
+```
+
+```dotenv
+EXPERT_WORKER_BOOTSTRAP_TOKEN=替换为随机生成的长随机字符串
+EXPERT_WORKER_BOOTSTRAP_AUTO_APPROVE=false
+EXPERT_WORKER_BOOTSTRAP_ALLOWED_CAPABILITIES=ota,yocto
+```
+
+`EXPERT_WORKER_BOOTSTRAP_AUTO_APPROVE` 默认必须为 `false`，新 Worker 需要在网页审批。只有在可信的内网部署中，明确设置为 `true` 时才自动激活；自动激活必须同时配置 `EXPERT_WORKER_BOOTSTRAP_ALLOWED_CAPABILITIES`，并且 Worker 申请的所有 capability 都在白名单内。Bootstrap Token 是部署级秘密，不要提交 Git 或写入日志；建议使用 TLS/mTLS 保护跨主机 gRPC 连接。
+
+配置后按项目正常流程重建/启动 Hub，使 gRPC 服务读取这些环境变量。不要在已有生产服务上未经安排直接重启。
+
+### 5.2 Worker 主机配置
+
+在 `/etc/team-skill-hub-worker/worker.env` 设置：
+
+```dotenv
+EXPERT_HUB_ADDRESS=hub.internal.example:7443
+EXPERT_WORKER_ID=yocto-worker-01
+EXPERT_CAPABILITY=yocto
+EXPERT_WORKER_BOOTSTRAP_TOKEN=与 Hub 配置相同的部署级 Token
+EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
+```
+
+保留该文件为 root 所有、权限 `600`。Bootstrap Token 只用于首次登记/审批后的凭据交换；Worker 成功保存正式 credential 后，会从当前进程环境中清除该 Token，并优先使用凭据文件。确认凭据文件已生成后，建议从 `worker.env` 删除 `EXPERT_WORKER_BOOTSTRAP_TOKEN`，以免长期保留引导凭据；之后重启会直接复用凭据文件。凭据文件默认由 `expert-worker` 用户持有、权限 `600`。不要把正式 credential 写入 Git、工单或日志。
+
+### 5.3 网页审批和状态管理
+
+1. 打开 `/admin/experts`，切换到 **Worker 管理**。
+2. Worker 首次启动后会自动出现在列表中，状态为 `pending`。
+3. 核对 Worker ID 和 capabilities 后点击“批准”。
+4. Worker 会自动轮询注册接口，在激活后交换并保存正式 credential，随后开始正常心跳和领取任务；管理员不需要手工复制 credential。
+5. 不再使用某个 Worker 时，确认没有任务正在运行，再点击“吊销”。
+
+### 5.4 备用方式：手动 CLI
+
+Bootstrap 不适用或需要运维排障时，仍可使用 CLI 手动注册、审批和签发凭据。在 Hub 主机执行：
 
 ```bash
 docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll yocto-worker-01 yocto
-```
-
-参数含义：`enroll <worker-id> <capabilities>`。Worker ID 应唯一且稳定；capability 必须与它实际能执行的任务一致。若一个 Worker 只服务 Yocto 专家，使用 `yocto` 即可。
-
-### 5.2 审批 Worker
-
-```bash
 docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js approve yocto-worker-01
-```
-
-### 5.3 签发 Worker credential
-
-```bash
 docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-credential yocto-worker-01
 ```
 
-命令会返回一次性显示的 credential。立即复制到 Worker 主机受保护的环境文件中，不要提交 Git、不要粘贴到聊天或终端工单。若遗失，应重新签发并更新 Worker 配置；旧 credential 会失效。
+CLI 签发的凭据可通过 `EXPERT_WORKER_CREDENTIAL` 提供给 Worker，或按运维流程安全写入 `EXPERT_WORKER_CREDENTIAL_FILE`。若正式 credential 丢失且 Hub 已保存其 hash，需由管理员重新签发并更新 Worker 本地凭据文件；Bootstrap 不会覆盖已有的有效凭据。
 
-可以检查注册状态，但不要在共享日志中保留 credential：
+## 6. 构建并分发 Worker 运行包（只在开发/发布机需要 Hub 源码）
 
-```bash
-docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll yocto-worker-01 yocto
-```
-
-如果 Worker 已存在，按实际返回错误处理，不要反复 enroll 同名 Worker。当前 Worker Admin CLI 没有独立的 list 子命令；请查看 Hub 注册数据库/现有运维查询方式，或使用已知 Worker ID 执行 approve、issue-credential 等有明确用途的操作，不要用重复注册来探测状态。
-
-## 6. 准备 Worker 主机和 Docker 镜像
-
-在 Worker 所在的 Linux/WSL2 主机准备项目代码与 Node.js 运行环境。Worker 可与 Hub 在同一台主机，也可运行在另一台主机；跨主机时必须使用 Worker 能访问的 Hub 地址，而不是 `127.0.0.1`。
-
-在 Team Skill Hub 仓库根目录构建 Worker 镜像：
+**Worker 主机不需要 clone `team-skill-hub`，也不需要安装 Hub 的 Admin/MCP 依赖。** 在开发/发布机的 Hub checkout 根目录构建两个制品：一个是宿主机常驻的 Worker daemon 运行包，另一个是任务执行用的 Codex Docker 镜像。
 
 ```bash
-docker build -t team-skill-hub-expert-worker:prototype docker/expert-worker
-docker run --rm team-skill-hub-expert-worker:prototype --version
+# 在 team-skill-hub 开发/发布机运行
+npm run build:worker-runtime
+scripts/build-worker-execution-image.sh 0.1.0
 ```
 
-Worker 运行进程通过 `npm run expert-worker` 启动；Docker 镜像用于执行任务的 Codex 环境，两者用途不同。
+生成：
+
+- `artifacts/worker-runtime/worker-runtime-0.1.0.tar.gz`：仅包含 Worker 入口及其传递依赖、最小生产依赖、配置模板、systemd service 和安装脚本；不包含 Hub Server、Admin UI、MCP 或知识管理源码。
+- `artifacts/worker-runtime/expert-worker-image-0.1.0.tar`：Codex 执行镜像归档。
+
+将这两个制品传到 Worker 主机即可，不要把整个 Git checkout、`.env` 或开发用 `node_modules` 复制过去。Worker 主机需要 Linux、Node.js 24、Docker Engine、到 Hub gRPC 端口和 Git 远端的网络连接。执行镜像可以用 `docker load` 导入，不要求 Worker 主机安装构建工具。
 
 ## 7. 创建 Worker 本地环境文件
 
-在 Worker 主机 Linux 文件系统创建配置文件。不要把带密钥的文件放在 `/mnt/c`、`/mnt/d` 等 Windows 挂载盘后依赖 `chmod 600`；建议使用 `/etc/expert/`。
+在 Worker 主机 Linux 文件系统创建配置文件。不要把带密钥的文件放在 `/mnt/c`、`/mnt/d` 等 Windows 挂载盘后依赖 `chmod 600`；建议使用 `/etc/team-skill-hub-worker/`。
 
 ```bash
-sudo install -d -m 700 /etc/expert
-sudoedit /etc/expert/yocto-worker.env
-sudo chown root:root /etc/expert/yocto-worker.env
-sudo chmod 600 /etc/expert/yocto-worker.env
+sudo install -d -m 700 /etc/team-skill-hub-worker
+sudoedit /etc/team-skill-hub-worker/worker.env
+sudo chown root:root /etc/team-skill-hub-worker/worker.env
+sudo chmod 600 /etc/team-skill-hub-worker/worker.env
 ```
 
-填写下面的模板并替换示例值。不要把此文件提交到 Git：
+填写下面的模板并替换示例值。Bootstrap Token 应与 Hub 的配置一致。不要把此文件提交到 Git：
 
 ```dotenv
 # Hub 的 gRPC 地址。同机运行时可用 127.0.0.1；跨主机时填写 Hub 主机名/IP 和可达端口。
 EXPERT_HUB_ADDRESS=127.0.0.1:7443
 EXPERT_WORKER_ID=yocto-worker-01
-EXPERT_WORKER_CREDENTIAL=替换为刚签发的credential
 EXPERT_CAPABILITY=yocto
+EXPERT_WORKER_BOOTSTRAP_TOKEN=与Hub配置一致的部署级随机Token
+EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 EXPERT_ID=yocto
 
-# 关键：此处是仓库父目录，不是多个 Worker 共用的 checkout。
-# Worker 会自动在其下追加自己的 ID，并为每个仓库 ID 建立独立 clone。
-EXPERT_REPOSITORY_ROOT=/srv/expert-repositories
+# 仓库父目录，不是多个 Worker 共用的 checkout。
+EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
+EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
 
-EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:prototype
+EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:0.1.0
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=default
 
 # 允许传入执行容器的环境变量名白名单，不是密钥值。
 EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
-# Expert 配置中的 credentialRef -> Worker 上真实存在的环境变量名。
 EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
 
 # 私有 Git 仓库需要时设置；公开仓库可不设置。
-EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/expert/keys/yocto-readonly"}'
+EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/team-skill-hub-worker/keys/yocto-readonly"}'
 
 EXPERT_HEARTBEAT_MS=10000
 EXPERT_POLL_MS=3000
@@ -227,18 +257,35 @@ TEAM_SKILL_HUB_API_KEY=在本机安全地设置实际APIKey
 - `EXPERT_REPOSITORY_ROOT` 会自动追加 Worker ID，例如最终目录是 `/srv/expert-repositories/yocto-worker-01/`。不同 Worker 必须使用不同 ID，不要共享同一份 `.git` 或工作树。
 - 若 Worker 位于另一台主机，Hub gRPC 默认的 `127.0.0.1:7443` 发布地址不可从远端访问。需通过 `EXPERT_GRPC_PUBLISH_BIND` 将端口绑定到受控的私有网卡地址，并配置仅允许该 Worker 主机访问的防火墙规则；不要为了省事将服务无条件暴露到公网。TLS 参数要么全部配置，要么全部省略；跨不可信网络建议启用 TLS/mTLS。
 
-## 8. 启动 Worker
+## 8. 安装和启动 Worker（Worker 主机不需要 Hub 源码）
 
-确保 `/etc/expert/yocto-worker.env` 的权限正确，并且环境变量已安全注入。交互式手动启动示例：
+先把运行包和执行镜像归档传到 Worker 主机。运行包内含 `install-worker.sh`，因此先解压到临时目录，再执行安装器：
 
 ```bash
-set -a
-source /etc/expert/yocto-worker.env
-set +a
-npm run expert-worker
+mkdir -p /tmp/worker-runtime-bootstrap
+tar -xzf worker-runtime-0.1.0.tar.gz -C /tmp/worker-runtime-bootstrap
+sudo /tmp/worker-runtime-bootstrap/install-worker.sh worker-runtime-0.1.0.tar.gz
+
+# 导入任务执行镜像；镜像 tag 必须与 worker.env 中 EXPERT_DOCKER_IMAGE 一致
+sudo docker load -i expert-worker-image-0.1.0.tar
+sudoedit /etc/team-skill-hub-worker/worker.env
+sudo chmod 600 /etc/team-skill-hub-worker/worker.env
+
+# 若使用 SSH 私钥，授权 Worker 专属组读取；私钥仍由 root 持有。
+# 确认 yocto-readonly 文件已放在该目录后再执行。
+sudo chown root:expert-worker /etc/team-skill-hub-worker/keys
+sudo chmod 750 /etc/team-skill-hub-worker/keys
+sudo chown root:expert-worker /etc/team-skill-hub-worker/keys/yocto-readonly
+sudo chmod 640 /etc/team-skill-hub-worker/keys/yocto-readonly
+
+sudo systemctl enable --now team-skill-hub-worker
+sudo systemctl status team-skill-hub-worker
+sudo journalctl -u team-skill-hub-worker -n 100 --no-pager
 ```
 
-此终端应保持运行。生产环境建议用受控的 service/supervisor 管理进程，避免把密钥放进命令行参数或日志。当前 WSL2 示例环境使用独立 tmux 会话与启动脚本维护已有 Worker；新增 Worker 时先确认该脚本是否已显式纳入新 Worker，不要假设所有 Worker 会自动启动。
+安装器只部署 Worker 运行包，不 clone Hub 源码。环境文件首次生成后需要填写真实的 Hub 地址、Admin 刚签发的 Worker credential、capability、仓库根目录、镜像 tag 和凭据映射。`systemd` 启动前会运行配置检查脚本；它只报告缺失的变量名，不打印变量值。
+
+Docker socket 访问通常需要将 Worker 服务用户加入 `docker` 组，这相当于授予近似 root 的权限。因此 Worker 应运行在专用且可信的主机上，不要让不可信用户控制 Worker 主机。生产部署请固定运行包/镜像版本并保留上一版本以便回滚。
 
 启动前可只检查变量是否存在，不要打印变量值：
 

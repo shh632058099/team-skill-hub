@@ -1,10 +1,22 @@
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
+import { existsSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Claim, ExpertTaskStore } from "./task-store.js";
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
 
+interface RegisterWorkerRequest {
+  worker_id: string;
+  capabilities: string[];
+  proposed_credential: string;
+}
+interface RegisterWorkerResponse {
+  status: string;
+  credential?: string;
+}
 interface ClaimTaskRequest {
   worker_id: string;
   capability: string;
@@ -51,6 +63,11 @@ type UnaryHandler<Request, Response> = (
 ) => void;
 
 interface WorkerServiceClient extends grpc.Client {
+  RegisterWorker(
+    request: RegisterWorkerRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: RegisterWorkerResponse) => void,
+  ): grpc.ClientUnaryCall;
   ClaimTask(
     request: ClaimTaskRequest,
     metadata: grpc.Metadata,
@@ -89,7 +106,9 @@ interface WorkerProto {
 }
 
 function loadWorkerProto(): WorkerProto {
-  const definition = protoLoader.loadSync(path.resolve("src/expert-platform/proto/expert-worker.proto"), {
+  const bundledProto = path.join(path.dirname(fileURLToPath(import.meta.url)), "proto/expert-worker.proto");
+  const sourceTreeProto = path.resolve("src/expert-platform/proto/expert-worker.proto");
+  const definition = protoLoader.loadSync(existsSync(bundledProto) ? bundledProto : sourceTreeProto, {
     defaults: true,
     keepCase: true,
     longs: String,
@@ -154,6 +173,9 @@ export interface GrpcTlsClientConfig {
 export interface GrpcServerOptions {
   tls?: GrpcTlsServerConfig;
   experts?: ExpertStore;
+  bootstrapToken?: string;
+  bootstrapAutoApprove?: boolean;
+  bootstrapAllowedCapabilities?: readonly string[];
 }
 
 export interface GrpcClientOptions {
@@ -168,6 +190,45 @@ export async function startExpertWorkerGrpcServer(
 ): Promise<{ address: string; close(): Promise<void> }> {
   const proto = loadWorkerProto();
   const server = new grpc.Server();
+
+  const registerWorker: UnaryHandler<RegisterWorkerRequest, RegisterWorkerResponse> = (call, callback) => {
+    try {
+      const configuredToken = options.bootstrapToken ?? "";
+      const authorization = String(call.metadata.get("authorization")[0] ?? "");
+      const suppliedToken = authorization.startsWith("Bootstrap ") ? authorization.slice(10) : "";
+      const supplied = Buffer.from(suppliedToken);
+      const expected = Buffer.from(configuredToken);
+      if (!configuredToken || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+        throw grpcError(grpc.status.UNAUTHENTICATED, "WORKER_BOOTSTRAP_UNAUTHENTICATED");
+      }
+      const result = workers.bootstrapRegister(
+        call.request.worker_id,
+        call.request.capabilities,
+        call.request.proposed_credential,
+        options.bootstrapAutoApprove ?? false,
+        options.bootstrapAllowedCapabilities ?? [],
+      );
+      callback(null, {
+        status: result.worker.status,
+        ...(result.credential ? { credential: result.credential } : {}),
+      });
+    } catch (error) {
+      const code =
+        error instanceof Error && error.message === "WORKER_BOOTSTRAP_UNAUTHENTICATED"
+          ? grpc.status.UNAUTHENTICATED
+          : error instanceof Error && error.message === "WORKER_REVOKED"
+            ? grpc.status.PERMISSION_DENIED
+            : error instanceof Error && error.message === "WORKER_CREDENTIAL_ALREADY_ISSUED"
+              ? grpc.status.ALREADY_EXISTS
+              : error instanceof Error &&
+                  ["INVALID_WORKER", "WORKER_CAPABILITY_NOT_ALLOWED", "WORKER_CONFIGURATION_MISMATCH"].includes(
+                    error.message,
+                  )
+                ? grpc.status.INVALID_ARGUMENT
+                : grpc.status.INTERNAL;
+      callback(grpcError(code, error instanceof Error ? error.message : "WORKER_BOOTSTRAP_FAILED"), null);
+    }
+  };
 
   const claimTask: UnaryHandler<ClaimTaskRequest, ClaimTaskResponse> = (call, callback) => {
     try {
@@ -295,6 +356,7 @@ export async function startExpertWorkerGrpcServer(
   };
 
   server.addService(proto.expert.v1.ExpertWorkerService.service, {
+    RegisterWorker: registerWorker,
     ClaimTask: claimTask,
     RenewLease: renewLease,
     CompleteTask: completeTask,
@@ -361,6 +423,37 @@ function parseClaimModelConfig(value: string) {
     return config as import("./expert-store.js").ExpertModelConfig;
   } catch {
     throw new Error("INVALID_CLAIM_MODEL_CONFIG");
+  }
+}
+
+export async function requestWorkerBootstrap(
+  address: string,
+  bootstrapToken: string,
+  workerId: string,
+  capabilities: string[],
+  proposedCredential: string,
+  options: GrpcClientOptions = {},
+): Promise<RegisterWorkerResponse> {
+  const proto = loadWorkerProto();
+  if ((options.tls?.cert && !options.tls.key) || (options.tls?.key && !options.tls.cert)) {
+    throw new Error("INVALID_TLS_CLIENT_CONFIG");
+  }
+  const credentials = options.tls
+    ? grpc.credentials.createSsl(options.tls.ca, options.tls.key, options.tls.cert)
+    : grpc.credentials.createInsecure();
+  const client = new proto.expert.v1.ExpertWorkerService(address, credentials);
+  const metadata = new grpc.Metadata();
+  metadata.set("authorization", `Bootstrap ${bootstrapToken}`);
+  try {
+    return await unary<RegisterWorkerResponse>((callback) =>
+      client.RegisterWorker(
+        { worker_id: workerId, capabilities, proposed_credential: proposedCredential },
+        metadata,
+        callback,
+      ),
+    );
+  } finally {
+    client.close();
   }
 }
 

@@ -18,12 +18,19 @@ test("Admin expert configuration UI manages definitions and execution configurat
   const dataDir = path.join(root, "data");
   const runtimeDb = path.join(root, "runtime", "expert-runtime.sqlite3");
   const search = new SqliteFtsSearchBackend();
-  const envKeys = ["AUTH_MODE", "ADMIN_LOGIN_REQUIRED", "ADMIN_API_KEY", "EXPERT_RUNTIME_DB"] as const;
+  const envKeys = [
+    "AUTH_MODE",
+    "ADMIN_LOGIN_REQUIRED",
+    "ADMIN_API_KEY",
+    "EXPERT_RUNTIME_DB",
+    "EXPERT_WORKER_REGISTRY_DB",
+  ] as const;
   const previous = new Map(envKeys.map((key) => [key, process.env[key]]));
   process.env.AUTH_MODE = "development";
   process.env.ADMIN_LOGIN_REQUIRED = "false";
   delete process.env.ADMIN_API_KEY;
   process.env.EXPERT_RUNTIME_DB = runtimeDb;
+  process.env.EXPERT_WORKER_REGISTRY_DB = path.join(root, "runtime", "expert-workers.sqlite");
   const config = {
     host: "127.0.0.1",
     port: 0,
@@ -54,6 +61,9 @@ test("Admin expert configuration UI manages definitions and execution configurat
     const html = await page.text();
     assert.match(html, /专家配置/);
     assert.match(html, /执行配置/);
+    assert.match(html, /Worker 管理/);
+    assert.match(html, /注册 Worker/);
+    assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
     assert.match(html, /Git 代理地址/);
     assert.match(html, /模型与 AI Router/);
@@ -178,6 +188,54 @@ test("Admin expert configuration UI manages definitions and execution configurat
       }),
     });
     assert.equal(disabled.status, 200);
+
+    const enrolledWorker = await fetch(base + "/admin/api/expert-workers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "yocto-worker-01", capabilities: ["yocto", "build"] }),
+    });
+    assert.equal(enrolledWorker.status, 201);
+    assert.deepEqual((await enrolledWorker.json()).worker, {
+      id: "yocto-worker-01",
+      capabilities: ["yocto", "build"],
+      status: "pending",
+    });
+
+    const pendingWorkers = await fetch(base + "/admin/api/expert-workers");
+    assert.equal(pendingWorkers.status, 200);
+    assert.deepEqual((await pendingWorkers.json()).workers, [
+      { id: "yocto-worker-01", capabilities: ["yocto", "build"], status: "pending" },
+    ]);
+
+    const rejectedCredential = await fetch(base + "/admin/api/expert-workers/yocto-worker-01/issue-credential", {
+      method: "POST",
+    });
+    assert.equal(rejectedCredential.status, 400);
+    assert.equal((await rejectedCredential.json()).error, "WORKER_NOT_ACTIVE");
+
+    const approvedWorker = await fetch(base + "/admin/api/expert-workers/yocto-worker-01/approve", {
+      method: "POST",
+    });
+    assert.equal(approvedWorker.status, 200);
+    assert.equal((await approvedWorker.json()).worker.status, "active");
+
+    const issuedCredentialResponse = await fetch(base + "/admin/api/expert-workers/yocto-worker-01/issue-credential", {
+      method: "POST",
+    });
+    assert.equal(issuedCredentialResponse.status, 200);
+    assert.match(issuedCredentialResponse.headers.get("cache-control") ?? "", /no-store/);
+    const issuedCredential = (await issuedCredentialResponse.json()) as { credential: string };
+    assert.match(issuedCredential.credential, /^ewc_/);
+    const listedAfterIssue = await fetch(base + "/admin/api/expert-workers");
+    const safeWorkerList = JSON.stringify(await listedAfterIssue.json());
+    assert.doesNotMatch(safeWorkerList, /ewc_/);
+    assert.doesNotMatch(safeWorkerList, /credential_hash|credential/);
+
+    const revokedWorker = await fetch(base + "/admin/api/expert-workers/yocto-worker-01/revoke", {
+      method: "POST",
+    });
+    assert.equal(revokedWorker.status, 200);
+    assert.equal((await revokedWorker.json()).worker.status, "revoked");
 
     const store = new ExpertStore(runtimeDb);
     try {

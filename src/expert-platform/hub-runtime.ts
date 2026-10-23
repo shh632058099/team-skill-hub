@@ -28,8 +28,23 @@ export async function startExpertHubRuntimeFromEnv(
   const experts = new ExpertStore(runtimeDb);
   const workers = new PersistentWorkerRegistry(registryDb);
   try {
+    const bootstrapToken = env.EXPERT_WORKER_BOOTSTRAP_TOKEN?.trim() || undefined;
+    const bootstrapAutoApprove = env.EXPERT_WORKER_BOOTSTRAP_AUTO_APPROVE?.trim() === "true";
+    const bootstrapAllowedCapabilities = (env.EXPERT_WORKER_BOOTSTRAP_ALLOWED_CAPABILITIES ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (
+      (bootstrapToken && bootstrapToken.length < 32) ||
+      (bootstrapAutoApprove && (!bootstrapToken || bootstrapAllowedCapabilities.length === 0))
+    ) {
+      throw new Error("INVALID_WORKER_BOOTSTRAP_CONFIG");
+    }
     const server = await startExpertWorkerGrpcServer(tasks, workers, grpcAddress, {
       experts,
+      ...(bootstrapToken ? { bootstrapToken } : {}),
+      bootstrapAutoApprove,
+      bootstrapAllowedCapabilities,
       ...(tlsCount === 3
         ? {
             tls: {

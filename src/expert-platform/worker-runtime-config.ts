@@ -9,6 +9,7 @@ export interface ExpertWorkerRuntimeConfig {
   expertId?: string;
   sourcePath: string;
   repositoryRoot: string;
+  sharedTempRoot: string;
   gitCredentialConfigs: Record<string, GitCredentialConfig>;
   dockerImage: string;
   dockerNetwork: string;
@@ -142,6 +143,7 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     expertId,
     sourcePath,
     repositoryRoot,
+    sharedTempRoot: path.join(repositoryRoot, ".runtime-tmp"),
     gitCredentialConfigs,
     dockerImage,
     dockerNetwork,

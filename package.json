@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "build:worker-runtime": "tsc -p tsconfig.worker.json && node scripts/package-worker-runtime.mjs",
     "build:client-integration": "tsx src/cli/build-client-integration.ts",
     "client-integration:version-check": "tsx src/cli/client-integration-version-check.ts",
     "start": "node dist/src/index.js",

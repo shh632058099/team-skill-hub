@@ -14,6 +14,7 @@ export interface DockerCodexExecutorOptions {
   image: string;
   sourcePath: string;
   repositoryRoot?: string;
+  sharedTempRoot?: string;
   gitCredentialConfigs?: Readonly<Record<string, GitCredentialConfig>>;
   network: string;
   seccompProfile?: "default" | "unconfined";
@@ -151,7 +152,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     let envNames = options.envNames;
     if (claim.modelConfig) {
       const generated = buildExpertCodexConfig(claim.modelConfig, options);
-      generatedConfigDir = mkdtempSync(path.join(os.tmpdir(), "expert-codex-config-"));
+      generatedConfigDir = mkdtempSync(path.join(options.sharedTempRoot ?? os.tmpdir(), ".expert-codex-config-"));
       configFilePath = path.join(generatedConfigDir, "config.toml");
       writeFileSync(configFilePath, generated.content, { mode: 0o644, flag: "wx" });
       // Creation mode is filtered by the worker launcher's umask; enforce readability explicitly.
