@@ -36,6 +36,7 @@ function isAllowedEnvName(name: string): boolean {
 export interface CodexDockerConfig {
   image: string;
   containerName?: string;
+  taskLabels?: { taskId: string; runId: string; fencing: number };
   sourcePath: string;
   network: string;
   seccompProfile?: "default" | "unconfined";
@@ -53,6 +54,14 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
   if (config.containerName !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(config.containerName)) {
     throw new Error("INVALID_CONTAINER_NAME");
   }
+  if (
+    config.taskLabels &&
+    (!/^[a-f0-9-]{36}$/.test(config.taskLabels.taskId) ||
+      !/^[a-f0-9-]{36}$/.test(config.taskLabels.runId) ||
+      !Number.isSafeInteger(config.taskLabels.fencing) ||
+      config.taskLabels.fencing < 1)
+  )
+    throw new Error("INVALID_TASK_LABELS");
   if (!config.network || config.network === "host" || config.network === "none") {
     throw new Error("INVALID_NETWORK");
   }
@@ -80,6 +89,18 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     "run",
     "--rm",
     ...(config.containerName ? ["--name", config.containerName] : []),
+    ...(config.taskLabels
+      ? [
+          "--label",
+          "team-skill-hub.expert-managed=1",
+          "--label",
+          `team-skill-hub.task-id=${config.taskLabels.taskId}`,
+          "--label",
+          `team-skill-hub.run-id=${config.taskLabels.runId}`,
+          "--label",
+          `team-skill-hub.fencing=${config.taskLabels.fencing}`,
+        ]
+      : []),
     "--init",
     "--network",
     config.network,

@@ -152,3 +152,25 @@ test("Docker Codex executor fails closed when a new-style repository ID has no r
   );
   assert.equal(ran, false, "must not analyze the default worker source directory");
 });
+
+test("Docker Codex executor labels UUID-backed execution with task, run and fencing", async () => {
+  const taskId = "71950fc2-e7e3-45fd-af39-0697e00ac219";
+  const runId = "7cf042dc-33e2-48f3-a1ce-eea40ec4ba08";
+  let args: readonly string[] = [];
+  const executor = createDockerCodexExecutor({
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async (options) => {
+      args = options.args;
+      return "test";
+    },
+  });
+  await executor({ ...claim, taskId, runId, fencing: 2 }, new AbortController().signal);
+  assert.ok(args.includes("team-skill-hub.expert-managed=1"));
+  assert.ok(args.includes(`team-skill-hub.task-id=${taskId}`));
+  assert.ok(args.includes(`team-skill-hub.run-id=${runId}`));
+  assert.ok(args.includes("team-skill-hub.fencing=2"));
+});

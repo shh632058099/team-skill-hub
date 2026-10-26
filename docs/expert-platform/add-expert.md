@@ -331,6 +331,12 @@ docker run --rm "$EXPERT_DOCKER_IMAGE" --version
 
 若 `selectionMode=explicit`，说明调用时显式指定了专家，不能算自动路由验收成功。
 
+### Worker 被强制退出后的 Docker 容器回收
+
+每个真实任务的 Docker 执行容器带有 `team-skill-hub.expert-managed`、`team-skill-hub.task-id`、`team-skill-hub.run-id` 和 `team-skill-hub.fencing` 标签。当旧 Worker 意外退出而无法运行进程退出清理时，**同一 Docker daemon 上**重新领取该任务的 Worker 会在启动新执行容器前，检查同任务、且 fencing 小于当前值的受管容器，并强制回收。当前或更高 fencing 的容器以及其他任务容器不会被删除。Docker 列表失败会拒绝启动新执行，避免在容器状态未知时重复执行。
+
+**限制**：此清理发生在任务被重新领取后，不是崩溃瞬间；并且只能回收当前 Worker 可以访问的 Docker daemon 上的容器。如果跨不同主机接管，旧主机上的孤儿容器无法由新主机直接删除，需要旧主机启动时的本地巡检或独立宿主机清理服务。不要在不同主机间共享 Docker socket。
+
 ## 10. 常见问题排查
 
 ### 页面报 `EXPERT_RUNTIME_DB_NOT_CONFIGURED`

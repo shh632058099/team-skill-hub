@@ -78,16 +78,20 @@ function buildExpertCodexConfig(
 async function dockerCommand(
   args: readonly string[],
   timeoutMs = 2_000,
+  maxOutputBytes = 256,
 ): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn("docker", [...args], { stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
+    let outputOverflow = false;
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error("DOCKER_COMMAND_TIMEOUT"));
     }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
-      if (stdout.length < 256) stdout += chunk.toString("utf8").slice(0, 256 - stdout.length);
+      const part = chunk.toString("utf8");
+      if (stdout.length + part.length > maxOutputBytes) outputOverflow = true;
+      stdout += part.slice(0, Math.max(0, maxOutputBytes - stdout.length));
     });
     child.once("error", (error) => {
       clearTimeout(timer);
@@ -95,7 +99,8 @@ async function dockerCommand(
     });
     child.once("close", (code) => {
       clearTimeout(timer);
-      resolve({ code, stdout: stdout.trim() });
+      if (outputOverflow) reject(new Error("DOCKER_COMMAND_OUTPUT_OVERFLOW"));
+      else resolve({ code, stdout: stdout.trim() });
     });
   });
 }
@@ -117,6 +122,46 @@ async function stopDockerContainer(name: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
   throw new Error("DOCKER_STOP_FAILED");
+}
+
+/** Remove only containers for earlier fenced attempts of a task already claimed by this Worker.
+ * Never remove the same or a newer fencing value; only managed, labeled containers
+ * on the same Docker daemon are eligible. Reclaim runs before launching the new attempt.
+ */
+export async function cleanupSupersededTaskContainers(claim: Pick<Claim, "taskId" | "fencing">): Promise<number> {
+  if (!/^[a-f0-9-]{36}$/.test(claim.taskId) || !Number.isSafeInteger(claim.fencing) || claim.fencing < 1) {
+    return 0; // legacy/mocked task IDs never trigger Docker container removal
+  }
+  const listing = await dockerCommand(
+    [
+      "ps",
+      "-aq",
+      "--filter",
+      "label=team-skill-hub.expert-managed=1",
+      "--filter",
+      `label=team-skill-hub.task-id=${claim.taskId}`,
+    ],
+    3_000,
+    64 * 1024,
+  );
+  if (listing.code !== 0) throw new Error("DOCKER_RECLAIM_LIST_FAILED");
+  // Fail closed on truncated Docker output rather than acting on partial container IDs.
+  const ids = listing.stdout.split(/\s+/).filter(Boolean);
+  let removed = 0;
+  for (const id of ids) {
+    if (!/^[a-f0-9]{12,64}$/.test(id)) throw new Error("DOCKER_RECLAIM_INVALID_CONTAINER_ID");
+    const inspected = await dockerCommand(
+      ["inspect", "-f", '{{index .Config.Labels "team-skill-hub.fencing"}}', id],
+      2_000,
+    );
+    if (inspected.code !== 0) continue; // container already vanished
+    const fence = Number(inspected.stdout);
+    if (!Number.isSafeInteger(fence) || fence < 1 || fence >= claim.fencing) continue;
+    const result = await dockerCommand(["rm", "-f", id], 5_000);
+    if (result.code !== 0) throw new Error("DOCKER_RECLAIM_REMOVE_FAILED");
+    removed++;
+  }
+  return removed;
 }
 
 export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
@@ -164,6 +209,9 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       const args = buildCodexDockerArgs({
         image: options.image,
         containerName,
+        ...(/^[a-f0-9-]{36}$/.test(claim.taskId) && /^[a-f0-9-]{36}$/.test(claim.runId)
+          ? { taskLabels: { taskId: claim.taskId, runId: claim.runId, fencing: claim.fencing } }
+          : {}),
         sourcePath,
         network: options.network,
         seccompProfile: options.seccompProfile,
@@ -172,6 +220,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         configFilePath,
         codexArgs,
       });
+      if (!options.runProcess) await cleanupSupersededTaskContainers(claim);
       const result = await runProcess({
         executable: "docker",
         args,
