@@ -30,6 +30,7 @@ export interface ReviewItem {
   contentType: ReviewContentType;
   status: string;
   statusGroup: ReviewStatusGroup;
+  operationHint: "update" | "suggested" | "preview";
   sourceType?: string;
   repository?: string;
   namespace?: string;
@@ -110,6 +111,12 @@ export function projectCandidateReviewItem(candidate: KnowledgeCandidate): Revie
     contentType: candidate.suggestedType === "skill" ? "legacy-skill" : "knowledge",
     status: candidate.status,
     statusGroup: statusGroup(candidate.status),
+    operationHint:
+      candidate.knowledgeRelation?.type === "updates" || candidate.knowledgeRelation?.type === "supersedes"
+        ? "update"
+        : candidate.relationHint
+          ? "suggested"
+          : "preview",
     sourceType: candidate.sourceType,
     repository: candidate.repository,
     skillCollection: candidate.skillCollection,
@@ -139,6 +146,7 @@ export function projectSkillBundleReviewItem(
     contentType: record.importType === "collection" ? "skill-bundle-collection" : "skill-bundle-skill",
     status: record.status,
     statusGroup: statusGroup(record.status),
+    operationHint: "preview",
     sourceType: record.sourceType,
     repository: record.repository,
     namespace: record.namespace,

@@ -168,6 +168,31 @@ test("submit validates the whole repository while replacing only the skill root"
   }
 });
 
+test("Skill preview suggests existing artifact but preserves explicit replacement root", async () => {
+  const { dir, db, service } = await fixture();
+  try {
+    const preview = await service.preview(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "usage",
+      files: [{ path: "SKILL.md", content: skill("ota-usage") + "\nUpdated instructions.\n" }],
+    });
+    assert.equal(preview.replacementRoot, "skills/ota/usage");
+    assert.equal(preview.artifactPreview.operation, "update");
+    assert.equal(preview.artifactPreview.artifactType, "skill");
+    assert.equal(preview.artifactPreview.targetPath, "skills/ota/usage");
+    assert.ok(preview.artifactPreview.changedFiles.modified.includes("SKILL.md"));
+    assert.equal(preview.artifactMatch?.relation?.type, "updates");
+    if (preview.artifactMatch?.relation?.type === "updates") {
+      assert.equal(preview.artifactMatch.relation.target.repositoryId, "rd-skills");
+      assert.equal(preview.artifactMatch.relation.target.path, "skills/ota/usage");
+    }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("approval stores a review baseline and later target changes make it stale", async () => {
   const { dir, sourceRoot, db, service } = await fixture();
   try {

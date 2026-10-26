@@ -179,6 +179,7 @@ export interface KnowledgeCandidate {
     reason: string;
     confidence: "medium" | "high";
   };
+  autoRelation?: boolean;
   sourceSessionId?: string;
   sourceTurnId?: string;
   sourceGapKey?: string;
@@ -1009,6 +1010,8 @@ export class McpObservabilityStore {
           | "automation"
           | "relatedKnowledge"
           | "relationHint"
+          | "knowledgeRelation"
+          | "autoRelation"
         >
       >,
   ): Promise<KnowledgeCandidate> {
@@ -1123,6 +1126,8 @@ export class McpObservabilityStore {
         | "repository"
         | "suggestedPath"
         | "knowledgeRelation"
+        | "relationHint"
+        | "autoRelation"
         | "validationSpecVersion"
         | "submissionSpecSchemaVersion"
       >
@@ -1154,6 +1159,8 @@ export class McpObservabilityStore {
       possibleDuplicateOf: nearDuplicate?.candidate.id,
       duplicateSimilarity: nearDuplicate ? Number(nearDuplicate.score.toFixed(3)) : undefined,
       ...(input.knowledgeRelation !== undefined ? { knowledgeRelation: input.knowledgeRelation } : {}),
+      ...("relationHint" in input ? { relationHint: input.relationHint } : {}),
+      ...(input.autoRelation !== undefined ? { autoRelation: input.autoRelation } : {}),
       ...(input.suggestedType !== undefined ? { suggestedType: input.suggestedType } : {}),
       ...(input.skillCollection !== undefined ? { skillCollection: input.skillCollection } : {}),
       ...(input.repository !== undefined ? { repository: input.repository || undefined } : {}),

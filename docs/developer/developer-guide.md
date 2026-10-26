@@ -158,6 +158,7 @@ Knowledge is for current facts such as design details, API behavior, root causes
 When Codex is installed with the setup script, automatic Knowledge candidates are enabled by default. A Candidate is created only when the task contains a meaningful engineering action, verification evidence, and reusable content.
 
 Automatic candidates still require administrator review and are never published directly.
+New Knowledge candidates are compared with published Markdown in the same repository. A unique high-confidence match targets the existing file for update; ambiguous matches are suggestions only. Review the target path and diff before approval. An administrator can explicitly choose a new document. Skill Bundle previews may expose advisory matches, but never override the submitted namespace/skill path.
 
 ### Manual feedback
 

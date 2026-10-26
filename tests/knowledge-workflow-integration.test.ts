@@ -25,6 +25,166 @@ async function git(cwd: string, ...args: string[]) {
   return stdout.trim();
 }
 
+test("published Knowledge is automatically related and updated through review and mocked GitLab PR", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "artifact-update-e2e-"));
+  const upstream = path.join(root, "repo");
+  const existingPath = "knowledge/ota-recovery.md";
+  const originalContent = "# OTA Recovery\n\nPrevious recovery instructions.\n";
+  await mkdir(path.join(upstream, "knowledge"), { recursive: true });
+  await writeFile(path.join(upstream, existingPath), originalContent);
+  await git(upstream, "init", "-b", "master");
+  await git(upstream, "config", "user.name", "Artifact E2E");
+  await git(upstream, "config", "user.email", "artifact@example.invalid");
+  await git(upstream, "add", ".");
+  await git(upstream, "commit", "-m", "baseline");
+
+  const repository: RepositoryConfig = {
+    id: "rd-knowledges",
+    name: "Knowledge",
+    provider: "git",
+    gitUrl: upstream,
+    branch: "master",
+    gitAuth: { type: "none" },
+    webhookAliases: [],
+    enabled: true,
+    audience: ["developer"],
+    visibility: ["internal"],
+    pollingIntervalSeconds: 0,
+    readRoles: ["developer"],
+    syncRoles: ["developer"],
+    knowledgePublishing: {
+      enabled: true,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.test",
+      projectPath: "test/rd-knowledges",
+      tokenEnv: "TEST_ARTIFACT_E2E_TOKEN",
+      targetBranch: "master",
+      branchPrefix: "skill-hub-knowledge",
+    },
+  };
+  const principal: Principal = { id: "artifact-test-user", tenantId: "rd", roles: ["developer"] };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir: path.join(root, "data"),
+      defaultRoles: ["developer"],
+      authentication: { mode: "development", apiKeys: {} },
+      repositories: [repository],
+    },
+    [new GitRepositoryProvider()],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer"]),
+    new StaticRolePermissionProvider(),
+    [],
+    new LoggingEventSink(),
+  );
+  const oldFetch = globalThis.fetch;
+  try {
+    await service.initialize();
+    const before = service.listKnowledgeDocuments(principal);
+    assert.equal(
+      before.some((doc) => doc.relativePath === existingPath),
+      true,
+    );
+    const candidate = await service.submitKnowledgeCandidate(principal, {
+      title: "OTA Recovery",
+      content: [
+        "# OTA Recovery",
+        "",
+        "## 问题",
+        "OTA 更新中断后恢复失败。",
+        "",
+        "## 根因",
+        "旧的恢复逻辑忽略检查点。",
+        "",
+        "## 解决方案",
+        "Updated recovery instructions with new verified checkpoints.",
+        "",
+        "## 验证结果",
+        "回归测试覆盖断点续传和镜像完整性检测，相关测试通过。",
+        "",
+        "## 适用范围",
+        "适用于 OTA 恢复流程。",
+        "",
+        "## 约束/限制",
+        "需要在目标设备验证。",
+      ].join("\n"),
+      sourceType: "manual",
+      suggestedType: "knowledge",
+      repository: "rd-knowledges",
+    });
+    assert.equal(candidate.status, "pending");
+    assert.equal(candidate.knowledgeRelation?.type, "updates");
+    assert.equal(candidate.knowledgeRelation?.target?.path, existingPath);
+
+    process.env.TEST_ARTIFACT_E2E_TOKEN = "fake-token";
+    let updatedPath = "";
+    let updatedContent = "";
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && /\/repository\/files\//.test(url)) {
+        return new Response(
+          JSON.stringify({ content: Buffer.from(originalContent).toString("base64"), encoding: "base64" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (method === "GET" && /\/repository\/branches\//.test(url)) return new Response(null, { status: 404 });
+      if (method === "HEAD" && /\/repository\/files\//.test(url)) return new Response(null, { status: 200 });
+      if (method === "PUT" && /\/repository\/files\//.test(url)) {
+        updatedPath = decodeURIComponent(url.split("/repository/files/")[1]!.split("?")[0]!);
+        updatedContent = JSON.parse(String(init?.body)).content;
+        return new Response(JSON.stringify({ file_path: updatedPath }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (method === "POST" && /\/merge_requests$/.test(url)) {
+        return new Response(
+          JSON.stringify({
+            iid: 42,
+            web_url: "https://gitlab.example.test/test/knowledge/-/merge_requests/42",
+            state: "opened",
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error("Unexpected mock request: " + method + " " + url);
+    };
+    const diff = await service.getKnowledgeCandidateDiff(candidate.id);
+    assert.equal(diff.target.operation, "update");
+    assert.equal(diff.artifactPreview.operation, "update");
+    assert.equal(diff.artifactPreview.artifactType, "knowledge");
+    assert.equal(diff.artifactPreview.targetPath, existingPath);
+    assert.deepEqual(diff.artifactPreview.changedFiles.modified, [existingPath]);
+    assert.equal(diff.target.path, existingPath);
+    assert.ok(diff.summary.addedLines > 0);
+    const approved = await service.reviewKnowledgeCandidate(
+      candidate.id,
+      "approved",
+      "admin-reviewer",
+      "Verified update",
+      "useful",
+    );
+    assert.equal(approved.status, "approved");
+    const published = await service.publishKnowledgeCandidate(candidate.id);
+    assert.equal(published.status, "publishing");
+    assert.equal(published.publication?.filePath, existingPath);
+    assert.equal(published.publication?.action, "update");
+    assert.equal(updatedPath, existingPath);
+    assert.match(updatedContent, /Updated recovery instructions/);
+  } finally {
+    globalThis.fetch = oldFetch;
+    delete process.env.TEST_ARTIFACT_E2E_TOKEN;
+    search.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("automatic candidate can publish through MR, merge, sync and become searchable Knowledge", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "skill-hub-knowledge-workflow-"));
   const upstream = path.join(tempRoot, "rd-skills");

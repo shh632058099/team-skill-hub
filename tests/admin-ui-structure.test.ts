@@ -126,6 +126,11 @@ test("review center exposes unified filters and list controls", () => {
     "reviewPrev",
     "reviewNext",
     "reviewRefresh",
+    "操作判断",
+    "UPDATE · 已关联",
+    "打开 Diff 确认",
+    "artifactOperationLabel",
+    "NEEDS REVIEW · 需要复核",
   ]);
 });
 

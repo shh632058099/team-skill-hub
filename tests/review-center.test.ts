@@ -71,6 +71,37 @@ test("candidate projection distinguishes knowledge and legacy skill", () => {
   assert.equal(knowledge.contentType, "knowledge");
   assert.equal(knowledge.title, "Candidate title");
   assert.equal(knowledge.repository, "rd-knowledges");
+  assert.equal(knowledge.operationHint, "preview");
+  const linked = projectCandidateReviewItem(
+    candidate({
+      knowledgeRelation: {
+        type: "updates",
+        target: {
+          repositoryId: "rd-knowledges",
+          key: "rd-knowledges:knowledge/existing.md",
+          path: "knowledge/existing.md",
+          title: "Existing",
+        },
+      },
+    }),
+  );
+  assert.equal(linked.operationHint, "update");
+  const suggested = projectCandidateReviewItem(
+    candidate({
+      relationHint: {
+        type: "updates",
+        target: {
+          repositoryId: "rd-knowledges",
+          key: "rd-knowledges:knowledge/existing.md",
+          path: "knowledge/existing.md",
+          title: "Existing",
+        },
+        reason: "similar content",
+        confidence: "medium",
+      },
+    }),
+  );
+  assert.equal(suggested.operationHint, "suggested");
   assert.equal(knowledge.submitter, "alice");
   assert.equal(knowledge.publication?.mergeRequestUrl, "https://example.com/pr/1");
 
@@ -90,6 +121,7 @@ test("skill bundle projection distinguishes skill and collection", () => {
   assert.equal(collection.submitter, "bob");
   assert.equal(collection.namespace, "superpowers");
   assert.equal(collection.importType, "collection");
+  assert.equal(collection.operationHint, "preview");
   assert.equal(collection.skillCount, 14);
   assert.equal(collection.fileCount, 65);
 

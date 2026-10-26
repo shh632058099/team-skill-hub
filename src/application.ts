@@ -83,6 +83,8 @@ import { openSkillHubDatabase, type SkillHubDatabase } from "./storage/database.
 import { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundleService, type SubmitSkillBundleServiceInput } from "./skill-bundle-service.js";
 import { legacyRdSkillPathToTarget, type SkillBundleImport } from "./skill-bundles.js";
+import { artifactIdentity, matchArtifact, resolveArtifactTarget, type ArtifactRelation } from "./artifact-relation.js";
+import { buildArtifactPreview } from "./artifact-preview.js";
 import {
   collectReviewItemsBounded,
   paginateReviewItems,
@@ -3310,8 +3312,34 @@ export class SkillHubApplicationService {
       content: input.content,
       submittedSpecVersion: options.submittedSpecVersion,
     });
+    const repositoryId = input.repository ?? this.defaultPublishingRepository("knowledge");
+    const match =
+      input.suggestedType === "knowledge" && repositoryId && !input.suggestedPath
+        ? matchArtifact(
+            { kind: "knowledge", repositoryId, title: normalized.title, content: normalized.content },
+            [...this.knowledgeDocuments.values()]
+              .filter((doc) => doc.relativePath.toLowerCase().endsWith(".md"))
+              .map((doc) => ({
+                identity: artifactIdentity(doc, "knowledge"),
+                content: doc.content,
+              })),
+          )
+        : undefined;
     const created = await this.observability.createCandidate(principal, {
       ...input,
+      ...(match?.relation?.type === "updates"
+        ? { knowledgeRelation: { type: "updates" as const, target: match.relation.target }, autoRelation: true }
+        : {}),
+      ...(match?.hint
+        ? {
+            relationHint: {
+              type: "updates" as const,
+              target: match.hint.target,
+              reason: match.hint.reason,
+              confidence: "medium" as const,
+            },
+          }
+        : {}),
       title: normalized.title,
       content: normalized.content,
       submissionSpecVersion: normalized.submittedSpecVersion ?? normalized.appliedSpecVersion,
@@ -3319,7 +3347,7 @@ export class SkillHubApplicationService {
       submissionSpecSchemaVersion: normalized.schemaVersion,
       submissionMode: options.submissionMode,
     });
-    if (!created.suggestedPath) {
+    if (!created.suggestedPath && created.knowledgeRelation?.type !== "updates") {
       return await this.observability.updateCandidate(created.id, { suggestedPath: defaultCandidatePath(created) });
     }
     return created;
@@ -3804,10 +3832,43 @@ export class SkillHubApplicationService {
       const repository = this.config.repositories.find((repo) => repo.id === input.repository);
       if (!repository) throw new Error("Repository not found");
     }
+    if (input.knowledgeRelation !== undefined || input.suggestedPath !== undefined) {
+      candidateUpdate.autoRelation = false;
+      candidateUpdate.relationHint = undefined;
+    } else if (
+      effectiveType === "knowledge" &&
+      (input.title !== undefined || input.content !== undefined || input.repository !== undefined) &&
+      (current.autoRelation || (!current.knowledgeRelation && current.suggestedPath === defaultCandidatePath(current)))
+    ) {
+      const repositoryId = input.repository ?? current.repository ?? this.defaultPublishingRepository("knowledge");
+      const match = repositoryId
+        ? matchArtifact(
+            {
+              kind: "knowledge",
+              repositoryId,
+              title: candidateUpdate.title ?? current.title,
+              content: candidateUpdate.content ?? current.content,
+            },
+            [...this.knowledgeDocuments.values()]
+              .filter((doc) => doc.relativePath.toLowerCase().endsWith(".md"))
+              .map((doc) => ({
+                identity: artifactIdentity(doc, "knowledge"),
+                content: doc.content,
+              })),
+          )
+        : undefined;
+      candidateUpdate.knowledgeRelation =
+        match?.relation?.type === "updates" ? { type: "updates", target: match.relation.target } : { type: "new" };
+      candidateUpdate.autoRelation = match?.relation?.type === "updates";
+      candidateUpdate.relationHint = match?.hint
+        ? { type: "updates", target: match.hint.target, reason: match.hint.reason, confidence: "medium" }
+        : undefined;
+    }
     if (input.knowledgeRelation) {
       const relation = input.knowledgeRelation;
       if (relation.type === "new") {
         candidateUpdate.knowledgeRelation = { type: "new" };
+        if (current.autoRelation && input.suggestedPath === undefined) candidateUpdate.suggestedPath = "";
       } else {
         if (!relation.target?.key) throw new Error("Knowledge relation target is required");
         const target = this.knowledgeDocuments.get(relation.target.key);
@@ -3858,7 +3919,15 @@ export class SkillHubApplicationService {
     if (relationTarget && relationTarget.repositoryId !== repositoryId) {
       throw new Error("Knowledge update target must be in the candidate repository");
     }
-    const publishPath = candidate.suggestedPath || relationTarget?.path || defaultCandidatePath(candidate);
+    const relation: ArtifactRelation | undefined = relationTarget
+      ? { type: "updates", source: "manual", target: { kind: "knowledge", ...relationTarget } }
+      : undefined;
+    const autoDefault = candidate.suggestedPath === defaultCandidatePath(candidate);
+    const publishPath = resolveArtifactTarget(
+      autoDefault ? undefined : candidate.suggestedPath,
+      relation,
+      defaultCandidatePath(candidate),
+    );
     const publishingType = candidate.suggestedType === "skill" ? "skill" : "knowledge";
     const route = this.requirePublishingRoute(publishingType, repositoryId);
     const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
@@ -3874,8 +3943,30 @@ export class SkillHubApplicationService {
     const { repositoryId, publishingRepository, target } = this.resolveKnowledgeCandidatePublishContext(candidate);
     const publisher = createKnowledgePublisher(publishingRepository);
     const baseline = await publisher.readTargetFile(target, publishingRepository);
+    const staleAutoTarget = candidate.autoRelation && !baseline.exists;
     const currentContent = baseline.content.replace(/\r\n/g, "\n");
     const desiredContent = target.desiredContent.replace(/\r\n/g, "\n");
+    if (staleAutoTarget) {
+      return {
+        target: {
+          repositoryId,
+          targetBranch: target.targetBranch,
+          path: target.filePath,
+          operation: "needs_review" as const,
+        },
+        summary: { addedLines: 0, removedLines: 0 },
+        hunks: [],
+        artifactPreview: buildArtifactPreview({
+          artifactType: "knowledge",
+          targetPath: target.filePath,
+          targetExists: false,
+          changed: true,
+          changedFiles: { added: [], modified: [], deleted: [] },
+          needsReviewReason:
+            "The automatically matched update target no longer exists; choose a target or explicitly create a new document.",
+        }),
+      };
+    }
     if (baseline.exists && currentContent === desiredContent) {
       return {
         target: {
@@ -3886,6 +3977,18 @@ export class SkillHubApplicationService {
         },
         summary: { addedLines: 0, removedLines: 0 },
         hunks: [],
+        artifactPreview: buildArtifactPreview({
+          artifactType: "knowledge",
+          targetPath: target.filePath,
+          targetExists: true,
+          changed: false,
+          changedFiles: { added: [], modified: [], deleted: [] },
+          ...(candidate.autoRelation
+            ? { relationConfidence: "high" as const }
+            : candidate.relationHint?.confidence === "medium"
+              ? { relationConfidence: "medium" as const }
+              : {}),
+        }),
       };
     }
 
@@ -3927,15 +4030,31 @@ export class SkillHubApplicationService {
       };
     });
 
+    const operation = baseline.exists ? ("update" as const) : ("create" as const);
     return {
       target: {
         repositoryId,
         targetBranch: target.targetBranch,
         path: target.filePath,
-        operation: baseline.exists ? ("update" as const) : ("create" as const),
+        operation,
       },
       summary: { addedLines, removedLines },
       hunks,
+      artifactPreview: buildArtifactPreview({
+        artifactType: "knowledge",
+        targetPath: target.filePath,
+        targetExists: baseline.exists,
+        changed: true,
+        changedFiles:
+          operation === "create"
+            ? { added: [target.filePath], modified: [], deleted: [] }
+            : { added: [], modified: [target.filePath], deleted: [] },
+        ...(candidate.autoRelation
+          ? { relationConfidence: "high" as const }
+          : candidate.relationHint?.confidence === "medium"
+            ? { relationConfidence: "medium" as const }
+            : {}),
+      }),
     };
   }
 
@@ -3948,7 +4067,8 @@ export class SkillHubApplicationService {
     if (candidate.knowledgeRelation?.type === "duplicate_of") {
       throw new Error("Duplicate Knowledge candidate should not be published");
     }
-    const { repositoryId, publishPath, publishingRepository } = this.resolveKnowledgeCandidatePublishContext(candidate);
+    const { repositoryId, publishPath, publishingRepository, target } =
+      this.resolveKnowledgeCandidatePublishContext(candidate);
 
     const candidatePatch: Partial<KnowledgeCandidate> = {};
     if (!candidate.repository) candidatePatch.repository = repositoryId;
@@ -3957,6 +4077,13 @@ export class SkillHubApplicationService {
       ? await this.observability.updateCandidate(id, candidatePatch)
       : candidate;
 
+    if (candidate.autoRelation) {
+      const baseline = await createKnowledgePublisher(publishingRepository).readTargetFile(
+        target,
+        publishingRepository,
+      );
+      if (!baseline.exists) throw new Error("Knowledge update target no longer exists; select a new target");
+    }
     await this.observability.markCandidatePublishing(id);
     try {
       const publisher = createKnowledgePublisher(publishingRepository);

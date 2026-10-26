@@ -19,6 +19,8 @@ import {
 } from "./skill-bundles.js";
 import type { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundlePublisher, SkillBundleReviewStaleError } from "./skill-bundle-publishing.js";
+import { artifactIdentity, matchArtifact, type ArtifactMatch } from "./artifact-relation.js";
+import { buildArtifactPreview, type ArtifactPreviewContract } from "./artifact-preview.js";
 
 export interface SkillBundleMaterializedRepository {
   sourceRoot: string;
@@ -32,10 +34,14 @@ export interface SkillBundlePreview {
   replacementRoot: string;
   targetRevision: string;
   targetTreeSha256: string;
+  targetExists: boolean;
   expectedTreeSha256: string;
+  artifactPreview: ArtifactPreviewContract;
   diff: SkillBundleDiff;
   fileDiffs: SkillBundleFileDiff[];
   skills: Skill[];
+  /** Advisory only: explicit namespace/skillPath and replacementRoot always win. */
+  artifactMatch?: ArtifactMatch;
 }
 
 export interface SkillBundleFileDiffLine {
@@ -275,6 +281,20 @@ export class SkillBundleService {
     const materialized = await this.options.materialize(repository);
     const currentRoot = path.join(materialized.sourceRoot, ...normalized.replacementRoot.split("/"));
     const before = await readTextTree(currentRoot);
+    // Skill imports already update the explicit replacementRoot. Provide a safe,
+    // same-repository match hint for renamed Skills without redirecting it.
+    let artifactMatch: ArtifactMatch | undefined;
+    if (normalized.importType === "skill") {
+      const file = normalized.files.find((item) => item.path === "SKILL.md");
+      const existingSkills = await scanSkills(materialized.sourceRoot, repository.id, materialized.revision);
+      const title = normalized.skills[0]?.name;
+      if (file?.content && title) {
+        artifactMatch = matchArtifact(
+          { kind: "skill", repositoryId: repository.id, title, content: file.content },
+          existingSkills.map((skill) => ({ identity: artifactIdentity(skill, "skill"), content: skill.content })),
+        );
+      }
+    }
     const tempParent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-preview-"));
     const tempRoot = path.join(tempParent, "repo");
     try {
@@ -298,10 +318,24 @@ export class SkillBundleService {
         replacementRoot: normalized.replacementRoot,
         targetRevision: materialized.revision,
         targetTreeSha256: canonicalTreeHash(before),
+        targetExists: before.length > 0,
         expectedTreeSha256: normalized.expectedTreeSha256,
         diff,
         fileDiffs: buildSkillBundleFileDiffs(before, normalized.files, diff),
         skills,
+        artifactPreview: buildArtifactPreview({
+          artifactType: "skill",
+          targetPath: normalized.replacementRoot,
+          targetExists: before.length > 0,
+          changed: diff.added.length + diff.modified.length + diff.deleted.length > 0,
+          changedFiles: { added: diff.added, modified: diff.modified, deleted: diff.deleted },
+          ...(artifactMatch?.relation
+            ? { relationConfidence: "high" as const }
+            : artifactMatch?.hint
+              ? { relationConfidence: "medium" as const }
+              : {}),
+        }),
+        ...(artifactMatch?.relation || artifactMatch?.hint ? { artifactMatch } : {}),
       };
     } finally {
       await rm(tempParent, { recursive: true, force: true });
