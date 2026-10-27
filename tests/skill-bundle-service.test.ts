@@ -193,6 +193,26 @@ test("Skill preview suggests existing artifact but preserves explicit replacemen
   }
 });
 
+test("Skill preview treats matches in another directory as suggestions, not updates", async () => {
+  const { dir, db, service } = await fixture();
+  try {
+    const preview = await service.preview(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "renamed",
+      files: [{ path: "SKILL.md", content: skill("ota-usage-renamed") }],
+    });
+    assert.equal(preview.replacementRoot, "skills/ota/renamed");
+    assert.equal(preview.artifactPreview.operation, "create");
+    assert.equal(preview.artifactPreview.relationConfidence, "medium");
+    assert.equal(preview.artifactMatch?.relation, undefined);
+    assert.equal(preview.artifactMatch?.hint?.target.path, "skills/ota/usage");
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("approval stores a review baseline and later target changes make it stale", async () => {
   const { dir, sourceRoot, db, service } = await fixture();
   try {

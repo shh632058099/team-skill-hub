@@ -295,6 +295,21 @@ export class SkillBundleService {
         );
       }
     }
+    // A match outside the explicitly requested replacement root is only a
+    // suggestion. It must not imply that this import updates that other Skill.
+    if (
+      artifactMatch?.relation?.type === "updates" &&
+      artifactMatch.relation.target.path !== normalized.replacementRoot
+    ) {
+      artifactMatch = {
+        score: artifactMatch.score,
+        hint: {
+          target: artifactMatch.relation.target,
+          confidence: "medium",
+          reason: "similar Skill exists at a different path; requested replacement root is unchanged",
+        },
+      };
+    }
     const tempParent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-preview-"));
     const tempRoot = path.join(tempParent, "repo");
     try {
