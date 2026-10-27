@@ -1,6 +1,6 @@
-# 新增 Expert 和 Worker：手把手操作手册
+# 新增 Expert 与部署 Worker：管理员及部署使用手册
 
-本文面向第一次使用 Team Skill Hub 专家平台的管理员，介绍如何新增一个专家、配置它可访问的 Git 仓库、注册独立 Worker，并从 Codex CLI/MCP 验证真实任务。所有配置均按当前代码和 Admin 页面实现编写。
+本文面向第一次部署专家平台的管理员和 Worker 主机运维人员。**部署者领取发布好的 Worker Runtime 安装包与执行镜像，而不是下载 Hub 源码自行构建。** 按顺序完成资源准备、安装、配置、注册审批和真实任务验收。示例命令按当前代码和安装脚本核对。
 
 > **先理解两个概念：**
 >
@@ -8,19 +8,68 @@
 > - **执行配置（Deployment）**：定义“谁可以调用这个专家、它能访问哪些仓库、使用什么运行环境”。一个专家可以绑定一个或多个仓库。
 > - **Worker 执行配置**：Worker 主机上的本地环境文件，定义 Worker 身份、能力、Hub 地址、Docker、Git 凭据和模型凭据映射。它不是 Admin 页面中的 Deployment，也不应把密钥写入数据库或 Git。
 
-下面优先使用 Admin 页面管理专家和执行配置；Worker 的注册/审批/签发凭据目前通过 CLI 完成。
+日常使用优先通过 Admin 页面管理专家、执行配置以及 Worker 审批。CLI 仅作为维护或排障备用方式。
 
-## 0. 准备工作
+**发布管理员 / CI 维护人员**如需制作 Runtime tar.gz、Docker Image tar、SHA-256 校验清单，请使用独立的 [Worker 制品制作与交付手册](./release-worker-artifacts.md)；部署用户继续按照本文操作即可。
 
-开始前确认：
+## 0. 开始之前：明确需要领取什么、准备什么
 
-- Team Skill Hub 已部署并能打开 Admin 页面。
-- Hub 的 Expert Runtime 已启用，且 Hub 与 Worker 使用同一套运行时/Worker 注册数据库。
-- 已有可用的 Codex Responses API Provider、模型名称和 API Key。每个专家可选择不同模型配置。
-- Worker 主机可以访问 Hub 的 gRPC 地址、Docker Engine 和 Git 仓库；私有仓库还需准备 SSH key 或 HTTPS Token。
-- 你知道要允许哪些 MCP 调用者访问该专家。请从已授权的 MCP 会话中调用 `get_server_info` 获取准确的 `principal.id`，不要使用显示名称或 tenant ID 代替。
+**部署者不需要 `team-skill-hub` 源码、npm 构建环境或 Dockerfile。** Worker 由两个相互独立的部分组成：
 
-以下示例使用 `yocto` 专家、`yocto-worker-01` Worker 和 `https://github.com/your-org/yocto-layer.git` 仓库。请将示例仓库、分支、模型和 principal 替换为实际值。不要把 API Key、Worker credential 或 Git Token 粘贴到聊天、文档或命令历史中。
+```text
+Team Skill Hub（已有的 Hub 服务和 Admin 页面）
+    └─ gRPC 私网地址:7443
+         │  注册、心跳、领取任务、回传结果
+         ▼
+Worker 主机（Linux）
+    ├─ Worker Runtime（systemd 常驻服务；读取 worker.env）
+    ├─ Docker Engine（由 Worker 调用，不是 Worker 自己的镜像）
+    ├─ 任务执行 Image（Docker 内运行 Codex/模型任务）
+    └─ 专属 Git checkout、日志及必要凭据
+```
+
+### 0.1 向发布方领取的交付清单
+
+| 交付物                | 形式与当前示例文件名                                                       | 部署位置 / 用途                                                             |
+| --------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **Worker Runtime 包** | `worker-runtime-0.1.0.tar.gz`                                              | 安装到 Worker 主机 `/opt/team-skill-hub-worker/`，作为 systemd 常驻服务运行 |
+| **任务执行镜像**      | `expert-worker-image-0.1.0.tar`                                            | `docker load` 导入 Worker 主机 Docker Engine，供每次任务创建执行容器        |
+| **版本与完整性信息**  | 发布方提供版本、目标 CPU 架构和 SHA-256 校验值                             | 确保 Runtime 与 Image 配套、文件在传输后未损坏                              |
+| **接入参数**          | Hub 私网 gRPC 地址、Bootstrap Token 的安全交付渠道、Worker ID / capability | 用于连接和自动注册；不要通过 Git、聊天记录传播密钥                          |
+| **业务凭据（按需）**  | 模型 API Key、私有 Git 仓库只读凭据、可信 CA / 代理配置                    | 由部署者在 Worker 主机安全配置，不包含在发行包内                            |
+
+当前代码的示例版本是 **`0.1.0`**。上述两个 tar 文件在开发/发布环境可生成，但 `artifacts/` 被 Git 忽略，**不等于在 GitHub Releases、镜像仓库或任意 URL 已经公开发布**。实际领取地址、版本和 SHA-256 由团队发布方提供；不能通过直接 clone 仓库代替交付。
+
+发布方应明确告知：镜像导入后的 tag（当前示例为 `team-skill-hub-expert-worker:0.1.0`）、CPU 架构、兼容的 Hub 版本、升级/回滚制品和密钥交付方式。部署者只需核对并安装制品。 **当前本地可核验的 `0.1.0` Docker 镜像为 `linux/amd64`；ARM64 主机不能直接使用这份镜像，需要发布方提供对应架构的镜像。**
+
+### 0.2 Worker 主机资源与依赖
+
+| 类别      | 基线与检查事项                                                                                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 系统      | 支持目标 Node.js 和 Docker Engine 的 Linux 主机；当前安装方式依赖 **systemd**；x86_64 或 ARM64 需与交付镜像架构一致                                                      |
+| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                |
+| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                            |
+| 软件      | Node.js **24.x**（systemd 单元当前固定使用 `/usr/bin/node`）、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`、systemd；安装时需要 sudo/root 权限 |
+| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 模型 Responses API；如需代理/DNS/CA，三条路径分别验证                                              |
+| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                     |
+| 数据目录  | `/opt/team-skill-hub-worker`（版本化 Runtime）、`/etc/team-skill-hub-worker`（配置和私钥）、`/var/lib/team-skill-hub-worker`（credential、仓库 checkout）                |
+
+**常见部署模式：** 一台 Worker 主机安装一个 Runtime 服务，并可由它派生多个任务执行容器（最终并发由 Hub 租约调度、Worker 能力和主机资源决定）；扩容时为另一台主机或另一套独立部署配置新的 Worker ID，不共享同一 Git checkout。**Hub 与 Worker 不必同机**，也不需要把 Hub 的整个 Docker Compose 或源码放到 Worker 主机。
+
+在 Worker 主机提前检查环境：
+
+```bash
+uname -m
+node --version            # 期望 v24.x
+/usr/bin/node --version   # 供 systemd 使用，必须同为 v24.x
+docker version            # Docker daemon 必须可用
+systemctl --version       # 需要 systemd
+command -v git tar sha256sum
+```
+
+若 Hub 已部署但无法打开 Admin、专家 Runtime 数据库未初始化或 gRPC 端口未能从 Worker 主机访问，先由 **Hub 管理员**修复服务；Worker 主机部署者不负责构建或修复 Hub 源码。
+
+以下示例使用 `yocto` 专家、`yocto-worker-01` Worker 和 `https://github.com/your-org/yocto-layer.git` 仓库。请将示例仓库、分支、模型、credential ref 和 principal 改为本地实际值。不要把 API Key、Worker credential 或 Git Token 粘贴到聊天、文档或命令历史中。
 
 ## 1. 打开专家管理页面
 
@@ -40,8 +89,8 @@
 | Capabilities      | `yocto,build,linux`                           | 专家能处理的能力标签；多个值用逗号或换行分隔                     |
 | Keywords          | `bitbake,recipe,layer,CVE`                    | 描述典型任务的关键词，帮助自动路由                               |
 | Provider ID       | `bst`                                         | 与当前 Provider 配置约定一致；不是 API Key                       |
-| Model             | `gpt-5.6-luna`                                | 填写你的 Router/Provider 实际支持的模型名                        |
-| Base URL          | `https://route.briancs.shop/v1`               | 填写实际 API 入口，不要附带密钥                                  |
+| Model             | `由模型服务提供方确认的模型ID`                | 填写你的 Router/Provider 实际支持的模型名                        |
+| Base URL          | `https://models.example.com/v1`               | 填写实际 API 入口，不要附带密钥                                  |
 | Wire API          | `responses`                                   | 当前 Worker 的 Codex 执行链路使用 Responses API                  |
 | Credential Ref    | `bst-router`                                  | 逻辑凭据引用；它不是密钥本身，后续要在 Worker 主机映射到环境变量 |
 | Allowed Env Names | `TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY` | 允许传入执行容器的环境变量名白名单；不要填写变量值               |
@@ -184,119 +233,134 @@ docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-creden
 
 CLI 签发的凭据可通过 `EXPERT_WORKER_CREDENTIAL` 提供给 Worker，或按运维流程安全写入 `EXPERT_WORKER_CREDENTIAL_FILE`。若正式 credential 丢失且 Hub 已保存其 hash，需由管理员重新签发并更新 Worker 本地凭据文件；Bootstrap 不会覆盖已有的有效凭据。
 
-## 6. 构建并分发 Worker 运行包（只在开发/发布机需要 Hub 源码）
+## 6. 领取并校验运行包 / 执行镜像（不构建）
 
-**Worker 主机不需要 clone `team-skill-hub`，也不需要安装 Hub 的 Admin/MCP 依赖。** 在开发/发布机的 Hub checkout 根目录构建两个制品：一个是宿主机常驻的 Worker daemon 运行包，另一个是任务执行用的 Codex Docker 镜像。
+由团队发布方将 **同一批次的两个制品** 安全传到 Worker 主机，例如 `/tmp/team-skill-hub-worker-release/`。以下用版本 `0.1.0` 演示；升级时应使用发布方提供的实际版本，**不要把示例版本当作永远固定的最新版**。
 
 ```bash
-# 在 team-skill-hub 开发/发布机运行
-npm run build:worker-runtime
-scripts/build-worker-execution-image.sh 0.1.0
+cd /tmp/team-skill-hub-worker-release
+ls -lh worker-runtime-0.1.0.tar.gz expert-worker-image-0.1.0.tar
+sha256sum worker-runtime-0.1.0.tar.gz expert-worker-image-0.1.0.tar
+# 人工与发布方通过受信任渠道交付的 SHA-256 清单逐一比对，不匹配即停止
 ```
 
-生成：
+该发行包的职责必须区分：
 
-- `artifacts/worker-runtime/worker-runtime-0.1.0.tar.gz`：仅包含 Worker 入口及其传递依赖、最小生产依赖、配置模板、systemd service 和安装脚本；不包含 Hub Server、Admin UI、MCP 或知识管理源码。
-- `artifacts/worker-runtime/expert-worker-image-0.1.0.tar`：Codex 执行镜像归档。
+- `worker-runtime-0.1.0.tar.gz` **不是容器镜像**：它安装成 Worker 主机的 systemd 服务，负责连接 Hub、注册、领任务、管理工作区和启动 Docker 容器。
+- `expert-worker-image-0.1.0.tar` **不是 Worker daemon**：这是每个专家任务使用的 Codex 执行镜像，导入 Docker 后由 Runtime 按需调用。
 
-将这两个制品传到 Worker 主机即可，不要把整个 Git checkout、`.env` 或开发用 `node_modules` 复制过去。Worker 主机需要 Linux、Node.js 24、Docker Engine、到 Hub gRPC 端口和 Git 远端的网络连接。执行镜像可以用 `docker load` 导入，不要求 Worker 主机安装构建工具。
+如果发布方改为提供私有镜像仓库地址而非 `.tar`，应同时给出可验证的镜像 digest、架构和拉取凭据。当前下面的安装步骤按**离线 tar 制品**展开；不要求 Worker 主机运行任何 `docker build` 或 `npm run build`。
 
-## 7. 创建 Worker 本地环境文件
+## 7. 在 Worker 主机安装（最短可执行流程）
 
-在 Worker 主机 Linux 文件系统创建配置文件。不要把带密钥的文件放在 `/mnt/c`、`/mnt/d` 等 Windows 挂载盘后依赖 `chmod 600`；建议使用 `/etc/team-skill-hub-worker/`。
+### 7.1 安装 Worker Runtime
+
+在**已安装 Node.js 24、Docker Engine 和 systemd 的 Linux Worker 主机**执行。安装器会创建 `expert-worker` 系统用户、版本化安装目录和 systemd 单元，首次生成 `worker.env` 配置模板。
 
 ```bash
-sudo install -d -m 700 /etc/team-skill-hub-worker
+cd /tmp/team-skill-hub-worker-release
+mkdir -p /tmp/team-skill-hub-worker-bootstrap
+tar -xzf worker-runtime-0.1.0.tar.gz -C /tmp/team-skill-hub-worker-bootstrap
+sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh   /tmp/team-skill-hub-worker-release/worker-runtime-0.1.0.tar.gz
+```
+
+安装完成后应有：
+
+```text
+/opt/team-skill-hub-worker/current/         # 指向当前版本运行包
+/etc/team-skill-hub-worker/worker.env       # 私有配置文件，root:root，0600
+/etc/team-skill-hub-worker/keys/           # 可选的 Git SSH 私钥目录
+/var/lib/team-skill-hub-worker/            # Worker credential、私有仓库副本
+/etc/systemd/system/team-skill-hub-worker.service
+```
+
+> 仅安装 Runtime **不会**自动为你配置 Hub 地址或模型密钥；在完成第 8 节前不要启动服务。
+
+### 7.2 导入配套的 Docker 执行镜像
+
+```bash
+cd /tmp/team-skill-hub-worker-release
+sudo docker load -i expert-worker-image-0.1.0.tar
+sudo docker image inspect team-skill-hub-expert-worker:0.1.0   --format '{{.RepoTags}} {{.Os}}/{{.Architecture}}'
+```
+
+**校验的 tag 必须与后面 `EXPERT_DOCKER_IMAGE` 完全一致**，架构需与目标机器兼容；检查失败则联系发布方重新获取正确制品，部署者不需要自己构建镜像。
+
+## 8. 配置 Worker、自动注册和启动
+
+### 8.1 编辑受保护环境文件
+
+```bash
 sudoedit /etc/team-skill-hub-worker/worker.env
 sudo chown root:root /etc/team-skill-hub-worker/worker.env
 sudo chmod 600 /etc/team-skill-hub-worker/worker.env
 ```
 
-填写下面的模板并替换示例值。Bootstrap Token 应与 Hub 的配置一致。不要把此文件提交到 Git：
+按发布方提供的 Hub 接入信息和 Admin 专家配置填写。**下面是示例，不是可以不修改就直接运行的配置**：
 
 ```dotenv
-# Hub 的 gRPC 地址。同机运行时可用 127.0.0.1；跨主机时填写 Hub 主机名/IP 和可达端口。
-EXPERT_HUB_ADDRESS=127.0.0.1:7443
+# Hub 的私网 gRPC 地址；跨主机不要写 127.0.0.1
+EXPERT_HUB_ADDRESS=hub.internal.example:7443
 EXPERT_WORKER_ID=yocto-worker-01
 EXPERT_CAPABILITY=yocto
-EXPERT_WORKER_BOOTSTRAP_TOKEN=与Hub配置一致的部署级随机Token
-EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 EXPERT_ID=yocto
+EXPERT_WORKER_BOOTSTRAP_TOKEN=与Hub部署方安全交付的Token
+EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 
-# 仓库父目录，不是多个 Worker 共用的 checkout。
+# Runtime 自动为每个 Worker ID 创建隔离的 Git checkout 目录
 EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
 EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
 
+# 必须与已导入的镜像 tag 相同
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:0.1.0
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=default
 
-# 允许传入执行容器的环境变量名白名单，不是密钥值。
+# 对应 Admin 的专家 modelConfig.credentialRef
 EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
 EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
+TEAM_SKILL_HUB_API_KEY=在Worker主机通过安全方式配置真实模型密钥
 
-# 私有 Git 仓库需要时设置；公开仓库可不设置。
-EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":"/etc/team-skill-hub-worker/keys/yocto-readonly"}'
-
-EXPERT_HEARTBEAT_MS=10000
-EXPERT_POLL_MS=3000
-EXPERT_TASK_TIMEOUT_MS=120000
-
-# 可选代理：必须是 Worker 主机能访问的代理。
-HTTPS_PROXY=http://proxy-host:7890
-NO_PROXY=127.0.0.1,localhost
-TEAM_SKILL_HUB_API_KEY=在本机安全地设置实际APIKey
+# 私有 Git 仓库才需要以下映射（公开仓库可不填）
+# EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/keys/git-readonly"}'
+# HTTPS_PROXY=http://proxy.internal:7890
+# NO_PROXY=127.0.0.1,localhost
 ```
 
-说明：
+配置时确认：
 
-- `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 只映射“凭据引用 → 环境变量名”，不能包含 API Key 明文。映射目标必须同时出现在 `EXPERT_MODEL_ENV_NAMES` 中。
-- `TEAM_SKILL_HUB_API_KEY`、`HTTPS_PROXY` 等值在 Worker 进程环境中提供。使用 `source` 加载配置时，确保 JSON 字符串被正确引用；含特殊字符的密钥不要直接拼进 shell 命令。
-- 如果不用 Git 私钥，把 `EXPERT_GIT_CREDENTIALS_JSON` 整行删掉即可。若使用 HTTPS Token，则按第 4 节的 JSON 格式配置，并确保 Token 环境变量在 Worker 进程中可用。
-- 新建专家已在 Admin 的专家配置中填写 `modelConfig` 时，Worker 会按所选专家动态生成本次任务的 Codex 模型配置；通常不需要设置 `EXPERT_CODEX_CONFIG_FILE`。该变量用于未配置 `modelConfig` 的兼容旧路径。若你确实使用静态 TOML，可复制 `docs/expert-platform/codex-provider.example.toml`，并确保 `env_key` 指向 Worker 白名单中的环境变量；不要把密钥写进 TOML。
-- `EXPERT_REPOSITORY_ROOT` 会自动追加 Worker ID，例如最终目录是 `/srv/expert-repositories/yocto-worker-01/`。不同 Worker 必须使用不同 ID，不要共享同一份 `.git` 或工作树。
-- 若 Worker 位于另一台主机，Hub gRPC 默认的 `127.0.0.1:7443` 发布地址不可从远端访问。需通过 `EXPERT_GRPC_PUBLISH_BIND` 将端口绑定到受控的私有网卡地址，并配置仅允许该 Worker 主机访问的防火墙规则；不要为了省事将服务无条件暴露到公网。TLS 参数要么全部配置，要么全部省略；跨不可信网络建议启用 TLS/mTLS。
+- `EXPERT_WORKER_ID` 在 Hub 注册表内唯一；`EXPERT_CAPABILITY` 与目标 Expert 的能力标签匹配。
+- `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 左侧的引用名与 Admin 专家配置的 **Credential Ref** 完全一致，右侧为 Worker 侧实际存在的环境变量名，且必须包含在 `EXPERT_MODEL_ENV_NAMES` 白名单中。
+- 如果使用私有仓库，在 `/etc/team-skill-hub-worker/keys/` 安全放入**只读 Git key**，按第 4 节配置 SSH/HTTPS 凭据映射；不要复制整个 Hub `.env`。
+- 需要跨主机连接时，Hub 管理员负责发布可达的私网 gRPC 地址，设置 `EXPERT_GRPC_PUBLISH_BIND`、防火墙白名单及必要的 TLS/mTLS；不应把 gRPC 端口暴露到公网。
+- 不要直接把密钥复制进文档或版本库。`EXPERT_DOCKER_SECCOMP_PROFILE=unconfined` 仅用于复现沙箱不兼容后的受控排障，默认保持 `default`。
 
-## 8. 安装和启动 Worker（Worker 主机不需要 Hub 源码）
-
-先把运行包和执行镜像归档传到 Worker 主机。运行包内含 `install-worker.sh`，因此先解压到临时目录，再执行安装器：
+### 8.2 启动并通过 Admin 批准
 
 ```bash
-mkdir -p /tmp/worker-runtime-bootstrap
-tar -xzf worker-runtime-0.1.0.tar.gz -C /tmp/worker-runtime-bootstrap
-sudo /tmp/worker-runtime-bootstrap/install-worker.sh worker-runtime-0.1.0.tar.gz
-
-# 导入任务执行镜像；镜像 tag 必须与 worker.env 中 EXPERT_DOCKER_IMAGE 一致
-sudo docker load -i expert-worker-image-0.1.0.tar
-sudoedit /etc/team-skill-hub-worker/worker.env
-sudo chmod 600 /etc/team-skill-hub-worker/worker.env
-
-# 若使用 SSH 私钥，授权 Worker 专属组读取；私钥仍由 root 持有。
-# 确认 yocto-readonly 文件已放在该目录后再执行。
-sudo chown root:expert-worker /etc/team-skill-hub-worker/keys
-sudo chmod 750 /etc/team-skill-hub-worker/keys
-sudo chown root:expert-worker /etc/team-skill-hub-worker/keys/yocto-readonly
-sudo chmod 640 /etc/team-skill-hub-worker/keys/yocto-readonly
-
 sudo systemctl enable --now team-skill-hub-worker
-sudo systemctl status team-skill-hub-worker
-sudo journalctl -u team-skill-hub-worker -n 100 --no-pager
+sudo systemctl status team-skill-hub-worker --no-pager
+sudo journalctl -u team-skill-hub-worker -n 80 --no-pager
 ```
 
-安装器只部署 Worker 运行包，不 clone Hub 源码。环境文件首次生成后需要填写真实的 Hub 地址、Admin 刚签发的 Worker credential、capability、仓库根目录、镜像 tag 和凭据映射。`systemd` 启动前会运行配置检查脚本；它只报告缺失的变量名，不打印变量值。
+在 Hub 的 `/admin/experts` → **Worker 管理**中观察 `yocto-worker-01`：
 
-Docker socket 访问通常需要将 Worker 服务用户加入 `docker` 组，这相当于授予近似 root 的权限。因此 Worker 应运行在专用且可信的主机上，不要让不可信用户控制 Worker 主机。生产部署请固定运行包/镜像版本并保留上一版本以便回滚。
+1. 首次启动自动注册，状态先变成 `pending`（默认不开启自动批准）。
+2. 管理员核对 Worker ID 和 capabilities，点击 **批准**。
+3. Worker 自动交换并保存正式 credential，开始心跳与领任务；不需要手工执行 `enroll` 或复制 credential。
+4. 在 Worker 主机确认 `/var/lib/team-skill-hub-worker/worker-credential` 已生成并受保护；随后**移除 `worker.env` 中的 Bootstrap Token**，重启后应继续使用凭据文件。
 
-启动前可只检查变量是否存在，不要打印变量值：
+旧版手动注册/签发 CLI 仍可作故障排查备用，见第 11 节。
+
+### 8.3 日常检查、升级与回滚
 
 ```bash
-test -n "${EXPERT_WORKER_CREDENTIAL:-}" && echo WORKER_CREDENTIAL_PRESENT || echo WORKER_CREDENTIAL_MISSING
-test -n "${TEAM_SKILL_HUB_API_KEY:-}" && echo MODEL_KEY_PRESENT || echo MODEL_KEY_MISSING
-test -d "${EXPERT_REPOSITORY_ROOT:-/nonexistent}" && echo REPOSITORY_ROOT_PRESENT || echo REPOSITORY_ROOT_WILL_BE_CREATED
-docker run --rm "$EXPERT_DOCKER_IMAGE" --version
+sudo systemctl status team-skill-hub-worker --no-pager
+sudo journalctl -u team-skill-hub-worker -f
+sudo docker image ls team-skill-hub-expert-worker
 ```
 
-只有在当前 WSL2/Docker 环境确认 Codex 的 `bwrap` 沙箱无法启动，且理解其降低 seccomp 防护的影响后，才考虑将 `EXPERT_DOCKER_SECCOMP_PROFILE=unconfined`。优先使用默认 `default`。
+升级需要发布方提供**新版本 Runtime 包与配套 Image**，由管理员安排任务排空/维护窗口后重复第 6～7 节；先导入新镜像，确认环境中的 `EXPERT_DOCKER_IMAGE` 指向新 tag，再重启 Worker 服务并完成一条只读任务验收。安装器使用 `/opt/team-skill-hub-worker/releases/<version>/` 与 `current` 软链接，便于保留旧 Runtime 作为回滚候选，但**切换旧版本前需一并恢复与其兼容的镜像 tag、配置和所需数据库/协议兼容性**，不能只改软链接就认定完成回滚。
 
 ## 9. 端到端验收：用 Codex CLI 发一个只读任务
 
