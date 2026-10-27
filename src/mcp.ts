@@ -1,4 +1,5 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { observeReuse } from "./reuse-observability.js";
 import * as z from "zod/v4";
 import type { SkillHubApplicationService } from "./application.js";
 import { loadClientIntegrationStatus } from "./client-integration/release.js";
@@ -120,6 +121,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             args: args[0],
             latencyMs: performance.now() - started,
             success: true,
+            reuse: observeReuse(name, result?.structuredContent, {
+              knowledgeMatchMinScore: appService.getKnowledgeMatchThreshold(),
+            }),
             principal,
           });
           if (result?.structuredContent && typeof result.structuredContent === "object") {

@@ -274,3 +274,16 @@ PowerShell：
 - 执行 AI 生成的代码和命令前仍然需要 Review 和验证。
 
 普通开发者日常只需要记住一条主线：**接入 MCP → 使用团队资产 → 完成并验证任务 → 必要时提交 Knowledge Candidate 或 Skill Bundle → 把对应 ID 给管理员审批。**
+
+### 运行观测：Knowledge / Skill Reuse
+
+管理员在 `/admin/observability/reuse` 查看 MCP 复用记录。新版 MCP 调用记录中 `reuse` 字段只保存最多五个资产的仓库、路径、标题、分数等摘要，**不保存检索返回的正文**；可按 HIT、MISS、LOAD、资产、用户、会话及时间筛选。统计接口 `/admin/api/reuse/summary` 提供完整范围内的事件计数及最常见资产（受用户、工具、时间筛选影响）。
+
+- **HIT**：搜索返回匹配项；Knowledge 在配置了 `knowledgeMatchMinScore` 时还须达到阈值。
+- **MISS**：搜索为空，或者 Knowledge 搜索最高分未达到阈值。
+- **LOAD**：`get_knowledge`、`get_skill` 或 `get_skill_resource` 成功读取指定资产。
+- **未识别**：升级前的历史调用或未带结果元数据的调用；不会推断其是否命中。
+
+搜索命中、资产加载和 Agent 确认使用是不同事件。HIT/LOAD 不能证明任务结果使用了对应资产；真正的使用效果应关联用户反馈或明确的执行证据。列表和详情仍可通过 `traceId` / `sessionId` 关联 MCP 调用和会话。统计不对旧记录进行历史补算。
+
+注意：统计卡中的 HIT 为**命中调用次数**，常见资产的“检索出现”则是该资产出现在返回列表中的次数；一次检索可能出现多个资产，这两个指标不能直接相加比较。

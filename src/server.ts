@@ -1415,6 +1415,8 @@ export async function startServer(
       tool?: string;
       actorId?: string;
       sessionId?: string;
+      event?: string;
+      asset?: string;
       from?: string;
       to?: string;
     };
@@ -1430,6 +1432,21 @@ export async function startServer(
     }
     return derivedMcpRows(request, false);
   });
+  app.get<{ Querystring: { actorId?: string; tool?: string; from?: string; to?: string } }>(
+    "/admin/api/reuse/summary",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const dateError = adminDateQueryError(request.query, ["from", "to"]);
+      if (dateError) {
+        reply.code(400);
+        return { error: dateError };
+      }
+      return service.adminReuseSummary(request.query) ?? { counts: null, topAssets: [] };
+    },
+  );
   app.get<{ Params: { id: string } }>("/admin/api/reuse/:id", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);

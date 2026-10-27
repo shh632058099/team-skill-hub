@@ -1933,6 +1933,10 @@ export class SkillHubApplicationService {
     };
   }
 
+  getKnowledgeMatchThreshold(): number | undefined {
+    return this.config.knowledgeMatchMinScore;
+  }
+
   newMcpTraceId(): string {
     return this.observability.newTraceId();
   }
@@ -1948,6 +1952,7 @@ export class SkillHubApplicationService {
     latencyMs: number;
     success: boolean;
     error?: string;
+    reuse?: import("./reuse-observability.js").ReuseObservation;
     principal: Principal;
   }) {
     const resolvedSessionId =
@@ -1966,6 +1971,7 @@ export class SkillHubApplicationService {
       latencyMs: input.latencyMs,
       success: input.success,
       error: input.error,
+      reuse: input.reuse,
       actorId: input.principal.id,
       tenantId: input.principal.tenantId,
     });
@@ -2192,6 +2198,9 @@ export class SkillHubApplicationService {
     return this.observability.adminCandidateDetectionsPage(query);
   }
 
+  adminReuseSummary(query: { actorId?: string; tool?: string; from?: string; to?: string }) {
+    return this.observability.adminReuseSummary(query);
+  }
   adminMcpCallsPage(
     query: Parameters<McpObservabilityStore["adminMcpCallsPage"]>[0],
     mode: "all" | "reuse" | "failures" = "all",

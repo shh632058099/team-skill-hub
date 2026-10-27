@@ -83,6 +83,7 @@ export interface McpCallRecord {
   latencyMs: number;
   success: boolean;
   error?: string;
+  reuse?: import("./reuse-observability.js").ReuseObservation;
 }
 
 function isMcpCallRecord(value: unknown): value is McpCallRecord {
@@ -429,6 +430,9 @@ export class McpObservabilityStore {
   adminCandidateDetectionsPage(query: Parameters<SqliteObservabilityRepository["adminCandidateDetections"]>[0]) {
     return this.readBackend === "sqlite" ? this.sqlite!.adminCandidateDetections(query) : undefined;
   }
+  adminReuseSummary(query: { actorId?: string; tool?: string; from?: string; to?: string }) {
+    return this.readBackend === "sqlite" ? this.sqlite!.adminReuseSummary(query) : undefined;
+  }
   adminMcpCallsPage(
     query: Parameters<SqliteObservabilityRepository["adminMcpCalls"]>[0],
     mode: "all" | "reuse" | "failures" = "all",
@@ -621,6 +625,7 @@ export class McpObservabilityStore {
       client: input.client ? redactText(input.client, 300) : undefined,
       error: input.error ? redactText(input.error, 1000) : undefined,
       args: sanitizeValue(input.args) as Record<string, unknown> | undefined,
+      reuse: sanitizeValue(input.reuse) as McpCallRecord["reuse"],
     };
     await this.persistRecord("mcp-calls.jsonl", record, () => this.sqlite!.recordMcpCall(record));
     return record;

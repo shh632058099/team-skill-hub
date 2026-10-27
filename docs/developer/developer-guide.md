@@ -271,3 +271,9 @@ Restart Codex or Claude Code after a required upgrade. Use the original setup `-
 - Review and verify AI-generated code and commands before execution.
 
 For ordinary developers, the main workflow is simple: **connect MCP -> use team assets -> complete and verify the task -> submit a Knowledge Candidate or Skill Bundle when useful -> send the resulting ID to an administrator for approval.**
+
+### Knowledge / Skill reuse observability
+
+The existing `/admin/observability/reuse` view now distinguishes result-level HIT, MISS and LOAD events. MCP call records store a bounded `reuse` summary (up to five asset repository/path/title/score references), **not retrieved document or Skill content**. The `/admin/api/reuse/summary` endpoint aggregates event counts and the most frequently returned/loaded assets for optional actor, tool and time filters. Knowledge search HIT respects `knowledgeMatchMinScore` if configured. Legacy calls without result metadata are shown as unknown. HIT and LOAD do not establish that an agent used the asset to complete the task; explicit feedback or execution evidence is still needed.
+
+Top-asset appearances count returned asset references, while HIT counts successful match calls. One call may return multiple assets, so these totals are not directly comparable.

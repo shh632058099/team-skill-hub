@@ -614,6 +614,59 @@ export class SqliteObservabilityRepository implements ObservabilityRepository {
       parse(r.record_json),
     );
   }
+  adminReuseSummary(query: { actorId?: string; tool?: string; from?: string; to?: string }) {
+    const filters = ["tool IN (" + [...REUSE].map(() => "?").join(",") + ")"];
+    const args: Array<string | number> = [...REUSE];
+    if (query.actorId) {
+      filters.push("actor_id=?");
+      args.push(query.actorId);
+    }
+    if (query.tool) {
+      filters.push("tool=?");
+      args.push(query.tool);
+    }
+    if (query.from) {
+      filters.push("ts>=?");
+      args.push(ms(query.from));
+    }
+    if (query.to) {
+      filters.push("ts<=?");
+      args.push(ms(query.to));
+    }
+    const scope = " FROM mcp_calls WHERE " + filters.join(" AND ");
+    const counts = this.database.raw
+      .prepare(
+        "SELECT count(*) total, " +
+          "sum(CASE WHEN json_extract(record_json,'$.reuse.event')='hit' THEN 1 ELSE 0 END) hit, " +
+          "sum(CASE WHEN json_extract(record_json,'$.reuse.event')='miss' THEN 1 ELSE 0 END) miss, " +
+          "sum(CASE WHEN json_extract(record_json,'$.reuse.event')='load' THEN 1 ELSE 0 END) load" +
+          scope,
+      )
+      .get(...args) as { total: number; hit: number; miss: number; load: number };
+    const topAssets = this.database.raw
+      .prepare(
+        "SELECT json_extract(a.value,'$.repository') repository, json_extract(a.value,'$.path') path, " +
+          "max(json_extract(a.value,'$.title')) title, " +
+          "sum(CASE WHEN json_extract(m.record_json,'$.reuse.event')='hit' THEN 1 ELSE 0 END) hits, " +
+          "sum(CASE WHEN json_extract(m.record_json,'$.reuse.event')='load' THEN 1 ELSE 0 END) loads " +
+          "FROM mcp_calls m JOIN json_each(m.record_json,'$.reuse.assets') a WHERE " +
+          filters.map((x) => x.replace(/^(tool|actor_id|ts)\b/g, "m.$1")).join(" AND ") +
+          " AND json_extract(a.value,'$.repository') IS NOT NULL AND json_extract(a.value,'$.path') IS NOT NULL " +
+          "GROUP BY repository,path ORDER BY loads DESC,hits DESC LIMIT 10",
+      )
+      .all(...args) as Array<{ repository: string; path: string; title: string | null; hits: number; loads: number }>;
+    const assets = topAssets.map((asset) => ({ ...asset }));
+    return {
+      counts: {
+        total: counts.total,
+        hit: counts.hit,
+        miss: counts.miss,
+        load: counts.load,
+        unknown: counts.total - counts.hit - counts.miss - counts.load,
+      },
+      topAssets: assets,
+    };
+  }
   adminMcpCalls(
     query: {
       limit?: string;
@@ -623,6 +676,8 @@ export class SqliteObservabilityRepository implements ObservabilityRepository {
       success?: string;
       actorId?: string;
       sessionId?: string;
+      event?: string;
+      asset?: string;
       from?: string;
       to?: string;
     },
@@ -636,6 +691,15 @@ export class SqliteObservabilityRepository implements ObservabilityRepository {
       a.push(...REUSE);
     }
     if (mode === "failures") w.push("success=0");
+    if (mode === "reuse" && query.event) {
+      if (!["hit", "miss", "load"].includes(query.event)) w.push("0=1");
+      w.push("json_extract(record_json,'$.reuse.event')=?");
+      a.push(query.event);
+    }
+    if (mode === "reuse" && query.asset) {
+      w.push("coalesce(json_extract(record_json,'$.reuse.assets'),'') LIKE ?");
+      a.push("%" + query.asset.replace(/[%_]/g, "") + "%");
+    }
     if (query.tool) {
       w.push("tool=?");
       a.push(query.tool);
@@ -667,7 +731,7 @@ export class SqliteObservabilityRepository implements ObservabilityRepository {
       const fields =
         mode === "all"
           ? "json_extract(record_json,'$.id')||' '||tool||' '||trace_id||' '||actor_id||' '||coalesce(session_id,'')||' '||coalesce(json_extract(record_json,'$.client'),'')||' '||coalesce(json_extract(record_json,'$.error'),'')"
-          : "json_extract(record_json,'$.id')||' '||tool||' '||actor_id||' '||coalesce(session_id,'')||' '||coalesce(json_extract(record_json,'$.client'),'')||' '||coalesce(json_extract(record_json,'$.error'),'')||' '||coalesce(json_extract(record_json,'$.args'),'')";
+          : "json_extract(record_json,'$.id')||' '||tool||' '||actor_id||' '||coalesce(session_id,'')||' '||coalesce(json_extract(record_json,'$.client'),'')||' '||coalesce(json_extract(record_json,'$.error'),'')||' '||coalesce(json_extract(record_json,'$.args'),'')||' '||coalesce(json_extract(record_json,'$.reuse.assets'),'')";
       w.push("lower(" + fields + ") LIKE ?");
       a.push("%" + q + "%");
     }

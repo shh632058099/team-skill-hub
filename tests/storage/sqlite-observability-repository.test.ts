@@ -71,3 +71,50 @@ test("duplicate IDs are idempotent and do not double count projections", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("reuse query filters real HIT/MISS/LOAD records by event and asset", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-reuse-query-"));
+  try {
+    const db = openSkillHubDatabase(path.join(root, "db.sqlite3"));
+    const repo = new SqliteObservabilityRepository(db);
+    await repo.recordMcpCall({
+      ...call,
+      id: "hit",
+      reuse: {
+        event: "hit",
+        resultCount: 1,
+        topScore: 0.9,
+        assets: [{ repository: "rd-knowledges", path: "knowledge/ota.md", score: 0.9 }],
+      },
+    });
+    await repo.recordMcpCall({ ...call, id: "miss", reuse: { event: "miss", resultCount: 0, assets: [] } });
+    await repo.recordMcpCall({
+      ...call,
+      id: "load",
+      tool: "get_knowledge",
+      reuse: { event: "load", assets: [{ repository: "rd-knowledges", path: "knowledge/ota.md" }] },
+    });
+    await repo.recordMcpCall({ ...call, id: "legacy" });
+    assert.equal(repo.adminMcpCalls({ event: "hit" }, "reuse").page.total, 1);
+    assert.equal(repo.adminMcpCalls({ event: "miss" }, "reuse").items[0]?.id, "miss");
+    assert.equal(repo.adminMcpCalls({ event: "load", asset: "ota.md" }, "reuse").items[0]?.id, "load");
+    assert.equal(repo.adminMcpCalls({ event: "hit", asset: "does-not-exist" }, "reuse").page.total, 0);
+    assert.equal(repo.adminMcpCalls({ event: "nope" }, "reuse").page.total, 0);
+    assert.equal(repo.adminMcpCalls({ q: "ota.md" }, "reuse").page.total, 2);
+    assert.equal(repo.adminMcpCalls({}, "reuse").page.total, 4);
+    const metrics = repo.adminReuseSummary({});
+    assert.deepEqual(metrics.counts, { total: 4, hit: 1, miss: 1, load: 1, unknown: 1 });
+    assert.deepEqual(metrics.topAssets[0], {
+      repository: "rd-knowledges",
+      path: "knowledge/ota.md",
+      title: null,
+      hits: 1,
+      loads: 1,
+    });
+    assert.equal(repo.adminReuseSummary({ tool: "get_knowledge" }).counts.load, 1);
+
+    db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

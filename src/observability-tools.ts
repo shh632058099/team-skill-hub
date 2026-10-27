@@ -4,6 +4,8 @@ export const REUSE_MCP_TOOLS = new Set([
   "get_knowledge",
   "search_skills",
   "get_skill",
+  "get_skill_resource",
+  "resolve_skill",
   "knowledge_search",
   "skill_search",
 ]);
