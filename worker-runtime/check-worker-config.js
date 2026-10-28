@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { existsSync } = require("node:fs");
+import { existsSync } from "node:fs";
 const credentialFile =
   process.env.EXPERT_WORKER_CREDENTIAL_FILE?.trim() || "/var/lib/team-skill-hub-worker/worker-credential";
 const required = [

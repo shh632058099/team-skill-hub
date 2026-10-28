@@ -5,9 +5,9 @@ This is the deployment-package definition for the Expert Worker daemon. The rele
 ## Requirements
 
 - Linux x86_64/arm64 supported by the selected Node.js 24 build and Docker Engine.
-- Node.js 24.x, Docker Engine, network access to the Hub gRPC endpoint and configured Git remotes.
+- Node.js 24.x, Docker Engine, network access to the Hub gRPC endpoint and configured Git remotes. **systemd is optional**; without it use `worker-control.sh`.
 - A stable Worker ID and capability. By default, the Worker uses a bootstrap token to register and waits for Admin approval; no manual credential copy is needed.
-- The matching `team-skill-hub-expert-worker:<version>` execution image, built/published separately. The Hub development checkout can build/export it with `scripts/build-worker-execution-image.sh <version>`; the Worker host only needs the resulting image archive (`docker load -i ...`), not the Dockerfile or Hub source.
+- The matching `team-skill-hub-expert-claude:<version>` (default; Codex optional) execution image, built/published separately. The Hub development checkout can build/export it with `scripts/build-worker-execution-image.sh <version>`; the Worker host only needs the resulting image archive (`docker load -i ...`), not the Dockerfile or Hub source.
 
 ## Build artifact (run in the Hub development checkout)
 
@@ -17,7 +17,7 @@ npm run build:worker-runtime
 
 Output: `artifacts/worker-runtime/worker-runtime-<version>.tar.gz`. Only deploy this artifact, not the Hub checkout.
 
-## Install on a Worker host
+## Install on a Worker host (with or without systemd)
 
 ```bash
 mkdir -p /tmp/worker-runtime-bootstrap
@@ -25,12 +25,30 @@ tar -xzf worker-runtime-<version>.tar.gz -C /tmp/worker-runtime-bootstrap
 sudo /tmp/worker-runtime-bootstrap/install-worker.sh worker-runtime-<version>.tar.gz
 sudoedit /etc/team-skill-hub-worker/worker.env
 sudo chmod 600 /etc/team-skill-hub-worker/worker.env
-# Load the matching execution image separately:
-sudo docker load -i expert-worker-image-<version>.tar
+sudo docker load -i expert-claude-image-<version>.tar  # default Claude Code image
+```
+
+The installer **does not require systemd**. It detects an actively running systemd manager, not merely the existence of a `systemctl` binary. It copies the service file and reloads systemd only when it is available.
+
+**With systemd:**
+
+```bash
 sudo systemctl enable --now team-skill-hub-worker
 sudo systemctl status team-skill-hub-worker
 sudo journalctl -u team-skill-hub-worker -n 100 --no-pager
 ```
+
+**Without systemd** (e.g. minimal Linux/container/WSL without systemd):
+
+```bash
+sudo /opt/team-skill-hub-worker/current/worker-control.sh start
+sudo /opt/team-skill-hub-worker/current/worker-control.sh status
+sudo /opt/team-skill-hub-worker/current/worker-control.sh logs
+sudo /opt/team-skill-hub-worker/current/worker-control.sh stop
+sudo /opt/team-skill-hub-worker/current/worker-control.sh restart
+```
+
+The manual controller runs the Worker as the unprivileged `expert-worker` user, reads root-owned `0600` `worker.env`, saves logs to `/var/lib/team-skill-hub-worker/worker.log` and records a PID + process start time to prevent stopping an unrelated process. It requires a Linux `/proc` filesystem and `runuser`; unlike systemd it **does not automatically restart a crashed process or enable start-on-boot**. Configure an external process supervisor if either behavior is required. Never start the systemd unit and the manual instance simultaneously. Run the controller as root/sudo, because it reads protected configuration.
 
 Set `EXPERT_HUB_ADDRESS`, `EXPERT_WORKER_ID`, `EXPERT_CAPABILITY` and `EXPERT_WORKER_BOOTSTRAP_TOKEN` in the protected environment file. The Worker registers automatically. Admin approval is required by default; the Worker creates a protected pending credential locally before registration and submits it to the Hub over the configured gRPC transport. The Hub stores only its hash. After approval, the same credential is activated and atomically moved to `EXPERT_WORKER_CREDENTIAL_FILE` (default `/var/lib/team-skill-hub-worker/worker-credential`) with mode `0600`. If the network response is lost, the Worker retries with the same pending credential. After verifying the credential file exists, remove the bootstrap token from `worker.env`; on later restarts, the saved credential is reused. The environment file contains secrets and must never be committed or printed in logs.
 

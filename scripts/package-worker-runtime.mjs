@@ -26,12 +26,14 @@ for (const file of [
   "worker.env.example",
   "team-skill-hub-worker.service",
   "install-worker.sh",
+  "worker-control.sh",
   "README.md",
   "check-worker-config.js",
 ]) {
   cpSync(path.join(root, "worker-runtime", file), path.join(stage, file));
 }
 chmodSync(path.join(stage, "install-worker.sh"), 0o755);
+chmodSync(path.join(stage, "worker-control.sh"), 0o755);
 chmodSync(path.join(stage, "check-worker-config.js"), 0o755);
 execFileSync("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], {
   cwd: stage,

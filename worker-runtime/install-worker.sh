@@ -23,7 +23,14 @@ chmod -R go-w "$BASE/releases/$VERSION"
 ln -sfn "$BASE/releases/$VERSION" "$BASE/current.new"
 mv -Tf "$BASE/current.new" "$BASE/current"
 if [[ ! -f "$ETC/worker.env" ]]; then install -m 0600 "$BASE/current/worker.env.example" "$ETC/worker.env"; chown root:root "$ETC/worker.env"; echo "Created $ETC/worker.env; edit it before starting the service."; fi
-install -m 0644 "$BASE/current/team-skill-hub-worker.service" /etc/systemd/system/team-skill-hub-worker.service
-systemctl daemon-reload
-echo "Installed Worker runtime $VERSION. Configure $ETC/worker.env, load the matching execution image, then run: systemctl enable --now team-skill-hub-worker"
+# systemctl may be installed even when systemd is NOT PID 1 (Docker, WSL, chroot).
+# Never require systemd for installation; only register a service on a real systemd host.
+if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1; then
+  install -m 0644 "$BASE/current/team-skill-hub-worker.service" /etc/systemd/system/team-skill-hub-worker.service
+  systemctl daemon-reload
+  echo "Installed Worker runtime $VERSION (systemd detected). Configure $ETC/worker.env and load the matching image, then run: systemctl enable --now team-skill-hub-worker"
+else
+  echo "Installed Worker runtime $VERSION (no running systemd). Configure $ETC/worker.env and load the matching image, then run: $BASE/current/worker-control.sh start"
+  echo "Manual control: $BASE/current/worker-control.sh {start|stop|restart|status|logs}"
+fi
 echo "Security note: membership in the docker group effectively grants root-equivalent privileges. Use a dedicated trusted Worker host."

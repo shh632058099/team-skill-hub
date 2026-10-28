@@ -259,7 +259,7 @@ sha256sum worker-runtime-0.1.0.tar.gz expert-claude-image-0.1.0.tar
 
 ### 7.1 安装 Worker Runtime
 
-在**已安装 Node.js 24、Docker Engine 和 systemd 的 Linux Worker 主机**执行。安装器会创建 `expert-worker` 系统用户、版本化安装目录和 systemd 单元，首次生成 `worker.env` 配置模板。
+在**已安装 Node.js 24、Docker Engine 的 Linux Worker 主机**执行（systemd 可选）。安装器会创建 `expert-worker` 系统用户、版本化安装目录，并仅在 systemd 运行时注册服务单元，首次生成 `worker.env` 配置模板。
 
 ```bash
 cd /tmp/team-skill-hub-worker-release
@@ -289,6 +289,22 @@ sudo docker image inspect team-skill-hub-expert-claude:0.1.0   --format '{{.Repo
 ```
 
 **校验的 tag 必须与后面 `EXPERT_DOCKER_IMAGE` 完全一致**，架构需与目标机器兼容；检查失败则联系发布方重新获取正确制品，部署者不需要自己构建镜像。
+
+### 7.3 没有 systemd 的主机
+
+`install-worker.sh` 不要求 systemd。检测到运行中的 systemd 时，它会注册 `team-skill-hub-worker.service`；没有 systemd（例如部分容器/WSL）则跳过服务注册，保留完整安装。
+
+配置完成后，如果主机**没有运行 systemd**，使用安装包自带的脚本手动管理：
+
+```bash
+sudo /opt/team-skill-hub-worker/current/worker-control.sh start
+sudo /opt/team-skill-hub-worker/current/worker-control.sh status
+sudo /opt/team-skill-hub-worker/current/worker-control.sh logs
+sudo /opt/team-skill-hub-worker/current/worker-control.sh stop
+sudo /opt/team-skill-hub-worker/current/worker-control.sh restart
+```
+
+手动运行以 `expert-worker` 身份启动，不需要复制 Hub 源码；日志保存在 `/var/lib/team-skill-hub-worker/worker.log`。**无 systemd 时不会自动重启崩溃进程，也不会自动开机启动**，长期部署可结合外部进程管理器。不要同时用 systemd 和手动脚本启动同一 Worker。第 8 节中 `systemctl` / `journalctl` 命令仅适用于 systemd 主机。
 
 ## 8. 配置 Worker、自动注册和启动
 

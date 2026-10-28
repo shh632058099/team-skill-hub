@@ -58,7 +58,7 @@ npm run build:worker-runtime
 bash scripts/build-worker-claude-image.sh "$VERSION"
 ```
 
-**实际脚本行为：** `build:worker-runtime` 先用 `tsconfig.worker.json` 编译 Worker 依赖闭包，再运行 `scripts/package-worker-runtime.mjs`；后者将 Worker JS、proto、运行时 `package.json` / lockfile、生产 npm 依赖、`install-worker.sh`、`worker.env.example`、systemd 服务和检查脚本打入 tar.gz。执行镜像由 `docker/expert-worker/Dockerfile.claude` 制作，内含 Node 24、Claude Code CLI、系统 CA 和独立的执行用户；构建脚本运行 `docker build --pull` 后 `docker save`。
+**实际脚本行为：** `build:worker-runtime` 先用 `tsconfig.worker.json` 编译 Worker 依赖闭包，再运行 `scripts/package-worker-runtime.mjs`；后者将 Worker JS、proto、运行时 `package.json` / lockfile、生产 npm 依赖、`install-worker.sh`、`worker-control.sh`、`worker.env.example`、可选的 systemd 服务和检查脚本打入 tar.gz。执行镜像由 `docker/expert-worker/Dockerfile.claude` 制作，内含 Node 24、Claude Code CLI、系统 CA 和独立的执行用户；构建脚本运行 `docker build --pull` 后 `docker save`。
 
 **注意可复现性：** 当前 Dockerfile 的基础镜像用浮动 tag，且构建脚本使用 `--pull`。即使版本号相同，多次构建也可能得到不同 digest；必须记录**实际**镜像 ID、基镜像/构建环境和 tar 的 SHA-256。若需要严格可复现发行，后续应固定基础镜像 digest、构建平台与依赖来源，不能仅凭版本号认定字节一致。
 
