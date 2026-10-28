@@ -74,6 +74,9 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      onActivity: async (claim, stage, sequence, tool, count) => {
+        await client.reportTaskStage?.(claim, stage, "", { sequence, tool, count });
+      },
       onStage: async (claim, stage, details) => {
         try {
           await client.reportTaskStage?.(claim, stage, details);

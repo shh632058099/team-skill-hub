@@ -235,17 +235,33 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     const taskId = String(submitted.taskId);
     assert.match(taskId, /^[0-9a-f-]{36}$/i);
 
+    assert.ok(listedTools.some((tool) => tool.name === "get_expert_task_events"));
+    assert.ok(listedTools.some((tool) => tool.name === "wait_expert_task"));
+    const initial = await callMcp(mcpUrl, apiKey, 40, "get_expert_task_events", { taskId });
+    assert.equal(initial.status, "queued");
+    assert.ok(Array.isArray(initial.events));
+    let observedWorkerActivity = false;
     const claimed = await runRemoteWorkerOnce(
       workerClient,
       "ota-worker",
       "ota",
       async (claim) => {
         assert.equal(claim.taskId, taskId);
+        await workerClient!.reportTaskStage(claim, "tool.activity", "", { sequence: 1, tool: "Read", count: 2 });
+        const progress = await callMcp(mcpUrl, apiKey, 41, "get_expert_task_events", { taskId, afterEventId: 0 });
+        const events = progress.events as Array<{ type: string; tool: string | null; count: number | null }>;
+        observedWorkerActivity = events.some(
+          (event) => event.type === "tool.activity" && event.tool === "Read" && event.count === 2,
+        );
+        const waited = await callMcp(mcpUrl, apiKey, 42, "wait_expert_task", { taskId, waitMs: 1000 });
+        assert.equal(waited.status, "running");
+        assert.ok((waited.events as unknown[]).length > 0);
         return "Read-only OTA analysis: the task was routed to the OTA expert and completed by the remote worker.";
       },
       { expertId: "ota", heartbeatMs: 1000 },
     );
     assert.equal(claimed, true);
+    assert.equal(observedWorkerActivity, true);
 
     const status = await callMcp(mcpUrl, apiKey, 2, "get_expert_task_status", { taskId });
     assert.equal(status.status, "succeeded");
@@ -263,6 +279,30 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     assert.equal(explicit.selectionMode, "explicit");
     assert.equal(explicit.repositoryId, "ota-repo");
     const explicitTaskId = String(explicit.taskId);
+    // Exercise a real in-flight MCP progress-token request over HTTP/SSE.
+    const notifiedProgress = fetch(mcpUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "x-skill-hub-api-key": apiKey,
+        "x-skill-hub-client": "claude-code",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 79,
+        method: "tools/call",
+        params: {
+          name: "wait_expert_task",
+          arguments: { taskId: explicitTaskId, waitMs: 8000, limit: 50 },
+          _meta: { progressToken: "progress-expert-e2e" },
+        },
+      }),
+    }).then(async (response) => {
+      assert.equal(response.status, 200);
+      return await response.text();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(
       await runRemoteWorkerOnce(
         workerClient,
@@ -270,12 +310,18 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
         "ota",
         async (claim) => {
           assert.equal(claim.taskId, explicitTaskId);
+          await workerClient!.reportTaskStage(claim, "tool.activity", "", { sequence: 1, tool: "Grep", count: 1 });
+          await new Promise((resolve) => setTimeout(resolve, 1100));
+          await workerClient!.reportTaskStage(claim, "tool.activity", "", { sequence: 2, tool: "Read", count: 3 });
           return "Explicit OTA analysis completed.";
         },
         { expertId: "ota", heartbeatMs: 1000 },
       ),
       true,
     );
+    const notifications = await notifiedProgress;
+    assert.match(notifications, /notifications\/progress/);
+    assert.match(notifications, /progress-expert-e2e/);
     const explicitStatus = await callMcp(mcpUrl, apiKey, 6, "get_expert_task_status", {
       taskId: explicitTaskId,
     });

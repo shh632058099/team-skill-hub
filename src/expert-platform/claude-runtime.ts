@@ -1,7 +1,7 @@
 /** Claude Code worker uses a read-only bind mount plus an allowlist of read-only tools.
  * No Bash, Write, Edit, NotebookEdit, MCP or agent tools are available to this worker.
  */
-export function buildClaudeReadOnlyArgs(problem: string, model: string): string[] {
+export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false): string[] {
   if (
     !problem.trim() ||
     problem.length > 10000 ||
@@ -13,7 +13,8 @@ export function buildClaudeReadOnlyArgs(problem: string, model: string): string[
     "-p",
     "--no-session-persistence",
     "--output-format",
-    "json",
+    stream ? "stream-json" : "json",
+    ...(stream ? ["--verbose"] : []),
     "--max-turns",
     "12",
     "--model",

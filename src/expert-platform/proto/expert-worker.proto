@@ -69,6 +69,9 @@ message TaskStageRequest {
   LeaseRequest claim = 1;
   string stage = 2;
   string details = 3;
+  uint64 source_sequence = 4;
+  string tool_code = 5;
+  uint32 count = 6;
 }
 
 message Empty {}

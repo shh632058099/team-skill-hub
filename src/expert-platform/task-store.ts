@@ -98,6 +98,9 @@ export class ExpertTaskStore {
       );
     `);
     this.ensureEventColumn("details", "TEXT");
+    this.ensureEventColumn("source_sequence", "INTEGER");
+    this.ensureEventColumn("tool_code", "TEXT");
+    this.ensureEventColumn("count", "INTEGER");
     this.ensureTaskColumn("expert_id", "TEXT NOT NULL DEFAULT 'legacy'");
     this.ensureTaskColumn("repository_id", "TEXT");
     this.ensureTaskColumn(
@@ -113,6 +116,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("source_client", "TEXT");
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);`);
   }
 
@@ -504,6 +508,138 @@ export class ExpertTaskStore {
       )
       .all(taskId);
     return { task, runs, events };
+  }
+
+  /** Existing status contract plus concise observed activity and session queue reason. */
+  getStatusWithActivity(taskId: string, principalId: string, scope: string) {
+    const task = this.get(taskId, principalId, scope);
+    const last = this.db
+      .prepare(`SELECT event_type,created_at FROM expert_events WHERE task_id=? ORDER BY event_id DESC LIMIT 1`)
+      .get(taskId) as { event_type: string; created_at: number } | undefined;
+    const current = this.db
+      .prepare(
+        `SELECT run_id,rowid,expert_id,source_client,source_session_id,principal_id,scope FROM expert_tasks WHERE task_id=?`,
+      )
+      .get(taskId) as Row;
+    let queueReason: "session_predecessor" | "unknown" | null = null;
+    if (task.status === "queued") {
+      const earlier = this.db
+        .prepare(
+          `SELECT 1 FROM expert_tasks WHERE rowid<? AND scope=? AND principal_id=?
+        AND expert_id=? AND source_client=? AND source_session_id=?
+        AND status IN ('queued','running') LIMIT 1`,
+        )
+        .get(
+          Number(current.rowid),
+          String(current.scope),
+          String(current.principal_id),
+          String(current.expert_id),
+          current.source_client == null ? null : String(current.source_client),
+          current.source_session_id == null ? null : String(current.source_session_id),
+        );
+      queueReason = earlier && current.source_session_id ? "session_predecessor" : "unknown";
+    }
+    return {
+      ...task,
+      currentRunId: current.run_id ?? null,
+      lastStage: last?.event_type ?? null,
+      lastActivityAt: last?.created_at ?? null,
+      queueReason,
+    };
+  }
+
+  /** Authenticated owner-scoped, monotonic event cursor. */
+  ownerEvents(taskId: string, principalId: string, scope: string, afterEventId = 0, limit = 50) {
+    if (
+      !Number.isSafeInteger(afterEventId) ||
+      afterEventId < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    )
+      throw new Error("INVALID_EVENT_CURSOR");
+    const task = this.get(taskId, principalId, scope);
+    const rows = this.db
+      .prepare(
+        `SELECT event_id,run_id,event_type,details,tool_code,count,created_at
+      FROM expert_events WHERE task_id=? AND event_id>? ORDER BY event_id LIMIT ?`,
+      )
+      .all(taskId, afterEventId, limit + 1) as Row[];
+    const selected = rows.slice(0, limit);
+    return {
+      taskId,
+      status: task.status,
+      terminal: ["succeeded", "failed", "cancelled"].includes(task.status),
+      currentRunId: ((this.db.prepare("SELECT run_id FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined)
+        ?.run_id ?? null) as string | null,
+      events: selected.map((row) => ({
+        eventId: Number(row.event_id),
+        runId: row.run_id == null ? null : String(row.run_id),
+        type: String(row.event_type),
+        details: row.details == null ? "" : String(row.details),
+        tool: row.tool_code == null ? null : String(row.tool_code),
+        count: row.count == null ? null : Number(row.count),
+        timestampMs: Number(row.created_at),
+      })),
+      nextEventId: selected.length ? Number(selected[selected.length - 1]!.event_id) : afterEventId,
+      hasMore: rows.length > limit,
+    };
+  }
+
+  /** Best-effort bounded activity recording; legacy lifecycle stages remain unchanged. */
+  recordActivity(
+    claim: Claim,
+    stage: string,
+    sourceSequence: number,
+    toolCode = "",
+    count = 0,
+    now = Date.now(),
+  ): void {
+    if (
+      !(["model.started", "model.active", "model.completed", "model.failed", "tool.activity"] as string[]).includes(
+        stage,
+      ) ||
+      !Number.isSafeInteger(sourceSequence) ||
+      sourceSequence < 1 ||
+      !["", "Read", "Glob", "Grep", "other"].includes(toolCode) ||
+      !Number.isInteger(count) ||
+      count < 0 ||
+      count > 100 ||
+      (stage === "tool.activity" ? !toolCode || count < 1 : toolCode !== "" || count !== 0)
+    )
+      throw new Error("INVALID_ACTIVITY_EVENT");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT 1 FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=?
+        AND fencing=? AND status='running' AND lease_until>=?`,
+        )
+        .get(claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
+      if (!row) throw new Error("STALE_ATTEMPT");
+      const prior = this.db
+        .prepare(`SELECT event_type,tool_code,count FROM expert_events WHERE run_id=? AND source_sequence=?`)
+        .get(claim.runId, sourceSequence) as Row | undefined;
+      if (prior) {
+        if (prior.event_type !== stage || (prior.tool_code ?? "") !== toolCode || Number(prior.count ?? 0) !== count)
+          throw new Error("PROGRESS_SEQUENCE_CONFLICT");
+      } else {
+        const used = this.db
+          .prepare(`SELECT count(*) AS n FROM expert_events WHERE run_id=? AND source_sequence IS NOT NULL`)
+          .get(claim.runId) as { n: number };
+        if (used.n < 150)
+          this.db
+            .prepare(
+              `INSERT INTO expert_events(task_id,run_id,event_type,details,source_sequence,tool_code,count,created_at)
+          VALUES(?,?,?,'',?,?,?,?)`,
+            )
+            .run(claim.taskId, claim.runId, stage, sourceSequence, toolCode || null, count || null, now);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Accept stage metadata only for the active claimed attempt; no raw model output. */

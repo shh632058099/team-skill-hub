@@ -361,3 +361,35 @@ test("legacy tasks without source session continue to claim independently", () =
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("activity events are bounded, deduplicated and owner-cursor scoped", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-activity-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const input = { principalId: "owner", scope: "tenant", idempotencyKey: "progress", problem: "read code" };
+    const task = store.submit(input);
+    const claim = store.claim("worker", 100, 100000)!;
+    store.recordActivity(claim, "model.started", 1, "", 0, 101);
+    store.recordActivity(claim, "tool.activity", 2, "Read", 3, 102);
+    store.recordActivity(claim, "tool.activity", 2, "Read", 3, 103);
+    assert.throws(() => store.recordActivity(claim, "tool.activity", 2, "Read", 4, 104), /PROGRESS_SEQUENCE_CONFLICT/);
+    assert.throws(() => store.ownerEvents(task.taskId, "other", "tenant"), /TASK_NOT_FOUND_OR_FORBIDDEN/);
+    const first = store.ownerEvents(task.taskId, "owner", "tenant", 0, 4);
+    assert.equal(first.events.length, 4);
+    assert.equal(first.hasMore, false);
+    assert.equal(first.events[3]?.type, "tool.activity");
+    assert.equal(first.events[3]?.tool, "Read");
+    assert.equal(first.events[3]?.count, 3);
+    for (let i = 3; i < 160; i++) store.recordActivity(claim, "model.active", i, "", 0, 105 + i);
+    store.recordStage(claim, "execution.completed", "", 300);
+    store.complete(claim, "result", 301);
+    const all = store.ownerEvents(task.taskId, "owner", "tenant", 0, 100);
+    assert.equal(all.events.length, 100);
+    const later = store.ownerEvents(task.taskId, "owner", "tenant", all.nextEventId, 100);
+    assert.ok(later.events.some((event) => event.type === "execution.completed"));
+    assert.ok(later.events.some((event) => event.type === "succeeded"));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -63,3 +63,19 @@ Hub 新增 `submit_expert_task_auto`，仅需 `problem` 和新任务的 `idempot
 ## 4. 验收口径
 
 必须分别验证：Claude CLI 实际调用了 `submit_expert_task_auto`、返回真实 Task ID；Hub 中选中的 Expert 正确、Worker 正确领取；Worker 使用导入的 Claude 镜像而非 Codex 镜像；分析成功且源码仓库没有变更；Admin → 专家平台 → 任务运行记录可查看 `repository`、`container`、`claude`（Claude 执行阶段）与 `execution` 的阶段事件。Codex Worker 和历史任务应保持可用。
+
+## 在 Claude CLI 中自动查看远程 Expert Worker 进度
+
+提交专家任务后，MCP 的 `submit_expert_task_auto` / `submit_expert_task` 会立即返回 `taskId`，不会直接等待远程 Worker 分析完成。
+
+**推荐给 Claude CLI 的单次指令：**
+
+> 通过 Team Skill Hub MCP 把以下问题下发给适合的 Expert，并持续等待执行进度：先调用 `submit_expert_task_auto` 获取真实 taskId；然后反复调用 `wait_expert_task`（每次 15 秒，传入上一轮 `nextEventId`），及时告诉我 Worker 正在同步仓库、启动模型或使用哪些只读工具，直到任务结束；只有 succeeded 才调用 `get_expert_task_result` 返回完整报告。如果客户端不支持实时进度通知，也要通过 `wait_expert_task` 的返回数据定时反馈，不要让我手动反复问状态。问题：……
+
+`wait_expert_task` 最长允许等待 30 秒、默认 15 秒；无 `progressToken` 时有新事件即返回，带 token 的活动调用内可发送 MCP `notifications/progress`。实际 Claude CLI 是否原生展示通知取决于其版本，不能把服务器已发通知等同于客户端一定可见。断线后保留 `taskId`、`nextEventId` 即可续查；取消等待不会取消实际 Worker Task。
+
+Worker 默认启用增量流式活动（Claude `stream-json --verbose` / Codex `--json`），遇到旧版模型 CLI 兼容问题可以在**独立 Worker 环境**中临时设定 `EXPERT_ACTIVITY_STREAM_ENABLED=0` 回退原有最终报告解析行为。Hub 无需打开此开关。Hub/Worker 均升级后才会传输工具活动；旧版 Worker 仍可报告生命周期阶段。工具活动仅包含类型和计数，不上传源码、模型思考或完整文件路径。
+
+### 真实调用方验收样例（2026-10-28）
+
+已用 Claude CLI 2.1.308 连接 `teamSkillHub`，单次提示提交 OTA 只读任务并要求循环调用 `wait_expert_task`。任务 `bcf7fdef-c53d-422a-b2ae-c7c2fb342550` 在真实 Codex Worker `ota-worker-01` 上执行成功；Claude CLI 的三轮游标推进为 `0 → 127 → 130 → 134`，Hub 确认 7 条工具活动记录与最终源码 Commit。该测试验证的是**Claude CLI 作为调用者**，并非 Claude Worker 模型后端；MCP 通知在 Claude CLI 终端中的独立渲染效果仍应单独评估。

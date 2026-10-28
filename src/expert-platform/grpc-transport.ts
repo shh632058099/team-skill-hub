@@ -56,6 +56,9 @@ interface TaskStageRequest {
   claim?: LeaseRequest;
   stage: string;
   details: string;
+  source_sequence?: string;
+  tool_code?: string;
+  count?: number;
 }
 interface Empty {}
 interface LeaseResponse {
@@ -373,7 +376,16 @@ export async function startExpertWorkerGrpcServer(
       requireIdentityMatch(authenticatedId, call.request.claim.worker_id);
       const claim = toClaim(call.request.claim);
       if (workers.get(claim.workerId).status !== "active") throw new Error("WORKER_FORBIDDEN");
-      tasks.recordStage(claim, call.request.stage, call.request.details || "");
+      if (call.request.source_sequence && call.request.source_sequence !== "0") {
+        const sequence = Number(call.request.source_sequence);
+        tasks.recordActivity(
+          claim,
+          call.request.stage,
+          sequence,
+          call.request.tool_code || "",
+          call.request.count || 0,
+        );
+      } else tasks.recordStage(claim, call.request.stage, call.request.details || "");
       callback(null, {});
     } catch (error) {
       callback(
@@ -552,10 +564,22 @@ export class ExpertWorkerClient {
     );
   }
 
-  reportTaskStage(claim: Claim, stage: string, details = ""): Promise<Empty> {
+  reportTaskStage(
+    claim: Claim,
+    stage: string,
+    details = "",
+    activity?: { sequence: number; tool?: string; count?: number },
+  ): Promise<Empty> {
     return unary((callback) =>
       this.client.ReportTaskStage(
-        { claim: this.claimRequest(claim), stage, details },
+        {
+          claim: this.claimRequest(claim),
+          stage,
+          details,
+          ...(activity
+            ? { source_sequence: String(activity.sequence), tool_code: activity.tool ?? "", count: activity.count ?? 0 }
+            : {}),
+        },
         this.metadata,
         { deadline: Date.now() + 2_000 },
         callback,

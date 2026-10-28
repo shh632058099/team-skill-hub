@@ -16,6 +16,17 @@ test("Claude CLI args enable only read-only tools and reject invalid model", () 
   assert.throws(() => buildClaudeReadOnlyArgs("ok", "../../unsafe"), /INVALID_CLAUDE_REQUEST/);
 });
 
+test("Claude streaming args preserve sandbox and read-only tool restriction", () => {
+  const args = buildClaudeReadOnlyArgs("review code", "sonnet", true);
+  assert.deepEqual(args.slice(args.indexOf("--output-format"), args.indexOf("--max-turns")), [
+    "--output-format",
+    "stream-json",
+    "--verbose",
+  ]);
+  assert.ok(args.includes("Read,Glob,Grep"));
+  assert.ok(args.includes("dontAsk"));
+});
+
 test("Claude output accepts successful structured response and rejects failure or malformed response", () => {
   assert.equal(
     parseClaudeResult(

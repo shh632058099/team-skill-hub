@@ -31,6 +31,15 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     await client.renewLease(claim!);
     await client.reportTaskStage(claim!, "repository.started");
     await client.reportTaskStage(claim!, "repository.completed");
+    await client.reportTaskStage(claim!, "tool.activity", "", { sequence: 1, tool: "Read", count: 3 });
+    await client.reportTaskStage(claim!, "tool.activity", "", { sequence: 1, tool: "Read", count: 3 });
+    await assert.rejects(
+      () => client.reportTaskStage(claim!, "tool.activity", "", { sequence: 1, tool: "Read", count: 4 }),
+      /PROGRESS_SEQUENCE_CONFLICT/,
+    );
+    const observed = tasks.ownerEvents(submitted.taskId, "alice", "org", 0, 50);
+    assert.equal(observed.events.filter((event) => event.type === "tool.activity").length, 1);
+
     await assert.rejects(() => client.reportTaskStage(claim!, "codex.started", "Bearer secret"), /INVALID_STAGE_EVENT/);
     await client.completeTask(claim!, "verified root cause", {
       repositoryUrl: "https://github.com/example/ota.git",

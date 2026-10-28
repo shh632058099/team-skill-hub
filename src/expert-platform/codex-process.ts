@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { parseCodexJsonlResult } from "./codex-runtime.js";
+import { JsonlReader } from "./jsonl-reader.js";
+import { mapExecutionActivity, StreamResultCollector, type ExecutionActivity } from "./execution-activity.js";
 
 function sanitizedStderrHint(stderr: string): string {
   if (/install: cannot open .* for reading: Permission denied/i.test(stderr))
@@ -43,10 +45,13 @@ export interface CodexProcessOptions {
   onAbort?: () => Promise<void>;
   parseResult?: (output: string) => string;
   env?: NodeJS.ProcessEnv;
+  /** Opt-in: consume JSONL incrementally without retaining the complete stdout. */
+  streamingBackend?: "claude" | "codex";
+  onActivity?: (activity: ExecutionActivity) => void;
 }
 /** Low-level subprocess transport; caller must enforce container isolation. */
 export async function runCodexProcess(options: CodexProcessOptions): Promise<string> {
-  const limit = options.maxOutputBytes ?? 4 * 1024 * 1024;
+  const limit = options.maxOutputBytes ?? (options.streamingBackend ? 64 * 1024 * 1024 : 4 * 1024 * 1024);
   if (!options.executable || !Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || limit <= 0) {
     throw new Error("INVALID_REQUEST");
   }
@@ -60,6 +65,19 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
     let settled = false;
     let terminating = false;
     let output = "";
+    const collector = options.streamingBackend ? new StreamResultCollector(options.streamingBackend) : undefined;
+    const reader = collector
+      ? new JsonlReader((event) => {
+          collector.accept(event);
+          for (const activity of mapExecutionActivity(options.streamingBackend!, event)) {
+            try {
+              options.onActivity?.(activity);
+            } catch {
+              /* Observability cannot disrupt execution. */
+            }
+          }
+        })
+      : undefined;
     let bytes = 0;
     let stderrOutput = "";
     const kill = () => {
@@ -79,7 +97,8 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
       if (error) reject(error);
       else {
         try {
-          resolve((options.parseResult ?? parseCodexJsonlResult)(output));
+          if (reader) reader.finish();
+          resolve(collector ? collector.result() : (options.parseResult ?? parseCodexJsonlResult)(output));
         } catch (parseError) {
           reject(parseError);
         }
@@ -118,8 +137,17 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
         finish(new Error("CODEX_OUTPUT_LIMIT"));
         return;
       }
-      if (record) output += chunk.toString("utf8");
-      else if (stderrOutput.length < 4096) stderrOutput += chunk.toString("utf8").slice(0, 4096 - stderrOutput.length);
+      if (record) {
+        if (reader) {
+          try {
+            reader.push(chunk);
+          } catch {
+            kill();
+            finish(new Error("EXPERT_STREAM_INVALID"));
+          }
+        } else output += chunk.toString("utf8");
+      } else if (stderrOutput.length < 4096)
+        stderrOutput += chunk.toString("utf8").slice(0, 4096 - stderrOutput.length);
     };
     child.stdout.on("data", (chunk: Buffer) => onChunk(chunk, true));
     child.stderr.on("data", (chunk: Buffer) => onChunk(chunk, false));

@@ -43,7 +43,7 @@ start_worker() {
     return 1
   fi
 }
-start_worker ota-expert-worker /usr/local/bin/ota-expert-worker
-start_worker code-review-expert-worker /usr/local/bin/review-expert-worker
+start_worker ota-expert-worker "/usr/bin/env EXPERT_EXECUTOR_BACKEND=codex /usr/local/bin/ota-expert-worker"
+start_worker code-review-expert-worker "/usr/bin/env EXPERT_EXECUTOR_BACKEND=codex /usr/local/bin/review-expert-worker"
 printf "[%s] Worker startup check finished.\n" "$(date -Is)"
 tmux -L skillhub list-sessions

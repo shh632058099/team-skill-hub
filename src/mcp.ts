@@ -99,6 +99,33 @@ function toolResult(value: unknown) {
   };
 }
 
+const activeExpertWaits = new Map<string, number>();
+function safeExpertActivityMessage(event: { type: string; tool: string | null; count: number | null }): string {
+  const tool = event.tool && ["Read", "Glob", "Grep", "other"].includes(event.tool) ? event.tool : "other";
+  if (event.type === "tool.activity")
+    return `Worker 正在执行 ${tool} 操作${event.count ? `（${event.count} 次）` : ""}`;
+  const names: Record<string, string> = {
+    queued: "任务已入队",
+    running: "Worker 已开始执行",
+    "repository.started": "正在同步 Git 仓库",
+    "repository.completed": "Git 仓库准备完成",
+    "repository.failed": "Git 仓库准备失败",
+    "container.started": "正在启动执行容器",
+    "container.completed": "执行容器已结束",
+    "model.started": "模型已启动",
+    "model.active": "模型正在分析",
+    "model.completed": "模型已生成结果",
+    "model.failed": "模型执行失败",
+    "execution.started": "Worker 开始执行",
+    "execution.completed": "Worker 执行完成",
+    "execution.failed": "Worker 执行失败",
+    succeeded: "任务已成功",
+    failed: "任务失败",
+    cancelled: "任务已取消",
+  };
+  return names[event.type] ?? "任务状态已更新";
+}
+
 export function createSkillHubMcpHandler(appService: SkillHubApplicationService) {
   return createMcpHandler(({ requestInfo }) => {
     const principal = appService.authenticateRequest(requestInfo?.headers);
@@ -1023,7 +1050,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task_auto",
         {
           description:
-            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Provide the user's problem and a new unique idempotencyKey. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a queued taskId; later query get_expert_task_status/get_expert_task_result.",
+            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Provide the user's problem and a new unique idempotencyKey. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a taskId immediately; when the user wants results, automatically call wait_expert_task with its cursor until terminal, then get_expert_task_result on success. Share actual progress while waiting.",
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
@@ -1049,7 +1076,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task",
         {
           description:
-            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode, then check status with backoff and read the report only after status=succeeded. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request.',
+            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode; for a result-seeking request automatically call wait_expert_task in bounded windows and pass nextEventId each time until terminal, then get_expert_task_result after succeeded. Do not require the user to ask again. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request.',
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
@@ -1083,7 +1110,120 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             "Check the status of an Expert Platform task after submit_expert_task or when the user asks to resume a task. Use its taskId; authorization is checked on every request. If status is queued or running, wait and retry with backoff rather than polling rapidly. If status is succeeded, call get_expert_task_result; if failed or cancelled, report that state accurately.",
           inputSchema: z.object({ taskId: z.string().uuid() }),
         },
-        async ({ taskId }) => toolResult({ ...expertTaskStore.get(taskId, principal.id, principal.tenantId) }),
+        async ({ taskId }) =>
+          toolResult(expertTaskStore.getStatusWithActivity(taskId, principal.id, principal.tenantId)),
+      );
+
+      registerTool(
+        "get_expert_task_events",
+        {
+          description:
+            "Read authenticated, cursor-based Worker progress (Git sync, model and tool activity). Use after submit_expert_task; keep nextEventId for subsequent calls.",
+          inputSchema: z.object({
+            taskId: z.string().uuid(),
+            afterEventId: z.number().int().min(0).default(0),
+            limit: z.number().int().min(1).max(100).default(50),
+          }),
+        },
+        async ({ taskId, afterEventId, limit }) =>
+          toolResult(expertTaskStore.ownerEvents(taskId, principal.id, principal.tenantId, afterEventId, limit)),
+      );
+
+      registerTool(
+        "wait_expert_task",
+        {
+          description:
+            "DEFAULT follow-up after submitting an Expert task when the user wants to wait. Wait up to 15 seconds for REAL Worker progress, return events and nextEventId. Repeat with nextEventId until terminal, then call get_expert_task_result on success. Do not ask the user to retry manually. Supports MCP progress notifications when the client provides a progressToken; no-token clients receive incremental long-poll results.",
+          inputSchema: z.object({
+            taskId: z.string().uuid(),
+            afterEventId: z.number().int().min(0).default(0),
+            waitMs: z.number().int().min(1000).max(30000).default(15000),
+            limit: z.number().int().min(1).max(100).default(50),
+          }),
+        },
+        async ({ taskId, afterEventId, waitMs, limit }, ctx) => {
+          // Check owner before consuming wait capacity.
+          expertTaskStore.get(taskId, principal.id, principal.tenantId);
+          const waitKey = `${principal.tenantId}:${principal.id}`;
+          const concurrent = activeExpertWaits.get(waitKey) ?? 0;
+          if (concurrent >= 5) throw new Error("WAIT_LIMIT_EXCEEDED");
+          activeExpertWaits.set(waitKey, concurrent + 1);
+          const signal: AbortSignal = ctx.mcpReq.signal;
+          const token = ctx.mcpReq._meta?.progressToken;
+          const deadline = performance.now() + waitMs;
+          let cursor = afterEventId;
+          let notificationIndex = 0;
+          const collected: ReturnType<ExpertTaskStore["ownerEvents"]>["events"] = [];
+          let lastNotify = 0;
+          try {
+            while (true) {
+              if (signal.aborted) throw new Error("WAIT_CANCELLED");
+              const page = expertTaskStore.ownerEvents(
+                taskId,
+                principal.id,
+                principal.tenantId,
+                cursor,
+                limit - collected.length,
+              );
+              collected.push(...page.events);
+              cursor = page.nextEventId;
+              if (token !== undefined && page.events.length && performance.now() - lastNotify >= 1000) {
+                lastNotify = performance.now();
+                const latest = page.events[page.events.length - 1]!;
+                try {
+                  await ctx.mcpReq.notify({
+                    method: "notifications/progress",
+                    params: {
+                      progressToken: token,
+                      progress: ++notificationIndex,
+                      message: safeExpertActivityMessage(latest),
+                    },
+                  });
+                } catch {
+                  /* notification is best-effort */
+                }
+              }
+              const timedOut = performance.now() >= deadline;
+              if (
+                page.terminal ||
+                collected.length >= limit ||
+                timedOut ||
+                (token === undefined && collected.length > 0)
+              ) {
+                const fresh = expertTaskStore.ownerEvents(taskId, principal.id, principal.tenantId, cursor, 1);
+                return toolResult({
+                  ...page,
+                  events: collected,
+                  nextEventId: cursor,
+                  hasMore: fresh.events.length > 0,
+                  status: fresh.status,
+                  terminal: fresh.terminal,
+                  timedOut: timedOut && !fresh.terminal,
+                });
+              }
+              const remaining = Math.max(0, deadline - performance.now());
+              await new Promise<void>((resolve, reject) => {
+                const timer = setTimeout(
+                  () => {
+                    signal.removeEventListener("abort", aborted);
+                    resolve();
+                  },
+                  Math.min(750, remaining),
+                );
+                const aborted = () => {
+                  clearTimeout(timer);
+                  signal.removeEventListener("abort", aborted);
+                  reject(new Error("WAIT_CANCELLED"));
+                };
+                signal.addEventListener("abort", aborted, { once: true });
+              });
+            }
+          } finally {
+            const count = activeExpertWaits.get(waitKey) ?? 1;
+            if (count <= 1) activeExpertWaits.delete(waitKey);
+            else activeExpertWaits.set(waitKey, count - 1);
+          }
+        },
       );
 
       registerTool(

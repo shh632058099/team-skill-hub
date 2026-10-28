@@ -28,6 +28,7 @@ export interface DockerCodexExecutorOptions {
   timeoutMs: number;
   maxOutputBytes?: number;
   onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
+  onActivity?: (claim: Claim, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>;
   runProcess?: (options: CodexProcessOptions) => Promise<string>;
 }
 
@@ -178,9 +179,10 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
   > => {
     const backend = options.backend ?? "claude";
     if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
+    const streaming = process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0" && !options.runProcess;
     let codexArgs =
       backend === "claude"
-        ? buildClaudeReadOnlyArgs(claim.problem, options.claudeModel ?? "sonnet")
+        ? buildClaudeReadOnlyArgs(claim.problem, options.claudeModel ?? "sonnet", streaming)
         : buildCodexReadOnlyArgs(claim.problem);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
@@ -226,7 +228,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw new Error("EXPERT_MODEL_PROTOCOL_MISMATCH");
     }
     if (backend === "claude" && claim.modelConfig) {
-      codexArgs = buildClaudeReadOnlyArgs(claim.problem, claim.modelConfig.model);
+      codexArgs = buildClaudeReadOnlyArgs(claim.problem, claim.modelConfig.model, streaming);
     }
     let claudeChildEnv: NodeJS.ProcessEnv | undefined;
     if (claim.modelConfig && backend === "claude") {
@@ -297,21 +299,73 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       if (!options.runProcess) await cleanupSupersededTaskContainers(claim);
       await report(`${backend}.started`);
       let result: string;
+      let sourceSequence = 0;
+      let lastActivityAt = 0;
+      let pendingActivity = Promise.resolve();
+      let inflight = 0;
+      const activityCounts = new Map<string, number>();
+      const flushActivity = () => {
+        for (const [key, count] of activityCounts) {
+          activityCounts.delete(key);
+          const [stage, tool] = key.split("|");
+          if (!stage) continue;
+          if (!options.onActivity || inflight >= 100) continue;
+          const sequence = ++sourceSequence;
+          inflight++;
+          pendingActivity = pendingActivity
+            .then(() => options.onActivity!(claim, stage, sequence, tool || undefined, count || undefined))
+            .catch(() => {
+              /* progress transport is best effort */
+            })
+            .then(() => {
+              inflight--;
+            });
+        }
+      };
       try {
         result = await runProcess({
           executable: "docker",
           args,
           timeoutMs: options.timeoutMs,
-          maxOutputBytes: options.maxOutputBytes,
+          maxOutputBytes: options.maxOutputBytes ?? (streaming ? 64 * 1024 * 1024 : undefined),
           signal,
           onAbort: () => stopDockerContainer(containerName),
           ...(claudeChildEnv ? { env: claudeChildEnv } : {}),
-          ...(backend === "claude" && !options.runProcess ? { parseResult: parseClaudeResult } : {}),
+          ...(streaming
+            ? {
+                streamingBackend: backend,
+                onActivity: (activity: import("./execution-activity.js").ExecutionActivity) => {
+                  const key = activity.kind + "|" + (activity.tool ?? "");
+                  activityCounts.set(key, Math.min(100, (activityCounts.get(key) ?? 0) + (activity.count ?? 1)));
+                  if (Date.now() - lastActivityAt >= 2000) {
+                    lastActivityAt = Date.now();
+                    flushActivity();
+                  }
+                },
+              }
+            : backend === "claude" && !options.runProcess
+              ? { parseResult: parseClaudeResult }
+              : {}),
         });
       } catch (error) {
         await report(`${backend}.failed`, "EXECUTION_FAILED");
         await report("container.failed", "EXECUTION_FAILED");
         throw error;
+      }
+      if (streaming) {
+        flushActivity();
+        // Briefly drain already accepted activity; never block final task completion on Hub progress.
+        let drainTimer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            pendingActivity,
+            new Promise<void>((resolve) => {
+              drainTimer = setTimeout(resolve, 500);
+            }),
+          ]);
+        } finally {
+          if (drainTimer) clearTimeout(drainTimer);
+        }
       }
       await report(`${backend}.completed`);
       await report("container.completed");
