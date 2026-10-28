@@ -138,3 +138,44 @@ test("Claude rejects incompatible Responses config instead of silently ignoring 
     /EXPERT_MODEL_PROTOCOL_MISMATCH/,
   );
 });
+
+test("Claude Router credential reference can target ANTHROPIC_AUTH_TOKEN", async () => {
+  const previous = process.env.ANTHROPIC_AUTH_TOKEN;
+  process.env.ANTHROPIC_AUTH_TOKEN = "synthetic-test-value";
+  try {
+    let seen: { args: readonly string[]; env?: NodeJS.ProcessEnv } | undefined;
+    const executor = createDockerCodexExecutor({
+      backend: "claude",
+      image: "expert-claude",
+      sourcePath: "/repo",
+      network: "bridge",
+      envNames: ["ANTHROPIC_AUTH_TOKEN"],
+      modelCredentialEnvNames: { gateway: "ANTHROPIC_AUTH_TOKEN" },
+      timeoutMs: 1000,
+      runProcess: async (options) => {
+        seen = options;
+        return "ok";
+      },
+    });
+    await executor(
+      {
+        ...claim,
+        modelConfig: {
+          providerId: "router",
+          model: "gpt-5.6-luna",
+          baseUrl: "https://router.example/v1",
+          wireApi: "anthropic-messages",
+          credentialRef: "gateway",
+          allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.equal(seen?.env?.ANTHROPIC_AUTH_TOKEN, "synthetic-test-value");
+    assert.equal(seen?.env?.ANTHROPIC_BASE_URL, "https://router.example/v1");
+    assert.ok(!seen?.args.join(" ").includes("synthetic-test-value"));
+  } finally {
+    if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = previous;
+  }
+});

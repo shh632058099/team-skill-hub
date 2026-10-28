@@ -7,10 +7,10 @@
 | 产物                                         | 构建命令                                     | 交付文件（当前示例版本 0.1.0）                           | 由谁使用                       |
 | -------------------------------------------- | -------------------------------------------- | -------------------------------------------------------- | ------------------------------ |
 | **Worker Runtime**（宿主机 systemd daemon）  | `npm run build:worker-runtime`               | `artifacts/worker-runtime/worker-runtime-0.1.0.tar.gz`   | Worker 主机解压安装            |
-| **默认任务执行 Docker Image**（Claude Code） | `scripts/build-worker-claude-image.sh 0.1.0` | `artifacts/worker-runtime/expert-claude-image-0.1.0.tar` | Worker 主机 `docker load` 导入 |
+| **默认任务执行 Docker Image**（Claude Code） | `scripts/build-worker-image.sh claude 0.1.0` | `artifacts/worker-runtime/expert-claude-image-0.1.0.tar` | Worker 主机 `docker load` 导入 |
 | **校验信息**                                 | `sha256sum`、`git rev-parse` 等              | 发布清单 / SHA-256 文件                                  | 部署者比对版本与文件完整性     |
 
-**Codex Worker 可选发布：** 发布管理员可额外执行 `bash scripts/build-worker-execution-image.sh 0.1.0`，得到 `expert-worker-image-0.1.0.tar`。部署步骤、模型密钥和权限边界请参阅 [Claude 执行器文档](./claude-executor.md)。
+**Codex Worker 可选发布：** 发布管理员可额外执行 `bash scripts/build-worker-image.sh codex 0.1.0`，得到 `expert-worker-image-0.1.0.tar`。部署步骤、模型密钥和权限边界请参阅 [Claude 执行器文档](./claude-executor.md)。
 
 Runtime **不是 Docker image**，Image 也**不是常驻 Worker 服务**。两者通过 `EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0` 关联。当前发行目录 `artifacts/` 被 Git 忽略：**本地生成不等于已公开发布**。应通过组织批准的制品库/内部文件服务向部署人员提供真实下载地址、校验值和版本；不要编造 GitHub Releases 地址，也不要直接提交大型 tar 到 Git。
 
@@ -55,7 +55,7 @@ npm run check
 npm run build:worker-runtime
 
 # 产物 2：Claude 执行镜像 + docker save 的离线 tar
-bash scripts/build-worker-claude-image.sh "$VERSION"
+bash scripts/build-worker-image.sh claude "$VERSION"
 ```
 
 **实际脚本行为：** `build:worker-runtime` 先用 `tsconfig.worker.json` 编译 Worker 依赖闭包，再运行 `scripts/package-worker-runtime.mjs`；后者将 Worker JS、proto、运行时 `package.json` / lockfile、生产 npm 依赖、`install-worker.sh`、`worker-control.sh`、`worker.env.example`、可选的 systemd 服务和检查脚本打入 tar.gz。执行镜像由 `docker/expert-worker/Dockerfile.claude` 制作，内含 Node 24、Claude Code CLI、系统 CA 和独立的执行用户；构建脚本运行 `docker build --pull` 后 `docker save`。
@@ -136,4 +136,4 @@ worker-artifacts-0.1.0.release.txt
 
 ## 可选：Codex 执行镜像
 
-如部署方明确选择 Codex，发布管理员另外运行 `bash scripts/build-worker-execution-image.sh 0.1.0`，交付 `artifacts/worker-runtime/expert-worker-image-0.1.0.tar` 与独立 SHA-256 校验信息。Worker 端须同时配置 `EXPERT_EXECUTOR_BACKEND=codex`、对应的 `EXPERT_DOCKER_IMAGE` 和 Codex 凭据。默认交付仍是 Claude Code 镜像。
+如部署方明确选择 Codex，发布管理员另外运行 `bash scripts/build-worker-image.sh codex 0.1.0`，交付 `artifacts/worker-runtime/expert-worker-image-0.1.0.tar` 与独立 SHA-256 校验信息。Worker 端须同时配置 `EXPERT_EXECUTOR_BACKEND=codex`、对应的 `EXPERT_DOCKER_IMAGE` 和 Codex 凭据。默认交付仍是 Claude Code 镜像。

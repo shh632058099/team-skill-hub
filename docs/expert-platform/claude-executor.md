@@ -13,7 +13,7 @@
 
 ```bash
 npm run build:worker-runtime
-bash scripts/build-worker-claude-image.sh 0.1.0
+bash scripts/build-worker-image.sh claude 0.1.0
 sha256sum artifacts/worker-runtime/worker-runtime-0.1.0.tar.gz \
   artifacts/worker-runtime/expert-claude-image-0.1.0.tar
 ```

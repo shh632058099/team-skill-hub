@@ -2,7 +2,12 @@
  * No Bash, Write, Edit, NotebookEdit, MCP or agent tools are available to this worker.
  */
 export function buildClaudeReadOnlyArgs(problem: string, model: string): string[] {
-  if (!problem.trim() || problem.length > 10000 || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(model))
+  if (
+    !problem.trim() ||
+    problem.length > 10000 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(model) ||
+    model.length > 200
+  )
     throw new Error("INVALID_CLAUDE_REQUEST");
   return [
     "-p",

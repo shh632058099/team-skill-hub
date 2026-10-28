@@ -235,16 +235,24 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       if (model.allowedEnvNames.some((name) => !allowed.has(name))) throw new Error("EXPERT_MODEL_ENV_NOT_ALLOWED");
       const source = model.credentialRef
         ? options.modelCredentialEnvNames?.[model.credentialRef]
-        : model.allowedEnvNames.includes("ANTHROPIC_API_KEY")
-          ? "ANTHROPIC_API_KEY"
-          : model.allowedEnvNames.includes("CLAUDE_CODE_OAUTH_TOKEN")
-            ? "CLAUDE_CODE_OAUTH_TOKEN"
-            : undefined;
+        : model.allowedEnvNames.includes("ANTHROPIC_AUTH_TOKEN")
+          ? "ANTHROPIC_AUTH_TOKEN"
+          : model.allowedEnvNames.includes("ANTHROPIC_API_KEY")
+            ? "ANTHROPIC_API_KEY"
+            : model.allowedEnvNames.includes("CLAUDE_CODE_OAUTH_TOKEN")
+              ? "CLAUDE_CODE_OAUTH_TOKEN"
+              : undefined;
       if (!source || !allowed.has(source) || !model.allowedEnvNames.includes(source))
         throw new Error("EXPERT_MODEL_CREDENTIAL_NOT_CONFIGURED");
       if (!process.env[source]) throw new Error("EXPERT_MODEL_CREDENTIAL_NOT_CONFIGURED");
-      const target = source === "CLAUDE_CODE_OAUTH_TOKEN" ? source : "ANTHROPIC_API_KEY";
-      claudeChildEnv = { ...process.env, ANTHROPIC_BASE_URL: model.baseUrl, [target]: process.env[source] };
+      const target = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"].includes(source)
+        ? source
+        : "ANTHROPIC_API_KEY";
+      claudeChildEnv = {
+        ...process.env,
+        ANTHROPIC_BASE_URL: model.baseUrl,
+        [target]: process.env[source],
+      };
       envNames = [
         ...new Set([
           ...model.allowedEnvNames,

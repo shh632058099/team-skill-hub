@@ -7,7 +7,7 @@ This is the deployment-package definition for the Expert Worker daemon. The rele
 - Linux x86_64/arm64 supported by the selected Node.js 24 build and Docker Engine.
 - Node.js 24.x, Docker Engine, network access to the Hub gRPC endpoint and configured Git remotes. **systemd is optional**; without it use `worker-control.sh`.
 - A stable Worker ID and capability. By default, the Worker uses a bootstrap token to register and waits for Admin approval; no manual credential copy is needed.
-- The matching `team-skill-hub-expert-claude:<version>` (default; Codex optional) execution image, built/published separately. The Hub development checkout can build/export it with `scripts/build-worker-execution-image.sh <version>`; the Worker host only needs the resulting image archive (`docker load -i ...`), not the Dockerfile or Hub source.
+- The matching `team-skill-hub-expert-claude:<version>` (default; Codex optional) execution image, built/published separately. The Hub development checkout can build/export it with `scripts/build-worker-image.sh claude <version>` (Codex: `scripts/build-worker-image.sh codex <version>`; the Worker host only needs the resulting image archive (`docker load -i ...`), not the Dockerfile or Hub source.
 
 ## Build artifact (run in the Hub development checkout)
 
