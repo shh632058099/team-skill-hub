@@ -15,6 +15,7 @@ const claim: Claim = {
 test("Docker Codex executor runs codex JSONL through docker with read-only source", async () => {
   let seen: { executable: string; args: readonly string[]; signal?: AbortSignal } | undefined;
   const executor = createDockerCodexExecutor({
+    backend: "codex",
     image: "team-skill-hub-expert-worker-prototype",
     sourcePath: "/work/repo",
     network: "expert-egress",
@@ -51,6 +52,7 @@ test("Docker Codex executor mounts an isolated per-expert provider config", asyn
     },
   };
   const executor = createDockerCodexExecutor({
+    backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/repo",
     network: "expert-egress",
@@ -88,6 +90,7 @@ test("Docker Codex executor mounts an isolated per-expert provider config", asyn
 
 test("Docker Codex executor requires a configured secret reference and rejects env expansion", async () => {
   const executor = createDockerCodexExecutor({
+    backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/repo",
     network: "expert-egress",
@@ -136,6 +139,7 @@ test("Docker Codex executor requires a configured secret reference and rejects e
 test("Docker Codex executor fails closed when a new-style repository ID has no resolved source", async () => {
   let ran = false;
   const executor = createDockerCodexExecutor({
+    backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/default-repo",
     network: "expert-egress",
@@ -158,6 +162,7 @@ test("Docker Codex executor labels UUID-backed execution with task, run and fenc
   const runId = "7cf042dc-33e2-48f3-a1ce-eea40ec4ba08";
   let args: readonly string[] = [];
   const executor = createDockerCodexExecutor({
+    backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/repo",
     network: "bridge",
@@ -173,4 +178,51 @@ test("Docker Codex executor labels UUID-backed execution with task, run and fenc
   assert.ok(args.includes(`team-skill-hub.task-id=${taskId}`));
   assert.ok(args.includes(`team-skill-hub.run-id=${runId}`));
   assert.ok(args.includes("team-skill-hub.fencing=2"));
+});
+
+test("Docker executor emits only bounded stage codes for successful execution", async () => {
+  const stages: string[] = [];
+  const execute = createDockerCodexExecutor({
+    backend: "codex",
+    image: "expert-image",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: ["OPENAI_API_KEY"],
+    timeoutMs: 1000,
+    onStage: async (_claim, stage, details) => {
+      stages.push(stage + (details ? ":" + details : ""));
+    },
+    runProcess: async () => "safe result",
+  });
+  assert.equal(await execute(claim, new AbortController().signal), "safe result");
+  assert.deepEqual(stages, [
+    "repository.started",
+    "repository.completed",
+    "container.started",
+    "codex.started",
+    "codex.completed",
+    "container.completed",
+  ]);
+});
+
+test("Docker executor emits generic failure codes, not raw process stderr", async () => {
+  const stages: string[] = [];
+  const execute = createDockerCodexExecutor({
+    backend: "codex",
+    image: "expert-image",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: ["OPENAI_API_KEY"],
+    timeoutMs: 1000,
+    onStage: async (_claim, stage, details) => {
+      stages.push(stage + (details ? ":" + details : ""));
+    },
+    runProcess: async () => {
+      throw new Error("Bearer never-log-this-secret");
+    },
+  });
+  await assert.rejects(() => execute(claim, new AbortController().signal), /never-log-this-secret/);
+  assert.ok(stages.includes("codex.failed:EXECUTION_FAILED"));
+  assert.ok(stages.includes("container.failed:EXECUTION_FAILED"));
+  assert.doesNotMatch(stages.join(" "), /never-log-this-secret/);
 });

@@ -91,6 +91,7 @@ export class ExpertTaskStore {
         created_at INTEGER NOT NULL
       );
     `);
+    this.ensureEventColumn("details", "TEXT");
     this.ensureTaskColumn("expert_id", "TEXT NOT NULL DEFAULT 'legacy'");
     this.ensureTaskColumn("repository_id", "TEXT");
     this.ensureTaskColumn(
@@ -102,6 +103,9 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("repository_branch", "TEXT");
     this.ensureTaskColumn("commit_sha", "TEXT");
     this.ensureTaskColumn("cancellation_requested", "INTEGER NOT NULL DEFAULT 0");
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
+      CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
+      CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);`);
   }
 
   submit(input: Submission): TaskRecord {
@@ -344,6 +348,101 @@ export class ExpertTaskStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /** Admin-only: bounded, parameterized task index with no result-body disclosure. */
+  adminTasks(
+    query: { limit?: number; offset?: number; status?: string; expertId?: string; workerId?: string; q?: string } = {},
+  ) {
+    const limit = Number.isFinite(query.limit) ? Math.min(100, Math.max(1, Math.floor(query.limit!))) : 20;
+    const offset = Number.isFinite(query.offset) ? Math.min(100000, Math.max(0, Math.floor(query.offset!))) : 0;
+    const where: string[] = [];
+    const args: string[] = [];
+    if (query.status) {
+      where.push("status=?");
+      args.push(query.status);
+    }
+    if (query.expertId) {
+      where.push("expert_id=?");
+      args.push(query.expertId);
+    }
+    if (query.workerId) {
+      where.push("worker_id=?");
+      args.push(query.workerId);
+    }
+    if (query.q) {
+      where.push("(task_id LIKE ? OR expert_id LIKE ? OR repository_id LIKE ?)");
+      args.push(...Array(3).fill(`%${query.q.slice(0, 100).replace(/[%_]/g, "")}%`));
+    }
+    const clause = where.length ? " WHERE " + where.join(" AND ") : "";
+    const total = Number(
+      (this.db.prepare("SELECT count(*) n FROM expert_tasks" + clause).get(...args) as { n: number }).n,
+    );
+    const rows = this.db
+      .prepare(
+        `SELECT task_id,principal_id,scope,expert_id,repository_id,selection_mode,status,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha FROM expert_tasks${clause} ORDER BY rowid DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...args, limit, offset);
+    return { total, limit, offset, tasks: rows };
+  }
+
+  adminTaskDetail(taskId: string) {
+    const task = this.db
+      .prepare(
+        "SELECT task_id,principal_id,scope,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,cancellation_requested FROM expert_tasks WHERE task_id=?",
+      )
+      .get(taskId);
+    if (!task) return null;
+    const runs = this.db
+      .prepare("SELECT run_id,task_id,worker_id,fencing,status FROM expert_runs WHERE task_id=? ORDER BY rowid")
+      .all(taskId);
+    const events = this.db
+      .prepare(
+        "SELECT event_id,task_id,run_id,event_type,details,created_at FROM expert_events WHERE task_id=? ORDER BY event_id LIMIT 1000",
+      )
+      .all(taskId);
+    return { task, runs, events };
+  }
+
+  /** Accept stage metadata only for the active claimed attempt; no raw model output. */
+  recordStage(claim: Claim, stage: string, details = "", now = Date.now()) {
+    // Accept only structured stage names and diagnostic codes. Never persist raw log text.
+    if (
+      !/^(repository|container|codex|claude|execution)\.(started|completed|failed)$/.test(stage) ||
+      (details !== "" && !/^[A-Z][A-Z0-9_]{0,79}$/.test(details))
+    )
+      throw new Error("INVALID_STAGE_EVENT");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          "SELECT 1 FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND lease_until>=?",
+        )
+        .get(claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
+      if (!row) throw new Error("STALE_ATTEMPT");
+      const count = Number(
+        (
+          this.db
+            .prepare("SELECT count(*) n FROM expert_events WHERE task_id=? AND run_id=?")
+            .get(claim.taskId, claim.runId) as { n: number }
+        ).n,
+      );
+      if (count >= 200) throw new Error("EVENT_LIMIT_REACHED");
+      const safeDetails = details;
+      this.db
+        .prepare("INSERT INTO expert_events(task_id,run_id,event_type,details,created_at) VALUES(?,?,?,?,?)")
+        .run(claim.taskId, claim.runId, stage, safeDetails, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private ensureEventColumn(name: string, definition: string): void {
+    const columns = this.db.prepare("PRAGMA table_info(expert_events)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === name))
+      this.db.exec(`ALTER TABLE expert_events ADD COLUMN ${name} ${definition}`);
   }
 
   private ensureTaskColumn(name: string, definition: string): void {

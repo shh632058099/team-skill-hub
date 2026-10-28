@@ -41,6 +41,7 @@ export interface CodexProcessOptions {
   maxOutputBytes?: number;
   signal?: AbortSignal;
   onAbort?: () => Promise<void>;
+  parseResult?: (output: string) => string;
 }
 /** Low-level subprocess transport; caller must enforce container isolation. */
 export async function runCodexProcess(options: CodexProcessOptions): Promise<string> {
@@ -76,7 +77,7 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
       if (error) reject(error);
       else {
         try {
-          resolve(parseCodexJsonlResult(output));
+          resolve((options.parseResult ?? parseCodexJsonlResult)(output));
         } catch (parseError) {
           reject(parseError);
         }

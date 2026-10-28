@@ -21,6 +21,7 @@ import {
 } from "./admin-ui.js";
 import { ADMIN_EXPERTS_HTML } from "./expert-admin-ui.js";
 import { ExpertStore, type ExpertDefinition, type ExpertDeploymentRecord } from "./expert-platform/expert-store.js";
+import { ExpertTaskStore } from "./expert-platform/task-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
 import {
@@ -754,6 +755,56 @@ export async function startServer(
     if (!dbPath) throw new Error("EXPERT_RUNTIME_DB_NOT_CONFIGURED");
     return dbPath;
   };
+  const withExpertTaskStore = <T>(run: (store: ExpertTaskStore) => T): T => {
+    const store = new ExpertTaskStore(expertRuntimeDb());
+    try {
+      return run(store);
+    } finally {
+      store.close();
+    }
+  };
+  app.get<{
+    Querystring: { limit?: string; offset?: string; status?: string; expertId?: string; workerId?: string; q?: string };
+  }>("/admin/api/expert-tasks", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const { limit, offset, status, expertId, workerId, q } = request.query;
+    if (status && !["queued", "running", "succeeded", "failed", "cancelled"].includes(status)) {
+      reply.code(400);
+      return { error: "invalid status" };
+    }
+    try {
+      return withExpertTaskStore((store) =>
+        store.adminTasks({ limit: Number(limit || 20), offset: Number(offset || 0), status, expertId, workerId, q }),
+      );
+    } catch (error) {
+      reply.code(503);
+      return { error: error instanceof Error ? error.message : "TASK_LIST_FAILED" };
+    }
+  });
+  app.get<{ Params: { id: string } }>("/admin/api/expert-tasks/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) {
+      reply.code(400);
+      return { error: "invalid task ID" };
+    }
+    try {
+      const detail = withExpertTaskStore((store) => store.adminTaskDetail(request.params.id));
+      if (!detail) {
+        reply.code(404);
+        return { error: "task not found" };
+      }
+      return detail;
+    } catch (error) {
+      reply.code(503);
+      return { error: error instanceof Error ? error.message : "TASK_DETAIL_FAILED" };
+    }
+  });
   const withExpertStore = <T>(run: (store: ExpertStore) => T): T => {
     const store = new ExpertStore(expertRuntimeDb());
     try {

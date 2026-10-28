@@ -52,6 +52,11 @@ interface FailTaskRequest {
   claim?: LeaseRequest;
   reason: string;
 }
+interface TaskStageRequest {
+  claim?: LeaseRequest;
+  stage: string;
+  details: string;
+}
 interface Empty {}
 interface LeaseResponse {
   cancellation_requested: boolean;
@@ -81,6 +86,12 @@ interface WorkerServiceClient extends grpc.Client {
   CompleteTask(
     request: CompleteTaskRequest,
     metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+  ): grpc.ClientUnaryCall;
+  ReportTaskStage(
+    request: TaskStageRequest,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
     callback: (error: grpc.ServiceError | null, response: Empty) => void,
   ): grpc.ClientUnaryCall;
   FailTask(
@@ -355,12 +366,30 @@ export async function startExpertWorkerGrpcServer(
     }
   };
 
+  const reportTaskStage: UnaryHandler<TaskStageRequest, Empty> = (call, callback) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      if (!call.request.claim) throw new Error("INVALID_REQUEST");
+      requireIdentityMatch(authenticatedId, call.request.claim.worker_id);
+      const claim = toClaim(call.request.claim);
+      if (workers.get(claim.workerId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      tasks.recordStage(claim, call.request.stage, call.request.details || "");
+      callback(null, {});
+    } catch (error) {
+      callback(
+        grpcError(grpc.status.FAILED_PRECONDITION, error instanceof Error ? error.message : "STAGE_FAILED"),
+        null,
+      );
+    }
+  };
+
   server.addService(proto.expert.v1.ExpertWorkerService.service, {
     RegisterWorker: registerWorker,
     ClaimTask: claimTask,
     RenewLease: renewLease,
     CompleteTask: completeTask,
     FailTask: failTask,
+    ReportTaskStage: reportTaskStage,
   });
 
   const serverCredentials = options.tls
@@ -518,6 +547,17 @@ export class ExpertWorkerClient {
           commit_sha: source?.commitSha ?? "",
         },
         this.metadata,
+        callback,
+      ),
+    );
+  }
+
+  reportTaskStage(claim: Claim, stage: string, details = ""): Promise<Empty> {
+    return unary((callback) =>
+      this.client.ReportTaskStage(
+        { claim: this.claimRequest(claim), stage, details },
+        this.metadata,
+        { deadline: Date.now() + 2_000 },
         callback,
       ),
     );

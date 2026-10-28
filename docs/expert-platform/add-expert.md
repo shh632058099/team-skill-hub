@@ -10,9 +10,13 @@
 
 日常使用优先通过 Admin 页面管理专家、执行配置以及 Worker 审批。CLI 仅作为维护或排障备用方式。
 
+**希望使用 Claude Code 执行任务**的部署者请参阅 [Claude Worker 执行后端配置](./claude-executor.md)。本手册默认使用 Claude Code，Codex 需显式选择。
+
 **发布管理员 / CI 维护人员**如需制作 Runtime tar.gz、Docker Image tar、SHA-256 校验清单，请使用独立的 [Worker 制品制作与交付手册](./release-worker-artifacts.md)；部署用户继续按照本文操作即可。
 
 ## 0. 开始之前：明确需要领取什么、准备什么
+
+**需要使用 Claude Code 作为 Worker 执行后端时，另请参阅 [Claude / Codex 执行器部署手册](./claude-executor.md)。**
 
 **部署者不需要 `team-skill-hub` 源码、npm 构建环境或 Dockerfile。** Worker 由两个相互独立的部分组成：
 
@@ -24,23 +28,23 @@ Team Skill Hub（已有的 Hub 服务和 Admin 页面）
 Worker 主机（Linux）
     ├─ Worker Runtime（systemd 常驻服务；读取 worker.env）
     ├─ Docker Engine（由 Worker 调用，不是 Worker 自己的镜像）
-    ├─ 任务执行 Image（Docker 内运行 Codex/模型任务）
+    ├─ 任务执行 Image（默认 Claude Code，可手动切换 Codex）
     └─ 专属 Git checkout、日志及必要凭据
 ```
 
 ### 0.1 向发布方领取的交付清单
 
-| 交付物                | 形式与当前示例文件名                                                       | 部署位置 / 用途                                                             |
-| --------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| **Worker Runtime 包** | `worker-runtime-0.1.0.tar.gz`                                              | 安装到 Worker 主机 `/opt/team-skill-hub-worker/`，作为 systemd 常驻服务运行 |
-| **任务执行镜像**      | `expert-worker-image-0.1.0.tar`                                            | `docker load` 导入 Worker 主机 Docker Engine，供每次任务创建执行容器        |
-| **版本与完整性信息**  | 发布方提供版本、目标 CPU 架构和 SHA-256 校验值                             | 确保 Runtime 与 Image 配套、文件在传输后未损坏                              |
-| **接入参数**          | Hub 私网 gRPC 地址、Bootstrap Token 的安全交付渠道、Worker ID / capability | 用于连接和自动注册；不要通过 Git、聊天记录传播密钥                          |
-| **业务凭据（按需）**  | 模型 API Key、私有 Git 仓库只读凭据、可信 CA / 代理配置                    | 由部署者在 Worker 主机安全配置，不包含在发行包内                            |
+| 交付物                               | 形式与当前示例文件名                                                       | 部署位置 / 用途                                                             |
+| ------------------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **Worker Runtime 包**                | `worker-runtime-0.1.0.tar.gz`                                              | 安装到 Worker 主机 `/opt/team-skill-hub-worker/`，作为 systemd 常驻服务运行 |
+| **Claude Code 任务执行镜像（默认）** | `expert-claude-image-0.1.0.tar`                                            | `docker load` 导入 Worker 主机 Docker Engine，供每次任务创建执行容器        |
+| **版本与完整性信息**                 | 发布方提供版本、目标 CPU 架构和 SHA-256 校验值                             | 确保 Runtime 与 Image 配套、文件在传输后未损坏                              |
+| **接入参数**                         | Hub 私网 gRPC 地址、Bootstrap Token 的安全交付渠道、Worker ID / capability | 用于连接和自动注册；不要通过 Git、聊天记录传播密钥                          |
+| **业务凭据（按需）**                 | 模型 API Key、私有 Git 仓库只读凭据、可信 CA / 代理配置                    | 由部署者在 Worker 主机安全配置，不包含在发行包内                            |
 
 当前代码的示例版本是 **`0.1.0`**。上述两个 tar 文件在开发/发布环境可生成，但 `artifacts/` 被 Git 忽略，**不等于在 GitHub Releases、镜像仓库或任意 URL 已经公开发布**。实际领取地址、版本和 SHA-256 由团队发布方提供；不能通过直接 clone 仓库代替交付。
 
-发布方应明确告知：镜像导入后的 tag（当前示例为 `team-skill-hub-expert-worker:0.1.0`）、CPU 架构、兼容的 Hub 版本、升级/回滚制品和密钥交付方式。部署者只需核对并安装制品。 **当前本地可核验的 `0.1.0` Docker 镜像为 `linux/amd64`；ARM64 主机不能直接使用这份镜像，需要发布方提供对应架构的镜像。**
+发布方应明确告知：镜像导入后的 tag（当前示例为 `team-skill-hub-expert-claude:0.1.0`）、CPU 架构、兼容的 Hub 版本、升级/回滚制品和密钥交付方式。部署者只需核对并安装制品。 **当前本地可核验的 `0.1.0` Docker 镜像为 `linux/amd64`；ARM64 主机不能直接使用这份镜像，需要发布方提供对应架构的镜像。**
 
 ### 0.2 Worker 主机资源与依赖
 
@@ -50,7 +54,7 @@ Worker 主机（Linux）
 | CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                |
 | 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                            |
 | 软件      | Node.js **24.x**（systemd 单元当前固定使用 `/usr/bin/node`）、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`、systemd；安装时需要 sudo/root 权限 |
-| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 模型 Responses API；如需代理/DNS/CA，三条路径分别验证                                              |
+| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API；如需代理/DNS/CA，三条路径分别验证                                                    |
 | 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                     |
 | 数据目录  | `/opt/team-skill-hub-worker`（版本化 Runtime）、`/etc/team-skill-hub-worker`（配置和私钥）、`/var/lib/team-skill-hub-worker`（credential、仓库 checkout）                |
 
@@ -239,15 +243,15 @@ CLI 签发的凭据可通过 `EXPERT_WORKER_CREDENTIAL` 提供给 Worker，或�
 
 ```bash
 cd /tmp/team-skill-hub-worker-release
-ls -lh worker-runtime-0.1.0.tar.gz expert-worker-image-0.1.0.tar
-sha256sum worker-runtime-0.1.0.tar.gz expert-worker-image-0.1.0.tar
+ls -lh worker-runtime-0.1.0.tar.gz expert-claude-image-0.1.0.tar
+sha256sum worker-runtime-0.1.0.tar.gz expert-claude-image-0.1.0.tar
 # 人工与发布方通过受信任渠道交付的 SHA-256 清单逐一比对，不匹配即停止
 ```
 
 该发行包的职责必须区分：
 
 - `worker-runtime-0.1.0.tar.gz` **不是容器镜像**：它安装成 Worker 主机的 systemd 服务，负责连接 Hub、注册、领任务、管理工作区和启动 Docker 容器。
-- `expert-worker-image-0.1.0.tar` **不是 Worker daemon**：这是每个专家任务使用的 Codex 执行镜像，导入 Docker 后由 Runtime 按需调用。
+- `expert-claude-image-0.1.0.tar` **不是 Worker daemon**：这是每个专家任务默认使用的 Claude Code 执行镜像，导入 Docker 后由 Runtime 按需调用。
 
 如果发布方改为提供私有镜像仓库地址而非 `.tar`，应同时给出可验证的镜像 digest、架构和拉取凭据。当前下面的安装步骤按**离线 tar 制品**展开；不要求 Worker 主机运行任何 `docker build` 或 `npm run build`。
 
@@ -280,8 +284,8 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh   /tmp/team-skill-hu
 
 ```bash
 cd /tmp/team-skill-hub-worker-release
-sudo docker load -i expert-worker-image-0.1.0.tar
-sudo docker image inspect team-skill-hub-expert-worker:0.1.0   --format '{{.RepoTags}} {{.Os}}/{{.Architecture}}'
+sudo docker load -i expert-claude-image-0.1.0.tar
+sudo docker image inspect team-skill-hub-expert-claude:0.1.0   --format '{{.RepoTags}} {{.Os}}/{{.Architecture}}'
 ```
 
 **校验的 tag 必须与后面 `EXPERT_DOCKER_IMAGE` 完全一致**，架构需与目标机器兼容；检查失败则联系发布方重新获取正确制品，部署者不需要自己构建镜像。
@@ -311,15 +315,17 @@ EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
 EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
 
-# 必须与已导入的镜像 tag 相同
-EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:0.1.0
+# 必须与已导入的镜像 tag 相同；Claude Code 为默认执行后端
+EXPERT_EXECUTOR_BACKEND=codex
+EXPERT_EXECUTOR_BACKEND=claude
+EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
+EXPERT_CLAUDE_MODEL=sonnet
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=default
 
-# 对应 Admin 的专家 modelConfig.credentialRef
-EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
-EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
-TEAM_SKILL_HUB_API_KEY=在Worker主机通过安全方式配置真实模型密钥
+# 对应 Admin 专家 modelConfig.credentialRef（Codex 模型路由）
+EXPERT_MODEL_ENV_NAMES=ANTHROPIC_API_KEY,HTTPS_PROXY,NO_PROXY
+ANTHROPIC_API_KEY=在Worker主机通过安全方式配置真实模型密钥
 
 # 私有 Git 仓库才需要以下映射（公开仓库可不填）
 # EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/keys/git-readonly"}'
@@ -330,7 +336,7 @@ TEAM_SKILL_HUB_API_KEY=在Worker主机通过安全方式配置真实模型密钥
 配置时确认：
 
 - `EXPERT_WORKER_ID` 在 Hub 注册表内唯一；`EXPERT_CAPABILITY` 与目标 Expert 的能力标签匹配。
-- `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 左侧的引用名与 Admin 专家配置的 **Credential Ref** 完全一致，右侧为 Worker 侧实际存在的环境变量名，且必须包含在 `EXPERT_MODEL_ENV_NAMES` 白名单中。
+- Claude Code 默认模式使用 Worker 配置的 `ANTHROPIC_API_KEY` 或 `CLAUDE_CODE_OAUTH_TOKEN`；若手动选择 Codex，才需按 Admin 的 `Credential Ref` 配置 `EXPERT_MODEL_CREDENTIAL_REFS_JSON`。
 - 如果使用私有仓库，在 `/etc/team-skill-hub-worker/keys/` 安全放入**只读 Git key**，按第 4 节配置 SSH/HTTPS 凭据映射；不要复制整个 Hub `.env`。
 - 需要跨主机连接时，Hub 管理员负责发布可达的私网 gRPC 地址，设置 `EXPERT_GRPC_PUBLISH_BIND`、防火墙白名单及必要的 TLS/mTLS；不应把 gRPC 端口暴露到公网。
 - 不要直接把密钥复制进文档或版本库。`EXPERT_DOCKER_SECCOMP_PROFILE=unconfined` 仅用于复现沙箱不兼容后的受控排障，默认保持 `default`。
@@ -362,9 +368,11 @@ sudo docker image ls team-skill-hub-expert-worker
 
 升级需要发布方提供**新版本 Runtime 包与配套 Image**，由管理员安排任务排空/维护窗口后重复第 6～7 节；先导入新镜像，确认环境中的 `EXPERT_DOCKER_IMAGE` 指向新 tag，再重启 Worker 服务并完成一条只读任务验收。安装器使用 `/opt/team-skill-hub-worker/releases/<version>/` 与 `current` 软链接，便于保留旧 Runtime 作为回滚候选，但**切换旧版本前需一并恢复与其兼容的镜像 tag、配置和所需数据库/协议兼容性**，不能只改软链接就认定完成回滚。
 
-## 9. 端到端验收：用 Codex CLI 发一个只读任务
+完成注册后，在 Admin → **专家平台** → **任务运行记录** 中可查看任务状态、Run、Worker 及执行阶段（需要最新 Worker Runtime 上报）。详细说明参见 [任务运行观测手册](./task-observability.md)。
 
-先在已连接 Team Skill Hub MCP 的 Codex CLI 会话中调用 `get_server_info`，确认当前 principal；再通过 Admin 执行配置列表或 API 结果取得对应的 `repositories[].id`。不要猜测仓库 ID。
+## 9. 端到端验收：用 Claude CLI 或 Codex CLI 发一个只读任务
+
+先在已连接 Team Skill Hub MCP 的 Claude CLI 或 Codex CLI 会话中调用 `get_server_info`，确认当前 principal；再通过 Admin 执行配置列表或 API 结果取得对应的 `repositories[].id`。不要猜测仓库 ID。
 
 提交任务时使用实际生成的 `repositoryId`，并且先做只读分析：
 

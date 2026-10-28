@@ -10,6 +10,7 @@ import { MemoryRegistryStore } from "../src/registry.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
 import { DevelopmentAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
+import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { startServer } from "../src/server.js";
 import { ADMIN_EXPERTS_HTML } from "../src/expert-admin-ui.js";
 
@@ -62,6 +63,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /专家配置/);
     assert.match(html, /执行配置/);
     assert.match(html, /Worker 管理/);
+    assert.match(html, /任务运行记录/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
@@ -237,6 +239,32 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(revokedWorker.status, 200);
     assert.equal((await revokedWorker.json()).worker.status, "revoked");
 
+    const taskStore = new ExpertTaskStore(runtimeDb);
+    const task = taskStore.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "admin-log-e2e",
+      problem: "analyse ota safely",
+      expertId: "ota",
+    });
+    const run = taskStore.claim("worker-01", Date.now(), 30000, "ota")!;
+    taskStore.recordStage(run, "repository.started");
+    taskStore.recordStage(run, "repository.completed");
+    taskStore.complete(run, "Read-only findings");
+    taskStore.close();
+    const list = await fetch(base + "/admin/api/expert-tasks?status=succeeded&expertId=ota");
+    assert.equal(list.status, 200);
+    const listed = await list.json();
+    assert.equal(listed.total, 1);
+    assert.equal(listed.tasks[0].task_id, task.taskId);
+    assert.equal(listed.tasks[0].result, undefined, "list must not expose full report");
+    const detail = await fetch(base + "/admin/api/expert-tasks/" + task.taskId);
+    assert.equal(detail.status, 200);
+    const body = await detail.json();
+    assert.equal(body.task.result, "Read-only findings");
+    assert.equal(body.runs.length, 1);
+    assert.ok(body.events.some((x: any) => x.event_type === "repository.started"));
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid")).status, 400);
     const store = new ExpertStore(runtimeDb);
     try {
       assert.deepEqual(

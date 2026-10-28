@@ -1020,10 +1020,34 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       );
 
       registerTool(
+        "submit_expert_task_auto",
+        {
+          description:
+            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Provide the user's problem and a new unique idempotencyKey. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a queued taskId; later query get_expert_task_status/get_expert_task_result.",
+          inputSchema: z.object({
+            problem: z.string().trim().min(1).max(10000),
+            idempotencyKey: z.string().min(1).max(200),
+          }),
+        },
+        async ({ problem, idempotencyKey }) => {
+          if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
+          return toolResult({
+            ...expertDispatchService.submit({
+              principalId: principal.id,
+              scope: principal.tenantId,
+              idempotencyKey,
+              problem,
+              selectionMode: "auto",
+            }),
+          });
+        },
+      );
+
+      registerTool(
         "submit_expert_task",
         {
           description:
-            'Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode, then check status with backoff and read the report only after status=succeeded. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request.',
+            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode, then check status with backoff and read the report only after status=succeeded. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request.',
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),

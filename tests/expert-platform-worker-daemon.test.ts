@@ -79,7 +79,9 @@ test("daemon forwards runtime configuration to Docker executor factory", () => {
       },
     },
   );
-  assert.deepEqual(seen, {
+  assert.equal(typeof (seen as { onStage?: unknown })?.onStage, "function");
+  const { onStage: _onStage, ...configuration } = seen as Record<string, unknown>;
+  assert.deepEqual(configuration, {
     image: "expert-worker",
     sourcePath: "/srv/ota",
     repositoryRoot: "/srv/expert-repositories",

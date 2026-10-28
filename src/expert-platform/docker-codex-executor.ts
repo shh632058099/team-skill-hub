@@ -7,11 +7,14 @@ import type { Claim } from "./task-store.js";
 import type { ExpertModelConfig } from "./expert-store.js";
 import { prepareRepositoryWorkspace, type GitCredentialConfig } from "./repository-workspace.js";
 import { buildCodexReadOnlyArgs } from "./codex-runtime.js";
+import { parseClaudeResult, buildClaudeReadOnlyArgs } from "./claude-runtime.js";
 import { buildCodexDockerArgs } from "./codex-container-executor.js";
 import { runCodexProcess, type CodexProcessOptions } from "./codex-process.js";
 
 export interface DockerCodexExecutorOptions {
   image: string;
+  backend?: "codex" | "claude";
+  claudeModel?: string;
   sourcePath: string;
   repositoryRoot?: string;
   sharedTempRoot?: string;
@@ -24,6 +27,7 @@ export interface DockerCodexExecutorOptions {
   configFilePath?: string;
   timeoutMs: number;
   maxOutputBytes?: number;
+  onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
   runProcess?: (options: CodexProcessOptions) => Promise<string>;
 }
 
@@ -172,30 +176,50 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
   ): Promise<
     string | { result: string; source: { repositoryUrl?: string; repositoryBranch?: string; commitSha: string } }
   > => {
-    const codexArgs = buildCodexReadOnlyArgs(claim.problem);
+    const backend = options.backend ?? "claude";
+    if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
+    const codexArgs =
+      backend === "claude"
+        ? buildClaudeReadOnlyArgs(claim.problem, options.claudeModel ?? "sonnet")
+        : buildCodexReadOnlyArgs(claim.problem);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
     // worker's unrelated default sourcePath. Legacy IDs retain compatibility.
     if (claim.repositoryId?.startsWith("repo-") && (!claim.repositoryUrl || !claim.repositoryBranch)) {
       throw new Error("SOURCE_REPOSITORY_UNAVAILABLE");
     }
-    const preparedRepository =
-      claim.repositoryUrl && claim.repositoryBranch && claim.repositoryId
-        ? await prepareRepositoryWorkspace({
-            id: claim.repositoryId,
-            url: claim.repositoryUrl,
-            branch: claim.repositoryBranch,
-            ...(claim.repositoryGitProxyUrl ? { gitProxyUrl: claim.repositoryGitProxyUrl } : {}),
-            root: options.repositoryRoot ?? `${options.sourcePath.replace(/\/[^/]+$/, "")}/expert-repositories`,
-            ...(claim.repositoryCredentialRef ? { credentialRef: claim.repositoryCredentialRef } : {}),
-            credentials: options.gitCredentialConfigs,
-          })
-        : undefined;
+    const report = async (stage: string, details = "") => {
+      try {
+        await options.onStage?.(claim, stage, details);
+      } catch {
+        /* Observability must not block task execution. */
+      }
+    };
+    await report("repository.started");
+    let preparedRepository: Awaited<ReturnType<typeof prepareRepositoryWorkspace>> | undefined;
+    try {
+      preparedRepository =
+        claim.repositoryUrl && claim.repositoryBranch && claim.repositoryId
+          ? await prepareRepositoryWorkspace({
+              id: claim.repositoryId,
+              url: claim.repositoryUrl,
+              branch: claim.repositoryBranch,
+              ...(claim.repositoryGitProxyUrl ? { gitProxyUrl: claim.repositoryGitProxyUrl } : {}),
+              root: options.repositoryRoot ?? `${options.sourcePath.replace(/\/[^/]+$/, "")}/expert-repositories`,
+              ...(claim.repositoryCredentialRef ? { credentialRef: claim.repositoryCredentialRef } : {}),
+              credentials: options.gitCredentialConfigs,
+            })
+          : undefined;
+    } catch (error) {
+      await report("repository.failed", "REPOSITORY_PREPARATION_FAILED");
+      throw error;
+    }
+    await report("repository.completed");
     const sourcePath = preparedRepository?.path ?? options.sourcePath;
     let generatedConfigDir: string | undefined;
     let configFilePath = options.configFilePath;
     let envNames = options.envNames;
-    if (claim.modelConfig) {
+    if (claim.modelConfig && backend === "codex") {
       const generated = buildExpertCodexConfig(claim.modelConfig, options);
       generatedConfigDir = mkdtempSync(path.join(options.sharedTempRoot ?? os.tmpdir(), ".expert-codex-config-"));
       configFilePath = path.join(generatedConfigDir, "config.toml");
@@ -220,15 +244,33 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         configFilePath,
         codexArgs,
       });
+      if (backend === "claude") {
+        // Docker entrypoint is the Claude CLI for Claude-specific images.
+        // Disable Codex-only env and auth injection; allow only explicitly configured env.
+        const codeHomeIndex = args.findIndex((value) => value === "CODEX_HOME=/home/expert/.codex");
+        if (codeHomeIndex >= 0) args[codeHomeIndex] = "CLAUDE_CONFIG_DIR=/home/expert/.claude";
+      }
+      await report("container.started");
       if (!options.runProcess) await cleanupSupersededTaskContainers(claim);
-      const result = await runProcess({
-        executable: "docker",
-        args,
-        timeoutMs: options.timeoutMs,
-        maxOutputBytes: options.maxOutputBytes,
-        signal,
-        onAbort: () => stopDockerContainer(containerName),
-      });
+      await report(`${backend}.started`);
+      let result: string;
+      try {
+        result = await runProcess({
+          executable: "docker",
+          args,
+          timeoutMs: options.timeoutMs,
+          maxOutputBytes: options.maxOutputBytes,
+          signal,
+          onAbort: () => stopDockerContainer(containerName),
+          ...(backend === "claude" && !options.runProcess ? { parseResult: parseClaudeResult } : {}),
+        });
+      } catch (error) {
+        await report(`${backend}.failed`, "EXECUTION_FAILED");
+        await report("container.failed", "EXECUTION_FAILED");
+        throw error;
+      }
+      await report(`${backend}.completed`);
+      await report("container.completed");
       return preparedRepository
         ? {
             result,

@@ -123,6 +123,7 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
 
     const listedTools = await listMcpTools(mcpUrl, apiKey);
     const catalogDescription = listedTools.find((tool) => tool.name === "list_available_experts")?.description ?? "";
+    assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task_auto"));
     const submitDescription = listedTools.find((tool) => tool.name === "submit_expert_task")?.description ?? "";
     assert.match(catalogDescription, /ONLY when the user explicitly names an Expert/i);
     assert.match(catalogDescription, /do NOT call this tool/i);
@@ -284,6 +285,14 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
       taskId: explicitTaskId,
     });
     assert.match(String(explicitResult.result), /Explicit OTA analysis completed/);
+
+    const autoDelegated = await callMcp(mcpUrl, apiKey, 31, "submit_expert_task_auto", {
+      problem: "Inspect OTA rollback source code, without any modifications",
+      idempotencyKey: "auto-tool-no-expert-id",
+    });
+    assert.equal(autoDelegated.expertId, "ota");
+    assert.equal(autoDelegated.selectionMode, "auto");
+    assert.equal(autoDelegated.repositoryId, null); // legacy repository ID requires explicit selection
   } finally {
     workerClient?.close();
     await hub?.close();

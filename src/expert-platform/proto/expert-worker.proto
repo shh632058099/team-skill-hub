@@ -8,6 +8,7 @@ service ExpertWorkerService {
   rpc RenewLease(LeaseRequest) returns (LeaseResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
+  rpc ReportTaskStage(TaskStageRequest) returns (Empty);
 }
 
 message RegisterWorkerRequest {
@@ -62,6 +63,12 @@ message CompleteTaskRequest {
 message FailTaskRequest {
   LeaseRequest claim = 1;
   string reason = 2;
+}
+
+message TaskStageRequest {
+  LeaseRequest claim = 1;
+  string stage = 2;
+  string details = 3;
 }
 
 message Empty {}

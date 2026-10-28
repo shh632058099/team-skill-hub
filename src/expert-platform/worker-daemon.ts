@@ -38,6 +38,8 @@ export function createExpertWorkerRuntime(
   const executor =
     dependencies.createExecutor?.({
       image: config.dockerImage,
+      ...(config.executorBackend ? { backend: config.executorBackend } : {}),
+      ...(config.executorBackend === "claude" ? { claudeModel: config.claudeModel ?? "sonnet" } : {}),
       sourcePath: config.sourcePath,
       repositoryRoot: config.repositoryRoot,
       sharedTempRoot: config.sharedTempRoot,
@@ -49,9 +51,18 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      onStage: async (claim, stage, details) => {
+        try {
+          await client.reportTaskStage?.(claim, stage, details);
+        } catch {
+          /* Best effort */
+        }
+      },
     }) ??
     createDockerCodexExecutor({
       image: config.dockerImage,
+      ...(config.executorBackend ? { backend: config.executorBackend } : {}),
+      ...(config.executorBackend === "claude" ? { claudeModel: config.claudeModel ?? "sonnet" } : {}),
       sourcePath: config.sourcePath,
       repositoryRoot: config.repositoryRoot,
       sharedTempRoot: config.sharedTempRoot,
@@ -63,6 +74,13 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      onStage: async (claim, stage, details) => {
+        try {
+          await client.reportTaskStage?.(claim, stage, details);
+        } catch {
+          /* Best effort */
+        }
+      },
     });
 
   return {

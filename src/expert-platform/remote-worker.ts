@@ -10,6 +10,7 @@ export interface RemoteWorkerClient {
   renewLease(claim: Claim): Promise<unknown>;
   completeTask(claim: Claim, result: string, source?: WorkerExecutionResult["source"]): Promise<unknown>;
   failTask(claim: Claim, reason: string): Promise<unknown>;
+  reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
 }
 
 export interface RemoteWorkerOptions {
@@ -32,6 +33,14 @@ export async function runRemoteWorkerOnce(
   const claim = await client.claimTask(workerId, expertId, capability);
   if (!claim) return false;
 
+  const stage = async (name: string, details = "") => {
+    if (!client.reportTaskStage) return;
+    try {
+      await client.reportTaskStage(claim, name, details);
+    } catch {
+      /* Diagnostics are best-effort and must not turn success into failure. */
+    }
+  };
   const controller = new AbortController();
   let leaseLost: Error | undefined;
   let cancellationRequested = false;
@@ -66,8 +75,11 @@ export async function runRemoteWorkerOnce(
   try {
     let execution: string | WorkerExecutionResult;
     try {
+      await stage("execution.started");
       execution = await executor(claim, controller.signal);
+      await stage("execution.completed");
     } catch (error) {
+      await stage("execution.failed", "EXECUTION_FAILED");
       if (leaseLost) throw leaseLost;
       if (cancellationRequested && error instanceof Error && error.message === "CODEX_CANCELLED") {
         await client.failTask(claim, "TASK_CANCELLED");

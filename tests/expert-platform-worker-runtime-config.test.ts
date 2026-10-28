@@ -10,6 +10,7 @@ test("worker runtime config parses a cross-host Docker Codex deployment", () => 
     EXPERT_CAPABILITY: "ota",
     EXPERT_SOURCE_PATH: "/srv/repos/ota",
     EXPERT_DOCKER_IMAGE: "team-skill-hub-expert-worker-prototype",
+    EXPERT_EXECUTOR_BACKEND: "codex",
     EXPERT_DOCKER_NETWORK: "expert-egress",
     EXPERT_DOCKER_SECCOMP_PROFILE: "unconfined",
     EXPERT_CODEX_AUTH_FILE: "/home/worker/.codex/auth.json",
@@ -50,6 +51,7 @@ test("worker runtime config rejects incomplete mTLS configuration", () => {
         EXPERT_CAPABILITY: "ota",
         EXPERT_SOURCE_PATH: "/repo",
         EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
         EXPERT_DOCKER_NETWORK: "expert-egress",
         EXPERT_TLS_CA_PATH: "/ca.pem",
       }),
@@ -67,6 +69,7 @@ test("worker runtime config fails closed on invalid paths and intervals", () => 
         EXPERT_CAPABILITY: "ota",
         EXPERT_SOURCE_PATH: "relative",
         EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
         EXPERT_DOCKER_NETWORK: "expert-egress",
       }),
     /INVALID_WORKER_CONFIG/,
@@ -80,6 +83,7 @@ test("worker runtime config fails closed on invalid paths and intervals", () => 
         EXPERT_CAPABILITY: "ota",
         EXPERT_SOURCE_PATH: "/repo",
         EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
         EXPERT_DOCKER_NETWORK: "host",
       }),
     /INVALID_WORKER_CONFIG/,
@@ -96,6 +100,7 @@ test("worker runtime config rejects a relative Codex provider config path", () =
         EXPERT_CAPABILITY: "ota",
         EXPERT_SOURCE_PATH: "/repo",
         EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
         EXPERT_DOCKER_NETWORK: "expert-egress",
         EXPERT_CODEX_CONFIG_FILE: "provider.toml",
       }),
@@ -111,6 +116,7 @@ test("worker can use configured repository root without a pre-cloned legacy sour
     EXPERT_CAPABILITY: "ota",
     EXPERT_REPOSITORY_ROOT: "/srv/expert-repositories",
     EXPERT_DOCKER_IMAGE: "worker",
+    EXPERT_EXECUTOR_BACKEND: "codex",
     EXPERT_DOCKER_NETWORK: "expert-egress",
   });
   assert.equal(config.sourcePath, "");
@@ -127,6 +133,7 @@ test("worker runtime config rejects credential refs mapped to unapproved environ
         EXPERT_CAPABILITY: "ota",
         EXPERT_SOURCE_PATH: "/repo",
         EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
         EXPERT_DOCKER_NETWORK: "expert-egress",
         EXPERT_MODEL_ENV_NAMES: "OPENAI_API_KEY",
         EXPERT_MODEL_CREDENTIAL_REFS_JSON: '{"router":"HOME"}',
@@ -142,6 +149,7 @@ test("different worker IDs receive independent clone roots even with the same co
     EXPERT_CAPABILITY: "ota",
     EXPERT_REPOSITORY_ROOT: "/srv/expert-repositories",
     EXPERT_DOCKER_IMAGE: "worker",
+    EXPERT_EXECUTOR_BACKEND: "codex",
     EXPERT_DOCKER_NETWORK: "expert-egress",
   };
   const workerA = parseExpertWorkerConfig({ ...base, EXPERT_WORKER_ID: "ota-worker-01" });
@@ -161,7 +169,60 @@ test("worker ID must be a safe stable path component", () => {
         EXPERT_CAPABILITY: "ota",
         EXPERT_REPOSITORY_ROOT: "/srv/expert-repositories",
         EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
         EXPERT_DOCKER_NETWORK: "expert-egress",
+      }),
+    /INVALID_WORKER_CONFIG/,
+  );
+});
+
+test("Worker defaults to Claude and supports explicit Codex selection", () => {
+  const base = {
+    EXPERT_HUB_ADDRESS: "hub:7443",
+    EXPERT_WORKER_ID: "claude-worker-01",
+    EXPERT_WORKER_CREDENTIAL: "credential",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_REPOSITORY_ROOT: "/repos",
+    EXPERT_DOCKER_IMAGE: "team-skill-hub-expert-claude:0.1.0",
+    EXPERT_DOCKER_NETWORK: "bridge",
+    EXPERT_MODEL_ENV_NAMES: "ANTHROPIC_API_KEY,HTTPS_PROXY",
+  };
+  assert.equal(parseExpertWorkerConfig(base).executorBackend, "claude");
+  const codex = parseExpertWorkerConfig({
+    ...base,
+    EXPERT_EXECUTOR_BACKEND: "codex",
+    EXPERT_DOCKER_IMAGE: "",
+    EXPERT_MODEL_ENV_NAMES: "OPENAI_API_KEY",
+  });
+  assert.equal(codex.executorBackend, "codex");
+  assert.equal(codex.dockerImage, "team-skill-hub-expert-worker:0.1.0");
+  assert.equal(parseExpertWorkerConfig({ ...base, EXPERT_DOCKER_IMAGE: "" }).executorBackend, "claude");
+  assert.equal(
+    parseExpertWorkerConfig({
+      ...base,
+      EXPERT_EXECUTOR_BACKEND: "claude",
+      EXPERT_DOCKER_IMAGE: "",
+      EXPERT_MODEL_ENV_NAMES: undefined,
+    }).dockerImage,
+    "team-skill-hub-expert-claude:0.1.0",
+  );
+  const configured = parseExpertWorkerConfig({
+    ...base,
+    EXPERT_EXECUTOR_BACKEND: "claude",
+    EXPERT_CLAUDE_MODEL: "sonnet",
+  });
+  assert.equal(configured.executorBackend, "claude");
+  assert.equal(configured.claudeModel, "sonnet");
+  assert.throws(
+    () => parseExpertWorkerConfig({ ...base, EXPERT_EXECUTOR_BACKEND: "unknown" }),
+    /INVALID_WORKER_CONFIG/,
+  );
+  assert.throws(
+    () =>
+      parseExpertWorkerConfig({
+        ...base,
+        EXPERT_EXECUTOR_BACKEND: "claude",
+        EXPERT_CODEX_AUTH_FILE: "/secrets/auth.json",
       }),
     /INVALID_WORKER_CONFIG/,
   );

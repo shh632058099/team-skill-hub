@@ -12,6 +12,8 @@ export interface ExpertWorkerRuntimeConfig {
   sharedTempRoot: string;
   gitCredentialConfigs: Record<string, GitCredentialConfig>;
   dockerImage: string;
+  executorBackend?: "codex" | "claude";
+  claudeModel?: string;
   dockerNetwork: string;
   dockerSeccompProfile: "default" | "unconfined";
   codexAuthFilePath?: string;
@@ -94,12 +96,18 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
       ? path.join(repositoryRootBase, workerId)
       : "";
   const gitCredentialConfigs = loadGitCredentialConfigs(env.EXPERT_GIT_CREDENTIALS_JSON);
-  const dockerImage = env.EXPERT_DOCKER_IMAGE?.trim() ?? "";
+  const executorBackend = env.EXPERT_EXECUTOR_BACKEND?.trim() || "claude";
+  const dockerImage =
+    env.EXPERT_DOCKER_IMAGE?.trim() ||
+    (executorBackend === "claude" ? "team-skill-hub-expert-claude:0.1.0" : "team-skill-hub-expert-worker:0.1.0");
+  const claudeModel = env.EXPERT_CLAUDE_MODEL?.trim() || "sonnet";
   const dockerNetwork = env.EXPERT_DOCKER_NETWORK?.trim() ?? "";
   const dockerSeccompProfile = env.EXPERT_DOCKER_SECCOMP_PROFILE?.trim() || "default";
   const codexAuthFilePath = env.EXPERT_CODEX_AUTH_FILE?.trim() || undefined;
   const codexConfigFilePath = env.EXPERT_CODEX_CONFIG_FILE?.trim() || undefined;
-  const modelEnvNames = (env.EXPERT_MODEL_ENV_NAMES ?? "OPENAI_API_KEY")
+  const modelEnvNames = (
+    env.EXPERT_MODEL_ENV_NAMES ?? (executorBackend === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")
+  )
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
@@ -124,6 +132,11 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     !path.isAbsolute(repositoryRoot) ||
     repositoryRoot === "/" ||
     !dockerImage ||
+    (executorBackend !== "codex" && executorBackend !== "claude") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(claudeModel) ||
+    (executorBackend === "claude" && (codexAuthFilePath !== undefined || codexConfigFilePath !== undefined)) ||
+    (executorBackend === "claude" &&
+      !modelEnvNames.some((name) => name === "ANTHROPIC_API_KEY" || name === "CLAUDE_CODE_OAUTH_TOKEN")) ||
     !dockerNetwork ||
     dockerNetwork === "host" ||
     dockerNetwork === "none" ||
@@ -146,6 +159,8 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     sharedTempRoot: path.join(repositoryRoot, ".runtime-tmp"),
     gitCredentialConfigs,
     dockerImage,
+    executorBackend,
+    claudeModel,
     dockerNetwork,
     dockerSeccompProfile,
     codexAuthFilePath,

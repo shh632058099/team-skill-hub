@@ -29,6 +29,9 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     assert.equal(claim?.problem, "investigate OTA failure");
     assert.equal(claim?.taskId, submitted.taskId);
     await client.renewLease(claim!);
+    await client.reportTaskStage(claim!, "repository.started");
+    await client.reportTaskStage(claim!, "repository.completed");
+    await assert.rejects(() => client.reportTaskStage(claim!, "codex.started", "Bearer secret"), /INVALID_STAGE_EVENT/);
     await client.completeTask(claim!, "verified root cause", {
       repositoryUrl: "https://github.com/example/ota.git",
       repositoryBranch: "release",
@@ -36,6 +39,11 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     });
     const completed = tasks.get(submitted.taskId, "alice", "org");
     assert.equal(completed.result, "verified root cause");
+    assert.ok(
+      tasks
+        .adminTaskDetail(submitted.taskId)
+        ?.events.some((event) => (event as any).event_type === "repository.started"),
+    );
     assert.equal(completed.repositoryUrl, "https://github.com/example/ota.git");
     assert.equal(completed.repositoryBranch, "release");
     assert.equal(completed.commitSha, "abcdef0123456789abcdef0123456789abcdef01");

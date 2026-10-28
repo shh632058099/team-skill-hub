@@ -222,3 +222,43 @@ test("running task cancellation is requested then acknowledged by its worker", (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("admin task history and bounded per-run stages reject stale workers and unsafe details", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-run-log-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.db"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "event",
+      problem: "investigate OTA",
+      expertId: "ota",
+    });
+    const first = store.claim("worker-a", 100, 10, "ota")!;
+    assert.equal(store.adminTasks({ status: "running", expertId: "ota" }).total, 1);
+    store.recordStage(first, "repository.started", "", 101);
+    store.recordStage(first, "repository.completed", "", 102);
+    assert.throws(() => store.recordStage(first, "codex.started", "Bearer secret", 103), /INVALID_STAGE_EVENT/);
+    assert.throws(() => store.recordStage(first, "invalid.event", "", 103), /INVALID_STAGE_EVENT/);
+    const second = store.claim("worker-b", 111, 10, "ota")!;
+    assert.throws(() => store.recordStage(first, "codex.started", "", 112), /STALE_ATTEMPT/);
+    store.recordStage(second, "codex.started", "", 112);
+    store.recordStage(second, "codex.failed", "EXECUTION_FAILED", 113);
+    store.fail(second, "EXECUTION_FAILED", 114);
+    const detail = store.adminTaskDetail(task.taskId)!;
+    assert.equal(detail.runs.length, 2);
+    assert.ok(detail.events.some((event) => (event as any).event_type === "lease_expired"));
+    assert.ok(
+      detail.events.some(
+        (event) => (event as any).event_type === "codex.failed" && (event as any).run_id === second.runId,
+      ),
+    );
+    assert.equal(store.adminTasks({ status: "failed" }).total, 1);
+    assert.equal(store.adminTasks({ workerId: "worker-b" }).total, 1);
+    assert.equal(store.adminTasks({ q: task.taskId }).total, 1);
+    assert.equal(store.adminTaskDetail("missing"), null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
