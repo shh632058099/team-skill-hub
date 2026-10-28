@@ -825,7 +825,7 @@ export async function startServer(
           providerId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
           model: z.string().trim().min(1).max(200),
           baseUrl: z.string().trim().url().max(2048),
-          wireApi: z.literal("responses"),
+          wireApi: z.enum(["responses", "anthropic-messages"]),
           credentialRef: z.string().trim().min(1).max(100).optional(),
           allowedEnvNames: z
             .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/))

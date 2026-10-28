@@ -42,6 +42,7 @@ export interface CodexProcessOptions {
   signal?: AbortSignal;
   onAbort?: () => Promise<void>;
   parseResult?: (output: string) => string;
+  env?: NodeJS.ProcessEnv;
 }
 /** Low-level subprocess transport; caller must enforce container isolation. */
 export async function runCodexProcess(options: CodexProcessOptions): Promise<string> {
@@ -53,6 +54,7 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
   return new Promise<string>((resolve, reject) => {
     const child = spawn(options.executable, [...options.args], {
       stdio: ["ignore", "pipe", "pipe"],
+      ...(options.env ? { env: options.env } : {}),
       detached: process.platform !== "win32",
     });
     let settled = false;

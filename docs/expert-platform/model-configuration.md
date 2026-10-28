@@ -1,6 +1,6 @@
 # 专家模型配置与凭据映射
 
-每个 Expert 的 AI Router/模型设置由 Admin 的“专家配置”维护。配置包括 Provider ID、模型名、Base URL、Responses API 协议、凭据引用（可选）和允许传入执行容器的环境变量名称。API Key 本身不会写入 Expert 数据库或随任务下发。
+每个 Expert 的 AI Router/模型设置由 Admin 的“专家配置”维护。配置包括 Provider ID、模型名、Base URL、API 协议（Responses / Anthropic Messages）、凭据引用（可选）和允许传入执行容器的环境变量名称。API Key 本身不会写入 Expert 数据库或随任务下发。
 
 ## Worker 凭据引用映射
 
@@ -15,12 +15,29 @@ EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
 
 如果 `credentialRef` 为空，兼容逻辑会从专家配置的 `allowedEnvNames` 中选择第一个非代理环境变量作为 Codex `env_key`。建议正式部署显式配置凭据引用，以便运维和审计。
 
+## Claude Code 与 AI Router
+
+在 Admin → Expert 配置里选择 **Anthropic Messages API (`anthropic-messages`)**，填写 AI Router 的 Anthropic API 兼容 Base URL 和 Claude Code 支持的模型名称。Hub 将不含密钥的模型配置通过经过认证的 gRPC Claim 下发给 Worker。
+
+Claude Worker 通过 `--model` 使用该模型，并以 `ANTHROPIC_BASE_URL` 使用配置的路由地址。`credentialRef` 必须映射到 Worker 本地已获授权的环境变量：
+
+```dotenv
+EXPERT_EXECUTOR_BACKEND=claude
+EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
+EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
+TEAM_SKILL_HUB_API_KEY=由安全渠道提供的实际密钥
+```
+
+Worker 使用映射密钥构造执行进程环境中的 `ANTHROPIC_API_KEY`，传给 Claude 容器时仅使用 Docker `--env ANTHROPIC_API_KEY`（**不带明文值**）；请求模型和 URL 来自本次 Expert 配置，不再从 `EXPERT_CLAUDE_MODEL` 取值。密钥不会保存在 Hub/任务数据库、模型配置、Docker 命令参数或任务阶段日志中。若使用 `CLAUDE_CODE_OAUTH_TOKEN`，应直接将凭据引用映射到同名环境变量；不应将 OAuth token 当 API Key 重命名。
+
+**协议要求**：Router 必须兼容 Claude Code 所用的 Anthropic Messages API，单纯 OpenAI Responses API 的 Base URL 不可直接用于 Claude。当前模型配置归属于 Expert Definition，而不是每条 Deployment；切换不同 Expert 即可下发不同模型。无 `modelConfig` 的旧任务仍使用 Worker 原先独立配置的模型作为兼容回退。
+
 ## 运行行为
 
 - 每个任务根据选中的 Expert 生成独立的临时 Codex 配置；其中只包含模型配置和环境变量名称，不包含密钥值。
 - 临时配置以只读方式挂载到容器，任务完成或失败后从 Worker 主机删除。文件权限为 `0644`，因为容器内 UID 10001 必须读取它；文件仅含模型名、Provider、Base URL 和环境变量名，不含密钥值。凭据只通过允许的环境变量传入。
 - 专家配置未设置 `modelConfig` 时，继续使用现有 Worker `EXPERT_CODEX_CONFIG_FILE`，用于兼容旧配置。
-- Provider ID 仅允许字母、数字、下划线和连字符；当前首版只支持 Codex Responses API。
+- Provider ID 仅允许字母、数字、下划线和连字符；Codex Worker 只支持 Responses API；Claude Worker 只支持 Anthropic Messages API。协议不匹配时任务失败，不会静默回退。
 
 ## 当前验收配置（2026-10-22）
 

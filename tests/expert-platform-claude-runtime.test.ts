@@ -60,3 +60,81 @@ test("Claude executor uses existing Docker isolation and selected model without 
   assert.ok(stages.includes("claude.started") && stages.includes("claude.completed"));
   assert.ok(!args.some((v) => v.startsWith("type=bind,src=") && v.includes("codex-auth")));
 });
+
+test("Claude Worker consumes Hub Anthropic model config and mapped AI Router credential without exposing secret in Docker args", async () => {
+  const key = "expert-test-secret-not-in-args";
+  const original = process.env.TEST_EXPERT_ROUTER_TOKEN;
+  process.env.TEST_EXPERT_ROUTER_TOKEN = key;
+  let args: readonly string[] = [];
+  let env: NodeJS.ProcessEnv | undefined;
+  try {
+    const executor = createDockerCodexExecutor({
+      backend: "claude",
+      image: "expert-claude",
+      sourcePath: "/repo",
+      network: "bridge",
+      envNames: ["TEST_EXPERT_ROUTER_TOKEN", "HTTPS_PROXY"],
+      modelCredentialEnvNames: { "router-api": "TEST_EXPERT_ROUTER_TOKEN" },
+      timeoutMs: 1000,
+      runProcess: async (options) => {
+        args = options.args;
+        env = options.env;
+        return "router result";
+      },
+    });
+    const result = await executor(
+      {
+        ...claim,
+        modelConfig: {
+          providerId: "router",
+          model: "claude-sonnet-router",
+          baseUrl: "https://router.example/anthropic",
+          wireApi: "anthropic-messages",
+          credentialRef: "router-api",
+          allowedEnvNames: ["TEST_EXPERT_ROUTER_TOKEN"],
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.equal(result, "router result");
+    assert.ok(args.includes("claude-sonnet-router"));
+    assert.ok(args.includes("ANTHROPIC_BASE_URL"));
+    assert.ok(args.includes("ANTHROPIC_API_KEY"));
+    assert.ok(!args.join(" ").includes(key));
+    assert.equal(env?.ANTHROPIC_API_KEY, key);
+    assert.equal(env?.ANTHROPIC_BASE_URL, "https://router.example/anthropic");
+    assert.ok(!JSON.stringify(result).includes(key));
+  } finally {
+    if (original === undefined) delete process.env.TEST_EXPERT_ROUTER_TOKEN;
+    else process.env.TEST_EXPERT_ROUTER_TOKEN = original;
+  }
+});
+
+test("Claude rejects incompatible Responses config instead of silently ignoring it", async () => {
+  const executor = createDockerCodexExecutor({
+    backend: "claude",
+    image: "expert-claude",
+    sourcePath: "/repo",
+    network: "bridge",
+    envNames: ["ANTHROPIC_API_KEY"],
+    timeoutMs: 1000,
+    runProcess: async () => "unexpected",
+  });
+  await assert.rejects(
+    () =>
+      executor(
+        {
+          ...claim,
+          modelConfig: {
+            providerId: "router",
+            model: "example",
+            baseUrl: "https://router.example/v1",
+            wireApi: "responses",
+            allowedEnvNames: ["ANTHROPIC_API_KEY"],
+          },
+        },
+        new AbortController().signal,
+      ),
+    /EXPERT_MODEL_PROTOCOL_MISMATCH/,
+  );
+});

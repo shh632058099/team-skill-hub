@@ -6,7 +6,7 @@ export interface ExpertModelConfig {
   providerId: string;
   model: string;
   baseUrl: string;
-  wireApi: "responses";
+  wireApi: "responses" | "anthropic-messages";
   credentialRef?: string;
   allowedEnvNames: string[];
 }
@@ -68,7 +68,11 @@ function stringArray(value: string): string[] {
 function isValidModelConfig(config: ExpertModelConfig): boolean {
   if (!config.providerId.trim() || config.providerId.length > 100 || !config.model.trim() || config.model.length > 200)
     return false;
-  if (config.wireApi !== "responses" || !Array.isArray(config.allowedEnvNames) || config.allowedEnvNames.length === 0)
+  if (
+    !(["responses", "anthropic-messages"] as string[]).includes(config.wireApi) ||
+    !Array.isArray(config.allowedEnvNames) ||
+    config.allowedEnvNames.length === 0
+  )
     return false;
   if (
     config.allowedEnvNames.some(

@@ -48,7 +48,7 @@ sudo journalctl -u team-skill-hub-worker -n 100 --no-pager
 
 Claude Executor 仅开放 `Read,Glob,Grep`，使用 `--permission-mode dontAsk`、非 root 执行、只读仓库 bind mount、read-only Docker 文件系统、资源限制和禁用写入工具。结果通过 `claude -p --output-format json` 的成功记录解析；失败时不将模型原始输出记入 Hub 阶段日志。仍应只在可信仓库使用 Worker，并根据组织的 Claude Code 商业许可和认证政策执行。
 
-当前 **Expert `modelConfig` 中的 `wireApi=responses` 是 Codex 专用配置**；Claude Worker 不使用该配置的模型 Provider/Base URL，也不自动读取宿主机的 Claude 登录态。Claude 通过 Worker 自身明确配置的模型、API Key / OAuth token 和环境变量连接服务。这个方案不会将 Codex 的 API Key 隐式复用为 Claude 的密钥。
+现在 Admin Expert `modelConfig` 支持 `wireApi=responses` 或 `anthropic-messages`：Codex 使用前者，Claude 使用后者。Claude 的模型、Base URL 和凭据引用从 Expert 下发，Worker 只负责按本机受保护映射取密钥，**不会下发明文密钥**。详细见 [模型配置与凭据映射](./model-configuration.md)。
 
 当前后端选择属于**Worker 部署配置**，尚非 Admin 中每条 Deployment 动态选择。若需 OTA 固定 Claude、code-review 固定 Codex，请为对应专家分别配置独立 Worker 身份、`EXPERT_ID`、capability、镜像与 backend。Hub 现有任务路由和 Worker 能力匹配保持不变。以后可以在 Deployment 增加期望 Backend 并由 Hub 在 Claim 时强校验。
 

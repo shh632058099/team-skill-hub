@@ -147,3 +147,30 @@ test("expert model config rejects unsafe env names and invalid API URLs", () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Expert store retains Anthropic Messages model configuration", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-anthropic-"));
+  try {
+    const store = new ExpertStore(path.join(dir, "runtime.sqlite"));
+    const modelConfig = {
+      providerId: "router",
+      model: "claude-sonnet-router",
+      baseUrl: "https://router.example/anthropic",
+      wireApi: "anthropic-messages" as const,
+      credentialRef: "router-api",
+      allowedEnvNames: ["ANTHROPIC_API_KEY"],
+    };
+    store.putDefinition({
+      id: "ota",
+      displayName: "OTA",
+      capabilities: ["ota"],
+      keywords: [],
+      active: true,
+      modelConfig,
+    });
+    assert.deepEqual(store.getDefinition("ota").modelConfig, modelConfig);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

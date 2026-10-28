@@ -443,7 +443,7 @@ function parseClaimModelConfig(value: string) {
       typeof config.providerId !== "string" ||
       typeof config.model !== "string" ||
       typeof config.baseUrl !== "string" ||
-      config.wireApi !== "responses" ||
+      (config.wireApi !== "responses" && config.wireApi !== "anthropic-messages") ||
       !Array.isArray(config.allowedEnvNames) ||
       config.allowedEnvNames.some((name) => typeof name !== "string")
     )

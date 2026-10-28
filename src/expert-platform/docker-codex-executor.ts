@@ -178,7 +178,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
   > => {
     const backend = options.backend ?? "claude";
     if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
-    const codexArgs =
+    let codexArgs =
       backend === "claude"
         ? buildClaudeReadOnlyArgs(claim.problem, options.claudeModel ?? "sonnet")
         : buildCodexReadOnlyArgs(claim.problem);
@@ -219,6 +219,41 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     let generatedConfigDir: string | undefined;
     let configFilePath = options.configFilePath;
     let envNames = options.envNames;
+    if (claim.modelConfig && backend === "codex" && claim.modelConfig.wireApi !== "responses") {
+      throw new Error("EXPERT_MODEL_PROTOCOL_MISMATCH");
+    }
+    if (claim.modelConfig && backend === "claude" && claim.modelConfig.wireApi !== "anthropic-messages") {
+      throw new Error("EXPERT_MODEL_PROTOCOL_MISMATCH");
+    }
+    if (backend === "claude" && claim.modelConfig) {
+      codexArgs = buildClaudeReadOnlyArgs(claim.problem, claim.modelConfig.model);
+    }
+    let claudeChildEnv: NodeJS.ProcessEnv | undefined;
+    if (claim.modelConfig && backend === "claude") {
+      const model = claim.modelConfig;
+      const allowed = new Set(options.envNames);
+      if (model.allowedEnvNames.some((name) => !allowed.has(name))) throw new Error("EXPERT_MODEL_ENV_NOT_ALLOWED");
+      const source = model.credentialRef
+        ? options.modelCredentialEnvNames?.[model.credentialRef]
+        : model.allowedEnvNames.includes("ANTHROPIC_API_KEY")
+          ? "ANTHROPIC_API_KEY"
+          : model.allowedEnvNames.includes("CLAUDE_CODE_OAUTH_TOKEN")
+            ? "CLAUDE_CODE_OAUTH_TOKEN"
+            : undefined;
+      if (!source || !allowed.has(source) || !model.allowedEnvNames.includes(source))
+        throw new Error("EXPERT_MODEL_CREDENTIAL_NOT_CONFIGURED");
+      if (!process.env[source]) throw new Error("EXPERT_MODEL_CREDENTIAL_NOT_CONFIGURED");
+      const target = source === "CLAUDE_CODE_OAUTH_TOKEN" ? source : "ANTHROPIC_API_KEY";
+      claudeChildEnv = { ...process.env, ANTHROPIC_BASE_URL: model.baseUrl, [target]: process.env[source] };
+      envNames = [
+        ...new Set([
+          ...model.allowedEnvNames,
+          ...options.envNames.filter((name) => PROXY_ENV_NAMES.has(name)),
+          target,
+          "ANTHROPIC_BASE_URL",
+        ]),
+      ];
+    }
     if (claim.modelConfig && backend === "codex") {
       const generated = buildExpertCodexConfig(claim.modelConfig, options);
       generatedConfigDir = mkdtempSync(path.join(options.sharedTempRoot ?? os.tmpdir(), ".expert-codex-config-"));
@@ -262,6 +297,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           maxOutputBytes: options.maxOutputBytes,
           signal,
           onAbort: () => stopDockerContainer(containerName),
+          ...(claudeChildEnv ? { env: claudeChildEnv } : {}),
           ...(backend === "claude" && !options.runProcess ? { parseResult: parseClaudeResult } : {}),
         });
       } catch (error) {
