@@ -262,3 +262,102 @@ test("admin task history and bounded per-run stages reject stale workers and uns
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("same-session expert queue reuses identical active work and serializes different tasks across workers", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-session-queue-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const common = {
+      principalId: "alice",
+      scope: "tenant-a",
+      sourceClient: "codex",
+      sourceSessionId: "session-1",
+      expertId: "ota",
+    };
+    const a = store.submit({ ...common, idempotencyKey: "a", problem: "check OTA state machine" });
+    const duplicate = store.submit({ ...common, idempotencyKey: "b", problem: "check OTA state machine" });
+    assert.equal(duplicate.taskId, a.taskId);
+    const b = store.submit({ ...common, idempotencyKey: "c", problem: "inspect rollback conditions" });
+    assert.notEqual(a.taskId, b.taskId);
+    const runA = store.claim("worker-1", 100, 1000, "ota")!;
+    assert.equal(runA.taskId, a.taskId);
+    assert.equal(store.claim("worker-2", 101, 1000, "ota"), null);
+    store.complete(runA, "first report", 102);
+    const runB = store.claim("worker-2", 103, 1000, "ota")!;
+    assert.equal(runB.taskId, b.taskId);
+    store.fail(runB, "FAILED", 104);
+    assert.equal(store.get(b.taskId, "alice", "tenant-a").status, "failed");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("session queue isolation, cancellation, and expired lease remain safe", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-session-isolation-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const base = {
+      principalId: "alice",
+      scope: "tenant-a",
+      sourceClient: "codex",
+      sourceSessionId: "session-1",
+      expertId: "ota",
+    };
+    const a = store.submit({ ...base, idempotencyKey: "a", problem: "first" });
+    const b = store.submit({ ...base, idempotencyKey: "b", problem: "second" });
+    const otherSession = store.submit({
+      ...base,
+      sourceSessionId: "session-2",
+      idempotencyKey: "c",
+      problem: "independent",
+    });
+    const otherExpert = store.submit({
+      ...base,
+      expertId: "review",
+      idempotencyKey: "d",
+      problem: "independent expert",
+    });
+    const runA = store.claim("worker-a", 100, 10, "ota")!;
+    assert.equal(runA.taskId, a.taskId);
+    const parallel = store.claim("worker-b", 105, 10, "ota")!;
+    assert.equal(parallel.taskId, otherSession.taskId);
+    assert.equal(store.claim("worker-c", 106, 10, "ota"), null);
+    assert.equal(store.claim("worker-d", 106, 10, "review")?.taskId, otherExpert.taskId);
+    const reclaimA = store.claim("worker-e", 111, 10, "ota")!;
+    assert.equal(reclaimA.taskId, a.taskId);
+    assert.equal(store.claim("worker-f", 112, 10, "ota"), null);
+    store.cancel(a.taskId, "alice", "tenant-a");
+    store.fail(reclaimA, "TASK_CANCELLED", 113);
+    assert.equal(store.claim("worker-f", 114, 10, "ota")?.taskId, b.taskId);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy tasks without source session continue to claim independently", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-no-session-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const a = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      expertId: "ota",
+      idempotencyKey: "a",
+      problem: "first",
+    });
+    const b = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      expertId: "ota",
+      idempotencyKey: "b",
+      problem: "second",
+    });
+    assert.equal(store.claim("worker-a", 100, 1000, "ota")?.taskId, a.taskId);
+    assert.equal(store.claim("worker-b", 101, 1000, "ota")?.taskId, b.taskId);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

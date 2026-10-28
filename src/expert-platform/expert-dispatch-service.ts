@@ -6,6 +6,8 @@ export interface DispatchInput {
   principalId: string;
   scope: string;
   idempotencyKey: string;
+  sourceSessionId?: string;
+  sourceClient?: string;
   problem: string;
   expertId?: string;
   selectionMode?: "explicit" | "auto";
@@ -100,6 +102,8 @@ export class ExpertDispatchService {
       principalId: input.principalId,
       scope: input.scope,
       idempotencyKey: input.idempotencyKey,
+      sourceSessionId: input.sourceSessionId,
+      sourceClient: input.sourceClient,
       problem: input.problem,
       expertId: route.expertId,
       repositoryId: configuredRepositoryId,

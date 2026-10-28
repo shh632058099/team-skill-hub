@@ -101,6 +101,12 @@ test("worker clones configured repositories and refreshes to the configured bran
     assert.equal(second.path, first.path);
     assert.notEqual(second.commitSha, first.commitSha);
     assert.equal(git(["-C", second.path, "show", "HEAD:README.md"]), "version two");
+    // Fail closed if remote becomes unavailable. Never run analysis on cached HEAD.
+    const unavailable = bare + ".offline";
+    git(["init", "--bare", unavailable]);
+    git(["remote", "set-url", "origin", unavailable], seed);
+    await assert.rejects(prepareRepositoryWorkspace({ ...input, branch: "missing-branch" }), /GIT_OPERATION_FAILED/);
+    assert.equal(git(["-C", second.path, "show", "HEAD:README.md"]), "version two");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

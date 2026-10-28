@@ -9,6 +9,8 @@ export type Submission = {
   principalId: string;
   scope: string;
   idempotencyKey: string;
+  sourceSessionId?: string;
+  sourceClient?: string;
   problem: string;
   expertId?: string;
   repositoryId?: string;
@@ -23,6 +25,8 @@ export type TaskRecord = {
   repositoryId: string | null;
   selectionMode: "explicit" | "auto";
   schemaVersion: number;
+  sourceSessionId?: string | null;
+  sourceClient?: string | null;
   repositoryUrl?: string | null;
   repositoryBranch?: string | null;
   commitSha?: string | null;
@@ -60,6 +64,8 @@ export class ExpertTaskStore {
         idempotency_key TEXT NOT NULL,
         request_digest TEXT NOT NULL,
         problem TEXT NOT NULL,
+        source_session_id TEXT,
+        source_client TEXT,
         expert_id TEXT NOT NULL DEFAULT 'legacy',
         repository_id TEXT,
         selection_mode TEXT NOT NULL DEFAULT 'explicit' CHECK (selection_mode IN ('explicit','auto')),
@@ -103,6 +109,8 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("repository_branch", "TEXT");
     this.ensureTaskColumn("commit_sha", "TEXT");
     this.ensureTaskColumn("cancellation_requested", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureTaskColumn("source_session_id", "TEXT");
+    this.ensureTaskColumn("source_client", "TEXT");
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);`);
@@ -112,6 +120,13 @@ export class ExpertTaskStore {
     if (!input.problem.trim() || !input.principalId.trim() || !input.scope.trim() || !input.idempotencyKey.trim()) {
       throw new Error("INVALID_REQUEST");
     }
+    const sourceSessionId = input.sourceSessionId?.trim() || null;
+    const sourceClient = input.sourceClient?.trim() || null;
+    if (
+      (sourceSessionId && (sourceSessionId.length > 200 || !sourceClient || sourceClient.length > 200)) ||
+      (!sourceSessionId && sourceClient && sourceClient.length > 200)
+    )
+      throw new Error("INVALID_REQUEST");
     const expertId = input.expertId?.trim() || "legacy";
     const repositoryId = input.repositoryId?.trim() || null;
     const selectionMode = input.selectionMode ?? "explicit";
@@ -145,9 +160,33 @@ export class ExpertTaskStore {
         this.db.exec("COMMIT");
         return this.fromRow(existing);
       }
+      // Reuse only identical active work scoped to the same authenticated principal,
+      // client session, expert and repository. Different questions remain queued.
+      if (sourceSessionId) {
+        const duplicate = this.db
+          .prepare(
+            `SELECT * FROM expert_tasks
+          WHERE principal_id=? AND scope=? AND source_client=? AND source_session_id=?
+            AND expert_id=? AND repository_id IS ? AND problem=?
+            AND status IN ('queued','running') ORDER BY rowid LIMIT 1`,
+          )
+          .get(
+            input.principalId,
+            input.scope,
+            sourceClient,
+            sourceSessionId,
+            expertId,
+            repositoryId,
+            input.problem.trim(),
+          ) as Row | undefined;
+        if (duplicate) {
+          this.db.exec("COMMIT");
+          return this.fromRow(duplicate);
+        }
+      }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,status) VALUES (?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -155,11 +194,13 @@ export class ExpertTaskStore {
           input.scope,
           input.idempotencyKey,
           digest,
-          input.problem,
+          input.problem.trim(),
           expertId,
           repositoryId,
           selectionMode,
           schemaVersion,
+          sourceSessionId,
+          sourceClient,
         );
       this.event(taskId, null, "queued");
       this.db.exec("COMMIT");
@@ -171,6 +212,8 @@ export class ExpertTaskStore {
         repositoryId,
         selectionMode,
         schemaVersion,
+        sourceSessionId,
+        sourceClient,
       };
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -185,12 +228,24 @@ export class ExpertTaskStore {
       const row = expertId
         ? (this.db
             .prepare(
-              "SELECT * FROM expert_tasks WHERE expert_id=? AND (status='queued' OR (status='running' AND lease_until < ?)) ORDER BY rowid LIMIT 1",
+              `SELECT * FROM expert_tasks AS t WHERE expert_id=? AND (status='queued' OR (status='running' AND lease_until < ?))
+                AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
+                  WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
+                    AND earlier.scope=t.scope AND earlier.principal_id=t.principal_id
+                    AND earlier.source_client=t.source_client AND earlier.source_session_id=t.source_session_id
+                    AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
+                ORDER BY t.rowid LIMIT 1`,
             )
             .get(expertId, now) as Row | undefined)
         : (this.db
             .prepare(
-              "SELECT * FROM expert_tasks WHERE status='queued' OR (status='running' AND lease_until < ?) ORDER BY rowid LIMIT 1",
+              `SELECT * FROM expert_tasks AS t WHERE (status='queued' OR (status='running' AND lease_until < ?))
+                AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
+                  WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
+                    AND earlier.scope=t.scope AND earlier.principal_id=t.principal_id
+                    AND earlier.source_client=t.source_client AND earlier.source_session_id=t.source_session_id
+                    AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
+                ORDER BY t.rowid LIMIT 1`,
             )
             .get(now) as Row | undefined);
       if (!row) {
@@ -513,6 +568,8 @@ export class ExpertTaskStore {
       repositoryId: row.repository_id == null ? null : String(row.repository_id),
       selectionMode: (row.selection_mode ?? "explicit") as "explicit" | "auto",
       schemaVersion: Number(row.schema_version ?? 1),
+      sourceSessionId: row.source_session_id == null ? null : String(row.source_session_id),
+      sourceClient: row.source_client == null ? null : String(row.source_client),
       repositoryUrl: row.repository_url == null ? null : String(row.repository_url),
       repositoryBranch: row.repository_branch == null ? null : String(row.repository_branch),
       commitSha: row.commit_sha == null ? null : String(row.commit_sha),
