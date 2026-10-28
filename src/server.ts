@@ -805,6 +805,32 @@ export async function startServer(
       return { error: error instanceof Error ? error.message : "TASK_DETAIL_FAILED" };
     }
   });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-tasks/:id/stop", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid task ID" });
+    try {
+      const outcome = withExpertTaskStore((store) => store.adminStopTask(request.params.id));
+      return { outcome };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TASK_STOP_FAILED";
+      return reply
+        .code(message === "TASK_NOT_FOUND" ? 404 : message === "TASK_NOT_ACTIVE" ? 409 : 503)
+        .send({ error: message });
+    }
+  });
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-tasks/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid task ID" });
+    try {
+      withExpertTaskStore((store) => store.adminDeleteTask(request.params.id));
+      return { deleted: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TASK_DELETE_FAILED";
+      return reply
+        .code(message === "TASK_NOT_FOUND" ? 404 : message === "TASK_NOT_TERMINAL" ? 409 : 503)
+        .send({ error: message });
+    }
+  });
   const withExpertStore = <T>(run: (store: ExpertStore) => T): T => {
     const store = new ExpertStore(expertRuntimeDb());
     try {

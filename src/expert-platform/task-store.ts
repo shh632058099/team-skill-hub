@@ -336,6 +336,53 @@ export class ExpertTaskStore {
     return this.get(taskId, principalId, scope);
   }
 
+  /** Admin stop: queued tasks become cancelled; running tasks are signalled to their Worker. */
+  adminStopTask(taskId: string): "cancelled" | "cancellation_requested" | "already_requested" {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT status,run_id,cancellation_requested FROM expert_tasks WHERE task_id=?")
+        .get(taskId) as { status: string; run_id: string | null; cancellation_requested: number } | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      if (row.status !== "queued" && row.status !== "running") throw new Error("TASK_NOT_ACTIVE");
+      let outcome: "cancelled" | "cancellation_requested" | "already_requested";
+      if (row.status === "queued") {
+        this.db.prepare("UPDATE expert_tasks SET status='cancelled' WHERE task_id=?").run(taskId);
+        this.event(taskId, null, "cancelled");
+        outcome = "cancelled";
+      } else if (row.cancellation_requested) {
+        outcome = "already_requested";
+      } else {
+        this.db.prepare("UPDATE expert_tasks SET cancellation_requested=1 WHERE task_id=?").run(taskId);
+        this.event(taskId, row.run_id, "cancellation_requested");
+        outcome = "cancellation_requested";
+      }
+      this.db.exec("COMMIT");
+      return outcome;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Admin hard-delete: only terminal tasks, including their event/run history. */
+  adminDeleteTask(taskId: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT status FROM expert_tasks WHERE task_id=?").get(taskId) as
+        { status: string } | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      if (!["succeeded", "failed", "cancelled"].includes(row.status)) throw new Error("TASK_NOT_TERMINAL");
+      this.db.prepare("DELETE FROM expert_events WHERE task_id=?").run(taskId);
+      this.db.prepare("DELETE FROM expert_runs WHERE task_id=?").run(taskId);
+      this.db.prepare("DELETE FROM expert_tasks WHERE task_id=?").run(taskId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   cancellationRequested(claim: Claim): boolean {
     const row = this.db
       .prepare(

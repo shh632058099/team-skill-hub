@@ -265,6 +265,53 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(body.runs.length, 1);
     assert.ok(body.events.some((x: any) => x.event_type === "repository.started"));
     assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid")).status, 400);
+    assert.match(html, /id="taskPage"/);
+    assert.match(html, /id="taskStop"/);
+    assert.match(html, /id="taskDelete"/);
+    assert.match(html, /hashchange/);
+    // Deletion is transactional and includes events + runs; active tasks cannot be removed.
+    const deleted = await fetch(base + "/admin/api/expert-tasks/" + task.taskId, { method: "DELETE" });
+    assert.equal(deleted.status, 200);
+    assert.equal((await deleted.json()).deleted, true);
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/" + task.taskId)).status, 404);
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/" + task.taskId, { method: "DELETE" })).status, 404);
+    const controlStore = new ExpertTaskStore(runtimeDb);
+    const queued = controlStore.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "admin-stop-queued",
+      problem: "wait for stop",
+      expertId: "ota",
+    });
+    const running = controlStore.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "admin-stop-running",
+      problem: "run then stop",
+      expertId: "ota",
+    });
+    const activeClaim = controlStore.claim("worker-02", Date.now(), 30000, "ota")!;
+    assert.equal(activeClaim.taskId, queued.taskId);
+    controlStore.close();
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/" + queued.taskId, { method: "DELETE" })).status, 409);
+    const stopRunning = await fetch(base + "/admin/api/expert-tasks/" + queued.taskId + "/stop", { method: "POST" });
+    assert.equal(stopRunning.status, 200);
+    assert.equal((await stopRunning.json()).outcome, "cancellation_requested");
+    const storeAfterStop = new ExpertTaskStore(runtimeDb);
+    assert.equal(storeAfterStop.cancellationRequested(activeClaim), true);
+    storeAfterStop.fail(activeClaim, "TASK_CANCELLED");
+    storeAfterStop.close();
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/" + queued.taskId, { method: "DELETE" })).status, 200);
+    const queuedStop = await fetch(base + "/admin/api/expert-tasks/" + running.taskId + "/stop", { method: "POST" });
+    assert.equal(queuedStop.status, 200);
+    assert.equal((await queuedStop.json()).outcome, "cancelled");
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/" + running.taskId, { method: "DELETE" })).status, 200);
+    assert.equal(
+      (await fetch(base + "/admin/api/expert-tasks/" + running.taskId + "/stop", { method: "POST" })).status,
+      404,
+    );
+    assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid/stop", { method: "POST" })).status, 400);
+
     const store = new ExpertStore(runtimeDb);
     try {
       assert.deepEqual(
