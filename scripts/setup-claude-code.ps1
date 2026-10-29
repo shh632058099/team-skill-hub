@@ -24,6 +24,7 @@ $ClaudeMd = Join-Path $ClaudeDir 'CLAUDE.md'
 $HooksDir = Join-Path $ClaudeDir 'hooks'
 $HookConf = Join-Path $HooksDir 'team-skill-hub.conf'
 $StopGate = Join-Path $HooksDir 'team-skill-hub-claude-stop.sh'
+$SessionGate = Join-Path $HooksDir 'team-skill-hub-expert-session.ps1'
 
 if ($Upgrade.IsPresent -and (Test-Path $HookConf)) {
     $Existing = @{}
@@ -199,10 +200,32 @@ foreach ($groupValue in @($root['hooks']['Stop'])) {
 $kept += ,@{ hooks = @($stopHandler) }
 $root['hooks']['Stop'] = @($kept)
 
+if ($ServerName -eq 'teamSkillHub') {
+  $kept = @()
+  foreach ($groupValue in @($root['hooks']['PreToolUse'])) {
+    if ($null -eq $groupValue) { continue }
+    $group = Convert-ToHashtable $groupValue
+    $handlers = @($group['hooks']) | Where-Object {
+      -not ([string]$_['command'] -like '*expert-session-hook*' -or [string]$_['command'] -like '*team-skill-hub-expert-session*')
+    }
+    if ($handlers.Count -gt 0) {
+      $copy = @{}; foreach ($key in $group.Keys) { $copy[$key] = $group[$key] }
+      $copy['hooks'] = @($handlers)
+      $kept += ,$copy
+    }
+  }
+  $sessionCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionGate + '"'
+  $kept += ,@{ matcher='^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$'; hooks=@(@{type='command';command=$sessionCommand;timeout=5}) }
+  $root['hooks']['PreToolUse'] = @($kept)
+}
+
 $json = $root | ConvertTo-Json -Depth 20
 Write-Utf8NoBom -Path $SettingsFile -Content $json
 
 Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-claude-stop.sh") $StopGate
+if ($ServerName -eq 'teamSkillHub') {
+    Copy-Item -Force (Join-Path $ClientReleaseDir 'scripts\claude\expert-session-hook.ps1') $SessionGate
+}
 
 $confContent = "event_url=$EventUrl" + [Environment]::NewLine +
   "mcp_url=$McpUrl" + [Environment]::NewLine +

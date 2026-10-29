@@ -9,6 +9,7 @@ test("client integration owned source changes require a version bump", () => {
   assert.equal(requiresClientVersionBump(["scripts/setup-codex-mcp.sh"]), true);
   assert.equal(requiresClientVersionBump(["client-integration/runtime/client-runtime.mjs"]), true);
   assert.equal(requiresClientVersionBump(["scripts/bootstrap-client-integration.ps1"]), true);
+  assert.equal(requiresClientVersionBump(["scripts/claude/expert-session-hook.py"]), true);
 });
 
 test("server-only changes do not require a client version bump", () => {

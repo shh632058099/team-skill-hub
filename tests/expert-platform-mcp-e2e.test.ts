@@ -241,6 +241,37 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     assert.equal(initial.status, "queued");
     assert.ok(Array.isArray(initial.events));
     let observedWorkerActivity = false;
+    // Explicit clientSessionId bridges Claude CLI HTTP MCP clients that omit session headers.
+    const perConversationId = "eac7bfb7-4dfa-46a3-ab19-f283991f9161";
+    const duplicateProblem = "Inspect OTA recovery state machine without modifying files";
+    const firstOfSession = await callMcp(mcpUrl, apiKey, 51, "submit_expert_task_auto", {
+      problem: duplicateProblem,
+      idempotencyKey: "same-session-first",
+      clientSessionId: perConversationId,
+    });
+    const secondOfSession = await callMcp(mcpUrl, apiKey, 52, "submit_expert_task_auto", {
+      problem: duplicateProblem,
+      idempotencyKey: "same-session-second",
+      clientSessionId: perConversationId,
+    });
+    assert.equal(secondOfSession.taskId, firstOfSession.taskId, "same active task must reuse taskId");
+    assert.equal(tasks!.get(String(firstOfSession.taskId), "ota-test-client", "rd").sourceSessionId, perConversationId);
+    const separateSession = await callMcp(mcpUrl, apiKey, 53, "submit_expert_task_auto", {
+      problem: duplicateProblem,
+      idempotencyKey: "other-session-first",
+      clientSessionId: "8c03e269-183b-449a-b975-e16bdf1add11",
+    });
+    assert.notEqual(separateSession.taskId, firstOfSession.taskId, "different conversations must remain independent");
+    const noSession = await callMcp(mcpUrl, apiKey, 54, "submit_expert_task_auto", {
+      problem: duplicateProblem,
+      idempotencyKey: "without-session-first",
+    });
+    assert.notEqual(noSession.taskId, firstOfSession.taskId, "missing session must not cross-dedup");
+    // Do not leave additional queue entries running; the main assertion concerns pending tasks.
+    for (const pending of [firstOfSession, separateSession, noSession]) {
+      tasks!.cancel(String(pending.taskId), "ota-test-client", "rd");
+    }
+
     const claimed = await runRemoteWorkerOnce(
       workerClient,
       "ota-worker",

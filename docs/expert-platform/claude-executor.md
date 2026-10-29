@@ -79,3 +79,52 @@ Worker 默认启用增量流式活动（Claude `stream-json --verbose` / Codex `
 ### 真实调用方验收样例（2026-10-28）
 
 已用 Claude CLI 2.1.308 连接 `teamSkillHub`，单次提示提交 OTA 只读任务并要求循环调用 `wait_expert_task`。任务 `bcf7fdef-c53d-422a-b2ae-c7c2fb342550` 在真实 Codex Worker `ota-worker-01` 上执行成功；Claude CLI 的三轮游标推进为 `0 → 127 → 130 → 134`，Hub 确认 7 条工具活动记录与最终源码 Commit。该测试验证的是**Claude CLI 作为调用者**，并非 Claude Worker 模型后端；MCP 通知在 Claude CLI 终端中的独立渲染效果仍应单独评估。
+
+### Claude CLI 重复任务复用（客户端 Session）
+
+Claude Code 2.1.308 的 HTTP MCP 不会自动传递 `x-skill-hub-session-id` 或 `mcp-session-id`。**现在推荐安装 `scripts/claude/expert-session-hook.py` 的 Claude `PreToolUse` Hook**：Hook 使用 Claude Code 通过 stdin 提供的原生 `session_id`，自动写入 MCP 提交工具已有的 `clientSessionId`，无需生成额外 UUID 或在提示词中说明 Session ID。若已有 HTTP Session Header，Hub 优先使用 Header。未安装 Hook 的客户端仍可显式提供 `clientSessionId` 作为兼容方案。
+
+推荐输入示例：
+
+> 请通过 `teamSkillHub` 的 `submit_expert_task_auto` 分析 OTA 恢复逻辑，使用新的 `idempotencyKey`。如当前 Claude 会话里有相同且尚未完成的任务，请复用原 Task ID，不重复执行。
+
+**边界**：只有相同 Principal、Tenant、Client、Session、Expert、Repository、Problem，且原 Task 为 `queued/running` 才自动复用；已完成任务可以重新执行。即使没有 `clientSessionId`，传入同一 `idempotencyKey` 的幂等重试仍然有效。使用原生 Session Hook 后无需模型主动传 `clientSessionId`；未安装 Hook 或客户端不支持该 Hook 时仍不能保证会话级自动复用。
+
+### 2026-10-28 真实 Claude CLI 重复拦截验收
+
+- 修复前：Claude CLI 2.1.308 的两次相同 problem、不同 idempotencyKey 提交，因 `source_session_id=NULL`，生成两个不同 Task（`fd6dbc4f-...`、`63170c62-...`），均独立执行；重试相同 idempotencyKey 可正常返回原 Task。
+- 修复后：提交工具增加可选 `clientSessionId` UUID，调用时优先使用已有 HTTP Session Header，否则使用此工具参数。MCP 集成测试覆盖同会话复用、不同会话隔离与缺少 Session 不跨会话复用。
+- 实际在 Claude CLI 单次调用中，`--session-id 57fa17ba-1e37-4f5d-b504-d7aa9c3c89df`，对两次 `submit_expert_task_auto` 明确传入相同 `clientSessionId`，使用不同 idempotencyKey、逐字相同 problem。两次返回完全相同 Task ID `6d30dd54-7dbd-4413-b13e-a75bdfed5d45`。
+- Hub SQLite 单独核验该 UUID 仅创建 **1 Task / 1 Run**，`source_client=claude-code/2.1.308 (sdk-cli)`，`source_session_id` 与请求一致。Worker 按正常任务执行一次。
+- 仍需注意：Claude CLI 未原生自动透传 HTTP Session ID；在未要求 Claude CLI 传入 `clientSessionId` 的对话中，不应宣称自动复用总是生效。新对话必须使用新的 UUID；同一对话后续调用必须保留 UUID；不要用固定的全局 Session ID。
+
+### 原生 Claude Session ID 自动传递：PreToolUse Hook（2026-10-28）
+
+Claude Code `PreToolUse` Hook 原生输入包含 `session_id`。项目脚本 `scripts/claude/expert-session-hook.py` 只匹配 `mcp__teamSkillHub__submit_expert_task` 和 `mcp__teamSkillHub__submit_expert_task_auto`，向 `updatedInput` 写入真实 `session_id`，保留任务和幂等键原样，**不会设置 `permissionDecision=allow`**。无需使用不稳定的 Claude 内部会话文件或全局固定 UUID。
+
+在当前 WSL2 的 `/root/.claude/settings.json` 已安装匹配这两个工具的用户级 Hook；其他主机可参考以下配置（把脚本路径替换为该主机实际路径，并与已有 `hooks` 合并，而不是覆盖全部设置）：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/team-skill-hub/scripts/claude/expert-session-hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+真实 Claude CLI 2.1.308 测试：启动 `--session-id c0dd3eaf-0c5f-4880-b36e-fb16b958e6a9` 的对话，仅要求两次同问题、不同 `idempotencyKey` 的 `submit_expert_task_auto` 调用，**提示词没有指定 `clientSessionId`**。两次返回相同 Task ID `b10bc8be-582a-447d-bf0a-f0026a666f56`；Hub SQLite 独立核验 `source_session_id` 与 Claude 原生 ID 一致，只存在 **1 Task、1 Run**。不同 Claude 会话的 ID 本身不同，保持隔离。
+
+### 标准客户端 Release v8（自动安装）
+
+从 Hub 下载 `setup-claude-code.sh` 或 `setup-claude-code.ps1` 后，脚本会自动下载客户端 Release v8，内含 Linux `scripts/claude/expert-session-hook.py` 和 Windows `scripts/claude/expert-session-hook.ps1`。Setup 将 Hook 复制到用户 Claude `hooks` 目录并注册只匹配两个 Expert 提交工具的 `PreToolUse`，重复执行不叠加 Hook，不覆盖其他 Hooks。以后客户端升级需重启 Claude Code 才能确保新 Hooks 生效。此能力适用于默认 MCP 名称 `teamSkillHub`；使用自定义 MCP server name 时当前不会安装该专用 Hook。Linux 需要 `python3`；Windows 使用 PowerShell，不要求 Python。

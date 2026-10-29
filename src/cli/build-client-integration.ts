@@ -54,6 +54,8 @@ async function copyAllowedAssets(repoRoot: string, staging: string): Promise<voi
     "scripts/team-skill-hub-hook.sh",
     "scripts/team-skill-hub-hook.ps1",
     "scripts/team-skill-hub-claude-stop.sh",
+    "scripts/claude/expert-session-hook.py",
+    "scripts/claude/expert-session-hook.ps1",
   ];
   for (const rel of files) {
     const source = path.join(repoRoot, rel);

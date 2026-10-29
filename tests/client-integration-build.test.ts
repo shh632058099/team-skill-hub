@@ -33,6 +33,8 @@ test("builds versioned linux and windows client packages with matching hashes", 
   const zip = await JSZip.loadAsync(await readFile(windows));
   assert.ok(zip.file("release.json"));
   assert.ok(zip.file("scripts/setup-codex-mcp.ps1"));
+  assert.ok(zip.file("scripts/claude/expert-session-hook.py"));
+  assert.ok(zip.file("scripts/claude/expert-session-hook.ps1"));
   assert.ok(zip.file("templates/codex-guidance.md"));
   assert.ok(zip.file("templates/claude-guidance.md"));
 

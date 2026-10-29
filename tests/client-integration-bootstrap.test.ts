@@ -57,6 +57,26 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   const claudeSettings = await readFile(path.join(claude, "settings.json"), "utf8");
   assert.match(claudeSettings, /team-skill-hub-client.*session-start --client claude/);
   assert.match(claudeSettings, /team-skill-hub-client.*session-start-display --client claude/);
+  const sessionHookFile = path.join(claude, "hooks", "team-skill-hub-expert-session.py");
+  await stat(sessionHookFile);
+  assert.equal(
+    await readFile(sessionHookFile, "utf8"),
+    await readFile("scripts/claude/expert-session-hook.py", "utf8"),
+  );
+  const sessionMatcher = "^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$";
+  let groups = JSON.parse(claudeSettings).hooks.PreToolUse as Array<{
+    matcher?: string;
+    hooks?: Array<{ command?: string }>;
+  }>;
+  assert.equal(groups.filter((group) => group.matcher === sessionMatcher).length, 1);
+  // Re-running setup updates the managed hook without duplicating it or other settings.
+  await execFileAsync("bash", ["scripts/setup-claude-code.sh", "--url", "http://127.0.0.1:8080/mcp"], {
+    cwd: process.cwd(),
+    env,
+  });
+  groups = JSON.parse(await readFile(path.join(claude, "settings.json"), "utf8")).hooks.PreToolUse;
+  assert.equal(groups.filter((group) => group.matcher === sessionMatcher).length, 1);
+
   const codexGuidance = await readFile(path.join(codex, "AGENTS.md"), "utf8");
   const claudeGuidance = await readFile(path.join(claude, "CLAUDE.md"), "utf8");
   for (const guidance of [codexGuidance, claudeGuidance]) {
