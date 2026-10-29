@@ -45,6 +45,32 @@ test("expert definitions and deployments persist across reopen", () => {
   }
 });
 
+test("expert and deployment deletion protects referenced experts", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-store-delete-"));
+  try {
+    const store = new ExpertStore(path.join(dir, "runtime.sqlite"));
+    store.putDefinition({ id: "ota", displayName: "OTA", capabilities: ["ota"], keywords: [], active: true });
+    store.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "readonly",
+      active: true,
+    });
+    assert.throws(() => store.deleteDefinition("ota"), /EXPERT_IN_USE/);
+    store.deleteDeployment("ota-default");
+    assert.throws(() => store.getDeployment("ota-default"), /EXPERT_DEPLOYMENT_NOT_FOUND/);
+    store.deleteDefinition("ota");
+    assert.throws(() => store.getDefinition("ota"), /EXPERT_NOT_FOUND/);
+    assert.throws(() => store.deleteDeployment("ota-default"), /EXPERT_DEPLOYMENT_NOT_FOUND/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("deployment executor and MCP policy persist with versioned updates", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-deployment-v2-"));
   try {

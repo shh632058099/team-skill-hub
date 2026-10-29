@@ -324,6 +324,31 @@ test("Admin expert configuration UI manages definitions and execution configurat
     } finally {
       store.close();
     }
+
+    const blockedDefinitionDelete = await fetch(base + "/admin/api/expert-config/definitions/ota", {
+      method: "DELETE",
+    });
+    assert.equal(blockedDefinitionDelete.status, 409);
+    assert.equal((await blockedDefinitionDelete.json()).error, "EXPERT_IN_USE");
+
+    const deletedLegacyDeployment = await fetch(base + "/admin/api/expert-config/deployments/ota-product-a", {
+      method: "DELETE",
+    });
+    assert.equal(deletedLegacyDeployment.status, 200);
+    assert.equal((await deletedLegacyDeployment.json()).deleted, true);
+    assert.equal(
+      (await fetch(base + "/admin/api/expert-config/deployments/ota-product-a", { method: "DELETE" })).status,
+      404,
+    );
+
+    const deletedUrlDeployment = await fetch(base + "/admin/api/expert-config/deployments/ota-from-url", {
+      method: "DELETE",
+    });
+    assert.equal(deletedUrlDeployment.status, 200);
+    const deletedDefinition = await fetch(base + "/admin/api/expert-config/definitions/ota", { method: "DELETE" });
+    assert.equal(deletedDefinition.status, 200);
+    assert.equal((await deletedDefinition.json()).deleted, true);
+    assert.equal((await fetch(base + "/admin/api/expert-config/definitions/ota", { method: "DELETE" })).status, 404);
   } finally {
     await app.close();
     search.close();

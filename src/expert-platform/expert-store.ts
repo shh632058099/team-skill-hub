@@ -420,6 +420,21 @@ export class ExpertStore {
     }));
   }
 
+  deleteDeployment(id: string): void {
+    const result = this.db.prepare("DELETE FROM expert_deployments WHERE id=?").run(id);
+    if (result.changes === 0) throw new Error("EXPERT_DEPLOYMENT_NOT_FOUND");
+  }
+
+  deleteDefinition(id: string): void {
+    if (!this.db.prepare("SELECT 1 FROM expert_definitions WHERE id=?").get(id)) {
+      throw new Error("EXPERT_NOT_FOUND");
+    }
+    if (this.db.prepare("SELECT 1 FROM expert_deployments WHERE expert_id=? LIMIT 1").get(id)) {
+      throw new Error("EXPERT_IN_USE");
+    }
+    this.db.prepare("DELETE FROM expert_definitions WHERE id=?").run(id);
+  }
+
   close(): void {
     this.db.close();
   }

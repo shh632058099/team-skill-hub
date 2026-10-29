@@ -1010,7 +1010,15 @@ export async function startServer(
   };
   const expertAdminError = (error: unknown, reply: any) => {
     const message = error instanceof Error ? error.message : String(error);
-    reply.code(message === "EXPERT_RUNTIME_DB_NOT_CONFIGURED" ? 503 : message === "EXPERT_NOT_FOUND" ? 404 : 400);
+    reply.code(
+      message === "EXPERT_RUNTIME_DB_NOT_CONFIGURED"
+        ? 503
+        : ["EXPERT_NOT_FOUND", "EXPERT_DEPLOYMENT_NOT_FOUND"].includes(message)
+          ? 404
+          : message === "EXPERT_IN_USE"
+            ? 409
+            : 400,
+    );
     return { error: message };
   };
   app.get("/admin/api/expert-config/definitions", async (request, reply) => {
@@ -1076,6 +1084,19 @@ export async function startServer(
       }
     },
   );
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-config/definitions/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      withExpertStore((store) => store.deleteDefinition(request.params.id));
+      return { deleted: true };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+
   const expertMcpProfileSchema = z.object({
     id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
     url: z.string().url(),
@@ -1191,6 +1212,19 @@ export async function startServer(
       }
     },
   );
+
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-config/deployments/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      withExpertStore((store) => store.deleteDeployment(request.params.id));
+      return { deleted: true };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
 
   const workerAdminError = (error: unknown, reply: any) => {
     const message = error instanceof Error ? error.message : String(error);
