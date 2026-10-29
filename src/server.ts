@@ -928,7 +928,7 @@ export async function startServer(
         .max(100)
         .optional()
         .default([]),
-      principals: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
+      principals: z.array(z.string().trim().min(1).max(200)).max(100),
       runtimeProfile: z.string().trim().min(1).max(200),
       executor: z
         .object({
@@ -1207,6 +1207,32 @@ export async function startServer(
           store.putDeployment(parsed.data);
         });
         return { deployment: withExpertStore((store) => store.getDeployment(request.params.id)) };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: { principals: string[] } }>(
+    "/admin/api/expert-config/deployments/:id/principals",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = z
+        .object({ principals: z.array(z.string().trim().min(1).max(200)).max(100) })
+        .safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+      }
+      try {
+        return {
+          deployment: withExpertStore((store) =>
+            store.updateDeploymentPrincipals(request.params.id, parsed.data.principals),
+          ),
+        };
       } catch (error) {
         return expertAdminError(error, reply);
       }

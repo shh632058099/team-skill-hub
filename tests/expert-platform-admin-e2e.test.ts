@@ -191,6 +191,19 @@ test("Admin expert configuration UI manages definitions and execution configurat
     });
     assert.equal(disabled.status, 200);
 
+    const principalsOnly = await fetch(base + "/admin/api/expert-config/deployments/ota-product-a/principals", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ principals: [] }),
+    });
+    assert.equal(principalsOnly.status, 200);
+    const principalsOnlyBody = (await principalsOnly.json()) as {
+      deployment: { principals: string[]; runtimeProfile: string; active: boolean };
+    };
+    assert.deepEqual(principalsOnlyBody.deployment.principals, []);
+    assert.equal(principalsOnlyBody.deployment.runtimeProfile, "linux-ota");
+    assert.equal(principalsOnlyBody.deployment.active, false);
+
     const enrolledWorker = await fetch(base + "/admin/api/expert-workers", {
       method: "POST",
       headers: { "content-type": "application/json" },

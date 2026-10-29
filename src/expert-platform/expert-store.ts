@@ -286,7 +286,6 @@ export class ExpertStore {
       ((deployment.repositories ?? []).length === 0 && deployment.repositoryIds.length === 0) ||
       deployment.repositoryIds.some((item) => !item.trim()) ||
       (deployment.repositories ?? []).some((repo) => !repo.id.trim() || !repo.url.trim() || !repo.branch.trim()) ||
-      deployment.principals.length === 0 ||
       deployment.principals.some((item) => !item.trim()) ||
       !deployment.runtimeProfile.trim() ||
       (deployment.executor !== undefined &&
@@ -418,6 +417,15 @@ export class ExpertStore {
         ? { configVersion: row.config_version }
         : {}),
     }));
+  }
+
+  updateDeploymentPrincipals(id: string, principals: string[]): ExpertDeploymentRecord {
+    if (principals.some((item) => !item.trim())) throw new Error("INVALID_EXPERT_DEPLOYMENT");
+    const result = this.db
+      .prepare("UPDATE expert_deployments SET principals_json=?, config_version=config_version+1 WHERE id=?")
+      .run(JSON.stringify([...new Set(principals)]), id);
+    if (result.changes === 0) throw new Error("EXPERT_DEPLOYMENT_NOT_FOUND");
+    return this.getDeployment(id);
   }
 
   deleteDeployment(id: string): void {

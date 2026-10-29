@@ -45,6 +45,32 @@ test("expert definitions and deployments persist across reopen", () => {
   }
 });
 
+test("deployment principals can be updated independently and may be empty", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-store-principals-"));
+  try {
+    const store = new ExpertStore(path.join(dir, "runtime.sqlite"));
+    store.putDefinition({ id: "ota", displayName: "OTA", capabilities: ["ota"], keywords: [], active: true });
+    store.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "readonly",
+      active: true,
+    });
+    const before = store.getDeployment("ota-default");
+    const updated = store.updateDeploymentPrincipals("ota-default", []);
+    assert.deepEqual(updated.principals, []);
+    assert.equal(updated.runtimeProfile, before.runtimeProfile);
+    assert.equal(updated.active, before.active);
+    assert.throws(() => store.updateDeploymentPrincipals("missing", ["alice"]), /EXPERT_DEPLOYMENT_NOT_FOUND/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("expert and deployment deletion protects referenced experts", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-store-delete-"));
   try {
