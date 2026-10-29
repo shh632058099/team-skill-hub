@@ -14,6 +14,7 @@ export interface ExpertWorkerRuntimeConfig {
   dockerImage: string;
   executorBackend?: "codex" | "claude";
   claudeModel?: string;
+  claudeMaxTurns?: number;
   dockerNetwork: string;
   dockerSeccompProfile: "default" | "unconfined";
   codexAuthFilePath?: string;
@@ -101,6 +102,8 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     env.EXPERT_DOCKER_IMAGE?.trim() ||
     (executorBackend === "claude" ? "team-skill-hub-expert-claude:0.1.0" : "team-skill-hub-expert-worker:0.1.0");
   const claudeModel = env.EXPERT_CLAUDE_MODEL?.trim() || "sonnet";
+  const claudeMaxTurns = positiveInteger(env.EXPERT_CLAUDE_MAX_TURNS, 12);
+  if (claudeMaxTurns > 1000) throw new Error("INVALID_WORKER_CONFIG");
   const dockerNetwork = env.EXPERT_DOCKER_NETWORK?.trim() ?? "";
   const dockerSeccompProfile = env.EXPERT_DOCKER_SECCOMP_PROFILE?.trim() || "default";
   const codexAuthFilePath = env.EXPERT_CODEX_AUTH_FILE?.trim() || undefined;
@@ -161,6 +164,7 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     dockerImage,
     executorBackend,
     claudeModel,
+    claudeMaxTurns,
     dockerNetwork,
     dockerSeccompProfile,
     codexAuthFilePath,

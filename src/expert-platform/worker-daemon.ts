@@ -39,7 +39,9 @@ export function createExpertWorkerRuntime(
     dependencies.createExecutor?.({
       image: config.dockerImage,
       ...(config.executorBackend ? { backend: config.executorBackend } : {}),
-      ...(config.executorBackend === "claude" ? { claudeModel: config.claudeModel ?? "sonnet" } : {}),
+      ...(config.executorBackend === "claude"
+        ? { claudeModel: config.claudeModel ?? "sonnet", claudeMaxTurns: config.claudeMaxTurns ?? 12 }
+        : {}),
       sourcePath: config.sourcePath,
       repositoryRoot: config.repositoryRoot,
       sharedTempRoot: config.sharedTempRoot,
@@ -62,7 +64,9 @@ export function createExpertWorkerRuntime(
     createDockerCodexExecutor({
       image: config.dockerImage,
       ...(config.executorBackend ? { backend: config.executorBackend } : {}),
-      ...(config.executorBackend === "claude" ? { claudeModel: config.claudeModel ?? "sonnet" } : {}),
+      ...(config.executorBackend === "claude"
+        ? { claudeModel: config.claudeModel ?? "sonnet", claudeMaxTurns: config.claudeMaxTurns ?? 12 }
+        : {}),
       sourcePath: config.sourcePath,
       repositoryRoot: config.repositoryRoot,
       sharedTempRoot: config.sharedTempRoot,

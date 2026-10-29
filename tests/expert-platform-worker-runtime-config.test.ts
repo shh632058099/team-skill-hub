@@ -227,3 +227,19 @@ test("Worker defaults to Claude and supports explicit Codex selection", () => {
     /INVALID_WORKER_CONFIG/,
   );
 });
+
+test("worker Claude max turns parses environment and rejects invalid values", () => {
+  const base = {
+    EXPERT_HUB_ADDRESS: "hub:7443",
+    EXPERT_WORKER_ID: "w",
+    EXPERT_WORKER_CREDENTIAL: "token",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_SOURCE_PATH: "/repo",
+    EXPERT_DOCKER_NETWORK: "expert-egress",
+  };
+  assert.equal(parseExpertWorkerConfig(base).claudeMaxTurns, 12);
+  assert.equal(parseExpertWorkerConfig({ ...base, EXPERT_CLAUDE_MAX_TURNS: "64" }).claudeMaxTurns, 64);
+  for (const bad of ["0", "-1", "1.5", "1001", "oops"]) {
+    assert.throws(() => parseExpertWorkerConfig({ ...base, EXPERT_CLAUDE_MAX_TURNS: bad }), /INVALID_WORKER_CONFIG/);
+  }
+});

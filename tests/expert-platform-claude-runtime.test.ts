@@ -50,6 +50,7 @@ test("Claude executor uses existing Docker isolation and selected model without 
     image: "team-skill-hub-expert-claude:0.1.0",
     backend: "claude",
     claudeModel: "sonnet",
+    claudeMaxTurns: 64,
     sourcePath: "/repo",
     network: "bridge",
     envNames: ["ANTHROPIC_API_KEY"],
@@ -63,6 +64,7 @@ test("Claude executor uses existing Docker isolation and selected model without 
     },
   });
   assert.equal(await executor(claim, new AbortController().signal), "claude report");
+  assert.equal(args[args.indexOf("--max-turns") + 1], "64");
   assert.ok(args.includes("--read-only"));
   assert.ok(args.includes("type=bind,src=/repo,dst=/workspace,readonly"));
   assert.ok(args.includes("Read,Glob,Grep"));
@@ -81,6 +83,7 @@ test("Claude Worker consumes Hub Anthropic model config and mapped AI Router cre
   try {
     const executor = createDockerCodexExecutor({
       backend: "claude",
+      claudeMaxTurns: 25,
       image: "expert-claude",
       sourcePath: "/repo",
       network: "bridge",
@@ -108,6 +111,7 @@ test("Claude Worker consumes Hub Anthropic model config and mapped AI Router cre
       new AbortController().signal,
     );
     assert.equal(result, "router result");
+    assert.equal(args[args.indexOf("--max-turns") + 1], "25");
     assert.ok(args.includes("claude-sonnet-router"));
     assert.ok(args.includes("ANTHROPIC_BASE_URL"));
     assert.ok(args.includes("ANTHROPIC_API_KEY"));
@@ -188,5 +192,14 @@ test("Claude Router credential reference can target ANTHROPIC_AUTH_TOKEN", async
   } finally {
     if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
     else process.env.ANTHROPIC_AUTH_TOKEN = previous;
+  }
+});
+
+test("Claude max turns is configurable and validated", () => {
+  const args = buildClaudeReadOnlyArgs("inspect", "sonnet", false, 38);
+  assert.equal(args[args.indexOf("--max-turns") + 1], "38");
+  assert.equal(buildClaudeReadOnlyArgs("inspect", "sonnet")[5], "12");
+  for (const bad of [0, -1, 1.5, 1001, NaN, Infinity]) {
+    assert.throws(() => buildClaudeReadOnlyArgs("inspect", "sonnet", false, bad), /INVALID_CLAUDE_MAX_TURNS/);
   }
 });

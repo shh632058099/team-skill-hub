@@ -31,6 +31,7 @@ sudo docker image inspect team-skill-hub-expert-claude:0.1.0
 EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
 EXPERT_CLAUDE_MODEL=sonnet
+EXPERT_CLAUDE_MAX_TURNS=12
 EXPERT_MODEL_ENV_NAMES=ANTHROPIC_API_KEY,HTTPS_PROXY,NO_PROXY
 ANTHROPIC_API_KEY=从安全密钥系统注入的实际值
 ```
@@ -128,3 +129,7 @@ Claude Code `PreToolUse` Hook 原生输入包含 `session_id`。项目脚本 `sc
 ### 标准客户端 Release v8（自动安装）
 
 从 Hub 下载 `setup-claude-code.sh` 或 `setup-claude-code.ps1` 后，脚本会自动下载客户端 Release v8，内含 Linux `scripts/claude/expert-session-hook.py` 和 Windows `scripts/claude/expert-session-hook.ps1`。Setup 将 Hook 复制到用户 Claude `hooks` 目录并注册只匹配两个 Expert 提交工具的 `PreToolUse`，重复执行不叠加 Hook，不覆盖其他 Hooks。以后客户端升级需重启 Claude Code 才能确保新 Hooks 生效。此能力适用于默认 MCP 名称 `teamSkillHub`；使用自定义 MCP server name 时当前不会安装该专用 Hook。Linux 需要 `python3`；Windows 使用 PowerShell，不要求 Python。
+
+### Claude 任务最大回合数
+
+Worker 环境变量 `EXPERT_CLAUDE_MAX_TURNS` 用来配置 Claude CLI 的 `--max-turns`，默认 `12`（兼容原有行为），允许 `1`～`1000` 的整数；非法值在 Worker 启动时拒绝。此参数适用于默认 Claude Model 和 Hub 下发的 Claude AI Router Model，Codex 后端不受影响。其限制不同于任务整体超时 `EXPERT_TASK_TIMEOUT_MS`，两者可独立设置。修改 Worker 环境变量后需要重启 Worker 才会生效。

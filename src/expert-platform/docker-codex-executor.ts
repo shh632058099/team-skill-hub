@@ -15,6 +15,7 @@ export interface DockerCodexExecutorOptions {
   image: string;
   backend?: "codex" | "claude";
   claudeModel?: string;
+  claudeMaxTurns?: number;
   sourcePath: string;
   repositoryRoot?: string;
   sharedTempRoot?: string;
@@ -182,7 +183,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     const streaming = process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0" && !options.runProcess;
     let codexArgs =
       backend === "claude"
-        ? buildClaudeReadOnlyArgs(claim.problem, options.claudeModel ?? "sonnet", streaming)
+        ? buildClaudeReadOnlyArgs(
+            claim.problem,
+            options.claudeModel ?? "sonnet",
+            streaming,
+            options.claudeMaxTurns ?? 12,
+          )
         : buildCodexReadOnlyArgs(claim.problem);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
@@ -228,7 +234,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw new Error("EXPERT_MODEL_PROTOCOL_MISMATCH");
     }
     if (backend === "claude" && claim.modelConfig) {
-      codexArgs = buildClaudeReadOnlyArgs(claim.problem, claim.modelConfig.model, streaming);
+      codexArgs = buildClaudeReadOnlyArgs(
+        claim.problem,
+        claim.modelConfig.model,
+        streaming,
+        options.claudeMaxTurns ?? 12,
+      );
     }
     let claudeChildEnv: NodeJS.ProcessEnv | undefined;
     if (claim.modelConfig && backend === "claude") {
