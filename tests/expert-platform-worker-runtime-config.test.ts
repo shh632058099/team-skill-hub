@@ -2,6 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseExpertWorkerConfig } from "../src/expert-platform/worker-runtime-config.js";
 
+test("Claude worker accepts Anthropic auth token through a credential reference", () => {
+  const config = parseExpertWorkerConfig({
+    EXPERT_HUB_ADDRESS: "hub.internal:7443",
+    EXPERT_WORKER_ID: "claude-worker-01",
+    EXPERT_WORKER_CREDENTIAL: "ewc_example",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_SOURCE_PATH: "/srv/repos/ota",
+    EXPERT_EXECUTOR_BACKEND: "claude",
+    EXPERT_DOCKER_IMAGE: "team-skill-hub-expert-claude:0.1.0",
+    EXPERT_DOCKER_NETWORK: "expert-egress",
+    EXPERT_MODEL_ENV_NAMES: "ANTHROPIC_AUTH_TOKEN",
+    EXPERT_MODEL_CREDENTIAL_REFS_JSON: '{"bst-router":"ANTHROPIC_AUTH_TOKEN"}',
+  });
+  assert.equal(config.executorBackend, "claude");
+  assert.deepEqual(config.modelCredentialEnvNames, { "bst-router": "ANTHROPIC_AUTH_TOKEN" });
+});
+
 test("worker runtime config parses a cross-host Docker Codex deployment", () => {
   const config = parseExpertWorkerConfig({
     EXPERT_HUB_ADDRESS: "hub.internal:7443",

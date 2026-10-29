@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -24,6 +24,8 @@ export interface DockerCodexExecutorOptions {
   seccompProfile?: "default" | "unconfined";
   envNames: readonly string[];
   modelCredentialEnvNames?: Readonly<Record<string, string>>;
+  mcpCredentialFiles?: Readonly<Record<string, string>>;
+  mcpDefaultUrl?: string;
   authFilePath?: string;
   configFilePath?: string;
   timeoutMs: number;
@@ -79,6 +81,45 @@ function buildExpertCodexConfig(
     ...new Set([...config.allowedEnvNames, ...options.envNames.filter((name) => PROXY_ENV_NAMES.has(name))]),
   ];
   return { content, envNames };
+}
+
+const MCP_READ_TOOLS = new Set([
+  "list_skills",
+  "search_skills",
+  "resolve_skill",
+  "get_skill",
+  "get_skill_resource",
+  "list_knowledge_sources",
+  "search_knowledge",
+  "get_knowledge",
+]);
+
+function validateMcpEndpoint(raw: string): void {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("WORKER_MCP_URL_INVALID");
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    url.search ||
+    ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname)
+  )
+    throw new Error("WORKER_MCP_URL_INVALID");
+}
+
+function readMcpWorkerKey(file: string | undefined): string {
+  if (!file) throw new Error("WORKER_MCP_CREDENTIAL_NOT_CONFIGURED");
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0)
+    throw new Error("WORKER_MCP_CREDENTIAL_UNSAFE");
+  const key = readFileSync(file, "utf8").trim();
+  if (!/^skh_[A-Za-z0-9_-]{32,}$/.test(key)) throw new Error("WORKER_MCP_CREDENTIAL_INVALID");
+  return key;
 }
 
 async function dockerCommand(
@@ -180,12 +221,20 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
   > => {
     const backend = options.backend ?? "claude";
     if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
+    if (claim.deploymentSnapshot && claim.deploymentSnapshot.executor.backend !== backend)
+      throw new Error("EXPERT_BACKEND_UNSUPPORTED");
+    if (
+      claim.deploymentSnapshot &&
+      (!claim.modelConfig ||
+        JSON.stringify(claim.modelConfig) !== JSON.stringify(claim.deploymentSnapshot.executor.modelConfig))
+    )
+      throw new Error("INVALID_DEPLOYMENT_SNAPSHOT");
     const streaming = process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0" && !options.runProcess;
     let codexArgs =
       backend === "claude"
         ? buildClaudeReadOnlyArgs(
             claim.problem,
-            options.claudeModel ?? "sonnet",
+            claim.deploymentSnapshot?.executor.modelConfig.model ?? options.claudeModel ?? "sonnet",
             streaming,
             options.claudeMaxTurns ?? 12,
           )
@@ -284,8 +333,84 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       chmodSync(configFilePath, 0o644);
       envNames = generated.envNames;
     }
+    let mcpConfigFilePath: string | undefined;
+    let mcpChildEnv: NodeJS.ProcessEnv | undefined;
     try {
+      const mcp = claim.deploymentSnapshot?.mcp;
+      if (mcp) {
+        let url: string | undefined;
+        let token: string | undefined;
+        try {
+          url = mcp.urlOverride ?? options.mcpDefaultUrl;
+          if (!url) throw new Error("WORKER_MCP_URL_NOT_CONFIGURED");
+          validateMcpEndpoint(url);
+          if (
+            !Array.isArray(mcp.allowedTools) ||
+            mcp.allowedTools.length === 0 ||
+            mcp.allowedTools.some((tool) => !MCP_READ_TOOLS.has(tool))
+          )
+            throw new Error("WORKER_MCP_TOOLS_INVALID");
+          token = readMcpWorkerKey(options.mcpCredentialFiles?.[mcp.credentialRef]);
+        } catch {
+          if (mcp.required) throw new Error("WORKER_MCP_UNAVAILABLE");
+          await report("knowledge_lookup_unavailable");
+        }
+        if (url && token) {
+          if (!generatedConfigDir)
+            generatedConfigDir = mkdtempSync(path.join(options.sharedTempRoot ?? os.tmpdir(), ".expert-mcp-config-"));
+          if (backend === "codex") {
+            if (!configFilePath) {
+              configFilePath = path.join(generatedConfigDir, "config.toml");
+              writeFileSync(configFilePath, "", { mode: 0o644, flag: "wx" });
+              chmodSync(configFilePath, 0o644);
+            }
+            appendFileSync(
+              configFilePath,
+              [
+                "",
+                "[mcp_servers.skillhub]",
+                `url = ${tomlString(url)}`,
+                'bearer_token_env_var = "SKILLHUB_EXPERT_MCP_API_KEY"',
+                `enabled_tools = ${JSON.stringify(mcp.allowedTools)}`,
+                `required = ${mcp.required === true}`,
+                'default_tools_approval_mode = "approve"',
+                ...mcp.allowedTools.flatMap((tool) => [
+                  "",
+                  `[mcp_servers.skillhub.tools.${tool}]`,
+                  'approval_mode = "approve"',
+                ]),
+                "",
+              ].join("\n"),
+            );
+            envNames = [...new Set([...envNames, "SKILLHUB_EXPERT_MCP_API_KEY"])];
+            mcpChildEnv = { SKILLHUB_EXPERT_MCP_API_KEY: token };
+          } else {
+            mcpConfigFilePath = path.join(generatedConfigDir, "mcp.json");
+            writeFileSync(
+              mcpConfigFilePath,
+              JSON.stringify({
+                mcpServers: { skillhub: { type: "http", url, headers: { Authorization: `Bearer ${token}` } } },
+              }),
+              { mode: 0o644, flag: "wx" },
+            );
+            // Worker runs with umask 0077; the task container still needs to read this non-secret wrapper file.
+            chmodSync(mcpConfigFilePath, 0o644);
+            const mcpToolNames = mcp.allowedTools.map((tool) => `mcp__skillhub__${tool}`).join(",");
+            for (const flag of ["--tools", "--allowedTools"]) {
+              const toolIndex = codexArgs.indexOf(flag);
+              if (toolIndex < 0) throw new Error("CLAUDE_TOOL_ALLOWLIST_MISSING");
+              codexArgs[toolIndex + 1] += "," + mcpToolNames;
+            }
+            const separator = codexArgs.indexOf("--");
+            if (separator < 0) throw new Error("CLAUDE_ARGUMENT_SEPARATOR_MISSING");
+            codexArgs.splice(separator, 0, "--mcp-config", "/run/expert-mcp.json", "--strict-mcp-config");
+          }
+          await report("mcp.configured");
+        }
+      }
       const containerName = `expert-${createHash("sha256").update(`${claim.taskId}:${claim.runId}:${claim.fencing}`).digest("hex").slice(0, 24)}`;
+
+      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : undefined;
       const args = buildCodexDockerArgs({
         image: options.image,
         containerName,
@@ -295,9 +420,11 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         sourcePath,
         network: options.network,
         seccompProfile: options.seccompProfile,
+        ...(workerGroupId !== undefined ? { supplementalGroupId: workerGroupId } : {}),
         envNames,
         authFilePath: options.authFilePath,
         configFilePath,
+        mcpConfigFilePath,
         codexArgs,
       });
       if (backend === "claude") {
@@ -341,7 +468,9 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           maxOutputBytes: options.maxOutputBytes ?? (streaming ? 64 * 1024 * 1024 : undefined),
           signal,
           onAbort: () => stopDockerContainer(containerName),
-          ...(claudeChildEnv ? { env: claudeChildEnv } : {}),
+          ...(claudeChildEnv || mcpChildEnv
+            ? { env: { ...(claudeChildEnv ?? process.env), ...(mcpChildEnv ?? {}) } }
+            : {}),
           ...(streaming
             ? {
                 streamingBackend: backend,

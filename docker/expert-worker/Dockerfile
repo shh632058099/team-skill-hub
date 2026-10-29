@@ -14,7 +14,7 @@ RUN case "${TARGETARCH}" in amd64) ARCH=x64 ;; arm64) ARCH=arm64 ;; *) echo "Uns
 RUN node -e "require('fs').writeFileSync('/tmp/ca-bundle.crt', require('tls').rootCertificates.map(c => c + '\n').join(''))" \
     && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt update \
-    && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt install --yes --no-install-recommends ca-certificates \
+    && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt install --yes --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* /tmp/ca-bundle.crt
 
 RUN useradd --create-home --uid 10001 expert

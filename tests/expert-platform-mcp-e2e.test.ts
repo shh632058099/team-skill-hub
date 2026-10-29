@@ -96,6 +96,7 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     const apiKey = "expert-mcp-e2e-key";
     const auth = new ApiKeyAuthenticationProvider({
       [apiKey]: { id: "ota-test-client", roles: ["developer", "internal"], tenantId: "rd" },
+      "worker-readonly-test-key": { id: "mcp-worker-only", roles: ["worker-mcp-readonly"], tenantId: "rd" },
     });
     const config: AppConfig = {
       host: "127.0.0.1",
@@ -123,6 +124,44 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     const mcpUrl = `http://127.0.0.1:${httpAddress.port}/mcp`;
 
     const listedTools = await listMcpTools(mcpUrl, apiKey);
+    const readonlyTools = await listMcpTools(mcpUrl, "worker-readonly-test-key");
+    assert.ok(readonlyTools.some((item) => item.name === "search_skills"));
+    assert.ok(readonlyTools.some((item) => item.name === "search_knowledge"));
+    assert.equal(
+      readonlyTools.some((item) => item.name === "submit_expert_task"),
+      false,
+    );
+    assert.equal(
+      readonlyTools.some((item) => item.name === "submit_expert_task_auto"),
+      false,
+    );
+    assert.equal(
+      readonlyTools.some((item) => item.name === "submit_knowledge_candidate"),
+      false,
+    );
+    assert.ok(
+      readonlyTools.every((item) =>
+        [
+          "list_skills",
+          "search_skills",
+          "resolve_skill",
+          "get_skill",
+          "get_skill_resource",
+          "list_knowledge_sources",
+          "search_knowledge",
+          "get_knowledge",
+        ].includes(item.name),
+      ),
+    );
+    const readonlySearch = await callMcp(mcpUrl, "worker-readonly-test-key", 987, "search_skills", {
+      query: "ota upgrade",
+    });
+    assert.ok(Array.isArray(readonlySearch.results));
+    const readonlyKnowledge = await callMcp(mcpUrl, "worker-readonly-test-key", 988, "search_knowledge", {
+      query: "firmware",
+    });
+    assert.ok(Array.isArray(readonlyKnowledge.results));
+    await assert.rejects(() => callMcp(mcpUrl, "worker-readonly-test-key", 989, "submit_expert_task", {}));
     const catalogDescription = listedTools.find((tool) => tool.name === "list_available_experts")?.description ?? "";
     assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task_auto"));
     const submitDescription = listedTools.find((tool) => tool.name === "submit_expert_task")?.description ?? "";

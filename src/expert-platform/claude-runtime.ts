@@ -1,5 +1,5 @@
-/** Claude Code worker uses a read-only bind mount plus an allowlist of read-only tools.
- * No Bash, Write, Edit, NotebookEdit, MCP or agent tools are available to this worker.
+/** Claude Code worker uses a read-only bind mount plus an explicit read-only tool allowlist.
+ * Bash, Write, Edit, NotebookEdit and agent tools are never available. Deployment-approved read-only MCP tools may be appended.
  */
 export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false, maxTurns = 12): string[] {
   if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 1000) throw new Error("INVALID_CLAUDE_MAX_TURNS");
@@ -23,6 +23,8 @@ export function buildClaudeReadOnlyArgs(problem: string, model: string, stream =
     "--permission-mode",
     "dontAsk",
     "--tools",
+    "Read,Glob,Grep",
+    "--allowedTools",
     "Read,Glob,Grep",
     "--",
     problem,

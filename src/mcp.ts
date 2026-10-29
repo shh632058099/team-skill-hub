@@ -146,8 +146,22 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       requestHeaders?.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     const client = requestHeaders?.get("x-skill-hub-client") ?? requestHeaders?.get("user-agent") ?? undefined;
 
-    const registerTool = (name: string, definition: any, handler: (...args: any[]) => Promise<any>) =>
-      server.registerTool(name, definition as any, async (...args: any[]) => {
+    // A dedicated Worker MCP principal can only discover/call the read-only view.
+    // This is enforced at the server tool registry, not merely by CLI prompts or flags.
+    const readOnlyWorker = principal.roles.includes("worker-mcp-readonly");
+    const workerReadTools = new Set([
+      "list_skills",
+      "search_skills",
+      "resolve_skill",
+      "get_skill",
+      "get_skill_resource",
+      "list_knowledge_sources",
+      "search_knowledge",
+      "get_knowledge",
+    ]);
+    const registerTool = (name: string, definition: any, handler: (...args: any[]) => Promise<any>) => {
+      if (readOnlyWorker && !workerReadTools.has(name)) return;
+      return server.registerTool(name, definition as any, async (...args: any[]) => {
         const started = performance.now();
         try {
           const result = await handler(...args);
@@ -190,6 +204,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           throw error;
         }
       });
+    };
 
     registerTool(
       "get_server_info",
@@ -1104,6 +1119,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             expertId: z.string().trim().min(1).max(200).optional(),
             selectionMode: z.enum(["auto", "explicit"]).optional(),
             repositoryId: z.string().trim().min(1).max(200).optional(),
+            deploymentId: z.string().trim().min(1).max(100).optional(),
             clientSessionProof: z
               .string()
               .max(100)
@@ -1124,6 +1140,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           expertId,
           selectionMode,
           repositoryId,
+          deploymentId,
           clientSessionId,
           clientSessionProof,
         }) => {
@@ -1144,6 +1161,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               expertId,
               selectionMode,
               repositoryId,
+              deploymentId,
             }),
           });
         },

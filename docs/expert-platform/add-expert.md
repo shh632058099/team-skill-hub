@@ -4,8 +4,8 @@
 
 > **先理解两个概念：**
 >
-> - **专家配置（Expert Definition）**：定义“它是谁、擅长什么、用哪个模型”。例如 `ota`、`code-review`。
-> - **执行配置（Deployment）**：定义“谁可以调用这个专家、它能访问哪些仓库、使用什么运行环境”。一个专家可以绑定一个或多个仓库。
+> - **专家配置（Expert Definition）**：定义“它是谁、擅长什么”，不再绑定模型。例如 `ota`、`code-review`。
+> - **执行配置（Deployment）**：定义“谁可以调用这个专家、它能访问哪些仓库，以及 Backend/模型/MCP 策略”。一个专家可以绑定一个或多个仓库。
 > - **Worker 执行配置**：Worker 主机上的本地环境文件，定义 Worker 身份、能力、Hub 地址、Docker、Git 凭据和模型凭据映射。它不是 Admin 页面中的 Deployment，也不应把密钥写入数据库或 Git。
 
 日常使用优先通过 Admin 页面管理专家、执行配置以及 Worker 审批。CLI 仅作为维护或排障备用方式。
@@ -92,21 +92,9 @@ command -v git tar sha256sum
 | 显示名称          | `Yocto 构建专家`                              | 给管理员和用户看的名称                                           |
 | Capabilities      | `yocto,build,linux`                           | 专家能处理的能力标签；多个值用逗号或换行分隔                     |
 | Keywords          | `bitbake,recipe,layer,CVE`                    | 描述典型任务的关键词，帮助自动路由                               |
-| Provider ID       | `bst`                                         | 与当前 Provider 配置约定一致；不是 API Key                       |
-| Model             | `由模型服务提供方确认的模型ID`                | 填写你的 Router/Provider 实际支持的模型名                        |
-| Base URL          | `https://models.example.com/v1`               | 填写实际 API 入口，不要附带密钥                                  |
-| Wire API          | `responses`                                   | 当前 Worker 的 Codex 执行链路使用 Responses API                  |
-| Credential Ref    | `bst-router`                                  | 逻辑凭据引用；它不是密钥本身，后续要在 Worker 主机映射到环境变量 |
-| Allowed Env Names | `TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY` | 允许传入执行容器的环境变量名白名单；不要填写变量值               |
 | 启用              | 勾选                                          | 保存后专家配置应处于启用状态                                     |
 
-**模型配置注意事项**
-
-- Provider 必须兼容 Codex CLI 使用的 Responses API；只有 `/chat/completions` 的服务不能直接套用。
-- `Credential Ref` 应与 Worker 的 `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 中的 key 完全一致。
-- `Allowed Env Names` 只填变量名。密钥实际值由 Worker 主机的受保护环境文件提供。
-- 如果不填写模型配置，会走兼容旧 Worker 配置的路径；新建专家建议显式配置模型，避免不同 Worker 意外使用旧默认值。
-- 点击保存后，在列表中确认专家 ID、能力、关键词、模型和状态正确。
+**模型已迁至 Deployment。** 新建专家仅管理能力、关键词、启停；历史 Expert.modelConfig 暂为 V1 兼容数据。
 
 ## 3. 创建执行配置并配置仓库地址
 
@@ -123,6 +111,13 @@ command -v git tar sha256sum
 | 允许调用者 Principal ID | `实际的 principal.id`                         | 每行一个；只授权确实需要使用此 Deployment 的调用者                   |
 | Runtime Profile         | `linux-yocto`                                 | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`              |
 | 启用执行配置            | 勾选                                          | 只有启用的 Deployment 才能参与任务派发                               |
+| Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名 |
+| 模型 Credential Ref     | `model-readonly`                              | Worker 本地模型凭据映射，不存 Key 明文 |
+| MCP Profile            | `default`                                     | Admin 全局 Profile，可由 Deployment 引用/覆盖 |
+| MCP URL                | `http://hub.internal:8080/mcp`                | 必须从任务容器网络可达；不能用 127.0.0.1 指向外部 Hub |
+| MCP Credential Ref     | `skillhub-readonly`                           | 独立只读 API Key 的本地文件映射 |
+| MCP Allowed Tools      | `search_skills,get_skill,search_knowledge,get_knowledge` | 只读工具白名单；禁止管理、发布、派发 |
+| MCP Required           | 按需                                        | Key/URL 不可用时是否直接失败 |
 
 可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。
 
@@ -139,6 +134,16 @@ docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 ```
 
 如果 CLI 提示缺少 `EXPERT_RUNTIME_DB`，请先检查 `docker-compose.expert.yml` 是否已应用并重建/启动 Hub；不要手动指向一个新的空数据库。
+
+### V2 Worker 只读 MCP 安装与测试
+
+1. 在 Admin 的 API Key 页面创建专属身份，roles **仅** `worker-mcp-readonly`，不要复用 Admin Key。Hub 服务端仅注册只读 Skill/Knowledge 工具。
+2. 安全保存密钥于 Worker 本地受权限保护的文件（`0600`、Worker 可读取），如 `/etc/team-skill-hub-worker/keys/skillhub-readonly`；不要写入 Git、Hub 数据库、任务日志。
+3. 在 `worker.env` 设置 `EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/keys/skillhub-readonly"}'`、`EXPERT_MCP_URL=http://hub.internal:8080/mcp`、`EXPERT_RUNTIME_PROFILES=linux-yocto`，并选择匹配 Docker 镜像的 `EXPERT_EXECUTOR_BACKEND`。
+4. 执行配置选择 Admin 全局 MCP Profile（默认 `default`）或按 Deployment 覆盖。覆盖不允许扩大 Profile 的只读工具权限。Worker 会在每个任务中生成隔离的 Claude/Codex MCP 配置，而不挂载个人配置或运行开发者 Hook。
+5. 发布前从**实际任务容器**测试 Hub DNS/网络、TLS/代理、MCP `tools/list`、Skill/Knowledge 检索，并验证提交/发布/专家再次派发工具不可用；同时测试无 Key、撤销 Key、协议不匹配、旧 Worker 不领取 V2 等负路径。
+
+> 现有版本化 Worker Runtime 是独立发布包，无须 Hub 源码。复用 Client Integration 完整 Setup 发行物的显式 `worker/read-only` 安装 Profile 尚未实现；当前由 Worker 任务执行器动态生成只读配置，完整自动升级和真实 Claude/Codex MCP 端到端验收仍需完成。
 
 ## 4. 在 Worker 主机配置 Git 仓库凭据
 

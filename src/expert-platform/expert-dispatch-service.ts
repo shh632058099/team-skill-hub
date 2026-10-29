@@ -1,6 +1,6 @@
 import type { ExpertStore } from "./expert-store.js";
 import { routeExpert } from "./router.js";
-import type { ExpertTaskStore, TaskRecord } from "./task-store.js";
+import type { DeploymentTaskSnapshot, ExpertTaskStore, TaskRecord } from "./task-store.js";
 
 export interface DispatchInput {
   principalId: string;
@@ -12,6 +12,7 @@ export interface DispatchInput {
   expertId?: string;
   selectionMode?: "explicit" | "auto";
   repositoryId?: string;
+  deploymentId?: string;
 }
 
 export interface AvailableExpert {
@@ -87,6 +88,7 @@ export class ExpertDispatchService {
               deployment.active &&
               deployment.expertId === route.expertId &&
               deployment.principals.includes(input.principalId) &&
+              (!input.deploymentId || deployment.id === input.deploymentId) &&
               (!input.repositoryId || deployment.repositoryIds.includes(input.repositoryId)),
           )
           .flatMap((deployment) => deployment.repositories ?? [])
@@ -98,6 +100,54 @@ export class ExpertDispatchService {
     }
     const configuredRepositoryId = input.repositoryId ?? availableRepositoryIds[0];
 
+    const eligible = deployments.filter(
+      (deployment) =>
+        deployment.active &&
+        deployment.expertId === route.expertId &&
+        deployment.principals.includes(input.principalId) &&
+        (!input.deploymentId || deployment.id === input.deploymentId) &&
+        (!configuredRepositoryId || deployment.repositoryIds.includes(configuredRepositoryId)),
+    );
+    const selected = input.deploymentId
+      ? eligible.find((deployment) => deployment.id === input.deploymentId)
+      : eligible.length === 1
+        ? eligible[0]
+        : undefined;
+    if (!selected) throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
+    const source = (selected.repositories ?? []).find((repository) => repository.id === configuredRepositoryId);
+    if (selected.executor && !source) throw new Error("SOURCE_REPOSITORY_UNAVAILABLE");
+    let effectiveMcp = selected.mcp ? structuredClone(selected.mcp) : undefined;
+    const profileId = selected.mcp?.profileRef ?? "default";
+    let profile;
+    try {
+      profile = this.experts.getMcpProfile(profileId);
+    } catch (error) {
+      if (selected.mcp?.profileRef || (error instanceof Error && error.message !== "EXPERT_MCP_PROFILE_NOT_FOUND"))
+        throw error;
+    }
+    if (profile) {
+      if (effectiveMcp && effectiveMcp.allowedTools.some((tool) => !profile!.allowedTools.includes(tool)))
+        throw new Error("MCP_PROFILE_TOOL_NOT_ALLOWED");
+      effectiveMcp = {
+        profileRef: profile.id,
+        urlOverride: effectiveMcp?.urlOverride ?? profile.url,
+        credentialRef: effectiveMcp?.credentialRef ?? profile.credentialRef,
+        allowedTools: effectiveMcp?.allowedTools ?? profile.allowedTools,
+        required: effectiveMcp?.required ?? profile.required,
+      };
+    }
+    const deploymentSnapshot: DeploymentTaskSnapshot | undefined =
+      selected.executor && source
+        ? {
+            deploymentId: selected.id,
+            configVersion: selected.configVersion ?? 1,
+            runtimeProfile: selected.runtimeProfile,
+            repository: { ...source },
+            executor: structuredClone(selected.executor),
+            ...(effectiveMcp ? { mcp: effectiveMcp } : {}),
+          }
+        : undefined;
+
     return this.tasks.submit({
       principalId: input.principalId,
       scope: input.scope,
@@ -108,7 +158,8 @@ export class ExpertDispatchService {
       expertId: route.expertId,
       repositoryId: configuredRepositoryId,
       selectionMode: route.selectionMode,
-      schemaVersion: 1,
+      schemaVersion: deploymentSnapshot ? 2 : 1,
+      ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
     });
   }
 }

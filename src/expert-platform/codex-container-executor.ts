@@ -40,9 +40,11 @@ export interface CodexDockerConfig {
   sourcePath: string;
   network: string;
   seccompProfile?: "default" | "unconfined";
+  supplementalGroupId?: number;
   envNames: readonly string[];
   authFilePath?: string;
   configFilePath?: string;
+  mcpConfigFilePath?: string;
   codexArgs: readonly string[];
 }
 
@@ -72,12 +74,20 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
   ) {
     throw new Error("INVALID_SECCOMP_PROFILE");
   }
+  if (
+    config.supplementalGroupId !== undefined &&
+    (!Number.isSafeInteger(config.supplementalGroupId) || config.supplementalGroupId < 1)
+  ) {
+    throw new Error("INVALID_SUPPLEMENTAL_GROUP_ID");
+  }
   if (config.authFilePath && (!path.isAbsolute(config.authFilePath) || config.authFilePath === "/")) {
     throw new Error("INVALID_AUTH_FILE_PATH");
   }
   if (config.configFilePath && (!path.isAbsolute(config.configFilePath) || config.configFilePath === "/")) {
     throw new Error("INVALID_CONFIG_FILE_PATH");
   }
+  if (config.mcpConfigFilePath && (!path.isAbsolute(config.mcpConfigFilePath) || config.mcpConfigFilePath === "/"))
+    throw new Error("INVALID_MCP_CONFIG_FILE_PATH");
   if (config.envNames.some((name) => !isAllowedEnvName(name))) {
     throw new Error("INVALID_ENV_NAME");
   }
@@ -105,6 +115,7 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     "--network",
     config.network,
     "--read-only",
+    ...(config.supplementalGroupId !== undefined ? ["--group-add", String(config.supplementalGroupId)] : []),
     "--cap-drop",
     "ALL",
     "--security-opt",
@@ -142,6 +153,9 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
 
   if (config.configFilePath) {
     args.push("--mount", `type=bind,src=${config.configFilePath},dst=/run/codex-config.toml,readonly`);
+  }
+  if (config.mcpConfigFilePath) {
+    args.push("--mount", `type=bind,src=${config.mcpConfigFilePath},dst=/run/expert-mcp.json,readonly`);
   }
 
   for (const name of config.envNames) {

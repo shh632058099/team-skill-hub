@@ -45,6 +45,66 @@ test("expert definitions and deployments persist across reopen", () => {
   }
 });
 
+test("deployment executor and MCP policy persist with versioned updates", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-deployment-v2-"));
+  try {
+    const file = path.join(dir, "runtime.sqlite");
+    const store = new ExpertStore(file);
+    store.putDefinition({ id: "review", displayName: "Review", capabilities: ["review"], keywords: [], active: true });
+    const executor = {
+      backend: "codex" as const,
+      modelConfig: {
+        providerId: "router",
+        model: "review-model",
+        baseUrl: "https://router.example/v1",
+        wireApi: "responses" as const,
+        credentialRef: "model-readonly",
+        allowedEnvNames: ["OPENAI_API_KEY"],
+      },
+    };
+    const mcp = {
+      credentialRef: "skillhub-readonly",
+      allowedTools: ["search_skills", "search_knowledge"],
+      required: true,
+    };
+    const deployment = {
+      id: "review-codex",
+      expertId: "review",
+      repositoryIds: ["repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "readonly",
+      active: true,
+      executor,
+      mcp,
+    };
+    store.putDeployment(deployment);
+    assert.equal(store.getDeployment("review-codex").configVersion, 1);
+    store.putDeployment(deployment);
+    assert.equal(store.getDeployment("review-codex").configVersion, 2);
+    assert.deepEqual(store.getDeployment("review-codex").executor, executor);
+    assert.deepEqual(store.getDeployment("review-codex").mcp, mcp);
+    assert.throws(
+      () =>
+        store.putDeployment({
+          ...deployment,
+          executor: { ...executor, modelConfig: { ...executor.modelConfig, wireApi: "anthropic-messages" as const } },
+        }),
+      /INVALID_EXPERT_DEPLOYMENT/,
+    );
+    assert.throws(
+      () => store.putDeployment({ ...deployment, mcp: { ...mcp, allowedTools: ["submit_expert_task"] } }),
+      /INVALID_EXPERT_DEPLOYMENT/,
+    );
+    store.close();
+    const reopened = new ExpertStore(file);
+    assert.equal(reopened.getDeployment("review-codex").configVersion, 2);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("deployment requires an existing expert", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-store-"));
   try {

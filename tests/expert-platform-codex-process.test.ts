@@ -64,6 +64,76 @@ test("process runner classifies sandbox failures without logging raw stderr", as
   assert.ok(logs.every((line) => !line.includes("private detail")));
 });
 
+test("process runner distinguishes Docker host config permission without logging path details", async () => {
+  const logs: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await assert.rejects(
+      () =>
+        runCodexProcess({
+          executable: process.execPath,
+          args: [
+            "-e",
+            "process.stderr.write('WARNING: Error loading config file: open /root/.docker/config.json: permission denied'); process.exit(1)",
+          ],
+          timeoutMs: 5000,
+        }),
+      /CODEX_PROCESS_FAILED/,
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.ok(logs.some((line) => line.includes('"errorCode":"DOCKER_CONFIG_PERMISSION"')));
+  assert.ok(logs.every((line) => !line.includes("/root/.docker/config.json")));
+});
+
+test("process runner reports only a fixed access target category", async () => {
+  const logs: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await assert.rejects(
+      () =>
+        runCodexProcess({
+          executable: process.execPath,
+          args: ["-e", "process.stderr.write('EACCES: permission denied, open /run/expert-mcp.json'); process.exit(1)"],
+          timeoutMs: 5000,
+        }),
+      /CODEX_PROCESS_FAILED/,
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.ok(logs.some((line) => line.includes('"accessTarget":"MCP_CONFIG"')));
+  assert.ok(logs.every((line) => !line.includes("/run/expert-mcp.json")));
+});
+
+test("Codex JSONL model errors receive a fixed code without exposing response text", async () => {
+  const logs: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await assert.rejects(
+      () =>
+        runCodexProcess({
+          executable: process.execPath,
+          args: [
+            "-e",
+            "console.log(JSON.stringify({type:'turn.failed',error:{message:'HTTP 429 quota exceeded secret-example'}})); process.exit(1)",
+          ],
+          timeoutMs: 5000,
+          streamingBackend: "codex",
+        }),
+      /CODEX_PROCESS_FAILED/,
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.ok(logs.some((line) => line.includes('"errorCode":"MODEL_RATE_LIMITED"')));
+  assert.ok(logs.every((line) => !line.includes("secret-example")));
+});
+
 test("process runner enforces deadline and abort", async () => {
   await assert.rejects(
     () =>

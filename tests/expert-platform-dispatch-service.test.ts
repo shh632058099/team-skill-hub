@@ -7,6 +7,93 @@ import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-se
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 
+test("V2 deployment snapshots are immutable, capability-gated and part of deduplication identity", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-v2-snapshot-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({
+      id: "review",
+      displayName: "Review",
+      capabilities: ["review"],
+      keywords: [],
+      active: true,
+    });
+    const modelConfig = {
+      providerId: "router",
+      model: "review-model-a",
+      baseUrl: "https://example.org/v1",
+      wireApi: "responses" as const,
+      credentialRef: "model",
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    const repository = { id: "repo", url: "https://github.com/example/example.git", branch: "main" };
+    const baseline = {
+      expertId: "review",
+      repositoryIds: ["repo"],
+      repositories: [repository],
+      principals: ["alice"],
+      runtimeProfile: "runtime-v2",
+      active: true,
+    };
+    experts.putDeployment({ ...baseline, id: "d1", executor: { backend: "codex", modelConfig } });
+    experts.putDeployment({
+      ...baseline,
+      id: "d2",
+      executor: { backend: "codex", modelConfig: { ...modelConfig, model: "review-model-b" } },
+    });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    const input = {
+      principalId: "alice",
+      scope: "test",
+      sourceClient: "claude",
+      sourceSessionId: "stable-session",
+      problem: "review this repository",
+      expertId: "review",
+      repositoryId: "repo",
+      selectionMode: "explicit" as const,
+    };
+    assert.throws(() => dispatch.submit({ ...input, idempotencyKey: "ambiguous" }), /DEPLOYMENT_REQUIRED/);
+    const first = dispatch.submit({ ...input, idempotencyKey: "first", deploymentId: "d1" });
+    const second = dispatch.submit({ ...input, idempotencyKey: "second", deploymentId: "d2" });
+    assert.notEqual(first.taskId, second.taskId);
+    assert.equal(first.deploymentSnapshot?.executor.modelConfig.model, "review-model-a");
+    assert.equal(first.schemaVersion, 2);
+    assert.equal(tasks.claim("old-worker", Date.now(), 30_000, "review"), null, "legacy Worker cannot claim V2");
+    assert.equal(
+      tasks.claim("wrong-backend", Date.now(), 30_000, "review", {
+        backend: "claude",
+        runtimeProfiles: ["runtime-v2"],
+      }),
+      null,
+    );
+    assert.equal(
+      tasks.claim("wrong-profile", Date.now(), 30_000, "review", { backend: "codex", runtimeProfiles: ["other"] }),
+      null,
+    );
+    experts.putDeployment({
+      ...baseline,
+      id: "d1",
+      executor: { backend: "codex", modelConfig: { ...modelConfig, model: "changed-model" } },
+    });
+    const claim = tasks.claim("v2-worker", Date.now(), 30_000, "review", {
+      backend: "codex",
+      runtimeProfiles: ["runtime-v2"],
+    });
+    assert.equal(
+      claim?.deploymentSnapshot?.executor.modelConfig.model,
+      "review-model-a",
+      "queued snapshot must not change",
+    );
+    assert.equal(claim?.taskId, first.taskId);
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatch auto-routes and persists routing metadata on task", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-"));
   const db = path.join(dir, "runtime.sqlite");

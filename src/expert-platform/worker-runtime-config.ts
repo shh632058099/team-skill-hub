@@ -13,6 +13,7 @@ export interface ExpertWorkerRuntimeConfig {
   gitCredentialConfigs: Record<string, GitCredentialConfig>;
   dockerImage: string;
   executorBackend?: "codex" | "claude";
+  supportedRuntimeProfiles?: string[];
   claudeModel?: string;
   claudeMaxTurns?: number;
   dockerNetwork: string;
@@ -21,6 +22,8 @@ export interface ExpertWorkerRuntimeConfig {
   codexConfigFilePath?: string;
   modelEnvNames: string[];
   modelCredentialEnvNames: Record<string, string>;
+  mcpCredentialFiles?: Record<string, string>;
+  mcpDefaultUrl?: string;
   heartbeatMs: number;
   pollMs: number;
   taskTimeoutMs: number;
@@ -73,6 +76,31 @@ function parseModelCredentialEnvNames(
   return result;
 }
 
+function parseMcpCredentialFiles(raw: string | undefined): Record<string, string> {
+  if (!raw?.trim()) return {};
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("INVALID_WORKER_MCP_CONFIG");
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("INVALID_WORKER_MCP_CONFIG");
+  const entries = Object.entries(data as Record<string, unknown>);
+  if (entries.length > 50) throw new Error("INVALID_WORKER_MCP_CONFIG");
+  const result: Record<string, string> = {};
+  for (const [ref, file] of entries) {
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(ref) ||
+      typeof file !== "string" ||
+      !path.isAbsolute(file) ||
+      file === "/"
+    )
+      throw new Error("INVALID_WORKER_MCP_CONFIG");
+    result[ref] = file;
+  }
+  return result;
+}
+
 function positiveInteger(value: string | undefined, fallback: number): number {
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
@@ -98,6 +126,15 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
       : "";
   const gitCredentialConfigs = loadGitCredentialConfigs(env.EXPERT_GIT_CREDENTIALS_JSON);
   const executorBackend = env.EXPERT_EXECUTOR_BACKEND?.trim() || "claude";
+  const supportedRuntimeProfiles = (env.EXPERT_RUNTIME_PROFILES ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (
+    supportedRuntimeProfiles.length > 20 ||
+    supportedRuntimeProfiles.some((value) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value))
+  )
+    throw new Error("INVALID_WORKER_CONFIG");
   const dockerImage =
     env.EXPERT_DOCKER_IMAGE?.trim() ||
     (executorBackend === "claude" ? "team-skill-hub-expert-claude:0.1.0" : "team-skill-hub-expert-worker:0.1.0");
@@ -116,6 +153,25 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     .filter(Boolean);
 
   const modelCredentialEnvNames = parseModelCredentialEnvNames(env.EXPERT_MODEL_CREDENTIAL_REFS_JSON, modelEnvNames);
+  const mcpCredentialFiles = parseMcpCredentialFiles(env.EXPERT_MCP_CREDENTIAL_FILES_JSON);
+  const mcpDefaultUrl = env.EXPERT_MCP_URL?.trim() || undefined;
+  if (mcpDefaultUrl) {
+    let url: URL;
+    try {
+      url = new URL(mcpDefaultUrl);
+    } catch {
+      throw new Error("INVALID_WORKER_MCP_CONFIG");
+    }
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      url.search ||
+      ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname)
+    )
+      throw new Error("INVALID_WORKER_MCP_CONFIG");
+  }
 
   const tlsCaPath = env.EXPERT_TLS_CA_PATH?.trim() || undefined;
   const tlsCertPath = env.EXPERT_TLS_CERT_PATH?.trim() || undefined;
@@ -139,7 +195,9 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(claudeModel) ||
     (executorBackend === "claude" && (codexAuthFilePath !== undefined || codexConfigFilePath !== undefined)) ||
     (executorBackend === "claude" &&
-      !modelEnvNames.some((name) => name === "ANTHROPIC_API_KEY" || name === "CLAUDE_CODE_OAUTH_TOKEN")) ||
+      !modelEnvNames.some((name) =>
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"].includes(name),
+      )) ||
     !dockerNetwork ||
     dockerNetwork === "host" ||
     dockerNetwork === "none" ||
@@ -163,6 +221,7 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     gitCredentialConfigs,
     dockerImage,
     executorBackend,
+    supportedRuntimeProfiles,
     claudeModel,
     claudeMaxTurns,
     dockerNetwork,
@@ -171,6 +230,8 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     codexConfigFilePath,
     modelEnvNames,
     modelCredentialEnvNames,
+    mcpCredentialFiles,
+    mcpDefaultUrl,
     heartbeatMs: positiveInteger(env.EXPERT_HEARTBEAT_MS, 10_000),
     pollMs: positiveInteger(env.EXPERT_POLL_MS, 3_000),
     taskTimeoutMs: positiveInteger(env.EXPERT_TASK_TIMEOUT_MS, 120_000),

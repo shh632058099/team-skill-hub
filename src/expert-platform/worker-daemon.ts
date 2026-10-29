@@ -33,7 +33,11 @@ export function createExpertWorkerRuntime(
         workerId: config.workerId,
         credential: config.workerCredential,
       },
-      tls ? { tls } : {},
+      {
+        ...(tls ? { tls } : {}),
+        supportedBackend: config.executorBackend,
+        supportedRuntimeProfiles: config.supportedRuntimeProfiles ?? [],
+      },
     );
   const executor =
     dependencies.createExecutor?.({
@@ -50,6 +54,8 @@ export function createExpertWorkerRuntime(
       seccompProfile: config.dockerSeccompProfile,
       envNames: config.modelEnvNames,
       modelCredentialEnvNames: config.modelCredentialEnvNames,
+      ...(config.mcpCredentialFiles ? { mcpCredentialFiles: config.mcpCredentialFiles } : {}),
+      ...(config.mcpDefaultUrl ? { mcpDefaultUrl: config.mcpDefaultUrl } : {}),
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
@@ -75,6 +81,8 @@ export function createExpertWorkerRuntime(
       seccompProfile: config.dockerSeccompProfile,
       envNames: config.modelEnvNames,
       modelCredentialEnvNames: config.modelCredentialEnvNames,
+      ...(config.mcpCredentialFiles ? { mcpCredentialFiles: config.mcpCredentialFiles } : {}),
+      ...(config.mcpDefaultUrl ? { mcpDefaultUrl: config.mcpDefaultUrl } : {}),
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,

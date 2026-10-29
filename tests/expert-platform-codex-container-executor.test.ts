@@ -7,20 +7,24 @@ test("Docker Codex executor builds a constrained read-only invocation", () => {
     image: "team-skill-hub-expert-worker-prototype",
     sourcePath: "/work/repo",
     network: "expert-egress",
+    supplementalGroupId: 988,
     envNames: ["OPENAI_API_KEY", "HTTPS_PROXY"],
     codexArgs: ["exec", "--sandbox", "read-only", "--json", "inspect"],
   });
-  assert.deepEqual(args.slice(0, 8), [
+  assert.deepEqual(args.slice(0, 10), [
     "run",
     "--rm",
     "--init",
     "--network",
     "expert-egress",
     "--read-only",
+    "--group-add",
+    "988",
     "--cap-drop",
     "ALL",
   ]);
   assert.ok(args.includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
+  assert.ok(args.some((arg, index) => arg === "--group-add" && args[index + 1] === "988"));
   assert.ok(args.includes("OPENAI_API_KEY"));
   assert.ok(args.includes("HTTPS_PROXY"));
   assert.ok(args.includes("/home/expert:rw,uid=10001,gid=10001,size=64m"));

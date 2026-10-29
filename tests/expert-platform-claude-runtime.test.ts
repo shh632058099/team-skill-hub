@@ -9,6 +9,7 @@ const claim: Claim = { workerId: "w", taskId: "t", runId: "r", fencing: 1, probl
 test("Claude CLI args enable only read-only tools and reject invalid model", () => {
   const args = buildClaudeReadOnlyArgs("Find OTA transitions", "sonnet");
   assert.ok(args.includes("Read,Glob,Grep"));
+  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
   assert.ok(args.includes("dontAsk"));
   assert.ok(args.includes("--no-session-persistence"));
   assert.equal(args.at(-1), "Find OTA transitions");
@@ -24,6 +25,7 @@ test("Claude streaming args preserve sandbox and read-only tool restriction", ()
     "--verbose",
   ]);
   assert.ok(args.includes("Read,Glob,Grep"));
+  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
   assert.ok(args.includes("dontAsk"));
 });
 

@@ -5,6 +5,21 @@ import { DatabaseSync } from "node:sqlite";
 import type { ExpertModelConfig } from "./expert-store.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type DeploymentTaskSnapshot = {
+  deploymentId: string;
+  configVersion: number;
+  runtimeProfile: string;
+  repository: { id: string; url: string; branch: string; credentialRef?: string; gitProxyUrl?: string } | null;
+  executor: { backend: "claude" | "codex"; modelConfig: ExpertModelConfig };
+  mcp?: {
+    profileRef?: string;
+    urlOverride?: string;
+    credentialRef: string;
+    allowedTools: string[];
+    required?: boolean;
+  };
+};
+
 export type Submission = {
   principalId: string;
   scope: string;
@@ -16,6 +31,7 @@ export type Submission = {
   repositoryId?: string;
   selectionMode?: "explicit" | "auto";
   schemaVersion?: number;
+  deploymentSnapshot?: DeploymentTaskSnapshot;
 };
 export type TaskRecord = {
   taskId: string;
@@ -25,6 +41,9 @@ export type TaskRecord = {
   repositoryId: string | null;
   selectionMode: "explicit" | "auto";
   schemaVersion: number;
+  deploymentId?: string | null;
+  deploymentConfigVersion?: number | null;
+  deploymentSnapshot?: DeploymentTaskSnapshot | null;
   sourceSessionId?: string | null;
   sourceClient?: string | null;
   repositoryUrl?: string | null;
@@ -46,6 +65,7 @@ export type Claim = {
   repositoryCredentialRef?: string;
   repositoryGitProxyUrl?: string;
   modelConfig?: ExpertModelConfig;
+  deploymentSnapshot?: DeploymentTaskSnapshot;
 };
 type Row = Record<string, unknown>;
 
@@ -114,6 +134,9 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("cancellation_requested", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("source_session_id", "TEXT");
     this.ensureTaskColumn("source_client", "TEXT");
+    this.ensureTaskColumn("deployment_id", "TEXT");
+    this.ensureTaskColumn("deployment_config_version", "INTEGER");
+    this.ensureTaskColumn("deployment_snapshot_json", "TEXT");
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
@@ -134,7 +157,20 @@ export class ExpertTaskStore {
     const expertId = input.expertId?.trim() || "legacy";
     const repositoryId = input.repositoryId?.trim() || null;
     const selectionMode = input.selectionMode ?? "explicit";
-    const schemaVersion = input.schemaVersion ?? 1;
+    const schemaVersion = input.schemaVersion ?? (input.deploymentSnapshot ? 2 : 1);
+    const snapshot = input.deploymentSnapshot;
+    if (
+      snapshot &&
+      (!snapshot.deploymentId ||
+        !Number.isSafeInteger(snapshot.configVersion) ||
+        snapshot.configVersion < 1 ||
+        !snapshot.executor ||
+        !snapshot.repository ||
+        snapshot.repository.id !== repositoryId ||
+        schemaVersion !== 2)
+    )
+      throw new Error("INVALID_DEPLOYMENT_SNAPSHOT");
+    if (!snapshot && schemaVersion === 2) throw new Error("INVALID_DEPLOYMENT_SNAPSHOT");
     if (
       (selectionMode !== "explicit" && selectionMode !== "auto") ||
       !Number.isSafeInteger(schemaVersion) ||
@@ -150,6 +186,13 @@ export class ExpertTaskStore {
           repositoryId,
           selectionMode,
           schemaVersion,
+          ...(snapshot
+            ? {
+                deploymentId: snapshot.deploymentId,
+                deploymentConfigVersion: snapshot.configVersion,
+                deploymentSnapshot: snapshot,
+              }
+            : {}),
         }),
       )
       .digest("hex");
@@ -171,7 +214,7 @@ export class ExpertTaskStore {
           .prepare(
             `SELECT * FROM expert_tasks
           WHERE principal_id=? AND scope=? AND source_client=? AND source_session_id=?
-            AND expert_id=? AND repository_id IS ? AND problem=?
+            AND expert_id=? AND repository_id IS ? AND problem=? AND request_digest=?
             AND status IN ('queued','running') ORDER BY rowid LIMIT 1`,
           )
           .get(
@@ -182,6 +225,7 @@ export class ExpertTaskStore {
             expertId,
             repositoryId,
             input.problem.trim(),
+            digest,
           ) as Row | undefined;
         if (duplicate) {
           this.db.exec("COMMIT");
@@ -190,7 +234,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,deployment_id,deployment_config_version,deployment_snapshot_json,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -205,6 +249,9 @@ export class ExpertTaskStore {
           schemaVersion,
           sourceSessionId,
           sourceClient,
+          snapshot?.deploymentId ?? null,
+          snapshot?.configVersion ?? null,
+          snapshot ? JSON.stringify(snapshot) : null,
         );
       this.event(taskId, null, "queued");
       this.db.exec("COMMIT");
@@ -216,6 +263,13 @@ export class ExpertTaskStore {
         repositoryId,
         selectionMode,
         schemaVersion,
+        ...(snapshot
+          ? {
+              deploymentId: snapshot.deploymentId,
+              deploymentConfigVersion: snapshot.configVersion,
+              deploymentSnapshot: snapshot,
+            }
+          : {}),
         sourceSessionId,
         sourceClient,
       };
@@ -225,14 +279,34 @@ export class ExpertTaskStore {
     }
   }
 
-  claim(workerId: string, now = Date.now(), leaseMs = 30_000, expertId?: string): Claim | null {
+  claim(
+    workerId: string,
+    now = Date.now(),
+    leaseMs = 30_000,
+    expertId?: string,
+    compatibility?: { backend?: "claude" | "codex"; runtimeProfiles: string[] },
+  ): Claim | null {
     if (!workerId || !Number.isFinite(now) || leaseMs <= 0) throw new Error("INVALID_REQUEST");
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const profiles = compatibility?.runtimeProfiles ?? [];
+      const supportsV2 =
+        compatibility?.backend !== undefined &&
+        ["claude", "codex"].includes(compatibility.backend) &&
+        profiles.length > 0 &&
+        profiles.every((profile) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(profile));
+      const compatibilitySql = supportsV2
+        ? `AND (t.schema_version < 2 OR
+            (t.schema_version = 2 AND
+              json_extract(t.deployment_snapshot_json,'$.executor.backend') = ? AND
+              json_extract(t.deployment_snapshot_json,'$.runtimeProfile') IN (${profiles.map(() => "?").join(",")})))`
+        : "AND t.schema_version < 2";
+      const compatibilityArgs = supportsV2 ? [compatibility!.backend!, ...profiles] : [];
       const row = expertId
         ? (this.db
             .prepare(
               `SELECT * FROM expert_tasks AS t WHERE expert_id=? AND (status='queued' OR (status='running' AND lease_until < ?))
+                ${compatibilitySql}
                 AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
                   WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
                     AND earlier.scope=t.scope AND earlier.principal_id=t.principal_id
@@ -240,10 +314,11 @@ export class ExpertTaskStore {
                     AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
                 ORDER BY t.rowid LIMIT 1`,
             )
-            .get(expertId, now) as Row | undefined)
+            .get(expertId, now, ...compatibilityArgs) as Row | undefined)
         : (this.db
             .prepare(
               `SELECT * FROM expert_tasks AS t WHERE (status='queued' OR (status='running' AND lease_until < ?))
+                ${compatibilitySql}
                 AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
                   WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
                     AND earlier.scope=t.scope AND earlier.principal_id=t.principal_id
@@ -251,7 +326,7 @@ export class ExpertTaskStore {
                     AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
                 ORDER BY t.rowid LIMIT 1`,
             )
-            .get(now) as Row | undefined);
+            .get(now, ...compatibilityArgs) as Row | undefined);
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -285,6 +360,9 @@ export class ExpertTaskStore {
         fencing,
         problem: String(row.problem),
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
+        ...(row.deployment_snapshot_json
+          ? { deploymentSnapshot: JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot }
+          : {}),
       };
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -704,6 +782,15 @@ export class ExpertTaskStore {
       repositoryId: row.repository_id == null ? null : String(row.repository_id),
       selectionMode: (row.selection_mode ?? "explicit") as "explicit" | "auto",
       schemaVersion: Number(row.schema_version ?? 1),
+      ...(row.deployment_id
+        ? {
+            deploymentId: String(row.deployment_id),
+            deploymentConfigVersion: Number(row.deployment_config_version),
+            deploymentSnapshot: row.deployment_snapshot_json
+              ? (JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot)
+              : null,
+          }
+        : {}),
       sourceSessionId: row.source_session_id == null ? null : String(row.source_session_id),
       sourceClient: row.source_client == null ? null : String(row.source_client),
       repositoryUrl: row.repository_url == null ? null : String(row.repository_url),

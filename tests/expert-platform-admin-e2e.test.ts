@@ -68,8 +68,8 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
     assert.match(html, /Git 代理地址/);
-    assert.match(html, /模型与 AI Router/);
-    assert.match(html, /凭据引用（不填写密钥）/);
+    assert.match(html, /Executor \/ Model/);
+    assert.match(html, /MCP Credential Ref/);
     assert.doesNotMatch(html, /源码仓库 ID（每行一项）/);
     const scriptStart = html.indexOf("<script>");
     const scriptEnd = html.indexOf("</script>", scriptStart + 8);

@@ -26,6 +26,8 @@ message ClaimTaskRequest {
   string worker_id = 1;
   string capability = 2;
   string expert_id = 3;
+  string supported_backend = 4;
+  repeated string supported_runtime_profiles = 5;
 }
 message ClaimTaskResponse {
   bool has_task = 1;
@@ -39,6 +41,7 @@ message ClaimTaskResponse {
   string repository_credential_ref = 9;
   string repository_git_proxy_url = 10;
   string model_config_json = 11;
+  string deployment_snapshot_json = 12;
 }
 
 message LeaseRequest {

@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Claim, ExpertTaskStore } from "./task-store.js";
+import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-store.js";
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
 
@@ -21,6 +21,8 @@ interface ClaimTaskRequest {
   worker_id: string;
   capability: string;
   expert_id: string;
+  supported_backend?: string;
+  supported_runtime_profiles?: string[];
 }
 interface ClaimTaskResponse {
   has_task: boolean;
@@ -34,6 +36,7 @@ interface ClaimTaskResponse {
   repository_credential_ref?: string;
   repository_git_proxy_url?: string;
   model_config_json?: string;
+  deployment_snapshot_json?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -194,6 +197,8 @@ export interface GrpcServerOptions {
 
 export interface GrpcClientOptions {
   tls?: GrpcTlsClientConfig;
+  supportedBackend?: "claude" | "codex";
+  supportedRuntimeProfiles?: string[];
 }
 
 export async function startExpertWorkerGrpcServer(
@@ -267,18 +272,26 @@ export async function startExpertWorkerGrpcServer(
           throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_EXPERT_CAPABILITY_MISMATCH");
         }
       }
-      const claim = tasks.claim(call.request.worker_id, Date.now(), 30_000, call.request.expert_id);
+      const compatibility =
+        call.request.supported_backend === "claude" || call.request.supported_backend === "codex"
+          ? {
+              backend: call.request.supported_backend as "claude" | "codex",
+              runtimeProfiles: call.request.supported_runtime_profiles ?? [],
+            }
+          : undefined;
+      const claim = tasks.claim(call.request.worker_id, Date.now(), 30_000, call.request.expert_id, compatibility);
       callback(
         null,
         claim
           ? (() => {
               const repository =
-                claim.repositoryId && options.experts
+                claim.deploymentSnapshot?.repository ??
+                (claim.repositoryId && options.experts
                   ? options.experts
                       .listDeployments()
                       .flatMap((deployment) => deployment.repositories ?? [])
                       .find((item) => item.id === claim.repositoryId)
-                  : undefined;
+                  : undefined);
               return {
                 has_task: true,
                 task_id: claim.taskId,
@@ -290,7 +303,10 @@ export async function startExpertWorkerGrpcServer(
                 repository_branch: repository?.branch ?? "",
                 repository_credential_ref: repository?.credentialRef ?? "",
                 repository_git_proxy_url: repository?.gitProxyUrl ?? "",
-                model_config_json: modelConfigJson,
+                model_config_json: claim.deploymentSnapshot
+                  ? JSON.stringify(claim.deploymentSnapshot.executor.modelConfig)
+                  : modelConfigJson,
+                deployment_snapshot_json: claim.deploymentSnapshot ? JSON.stringify(claim.deploymentSnapshot) : "",
               };
             })()
           : { has_task: false },
@@ -467,6 +483,25 @@ function parseClaimModelConfig(value: string) {
   }
 }
 
+function parseClaimDeploymentSnapshot(value: string): DeploymentTaskSnapshot {
+  let result: DeploymentTaskSnapshot;
+  try {
+    result = JSON.parse(value) as DeploymentTaskSnapshot;
+  } catch {
+    throw new Error("INVALID_CLAIM_DEPLOYMENT_SNAPSHOT");
+  }
+  if (
+    !result ||
+    !result.deploymentId ||
+    !Number.isSafeInteger(result.configVersion) ||
+    !result.repository ||
+    !result.executor ||
+    !["claude", "codex"].includes(result.executor.backend)
+  )
+    throw new Error("INVALID_CLAIM_DEPLOYMENT_SNAPSHOT");
+  return result;
+}
+
 export async function requestWorkerBootstrap(
   address: string,
   bootstrapToken: string,
@@ -501,6 +536,8 @@ export async function requestWorkerBootstrap(
 export class ExpertWorkerClient {
   private readonly client: WorkerServiceClient;
   private readonly metadata: grpc.Metadata;
+  private readonly supportedBackend?: "claude" | "codex";
+  private readonly supportedRuntimeProfiles: string[];
 
   constructor(address: string, identity: { workerId: string; credential: string }, options: GrpcClientOptions = {}) {
     const proto = loadWorkerProto();
@@ -514,11 +551,23 @@ export class ExpertWorkerClient {
     this.metadata = new grpc.Metadata();
     this.metadata.set("x-expert-worker-id", identity.workerId);
     this.metadata.set("authorization", `Bearer ${identity.credential}`);
+    this.supportedBackend = options.supportedBackend;
+    this.supportedRuntimeProfiles = options.supportedRuntimeProfiles ?? [];
   }
 
   async claimTask(workerId: string, expertId: string, capability = expertId): Promise<Claim | null> {
     const response = await unary<ClaimTaskResponse>((callback) =>
-      this.client.ClaimTask({ worker_id: workerId, capability, expert_id: expertId }, this.metadata, callback),
+      this.client.ClaimTask(
+        {
+          worker_id: workerId,
+          capability,
+          expert_id: expertId,
+          supported_backend: this.supportedBackend,
+          supported_runtime_profiles: this.supportedRuntimeProfiles,
+        },
+        this.metadata,
+        callback,
+      ),
     );
     if (!response.has_task) return null;
     const fencing = Number(response.fencing);
@@ -537,6 +586,9 @@ export class ExpertWorkerClient {
       ...(response.repository_credential_ref ? { repositoryCredentialRef: response.repository_credential_ref } : {}),
       ...(response.repository_git_proxy_url ? { repositoryGitProxyUrl: response.repository_git_proxy_url } : {}),
       ...(response.model_config_json ? { modelConfig: parseClaimModelConfig(response.model_config_json) } : {}),
+      ...(response.deployment_snapshot_json
+        ? { deploymentSnapshot: parseClaimDeploymentSnapshot(response.deployment_snapshot_json) }
+        : {}),
     };
   }
 

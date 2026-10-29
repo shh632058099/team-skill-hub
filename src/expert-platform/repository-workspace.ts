@@ -1,5 +1,15 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
@@ -40,6 +50,35 @@ function runGit(args: string[], cwd: string | undefined, env: NodeJS.ProcessEnv)
 function sshCommand(keyPath: string): string {
   const escaped = keyPath.replace(/'/g, "'\\''");
   return `ssh -i '${escaped}' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`;
+}
+
+/** Make a private Worker checkout group-readable by the execution container.
+ * Non-root Workers keep their own primary group; root Workers retain the image GID 10001 fallback.
+ * Never follow symlinks outside the checkout.
+ */
+export function grantExecutionContainerReadAccess(
+  root: string,
+  containerGid = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001,
+): void {
+  const visit = (file: string): void => {
+    const stat = lstatSync(file);
+    if (stat.isSymbolicLink()) return;
+    if (!stat.isDirectory() && !stat.isFile()) return;
+    if (stat.gid !== containerGid) {
+      try {
+        chownSync(file, stat.uid, containerGid);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "EPERM")
+          throw new Error("WORKER_CHECKOUT_GROUP_NOT_CONFIGURED");
+        throw error;
+      }
+    }
+    const ownerBits = (stat.mode >> 6) & 0o7;
+    const groupBits = stat.isDirectory() ? ownerBits & 0o5 : ownerBits & 0o4;
+    chmodSync(file, (stat.mode & 0o707) | (groupBits << 3));
+    if (stat.isDirectory()) for (const entry of readdirSync(file)) visit(path.join(file, entry));
+  };
+  visit(root);
 }
 
 export async function prepareRepositoryWorkspace(
@@ -167,6 +206,7 @@ export async function prepareRepositoryWorkspace(
       );
     });
     if (!/^[a-f0-9]{40,64}$/i.test(origin)) throw new Error("SOURCE_REPOSITORY_COMMIT_UNAVAILABLE");
+    grantExecutionContainerReadAccess(destination);
     return { path: destination, commitSha: origin };
   } finally {
     if (credentialTempDir) rmSync(credentialTempDir, { recursive: true, force: true });

@@ -20,7 +20,12 @@ import {
   ADMIN_SKILL_BUNDLES_HTML,
 } from "./admin-ui.js";
 import { ADMIN_EXPERTS_HTML } from "./expert-admin-ui.js";
-import { ExpertStore, type ExpertDefinition, type ExpertDeploymentRecord } from "./expert-platform/expert-store.js";
+import {
+  ExpertStore,
+  type ExpertDefinition,
+  type ExpertDeploymentRecord,
+  type ExpertMcpProfile,
+} from "./expert-platform/expert-store.js";
 import { ExpertTaskStore } from "./expert-platform/task-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
@@ -925,6 +930,39 @@ export async function startServer(
         .default([]),
       principals: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
       runtimeProfile: z.string().trim().min(1).max(200),
+      executor: z
+        .object({
+          backend: z.enum(["claude", "codex"]),
+          modelConfig: z.object({
+            providerId: z.string().min(1),
+            model: z.string().min(1),
+            baseUrl: z.string().url(),
+            wireApi: z.enum(["responses", "anthropic-messages"]),
+            credentialRef: z.string().optional(),
+            allowedEnvNames: z.array(z.string()).min(1),
+          }),
+        })
+        .optional(),
+      mcp: z
+        .object({
+          profileRef: z.string().optional(),
+          urlOverride: z.string().url().optional(),
+          credentialRef: z.string().min(1),
+          allowedTools: z.array(
+            z.enum([
+              "list_skills",
+              "search_skills",
+              "resolve_skill",
+              "get_skill",
+              "get_skill_resource",
+              "list_knowledge_sources",
+              "search_knowledge",
+              "get_knowledge",
+            ]),
+          ),
+          required: z.boolean().optional(),
+        })
+        .optional(),
       active: z.boolean(),
     })
     .superRefine((value, context) => {
@@ -1038,6 +1076,58 @@ export async function startServer(
       }
     },
   );
+  const expertMcpProfileSchema = z.object({
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+    url: z.string().url(),
+    credentialRef: z.string().trim().min(1).max(100),
+    allowedTools: z
+      .array(
+        z.enum([
+          "list_skills",
+          "search_skills",
+          "resolve_skill",
+          "get_skill",
+          "get_skill_resource",
+          "list_knowledge_sources",
+          "search_knowledge",
+          "get_knowledge",
+        ]),
+      )
+      .min(1),
+    required: z.boolean(),
+  });
+  app.get("/admin/api/expert-config/mcp-profiles", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { profiles: withExpertStore((store) => store.listMcpProfiles()) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+  app.put<{ Params: { id: string }; Body: ExpertMcpProfile }>(
+    "/admin/api/expert-config/mcp-profiles/:id",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = expertMcpProfileSchema.safeParse({ ...request.body, id: request.params.id });
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT_MCP_PROFILE", issues: parsed.error.issues };
+      }
+      try {
+        withExpertStore((store) => store.putMcpProfile(parsed.data));
+        return { profile: withExpertStore((store) => store.getMcpProfile(parsed.data.id)) };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+
   app.get("/admin/api/expert-config/deployments", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);

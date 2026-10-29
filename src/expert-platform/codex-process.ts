@@ -9,6 +9,12 @@ function sanitizedStderrHint(stderr: string): string {
   if (/bwrap/i.test(stderr)) return "Codex sandbox initialization failed";
   if (/mount source path|mounting.*permission denied|permission denied.*mount/i.test(stderr))
     return "Docker bind mount permission failure";
+  if (/Error loading config file: open .*\.docker\/config\.json: permission denied/i.test(stderr))
+    return "Docker CLI cannot read its host config";
+  if (/permission denied while trying to connect to the Docker daemon socket/i.test(stderr))
+    return "Docker daemon socket permission denied";
+  if (/EROFS: read-only file system/i.test(stderr)) return "container filesystem is read-only at a required path";
+  if (/\bEACCES\b.*permission denied/i.test(stderr)) return "container path access denied";
   if (/Could not resolve proxy|proxy.*(?:refused|unreachable|timed out)/i.test(stderr))
     return "proxy connection failed";
   if (/unauthorized|authentication required|invalid api key/i.test(stderr)) return "authentication rejected";
@@ -16,6 +22,17 @@ function sanitizedStderrHint(stderr: string): string {
   if (/network is unreachable|could not resolve host|connection refused/i.test(stderr))
     return "network connection failed";
   return stderr.trim() ? "process wrote stderr; details omitted" : "";
+}
+
+function accessTarget(stderr: string): string | undefined {
+  if (!/\bEACCES\b|permission denied/i.test(stderr)) return undefined;
+  if (/\/run\/expert-mcp\.json/i.test(stderr)) return "MCP_CONFIG";
+  if (/\/workspace(?:\/|\b)/i.test(stderr)) return "WORKSPACE";
+  if (/\/home\/expert(?:\/|\b)/i.test(stderr)) return "CONTAINER_HOME";
+  if (/\/tmp(?:\/|\b)/i.test(stderr)) return "CONTAINER_TMP";
+  if (/\.docker\/config\.json/i.test(stderr)) return "DOCKER_CONFIG";
+  if (/\/var\/lib\/team-skill-hub-worker/i.test(stderr)) return "WORKER_RUNTIME";
+  return "OTHER";
 }
 
 function classifyProcessFailure(stderr: string): string {
@@ -27,6 +44,12 @@ function classifyProcessFailure(stderr: string): string {
   if (/no space left on device/i.test(stderr)) return "DISK_FULL";
   if (/mount source path|mounting.*permission denied|permission denied.*mount/i.test(stderr))
     return "DOCKER_MOUNT_PERMISSION";
+  if (/Error loading config file: open .*\.docker\/config\.json: permission denied/i.test(stderr))
+    return "DOCKER_CONFIG_PERMISSION";
+  if (/permission denied while trying to connect to the Docker daemon socket/i.test(stderr))
+    return "DOCKER_SOCKET_PERMISSION";
+  if (/EROFS: read-only file system/i.test(stderr)) return "READ_ONLY_FILESYSTEM";
+  if (/\bEACCES\b.*permission denied/i.test(stderr)) return "FILE_ACCESS_DENIED";
   if (/permission denied/i.test(stderr)) return "PERMISSION_DENIED";
   if (
     /network is unreachable|could not resolve host|connection refused|temporary failure in name resolution/i.test(
@@ -36,6 +59,33 @@ function classifyProcessFailure(stderr: string): string {
     return "NETWORK_CONNECTION_FAILED";
   return "PROCESS_EXIT_NONZERO";
 }
+/** Classify only structured model errors; never log raw stdout or provider messages. */
+function classifyJsonlFailure(output: string): string | undefined {
+  for (const line of output.split("\n")) {
+    if (line.length > 16384 || !line.startsWith("{")) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event.type !== "error" && event.type !== "turn.failed") continue;
+    const failure = event.error;
+    const code = failure && typeof failure === "object" ? (failure as Record<string, unknown>).code : undefined;
+    if (code === "insufficient_quota") return "MODEL_QUOTA_EXCEEDED";
+    const message =
+      failure && typeof failure === "object" ? (failure as Record<string, unknown>).message : event.message;
+    if (typeof message !== "string") return "MODEL_REQUEST_FAILED";
+    if (/401|unauthorized|invalid.api.key|authentication/i.test(message)) return "AUTHENTICATION_FAILED";
+    if (/403|access.denied|forbidden/i.test(message)) return "MODEL_ACCESS_DENIED";
+    if (/429|rate.limit|quota/i.test(message)) return "MODEL_RATE_LIMITED";
+    if (/model.*(not.found|unsupported)|404/i.test(message)) return "MODEL_NOT_FOUND";
+    if (/proxy|ECONNREFUSED|ENOTFOUND|TLS|certificate|connection|timeout/i.test(message)) return "MODEL_NETWORK_FAILED";
+    return "MODEL_REQUEST_FAILED";
+  }
+  return undefined;
+}
+
 export interface CodexProcessOptions {
   executable: string;
   args: readonly string[];
@@ -65,10 +115,13 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
     let settled = false;
     let terminating = false;
     let output = "";
+    let structuredErrorCode: string | undefined;
     const collector = options.streamingBackend ? new StreamResultCollector(options.streamingBackend) : undefined;
     const reader = collector
       ? new JsonlReader((event) => {
           collector.accept(event);
+          if (options.streamingBackend === "codex" && !structuredErrorCode)
+            structuredErrorCode = classifyJsonlFailure(JSON.stringify(event));
           for (const activity of mapExecutionActivity(options.streamingBackend!, event)) {
             try {
               options.onActivity?.(activity);
@@ -159,8 +212,9 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
           JSON.stringify({
             event: "expert_worker.codex_process_failed",
             exitCode: code,
-            errorCode: classifyProcessFailure(stderrOutput),
+            errorCode: structuredErrorCode ?? classifyJsonlFailure(output) ?? classifyProcessFailure(stderrOutput),
             stderrHint: sanitizedStderrHint(stderrOutput),
+            ...(accessTarget(stderrOutput) ? { accessTarget: accessTarget(stderrOutput) } : {}),
           }),
         );
       }
