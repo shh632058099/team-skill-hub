@@ -1,6 +1,6 @@
 # Worker 选择 Codex / Claude 执行器
 
-> 当前实现采用**每个独立 Worker Runtime 指定一个执行后端**。未设置 `EXPERT_EXECUTOR_BACKEND` 时默认 Claude Code；需要 Codex 时须显式设置 `codex`。Claude CLI（派发者）与 Claude Worker（执行者）是两个不同角色。
+> 当前实现由 **Deployment 指定 Executor Backend 和模型**，Worker Runtime 只声明自己支持的 Backend / Runtime Profile，并领取与自身能力匹配的任务。Claude CLI（派发者）与 Claude Worker（执行者）是两个不同角色。
 
 ## 1. 选择与部署方式
 
@@ -30,13 +30,13 @@ sudo docker image inspect team-skill-hub-expert-claude:0.1.0
 ```dotenv
 EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
-EXPERT_CLAUDE_MODEL=sonnet
-EXPERT_CLAUDE_MAX_TURNS=12
-EXPERT_MODEL_ENV_NAMES=ANTHROPIC_API_KEY,HTTPS_PROXY,NO_PROXY
-ANTHROPIC_API_KEY=从安全密钥系统注入的实际值
+EXPERT_RUNTIME_PROFILES=claude-readonly
+EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
+EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"ANTHROPIC_AUTH_TOKEN"}'
+ANTHROPIC_AUTH_TOKEN=从安全密钥系统注入的实际值
 ```
 
-如需改回 Codex，可设置 `EXPERT_EXECUTOR_BACKEND=codex`、导入 `team-skill-hub-expert-worker:0.1.0` 并设置对应的 `EXPERT_DOCKER_IMAGE`、Codex 凭据映射。已经在运行的旧 Worker 无需添加后端字段也继续使用 Codex，但不应仅靠旧镜像名推断后端。
+如部署 Codex Worker，应配置 `EXPERT_EXECUTOR_BACKEND=codex`、`EXPERT_RUNTIME_PROFILES=codex-readonly`、导入 `team-skill-hub-expert-worker:0.1.0`，并提供 Deployment 中 `credentialRef` 对应的 Worker 本地凭据映射。Worker Backend 与 Deployment Backend 必须匹配；Hub 不会让 Claude-only Worker 领取 Codex Deployment。
 
 改用 OAuth token 时，将上面的 `ANTHROPIC_API_KEY` 替换为 `CLAUDE_CODE_OAUTH_TOKEN` 并在 `EXPERT_MODEL_ENV_NAMES` 中同步替换。**绝对不要**把密钥写进镜像、Git、发布 tar 包或文档。模型必须是安装的 Claude CLI 认可且当前账户有权限访问的模型 ID；使用代理网关时，所需 `ANTHROPIC_BASE_URL` 等变量也必须在 Worker 环境及 `EXPERT_MODEL_ENV_NAMES` 白名单内显式配置。
 
@@ -47,11 +47,11 @@ sudo journalctl -u team-skill-hub-worker -n 100 --no-pager
 
 ## 2. 隔离与兼容性
 
-Claude Executor 仅开放 `Read,Glob,Grep`，使用 `--permission-mode dontAsk`、非 root 执行、只读仓库 bind mount、read-only Docker 文件系统、资源限制和禁用写入工具。结果通过 `claude -p --output-format json` 的成功记录解析；失败时不将模型原始输出记入 Hub 阶段日志。仍应只在可信仓库使用 Worker，并根据组织的 Claude Code 商业许可和认证政策执行。
+Claude Executor 基础只开放 `Read,Glob,Grep`，并把 Deployment 允许的 Skill Hub MCP 只读工具同时加入 `--tools` 与 `--allowedTools`；使用 `--permission-mode dontAsk`、非 root 执行、只读仓库 bind mount、read-only Docker 文件系统、资源限制和禁用写入工具。结果通过 `claude -p --output-format json` 的成功记录解析；失败时不将模型原始输出记入 Hub 阶段日志。仍应只在可信仓库使用 Worker，并根据组织的 Claude Code 商业许可和认证政策执行。
 
-现在 Admin Expert `modelConfig` 支持 `wireApi=responses` 或 `anthropic-messages`：Codex 使用前者，Claude 使用后者。Claude 的模型、Base URL 和凭据引用从 Expert 下发，Worker 只负责按本机受保护映射取密钥，**不会下发明文密钥**。详细见 [模型配置与凭据映射](./model-configuration.md)。
+现在模型配置属于 **Admin → 执行配置（Deployment）**：Codex 使用 `responses`，Claude 使用 `anthropic-messages`。模型名、Base URL、Provider、凭据引用均从 Deployment 的不可变任务快照下发；Worker 只负责按本机受保护映射取得密钥，**不会从 Hub 接收明文密钥**。详细见 [执行配置中的模型与凭据映射](./model-configuration.md)。
 
-当前后端选择属于**Worker 部署配置**，尚非 Admin 中每条 Deployment 动态选择。若需 OTA 固定 Claude、code-review 固定 Codex，请为对应专家分别配置独立 Worker 身份、`EXPERT_ID`、capability、镜像与 backend。Hub 现有任务路由和 Worker 能力匹配保持不变。以后可以在 Deployment 增加期望 Backend 并由 Hub 在 Claim 时强校验。
+Worker 仍需配置本机 `EXPERT_EXECUTOR_BACKEND` 和 `EXPERT_RUNTIME_PROFILES` 来声明自己能执行什么，但这只是 Worker 能力声明，不是任务模型的来源。Hub Claim 时同时校验 Deployment Backend / Runtime Profile 与 Worker 能力。
 
 ## 3. Claude CLI 自动派发
 

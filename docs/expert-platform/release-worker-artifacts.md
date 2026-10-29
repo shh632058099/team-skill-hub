@@ -10,7 +10,7 @@
 | **默认任务执行 Docker Image**（Claude Code） | `scripts/build-worker-image.sh claude 0.1.0` | `artifacts/worker-runtime/expert-claude-image-0.1.0.tar` | Worker 主机 `docker load` 导入 |
 | **校验信息**                                 | `sha256sum`、`git rev-parse` 等              | 发布清单 / SHA-256 文件                                  | 部署者比对版本与文件完整性     |
 
-**Codex Worker 可选发布：** 发布管理员可额外执行 `bash scripts/build-worker-image.sh codex 0.1.0`，得到 `expert-worker-image-0.1.0.tar`。部署步骤、模型密钥和权限边界请参阅 [Claude 执行器文档](./claude-executor.md)。
+**Codex Worker 同样是受支持执行后端：** 发布管理员可执行 `bash scripts/build-worker-image.sh codex 0.1.0`，得到 `expert-worker-image-0.1.0.tar`。若环境同时运行 Claude/Codex Worker，建议同一发布批次同时制作、校验和交付两张镜像。部署步骤、模型密钥和权限边界请参阅 [Claude/Codex 执行器文档](./claude-executor.md)。
 
 Runtime **不是 Docker image**，Image 也**不是常驻 Worker 服务**。两者通过 `EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0` 关联。当前发行目录 `artifacts/` 被 Git 忽略：**本地生成不等于已公开发布**。应通过组织批准的制品库/内部文件服务向部署人员提供真实下载地址、校验值和版本；不要编造 GitHub Releases 地址，也不要直接提交大型 tar 到 Git。
 
@@ -58,7 +58,7 @@ npm run build:worker-runtime
 bash scripts/build-worker-image.sh claude "$VERSION"
 ```
 
-**实际脚本行为：** `build:worker-runtime` 先用 `tsconfig.worker.json` 编译 Worker 依赖闭包，再运行 `scripts/package-worker-runtime.mjs`；后者将 Worker JS、proto、运行时 `package.json` / lockfile、生产 npm 依赖、`install-worker.sh`、`worker-control.sh`、`worker.env.example`、可选的 systemd 服务和检查脚本打入 tar.gz。执行镜像由 `docker/expert-worker/Dockerfile.claude` 制作，内含 Node 24、Claude Code CLI、系统 CA 和独立的执行用户；构建脚本运行 `docker build --pull` 后 `docker save`。
+**实际脚本行为：** `build:worker-runtime` 先用 `tsconfig.worker.json` 编译 Worker 依赖闭包，再运行 `scripts/package-worker-runtime.mjs`；后者将 Worker JS、proto、运行时 `package.json` / lockfile、生产 npm 依赖、`install-worker.sh`、`worker-control.sh`、`worker.env.example`、可选的 systemd 服务和检查脚本打入 tar.gz。执行镜像由 `docker/expert-worker/Dockerfile.claude` / `Dockerfile` 制作，内含 Node 24、对应的 Claude Code 或 Codex CLI、系统 CA、`git` 和独立执行用户；构建脚本运行 `docker build --pull` 后 `docker save`。容器内 `git` 用于只读 `status/log/diff/show/branch` 等源码分析，仓库 clone/fetch 仍由宿主 Worker Runtime 负责。
 
 **注意可复现性：** 当前 Dockerfile 的基础镜像用浮动 tag，且构建脚本使用 `--pull`。即使版本号相同，多次构建也可能得到不同 digest；必须记录**实际**镜像 ID、基镜像/构建环境和 tar 的 SHA-256。若需要严格可复现发行，后续应固定基础镜像 digest、构建平台与依赖来源，不能仅凭版本号认定字节一致。
 
@@ -134,6 +134,6 @@ worker-artifacts-0.1.0.release.txt
 
 **职责边界：** 本手册是发布管理员/CI 的“制作和交付”流程；`add-expert.md` 是管理员/部署用户的“领取和使用”流程。需要正式一键发布或公开下载时，应在 CI/制品仓库实现可审计的上传、签名与版本管理，而不是让部署用户执行源码构建。
 
-## 可选：Codex 执行镜像
+## Codex 执行镜像
 
 如部署方明确选择 Codex，发布管理员另外运行 `bash scripts/build-worker-image.sh codex 0.1.0`，交付 `artifacts/worker-runtime/expert-worker-image-0.1.0.tar` 与独立 SHA-256 校验信息。Worker 端须同时配置 `EXPERT_EXECUTOR_BACKEND=codex`、对应的 `EXPERT_DOCKER_IMAGE` 和 Codex 凭据。默认交付仍是 Claude Code 镜像。

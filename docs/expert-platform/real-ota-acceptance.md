@@ -2,7 +2,7 @@
 
 > 新增 Expert 的完整搭建步骤和手动测试提示词统一维护在 [`add-expert.md`](./add-expert.md) 第 7 节。本文保留 OTA 专项验收的详细命令和分析场景；日常新增其他 Expert 时，优先使用该操作手册。
 
-本文用于验收真实链路，不以单元测试或模拟 Executor 代替真实 Codex 分析。
+本文用于验收真实链路，不以单元测试或模拟 Executor 代替真实模型分析。当前主路径以正式 Worker Runtime + Deployment 模型配置为准；下面保留 OTA/Codex 场景，同时指出与旧原型的差异。
 
 ## 验收链路
 
@@ -12,7 +12,9 @@ Codex CLI / MCP
   → Expert Router
   → 持久化 Task
   → gRPC Worker
+  → Deployment snapshot（Backend / Model / MCP）
   → Docker 中的 Codex CLI（只读沙箱）
+  → Skill Hub MCP（只读 Skill/Knowledge）
   → get_expert_task_status / get_expert_task_result
 ```
 
@@ -65,22 +67,27 @@ sudo chmod 600 /etc/expert/ota-worker.env
 ```dotenv
 EXPERT_HUB_ADDRESS=127.0.0.1:7443
 EXPERT_WORKER_ID=ota-worker-01
-EXPERT_WORKER_CREDENTIAL=替换为刚生成的credential
+EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 EXPERT_CAPABILITY=ota
 EXPERT_ID=ota
-EXPERT_SOURCE_PATH=/mnt/d/wsl/.codex/workspace/otalib
-EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:prototype
+EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
+EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
+EXPERT_EXECUTOR_BACKEND=codex
+EXPERT_RUNTIME_PROFILES=codex-readonly
+EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:0.1.0
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=unconfined
-EXPERT_CODEX_CONFIG_FILE=/etc/expert/ota-codex.toml
 EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
+EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
+EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
+EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/keys/skillhub-readonly"}'
 EXPERT_HEARTBEAT_MS=10000
 EXPERT_POLL_MS=3000
 EXPERT_TASK_TIMEOUT_MS=120000
 TEAM_SKILL_HUB_API_KEY=填入你为当前Provider准备的APIKey
 ```
 
-`/etc/expert/ota-codex.toml` 应使用 `model_providers.<id>.env_key = "TEAM_SKILL_HUB_API_KEY"` 从环境变量读取凭据；不要在 TOML 中使用 `experimental_bearer_token` 写入长期令牌。配置文件需让容器内 UID `10001` 可读，但不要在该文件内放 API Key。
+不再要求运维人员维护固定 `/etc/expert/ota-codex.toml`。Provider、Model、Base URL、协议和 MCP 策略来自 Deployment 快照；Worker 每任务生成临时 Codex 配置。长期密钥只保存在 Worker 受保护环境或 key 文件中。
 
 确认本机已配置密钥，但不要打印密钥值：
 
@@ -93,17 +100,7 @@ test -d "$EXPERT_SOURCE_PATH" && echo OTA_SOURCE_PRESENT || echo OTA_SOURCE_MISS
 docker run --rm "$EXPERT_DOCKER_IMAGE" --version
 ```
 
-如果镜像尚未构建：
-
-```bash
-docker build -t team-skill-hub-expert-worker:prototype docker/expert-worker
-```
-
-启动 Worker，并保持这个终端运行：
-
-```bash
-npm run expert-worker
-```
+正式部署应使用发布管理员交付的 `worker-runtime-<version>.tar.gz` 和 `expert-worker-image-<version>.tar`，Worker 主机无需 Hub 源码。没有 systemd 时使用 `/opt/team-skill-hub-worker/current/worker-control.sh` 或受控进程管理器启动；有 systemd 时使用 `team-skill-hub-worker.service`。
 
 Docker Codex Executor 将源码以只读方式挂载，容器禁用新增 Linux capabilities、使用只读根文件系统和受限资源。此验收不允许 Expert 自动修改或提交 OTA 仓库。
 
@@ -125,6 +122,8 @@ Hub 应自动路由到 `ota` Expert，并返回 `taskId`。随后调用：
 
 1. `get_expert_task_status`，传入返回的 `taskId`，直到 `status` 为 `succeeded` 或 `failed`。
 2. 只有 `status` 为 `succeeded` 时调用 `get_expert_task_result`，获取真实分析报告。
+
+当前执行镜像已经包含 `git`，因此任务容器可以在只读仓库上执行 `git status/log/diff/show/branch` 等分析；clone/fetch/reset/clean 仍由宿主 Worker 在领取任务后完成。
 
 ## 验收标准
 

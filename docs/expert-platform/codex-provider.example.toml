@@ -1,7 +1,11 @@
-# Copy this file to the Worker host and set EXPERT_CODEX_CONFIG_FILE to its
-# absolute path. Replace the provider name, endpoint, model, and API-key env.
-# This Codex CLI version requires the provider to support the Responses API.
-# Do not put the API key itself in this file.
+# LEGACY / DIAGNOSTIC EXAMPLE ONLY.
+#
+# Current V2 Worker Runtime does NOT require a persistent EXPERT_CODEX_CONFIG_FILE
+# for normal tasks. Provider/model/base URL are taken from the selected Deployment
+# snapshot, and Runtime generates a per-task Codex config automatically.
+#
+# Keep this file only as a reference when diagnosing Codex provider compatibility
+# outside the normal Worker flow. Do not put API keys in this file.
 
 model = "your-model-id"
 model_provider = "custom-router"
@@ -16,10 +20,10 @@ env_key = "MY_ROUTER_API_KEY"
 requires_openai_auth = false
 supports_websockets = false
 
-# Do not pass variables containing KEY, SECRET, or TOKEN to shell commands.
 [shell_environment_policy]
 ignore_default_excludes = false
 
-# Expert analysis does not need to fetch remote Codex plugin catalogs.
+[features]
+remote_plugin = false
 [features]
 remote_plugin = false

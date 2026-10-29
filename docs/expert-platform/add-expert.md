@@ -143,7 +143,7 @@ docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 4. 执行配置选择 Admin 全局 MCP Profile（默认 `default`）或按 Deployment 覆盖。覆盖不允许扩大 Profile 的只读工具权限。Worker 会在每个任务中生成隔离的 Claude/Codex MCP 配置，而不挂载个人配置或运行开发者 Hook。
 5. 发布前从**实际任务容器**测试 Hub DNS/网络、TLS/代理、MCP `tools/list`、Skill/Knowledge 检索，并验证提交/发布/专家再次派发工具不可用；同时测试无 Key、撤销 Key、协议不匹配、旧 Worker 不领取 V2 等负路径。
 
-> 现有版本化 Worker Runtime 是独立发布包，无须 Hub 源码。复用 Client Integration 完整 Setup 发行物的显式 `worker/read-only` 安装 Profile 尚未实现；当前由 Worker 任务执行器动态生成只读配置，完整自动升级和真实 Claude/Codex MCP 端到端验收仍需完成。
+> 现有版本化 Worker Runtime 是独立发布包，无须 Hub 源码。任务容器不复用开发者完整 Setup，而是由 Worker Runtime 按 Deployment 动态生成最小只读 Claude/Codex MCP 配置。Claude 与 Codex 两种 Backend 的真实 MCP 端到端链路均已验收通过；自动升级/版本分发仍应由发布流程单独管理。
 
 ## 4. 在 Worker 主机配置 Git 仓库凭据
 
@@ -336,17 +336,17 @@ EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
 EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
 
-# 必须与已导入的镜像 tag 相同；Claude Code 为默认执行后端
-EXPERT_EXECUTOR_BACKEND=codex
+# 每个 Worker 只声明一个执行后端；模型由 Deployment 决定
 EXPERT_EXECUTOR_BACKEND=claude
+EXPERT_RUNTIME_PROFILES=claude-readonly
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
-EXPERT_CLAUDE_MODEL=sonnet
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=default
 
-# 对应 Admin 专家 modelConfig.credentialRef（Codex 模型路由）
-EXPERT_MODEL_ENV_NAMES=ANTHROPIC_API_KEY,HTTPS_PROXY,NO_PROXY
-ANTHROPIC_API_KEY=在Worker主机通过安全方式配置真实模型密钥
+# 对应 Admin 执行配置 executor.modelConfig.credentialRef
+EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
+EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"ANTHROPIC_AUTH_TOKEN"}'
+ANTHROPIC_AUTH_TOKEN=在Worker主机通过安全方式配置真实模型密钥
 
 # 私有 Git 仓库才需要以下映射（公开仓库可不填）
 # EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/keys/git-readonly"}'
@@ -357,7 +357,7 @@ ANTHROPIC_API_KEY=在Worker主机通过安全方式配置真实模型密钥
 配置时确认：
 
 - `EXPERT_WORKER_ID` 在 Hub 注册表内唯一；`EXPERT_CAPABILITY` 与目标 Expert 的能力标签匹配。
-- Claude Code 默认模式使用 Worker 配置的 `ANTHROPIC_API_KEY` 或 `CLAUDE_CODE_OAUTH_TOKEN`；若手动选择 Codex，才需按 Admin 的 `Credential Ref` 配置 `EXPERT_MODEL_CREDENTIAL_REFS_JSON`。
+- 模型名、Provider、Base URL、协议来自 **Deployment**；Worker 只声明 Backend / Runtime Profile，并通过 `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 把 Deployment 的 `credentialRef` 映射到本机受保护环境变量。Claude 可使用 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，Codex 使用其 Deployment 允许的 Provider 环境变量。
 - 如果使用私有仓库，在 `/etc/team-skill-hub-worker/keys/` 安全放入**只读 Git key**，按第 4 节配置 SSH/HTTPS 凭据映射；不要复制整个 Hub `.env`。
 - 需要跨主机连接时，Hub 管理员负责发布可达的私网 gRPC 地址，设置 `EXPERT_GRPC_PUBLISH_BIND`、防火墙白名单及必要的 TLS/mTLS；不应把 gRPC 端口暴露到公网。
 - 不要直接把密钥复制进文档或版本库。`EXPERT_DOCKER_SECCOMP_PROFILE=unconfined` 仅用于复现沙箱不兼容后的受控排障，默认保持 `default`。
@@ -477,7 +477,7 @@ Admin 页面用于日常维护专家配置和执行配置。以下 CLI 主要用
 
 docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 
-# CLI 创建基础专家定义（不包含 Admin 页面中的 modelConfig）
+# CLI 创建基础专家定义（Expert 本身不包含执行模型配置）
 docker exec team-skill-hub node dist/src/cli/expert-admin.js define yocto "Yocto 构建专家" yocto,build,linux bitbake,recipe,layer,CVE
 
 # Worker 注册、审批、签发凭据
@@ -491,7 +491,7 @@ docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-creden
 docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke yocto-worker-01
 ```
 
-CLI 的 `define` 命令只创建基础定义，不支持完整模型配置表单；建议在 Admin 页面创建/编辑专家模型设置。CLI 的 `deploy` 命令使用旧式 `repositoryIds` 参数，不支持 Admin 页面直接填写仓库 URL、分支、Git 凭据引用和代理的完整体验，因此新建执行配置应优先使用 Admin 页面。
+CLI 的 `define` 命令只创建 Expert Definition；模型、Backend、MCP 策略均属于 Deployment，应在 Admin → **执行配置** 中维护。CLI 的 `deploy` 命令仍偏向旧式 `repositoryIds` 参数，不覆盖 Admin 页面直接填写仓库 URL、分支、Git 凭据引用、代理、Executor/Model 和 MCP 策略的完整体验，因此新建执行配置应优先使用 Admin 页面。
 
 ## 12. 新增第二个 Worker 的注意事项
 
