@@ -1,3 +1,4 @@
+import { verifyClaudeSessionProof } from "./expert-platform/session-proof.js";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { observeReuse } from "./reuse-observability.js";
 import * as z from "zod/v4";
@@ -140,6 +141,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     const traceId = explicitTraceId ?? appService.newMcpTraceId();
     const sessionId = requestHeaders?.get("x-skill-hub-session-id") ?? undefined;
     const transportSessionId = requestHeaders?.get("mcp-session-id") ?? undefined;
+    const credential =
+      requestHeaders?.get("x-skill-hub-api-key") ??
+      requestHeaders?.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     const client = requestHeaders?.get("x-skill-hub-client") ?? requestHeaders?.get("user-agent") ?? undefined;
 
     const registerTool = (name: string, definition: any, handler: (...args: any[]) => Promise<any>) =>
@@ -1050,27 +1054,37 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task_auto",
         {
           description:
-            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Provide the user's problem and a new unique idempotencyKey. For duplicate suppression, set optional clientSessionId to ONE stable UUID for this Claude conversation and reuse it on subsequent submit calls (different conversations MUST use different UUIDs); this matters when Claude MCP does not send a session header. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a taskId immediately; when the user wants results, automatically call wait_expert_task with its cursor until terminal, then get_expert_task_result on success. Share actual progress while waiting.",
+            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Provide the user's problem and a new unique idempotencyKey. Session identity is injected by the Claude client PreToolUse hook when installed; do not invent or generate clientSessionId. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a taskId immediately; when the user wants results, automatically call wait_expert_task with its cursor until terminal, then get_expert_task_result on success. Share actual progress while waiting.",
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
+            clientSessionProof: z
+              .string()
+              .max(100)
+              .optional()
+              .describe("Client hook generated proof; do not fabricate."),
             clientSessionId: z
               .string()
               .uuid()
               .optional()
               .describe(
-                "Stable UUID for this client conversation, generated once and reused; never share across independent conversations.",
+                "Client-injected native conversation session UUID; omit this field unless supplied by trusted client integration.",
               ),
           }),
         },
-        async ({ problem, idempotencyKey, clientSessionId }) => {
+        async ({ problem, idempotencyKey, clientSessionId, clientSessionProof }) => {
           if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
           return toolResult({
             ...expertDispatchService.submit({
               principalId: principal.id,
               scope: principal.tenantId,
               idempotencyKey,
-              sourceSessionId: sessionId ?? transportSessionId ?? clientSessionId,
+              sourceSessionId:
+                sessionId ??
+                transportSessionId ??
+                (verifyClaudeSessionProof(credential, clientSessionId, idempotencyKey, clientSessionProof)
+                  ? clientSessionId
+                  : undefined),
               sourceClient: client?.slice(0, 200) || "mcp",
               problem,
               selectionMode: "auto",
@@ -1083,28 +1097,48 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task",
         {
           description:
-            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode; for a result-seeking request automatically call wait_expert_task in bounded windows and pass nextEventId each time until terminal, then get_expert_task_result after succeeded. Do not require the user to ask again. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request. For identical active tasks in one Claude conversation, set optional clientSessionId to a stable per-conversation UUID, reusing it for all submits (different conversations require different UUIDs).',
+            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode; for a result-seeking request automatically call wait_expert_task in bounded windows and pass nextEventId each time until terminal, then get_expert_task_result after succeeded. Do not require the user to ask again. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request. Claude client PreToolUse injects native session identity when installed; do not invent or generate clientSessionId.',
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
             expertId: z.string().trim().min(1).max(200).optional(),
             selectionMode: z.enum(["auto", "explicit"]).optional(),
             repositoryId: z.string().trim().min(1).max(200).optional(),
+            clientSessionProof: z
+              .string()
+              .max(100)
+              .optional()
+              .describe("Client hook generated proof; do not fabricate."),
             clientSessionId: z
               .string()
               .uuid()
               .optional()
-              .describe("Stable UUID for this client conversation; do not reuse across different conversations."),
+              .describe(
+                "Client-injected native conversation session UUID; omit unless supplied by trusted client integration.",
+              ),
           }),
         },
-        async ({ problem, idempotencyKey, expertId, selectionMode, repositoryId, clientSessionId }) => {
+        async ({
+          problem,
+          idempotencyKey,
+          expertId,
+          selectionMode,
+          repositoryId,
+          clientSessionId,
+          clientSessionProof,
+        }) => {
           if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
           return toolResult({
             ...expertDispatchService.submit({
               principalId: principal.id,
               scope: principal.tenantId,
               idempotencyKey,
-              sourceSessionId: sessionId ?? transportSessionId ?? clientSessionId,
+              sourceSessionId:
+                sessionId ??
+                transportSessionId ??
+                (verifyClaudeSessionProof(credential, clientSessionId, idempotencyKey, clientSessionProof)
+                  ? clientSessionId
+                  : undefined),
               sourceClient: client?.slice(0, 200) || "mcp",
               problem,
               expertId,

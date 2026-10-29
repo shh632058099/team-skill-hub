@@ -495,7 +495,7 @@ export class ExpertTaskStore {
   adminTaskDetail(taskId: string) {
     const task = this.db
       .prepare(
-        "SELECT task_id,principal_id,scope,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,cancellation_requested FROM expert_tasks WHERE task_id=?",
+        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,cancellation_requested FROM expert_tasks WHERE task_id=?",
       )
       .get(taskId);
     if (!task) return null;

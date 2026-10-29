@@ -247,6 +247,8 @@ test("admin task history and bounded per-run stages reject stale workers and uns
     store.fail(second, "EXECUTION_FAILED", 114);
     const detail = store.adminTaskDetail(task.taskId)!;
     assert.equal(detail.runs.length, 2);
+    assert.ok(Object.prototype.hasOwnProperty.call(detail.task, "source_session_id"));
+    assert.ok(Object.prototype.hasOwnProperty.call(detail.task, "source_client"));
     assert.ok(detail.events.some((event) => (event as any).event_type === "lease_expired"));
     assert.ok(
       detail.events.some(

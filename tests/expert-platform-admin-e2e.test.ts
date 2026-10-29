@@ -335,3 +335,9 @@ test("Admin expert configuration UI manages definitions and execution configurat
     }
   }
 });
+
+// Task detail must expose the persisted client/session identity to operators.
+test("expert task detail UI displays persisted source session and client", () => {
+  assert.match(ADMIN_EXPERTS_HTML, /source_session_id/);
+  assert.match(ADMIN_EXPERTS_HTML, /source_client/);
+});

@@ -21,8 +21,10 @@ class SessionHookTests(unittest.TestCase):
                 result = apply({'hook_event_name': 'PreToolUse',
                     'tool_name': f'mcp__teamSkillHub__{name}', 'session_id': SESSION,
                     'tool_input': {'problem': 'read-only', 'idempotencyKey': 'k', 'clientSessionId': 'old'}})
-                self.assertEqual(result['hookSpecificOutput']['updatedInput'],
-                    {'problem': 'read-only', 'idempotencyKey': 'k', 'clientSessionId': SESSION})
+                updated = result['hookSpecificOutput']['updatedInput']
+                self.assertEqual(updated['clientSessionId'], SESSION)
+                self.assertEqual(updated['problem'], 'read-only')
+                self.assertEqual(updated['idempotencyKey'], 'k')
                 self.assertNotIn('permissionDecision', result['hookSpecificOutput'])
 
     def test_other_tools_and_invalid_session_are_untouched(self):

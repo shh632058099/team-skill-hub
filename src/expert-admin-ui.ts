@@ -25,7 +25,7 @@ async function loadTaskList(){
   }catch(e){$('taskSummary').textContent=e.message}
 }
 async function loadTaskDetail(id){try{const data=await api('/admin/api/expert-tasks/'+encodeURIComponent(id));if(location.hash!=='#task/'+id)return;taskSelected=id;
-  const task=data.task||{};$('taskDetail').replaceChildren();for(const key of ['task_id','principal_id','scope','expert_id','repository_id','repository_url','repository_branch','commit_sha','worker_id','run_id','fencing','status','selection_mode','problem']){const box=document.createElement('p');box.textContent=key+': '+String(task[key]??'—');$('taskDetail').append(box)}
+  const task=data.task||{};$('taskDetail').replaceChildren();for(const key of ['task_id','principal_id','scope','source_client','source_session_id','expert_id','repository_id','repository_url','repository_branch','commit_sha','worker_id','run_id','fencing','status','selection_mode','problem']){const box=document.createElement('p');box.textContent=key+': '+String(task[key]??'—');$('taskDetail').append(box)}
   $('taskRuns').textContent=(data.runs||[]).map(r=>r.run_id+' / '+r.worker_id+' / fencing='+r.fencing+' / '+r.status).join('；')||'无';$('taskEvents').replaceChildren();for(const e of data.events||[]){const tr=document.createElement('tr');for(const v of [new Date(Number(e.created_at)).toLocaleString(),e.run_id||'—',e.event_type,e.event_type==='tool.activity'?(String(e.tool_code||'other')+' ×'+String(e.count||1)):(e.details||'')]){const td=document.createElement('td');td.textContent=String(v);tr.append(td)}$('taskEvents').append(tr)}
   $('taskReport').textContent=String(task.result||'尚无结果');
   $('taskStop').disabled=!['queued','running'].includes(task.status)||Boolean(task.cancellation_requested);

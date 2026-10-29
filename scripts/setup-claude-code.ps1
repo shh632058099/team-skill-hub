@@ -23,7 +23,7 @@ $SettingsFile = Join-Path $ClaudeDir 'settings.json'
 $ClaudeMd = Join-Path $ClaudeDir 'CLAUDE.md'
 $HooksDir = Join-Path $ClaudeDir 'hooks'
 $HookConf = Join-Path $HooksDir 'team-skill-hub.conf'
-$StopGate = Join-Path $HooksDir 'team-skill-hub-claude-stop.sh'
+$StopGate = Join-Path $HooksDir 'team-skill-hub-claude-stop.ps1'
 $SessionGate = Join-Path $HooksDir 'team-skill-hub-expert-session.ps1'
 
 if ($Upgrade.IsPresent -and (Test-Path $HookConf)) {
@@ -148,7 +148,7 @@ $httpHandler = @{
 }
 $stopHandler = @{
   type = 'command'
-  command = 'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"'
+  command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $StopGate + '"'
   timeout = 4
 }
 
@@ -222,7 +222,7 @@ if ($ServerName -eq 'teamSkillHub') {
 $json = $root | ConvertTo-Json -Depth 20
 Write-Utf8NoBom -Path $SettingsFile -Content $json
 
-Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-claude-stop.sh") $StopGate
+Copy-Item -Force (Join-Path $ClientReleaseDir 'scripts\claude\stop-hook.ps1') $StopGate
 if ($ServerName -eq 'teamSkillHub') {
     Copy-Item -Force (Join-Path $ClientReleaseDir 'scripts\claude\expert-session-hook.ps1') $SessionGate
 }

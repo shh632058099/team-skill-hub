@@ -69,6 +69,18 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     hooks?: Array<{ command?: string }>;
   }>;
   assert.equal(groups.filter((group) => group.matcher === sessionMatcher).length, 1);
+  // Re-run Setup from the installed release itself. Bootstrap must not delete its source.
+  await execFileAsync(
+    "bash",
+    [
+      path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "scripts", "setup-claude-code.sh"),
+      "--url",
+      "http://127.0.0.1:8080/mcp",
+      "--skip-mcp",
+    ],
+    { cwd: process.cwd(), env },
+  );
+  await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "release.json"));
   // Re-running setup updates the managed hook without duplicating it or other settings.
   await execFileAsync("bash", ["scripts/setup-claude-code.sh", "--url", "http://127.0.0.1:8080/mcp"], {
     cwd: process.cwd(),
