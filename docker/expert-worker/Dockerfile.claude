@@ -1,7 +1,14 @@
 FROM node:24-bookworm-slim
 ARG CLAUDE_VERSION=2.1.308
 RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}" && npm cache clean --force
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# Some build networks intercept plain HTTP Debian mirrors and return HTML rather
+# than apt metadata. Node ships a trusted root store but the slim system image
+# may not, so bootstrap apt over HTTPS before installing system certificates.
+RUN node -e "require('fs').writeFileSync('/tmp/ca-bundle.crt', require('tls').rootCertificates.map(c => c + '\n').join(''))" \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt update \
+    && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /tmp/ca-bundle.crt
 RUN useradd --create-home --uid 10001 expert
 USER expert
 WORKDIR /workspace

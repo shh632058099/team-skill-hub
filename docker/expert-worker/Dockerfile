@@ -9,9 +9,13 @@ RUN case "${TARGETARCH}" in amd64) ARCH=x64 ;; arm64) ARCH=arm64 ;; *) echo "Uns
 
 # Codex uses a native TLS client; include the system trust store in the
 # runtime image rather than relying on Node.js' bundled CA certificates.
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Some build networks hijack plain HTTP Debian mirrors; bootstrap apt's trust
+# from Node's bundled root certificates over HTTPS instead.
+RUN node -e "require('fs').writeFileSync('/tmp/ca-bundle.crt', require('tls').rootCertificates.map(c => c + '\n').join(''))" \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt update \
+    && apt-get -o Acquire::https::CaInfo=/tmp/ca-bundle.crt install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /tmp/ca-bundle.crt
 
 RUN useradd --create-home --uid 10001 expert
 
