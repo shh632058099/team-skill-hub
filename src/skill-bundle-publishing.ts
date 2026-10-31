@@ -14,6 +14,7 @@ import {
   type SkillBundlePullRequestPublication,
   type SkillBundleSnapshot,
 } from "./skill-bundles.js";
+import { buildArtifactFileActions, type ArtifactFileAction } from "./artifact-bundle-publishing.js";
 
 const execFileAsync = promisify(execFile);
 export type SkillBundleGitRun = (args: string[], cwd?: string) => Promise<string>;
@@ -101,18 +102,26 @@ async function readTree(root: string): Promise<SkillBundleFile[]> {
   return result;
 }
 
-async function replaceRoot(worktree: string, targetRoot: string, snapshot: SkillBundleSnapshot): Promise<void> {
-  const target = path.join(worktree, ...targetRoot.split("/"));
-  await rm(target, { recursive: true, force: true });
-  await mkdir(target, { recursive: true });
-  for (const file of snapshot.files) {
-    const destination = path.join(target, ...file.path.split("/"));
+async function applyArtifactFileActions(
+  worktree: string,
+  targetRoot: string,
+  actions: ArtifactFileAction[],
+): Promise<void> {
+  for (const action of actions) {
+    const destination = path.join(worktree, ...targetRoot.split("/"), ...action.path.split("/"));
+    if (action.action === "delete") {
+      await rm(destination, { force: true });
+      continue;
+    }
+    if (action.action === "chmod") {
+      await chmod(destination, action.mode === "0755" ? 0o755 : 0o644);
+      continue;
+    }
     await mkdir(path.dirname(destination), { recursive: true });
-    await writeFile(destination, skillBundleFileBytes(file));
-    await chmod(destination, file.mode === "0755" ? 0o755 : 0o644);
+    await writeFile(destination, skillBundleFileBytes(action.file));
+    await chmod(destination, action.file.mode === "0755" ? 0o755 : 0o644);
   }
 }
-
 export interface SkillBundleReconcileResult {
   publication: SkillBundlePullRequestPublication;
   finalTreeMatches?: boolean;
@@ -325,40 +334,23 @@ export class SkillBundlePublisher {
     }
 
     const diff = diffSkillBundleTrees(before, snapshot.files);
-    const beforeByPath = new Map(before.map((file) => [file.path, file]));
-    const snapshotByPath = new Map(snapshot.files.map((file) => [file.path, file]));
-    const actions: Array<{
-      action: "create" | "update" | "delete" | "chmod";
-      file_path: string;
-      content?: string;
-      encoding?: "base64";
-      execute_filemode?: boolean;
-    }> = [];
-    const addWriteAction = (action: "create" | "update", relativePath: string) => {
-      const file = snapshotByPath.get(relativePath);
-      if (!file) throw new Error(`Skill Bundle snapshot file is missing: ${relativePath}`);
-      const filePath = `${record.replacementRoot}/${relativePath}`;
-      actions.push({
-        action,
-        file_path: filePath,
-        content: skillBundleFileBytes(file).toString("base64"),
-        encoding: "base64",
-      });
-      const previousMode = beforeByPath.get(relativePath)?.mode ?? "0644";
-      if (file.mode !== previousMode) {
-        actions.push({
-          action: "chmod",
+    const actions = buildArtifactFileActions(before, snapshot.files).map((action) => {
+      const filePath = `${record.replacementRoot}/${action.path}`;
+      if (action.action === "delete") return { action: "delete" as const, file_path: filePath };
+      if (action.action === "chmod") {
+        return {
+          action: "chmod" as const,
           file_path: filePath,
-          execute_filemode: file.mode === "0755",
-        });
+          execute_filemode: action.mode === "0755",
+        };
       }
-    };
-    for (const relativePath of diff.modified) addWriteAction("update", relativePath);
-    for (const relativePath of diff.added) addWriteAction("create", relativePath);
-    for (const relativePath of diff.deleted) {
-      actions.push({ action: "delete", file_path: `${record.replacementRoot}/${relativePath}` });
-    }
-
+      return {
+        action: action.action,
+        file_path: filePath,
+        content: skillBundleFileBytes(action.file).toString("base64"),
+        encoding: "base64" as const,
+      };
+    });
     const project = encodeURIComponent(projectPath);
     const suffix = branchSuffix(record.id);
     const baselineBranch = `skill-hub-base-${suffix}`;
@@ -503,7 +495,7 @@ export class SkillBundlePublisher {
       const remoteBranch = await this.gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], worktree);
       const remoteBranchSha = remoteBranch.trim() ? remoteBranch.trim().split(/\s+/)[0] : undefined;
       await this.gitRun(["checkout", "-B", branch], worktree);
-      await replaceRoot(worktree, record.replacementRoot, snapshot);
+      await applyArtifactFileActions(worktree, record.replacementRoot, buildArtifactFileActions(before, snapshot.files));
       await this.gitRun(["add", "-A", "--", record.replacementRoot], worktree);
       await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
       await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);
