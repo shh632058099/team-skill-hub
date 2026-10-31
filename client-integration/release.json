@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": 11,
+  "version": 12,
   "minimumSupportedVersion": 1,
-  "hookRuntimeVersion": "1.2.0",
+  "hookRuntimeVersion": "1.3.0",
   "hookSchemaVersion": 1
 }

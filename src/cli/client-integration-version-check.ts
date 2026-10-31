@@ -15,6 +15,7 @@ export function requiresClientVersionBump(paths: string[]): boolean {
     return (
       file.startsWith("client-integration/") ||
       file.startsWith("scripts/claude/") ||
+      file.startsWith("scripts/codex/") ||
       /^scripts\/setup-(?:codex|claude)-/.test(file) ||
       /^scripts\/team-skill-hub-(?:hook|claude-stop)/.test(file) ||
       /^scripts\/bootstrap-client-integration\./.test(file)

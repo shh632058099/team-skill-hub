@@ -22,7 +22,7 @@ try {
     $credential = [Environment]::GetEnvironmentVariable($keyEnv)
     if ($credential -and $inputData['idempotencyKey'] -is [string]) {
         $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()
-        $message = "team-skill-hub/claude-session/v1`n$($session.ToString('D'))`n$($inputData['idempotencyKey'])`n$timestamp"
+        $message = "team-skill-hub/client-session/v1`n$($session.ToString('D'))`n$($inputData['idempotencyKey'])`n$timestamp"
         $mac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($credential))
         try { $signature = [BitConverter]::ToString($mac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($message))).Replace('-', '').ToLowerInvariant() }
         finally { $mac.Dispose() }

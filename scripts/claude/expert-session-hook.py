@@ -53,7 +53,7 @@ def main() -> None:
         key = tool_input.get("idempotencyKey")
         if credential and isinstance(key, str):
             timestamp = str(int(time.time() * 1000))
-            message = f"team-skill-hub/claude-session/v1\n{session_id}\n{key}\n{timestamp}"
+            message = f"team-skill-hub/client-session/v1\n{session_id}\n{key}\n{timestamp}"
             signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
             updated["clientSessionProof"] = f"{timestamp}.{signature}"
         print(json.dumps({"hookSpecificOutput": {

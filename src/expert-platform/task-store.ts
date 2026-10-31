@@ -50,6 +50,12 @@ export type TaskRecord = {
   repositoryBranch?: string | null;
   commitSha?: string | null;
   cancellationRequested?: boolean;
+  /** True when this submission reused a task created by an earlier submission. */
+  reusedExistingTask?: boolean;
+  deduplicationReason?: "idempotency_key" | "same_active_session_task";
+  /** Oldest queued/running task for this authenticated client session, including this task. */
+  activeSessionTaskId?: string;
+  activeSessionTaskStatus?: TaskStatus;
 };
 export type TaskSourceMetadata = { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
 
@@ -206,13 +212,33 @@ export class ExpertTaskStore {
     const taskId = randomUUID();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const activeSessionTask = (): Pick<TaskRecord, "activeSessionTaskId" | "activeSessionTaskStatus"> => {
+        if (!sourceSessionId) return {};
+        const active = this.db
+          .prepare(
+            `SELECT task_id,status FROM expert_tasks
+             WHERE principal_id=? AND scope=? AND source_client=? AND source_session_id=?
+               AND status IN ('queued','running')
+             ORDER BY CASE WHEN created_at IS NULL THEN 1 ELSE 0 END, created_at ASC, rowid ASC LIMIT 1`,
+          )
+          .get(input.principalId, input.scope, sourceClient, sourceSessionId) as
+          { task_id: string; status: TaskStatus } | undefined;
+        return active ? { activeSessionTaskId: String(active.task_id), activeSessionTaskStatus: active.status } : {};
+      };
       const existing = this.db
         .prepare("SELECT * FROM expert_tasks WHERE principal_id=? AND scope=? AND idempotency_key=?")
         .get(input.principalId, input.scope, input.idempotencyKey) as Row | undefined;
       if (existing) {
         if (existing.request_digest !== digest) throw new Error("IDEMPOTENCY_CONFLICT");
+        const record = this.fromRow(existing);
+        const sessionTask = activeSessionTask();
         this.db.exec("COMMIT");
-        return this.fromRow(existing);
+        return {
+          ...record,
+          reusedExistingTask: true,
+          deduplicationReason: "idempotency_key",
+          ...sessionTask,
+        };
       }
       // Reuse only identical active work scoped to the same authenticated principal,
       // client session, expert and repository. Different questions remain queued.
@@ -235,8 +261,15 @@ export class ExpertTaskStore {
             digest,
           ) as Row | undefined;
         if (duplicate) {
+          const record = this.fromRow(duplicate);
+          const sessionTask = activeSessionTask();
           this.db.exec("COMMIT");
-          return this.fromRow(duplicate);
+          return {
+            ...record,
+            reusedExistingTask: true,
+            deduplicationReason: "same_active_session_task",
+            ...sessionTask,
+          };
         }
       }
       this.db
@@ -262,6 +295,7 @@ export class ExpertTaskStore {
           Date.now(),
         );
       this.event(taskId, null, "queued");
+      const sessionTask = activeSessionTask();
       this.db.exec("COMMIT");
       return {
         taskId,
@@ -280,6 +314,8 @@ export class ExpertTaskStore {
           : {}),
         sourceSessionId,
         sourceClient,
+        reusedExistingTask: false,
+        ...sessionTask,
       };
     } catch (error) {
       this.db.exec("ROLLBACK");

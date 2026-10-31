@@ -47,6 +47,16 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   await stat(path.join(home, ".team-skill-hub", "bin", "team-skill-hub-client"));
   await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "templates", "codex-guidance.md"));
   await stat(path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "scripts", "team-skill-hub-hook.sh"));
+  await stat(
+    path.join(home, ".team-skill-hub", "releases", `v${releaseVersion}`, "scripts", "codex", "expert-session-hook.py"),
+  );
+  await stat(path.join(codex, "hooks", "expert-session-hook.py"));
+  const codexHooks = JSON.parse(await readFile(path.join(codex, "hooks.json"), "utf8"));
+  const codexSessionHook = codexHooks.hooks.PreToolUse.find(
+    (group: { matcher?: string }) => group.matcher === "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$",
+  );
+  assert.ok(codexSessionHook);
+  assert.equal(codexSessionHook.hooks[0].async, false);
   assert.match(await readFile(path.join(codex, "hooks.json"), "utf8"), /team-skill-hub-client.*session-start/);
   const codexConfig = await readFile(path.join(codex, "config.toml"), "utf8");
   assert.match(codexConfig, /\[sandbox_workspace_write\]/);
@@ -186,6 +196,11 @@ test("setup scripts support remote bootstrap fallback from the Hub", async () =>
     assert.match(source, /ClientReleaseDir|CLIENT_RELEASE_DIR/);
     assert.match(source, /session-start/);
     if (file.includes("claude-code")) assert.match(source, /session-start-display/);
+    if (file.includes("codex-mcp")) {
+      assert.match(source, /expert-session-hook/);
+      assert.match(source, /submit_expert_task/);
+      assert.match(source, /\/hooks.*review\/trust/i);
+    }
   }
 });
 

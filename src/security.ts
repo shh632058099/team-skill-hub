@@ -40,14 +40,16 @@ export class StaticRolePermissionProvider implements PermissionProvider {
     return roles.length === 0 || roles.some((role) => principal.roles.includes(role));
   }
 
+  private canReadInternal(principal: Principal): boolean {
+    return ["internal", "developer", "worker-mcp-readonly"].some((role) => principal.roles.includes(role));
+  }
+
   allowedRepositories(principal: Principal, repositories: RepositoryConfig[]): RepositoryConfig[] {
     return repositories.filter((repository) => {
       if (!repository.enabled) return false;
       if (!this.hasAnyRole(principal, repository.readRoles)) return false;
       if (repository.visibility.includes("public")) return true;
-      if (repository.visibility.includes("internal")) {
-        return principal.roles.includes("internal") || principal.roles.includes("developer");
-      }
+      if (repository.visibility.includes("internal")) return this.canReadInternal(principal);
       if (repository.visibility.includes("customer")) return principal.roles.includes("customer");
       return false;
     });
@@ -56,9 +58,7 @@ export class StaticRolePermissionProvider implements PermissionProvider {
   canReadSkill(principal: Principal, repository: RepositoryConfig, skill: Skill): boolean {
     if (!this.allowedRepositories(principal, [repository]).length) return false;
     if (skill.metadata.visibility.includes("public")) return true;
-    if (skill.metadata.visibility.includes("internal")) {
-      return principal.roles.includes("internal") || principal.roles.includes("developer");
-    }
+    if (skill.metadata.visibility.includes("internal")) return this.canReadInternal(principal);
     if (skill.metadata.visibility.includes("customer")) return principal.roles.includes("customer");
     return false;
   }

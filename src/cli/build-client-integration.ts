@@ -57,6 +57,8 @@ async function copyAllowedAssets(repoRoot: string, staging: string): Promise<voi
     "scripts/claude/expert-session-hook.py",
     "scripts/claude/expert-session-hook.ps1",
     "scripts/claude/stop-hook.ps1",
+    "scripts/codex/expert-session-hook.py",
+    "scripts/codex/expert-session-hook.ps1",
   ];
   for (const rel of files) {
     const source = path.join(repoRoot, rel);

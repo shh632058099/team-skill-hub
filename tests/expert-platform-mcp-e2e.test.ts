@@ -165,11 +165,20 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     const catalogDescription = listedTools.find((tool) => tool.name === "list_available_experts")?.description ?? "";
     assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task_auto"));
     const submitDescription = listedTools.find((tool) => tool.name === "submit_expert_task")?.description ?? "";
+    const submitAutoDescription =
+      listedTools.find((tool) => tool.name === "submit_expert_task_auto")?.description ?? "";
     assert.match(catalogDescription, /ONLY when the user explicitly names an Expert/i);
     assert.match(catalogDescription, /do NOT call this tool/i);
     assert.match(catalogDescription, /separate from Skill Hub skills and agents/i);
     assert.match(catalogDescription, /returned expertId/i);
     assert.match(submitDescription, /delegate.*specialist analysis/i);
+    for (const description of [submitDescription, submitAutoDescription]) {
+      assert.match(description, /Never call submit_expert_task_auto and submit_expert_task for the same user request/i);
+      assert.match(description, /reuse the original idempotencyKey/i);
+      assert.match(description, /activeSessionTaskId/i);
+      assert.match(description, /wait_expert_task/i);
+      assert.match(description, /Codex CLI/i);
+    }
     assert.match(submitDescription, /CRITICAL ROUTING RULE/i);
     assert.match(submitDescription, /selectionMode="auto"/i);
     assert.match(submitDescription, /never use magic expertId strings/i);
@@ -281,13 +290,13 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     assert.equal(initial.status, "queued");
     assert.ok(Array.isArray(initial.events));
     let observedWorkerActivity = false;
-    // Explicit clientSessionId bridges Claude CLI HTTP MCP clients that omit session headers.
+    // Explicit signed clientSessionId bridges HTTP MCP clients that omit session headers.
     const perConversationId = "eac7bfb7-4dfa-46a3-ab19-f283991f9161";
     const duplicateProblem = "Inspect OTA recovery state machine without modifying files";
     const proof = (session: string, key: string) => {
       const stamp = String(Date.now());
       const hash = createHmac("sha256", apiKey)
-        .update(`team-skill-hub/claude-session/v1\n${session}\n${key}\n${stamp}`)
+        .update(`team-skill-hub/client-session/v1\n${session}\n${key}\n${stamp}`)
         .digest("hex");
       return `${stamp}.${hash}`;
     };
@@ -303,8 +312,23 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
       clientSessionId: perConversationId,
       clientSessionProof: proof(perConversationId, "same-session-second"),
     });
+    assert.equal(firstOfSession.reusedExistingTask, false);
+    assert.equal(firstOfSession.activeSessionTaskId, firstOfSession.taskId);
     assert.equal(secondOfSession.taskId, firstOfSession.taskId, "same active task must reuse taskId");
+    assert.equal(secondOfSession.reusedExistingTask, true);
+    assert.equal(secondOfSession.deduplicationReason, "same_active_session_task");
+    assert.equal(secondOfSession.activeSessionTaskId, firstOfSession.taskId);
     assert.equal(tasks!.get(String(firstOfSession.taskId), "ota-test-client", "rd").sourceSessionId, perConversationId);
+    const differentTaskSameSession = await callMcp(mcpUrl, apiKey, 55, "submit_expert_task_auto", {
+      problem: "Inspect a separate OTA rollback timeout issue",
+      idempotencyKey: "same-session-distinct-task",
+      clientSessionId: perConversationId,
+      clientSessionProof: proof(perConversationId, "same-session-distinct-task"),
+    });
+    assert.notEqual(differentTaskSameSession.taskId, firstOfSession.taskId);
+    assert.equal(differentTaskSameSession.reusedExistingTask, false);
+    assert.equal(differentTaskSameSession.activeSessionTaskId, firstOfSession.taskId);
+    assert.equal(differentTaskSameSession.activeSessionTaskStatus, "queued");
     const separateSession = await callMcp(mcpUrl, apiKey, 53, "submit_expert_task_auto", {
       problem: duplicateProblem,
       idempotencyKey: "other-session-first",
@@ -312,20 +336,23 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
       clientSessionProof: proof("8c03e269-183b-449a-b975-e16bdf1add11", "other-session-first"),
     });
     assert.notEqual(separateSession.taskId, firstOfSession.taskId, "different conversations must remain independent");
+    assert.equal(separateSession.activeSessionTaskId, separateSession.taskId);
     const spoofed = await callMcp(mcpUrl, apiKey, 60, "submit_expert_task_auto", {
       problem: duplicateProblem,
       idempotencyKey: "unverified-forged-session",
       clientSessionId: perConversationId,
     });
     assert.notEqual(spoofed.taskId, firstOfSession.taskId, "unverified model UUID must not deduplicate");
+    assert.equal(spoofed.activeSessionTaskId, undefined);
     assert.equal(tasks!.get(String(spoofed.taskId), "ota-test-client", "rd").sourceSessionId, null);
     const noSession = await callMcp(mcpUrl, apiKey, 54, "submit_expert_task_auto", {
       problem: duplicateProblem,
       idempotencyKey: "without-session-first",
     });
     assert.notEqual(noSession.taskId, firstOfSession.taskId, "missing session must not cross-dedup");
+    assert.equal(noSession.activeSessionTaskId, undefined);
     // Do not leave additional queue entries running; the main assertion concerns pending tasks.
-    for (const pending of [firstOfSession, separateSession, spoofed, noSession]) {
+    for (const pending of [firstOfSession, differentTaskSameSession, separateSession, spoofed, noSession]) {
       tasks!.cancel(String(pending.taskId), "ota-test-client", "rd");
     }
 

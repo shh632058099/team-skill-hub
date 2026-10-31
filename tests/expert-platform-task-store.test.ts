@@ -13,6 +13,9 @@ test("idempotent submissions preserve task identity and reject changed input", (
     const first = store.submit({ principalId: "alice", scope: "team-a", idempotencyKey: "k1", problem: "OTA failed" });
     const again = store.submit({ principalId: "alice", scope: "team-a", idempotencyKey: "k1", problem: "OTA failed" });
     assert.equal(first.taskId, again.taskId);
+    assert.equal(first.reusedExistingTask, false);
+    assert.equal(again.reusedExistingTask, true);
+    assert.equal(again.deduplicationReason, "idempotency_key");
     assert.throws(
       () => store.submit({ principalId: "alice", scope: "team-a", idempotencyKey: "k1", problem: "Other failure" }),
       /IDEMPOTENCY_CONFLICT/,
@@ -327,16 +330,26 @@ test("same-session expert queue reuses identical active work and serializes diff
     const a = store.submit({ ...common, idempotencyKey: "a", problem: "check OTA state machine" });
     const duplicate = store.submit({ ...common, idempotencyKey: "b", problem: "check OTA state machine" });
     assert.equal(duplicate.taskId, a.taskId);
+    assert.equal(duplicate.reusedExistingTask, true);
+    assert.equal(duplicate.deduplicationReason, "same_active_session_task");
+    assert.equal(duplicate.activeSessionTaskId, a.taskId);
     const b = store.submit({ ...common, idempotencyKey: "c", problem: "inspect rollback conditions" });
     assert.notEqual(a.taskId, b.taskId);
+    assert.equal(b.reusedExistingTask, false);
+    assert.equal(b.activeSessionTaskId, a.taskId);
+    assert.equal(b.activeSessionTaskStatus, "queued");
     const runA = store.claim("worker-1", 100, 1000, "ota")!;
     assert.equal(runA.taskId, a.taskId);
     assert.equal(store.claim("worker-2", 101, 1000, "ota"), null);
+    const c = store.submit({ ...common, idempotencyKey: "d", problem: "inspect a third OTA issue" });
+    assert.equal(c.activeSessionTaskId, a.taskId);
+    assert.equal(c.activeSessionTaskStatus, "running");
     store.complete(runA, "first report", 102);
     const runB = store.claim("worker-2", 103, 1000, "ota")!;
     assert.equal(runB.taskId, b.taskId);
     store.fail(runB, "FAILED", 104);
     assert.equal(store.get(b.taskId, "alice", "tenant-a").status, "failed");
+    assert.equal(store.claim("worker-3", 105, 1000, "ota")?.taskId, c.taskId);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
