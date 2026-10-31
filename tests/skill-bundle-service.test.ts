@@ -280,6 +280,29 @@ test("Skill preview treats matches in another directory as suggestions, not upda
   }
 });
 
+test("approval refuses a target that changed after submission", async () => {
+  const { dir, sourceRoot, db, service } = await fixture();
+  try {
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "design",
+      files: [{ path: "SKILL.md", content: skill("ota-design") }],
+      sourceType: "mcp",
+    });
+    assert.ok(created.targetScopeSha256);
+    await mkdir(path.join(sourceRoot, "skills", "ota", "design"), { recursive: true });
+    await writeFile(path.join(sourceRoot, "skills", "ota", "design", "SKILL.md"), skill("other-writer"));
+
+    const reviewed = await service.review(adminPrincipal, repository, created.id, "approved", "looks good");
+    assert.equal(reviewed.status, "review_stale");
+    assert.equal(reviewed.review, undefined);
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("approval stores a review baseline and later target changes make it stale", async () => {
   const { dir, sourceRoot, db, service } = await fixture();
   try {

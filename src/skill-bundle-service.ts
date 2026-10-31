@@ -533,14 +533,23 @@ export class SkillBundleService {
       });
     }
     const preview = await this.previewImport(principal, repository, id);
+    if (current.targetScopeSha256 && preview.targetTreeSha256 !== current.targetScopeSha256) {
+      return this.options.storage.updateImport({
+        ...current,
+        status: "review_stale",
+        review: undefined,
+        publishError: undefined,
+        updatedAt: now,
+      });
+    }
     return this.options.storage.updateImport({
       ...current,
       status,
       review: {
         reviewer: principal.id,
         reviewedAt: now,
-        targetRevision: preview.targetRevision,
-        targetTreeSha256: preview.targetTreeSha256,
+        targetRevision: current.targetRevision ?? preview.targetRevision,
+        targetTreeSha256: current.targetScopeSha256 ?? preview.targetTreeSha256,
         diffSha256: preview.diff.sha256,
         added: preview.diff.added.length,
         modified: preview.diff.modified.length,
