@@ -10,6 +10,7 @@ import {
 } from "./artifact-bundles.js";
 
 export type SkillBundleImportType = "skill" | "collection";
+export type SkillBundleSubmissionMode = "merge" | "replace";
 export type SkillBundleFileMode = ArtifactBundleFileMode;export type SkillBundleImportStatus =
   | "pending"
   | "approved"
@@ -110,6 +111,10 @@ export interface SkillBundleImport {
   submitter?: string;
   submissionKey?: string;
   requestSemanticsSha256?: string;
+  submissionMode?: SkillBundleSubmissionMode;
+  targetKind?: "directory";
+  targetRevision?: string;
+  targetScopeSha256?: string;
   review?: SkillBundleReview;
   publication?: SkillBundlePublication;
   publishError?: string;
@@ -221,12 +226,11 @@ function assertCollectionRootsNotNested(skills: SkillBundleSkillSummary[]): void
   }
 }
 
-export function normalizeSkillBundleInput(input: {
+export function normalizeSkillBundleTarget(input: {
   namespace: string;
   importType: SkillBundleImportType;
   skillPath?: string;
-  files: SkillBundleInputFile[];
-}): NormalizedSkillBundleInput {
+}): { namespace: string; importType: SkillBundleImportType; skillPath?: string; replacementRoot: string } {
   const namespace = normalizeNamespace(input.namespace);
   const skillPath =
     input.importType === "skill" && input.skillPath !== undefined
@@ -235,6 +239,24 @@ export function normalizeSkillBundleInput(input: {
   if (input.importType === "collection" && input.skillPath !== undefined) {
     throw new Error("skill_path is only valid for skill imports");
   }
+  const replacementRoot =
+    input.importType === "skill" && skillPath ? `skills/${namespace}/${skillPath}` : `skills/${namespace}`;
+  return {
+    namespace,
+    importType: input.importType,
+    ...(skillPath ? { skillPath } : {}),
+    replacementRoot,
+  };
+}
+
+export function normalizeSkillBundleInput(input: {
+  namespace: string;
+  importType: SkillBundleImportType;
+  skillPath?: string;
+  files: SkillBundleInputFile[];
+}): NormalizedSkillBundleInput {
+  const target = normalizeSkillBundleTarget(input);
+  const { namespace, skillPath } = target;
   if (!input.files.length) throw new Error("bundle files must not be empty");
   if (input.files.length > MAX_BUNDLE_FILES) throw new Error(`bundle file count limit exceeded (${MAX_BUNDLE_FILES})`);
   const files = normalizedTreeFiles(input.files);
@@ -244,8 +266,9 @@ export function normalizeSkillBundleInput(input: {
     }
   }
   const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0);
-  if (totalBytes > MAX_BUNDLE_TOTAL_BYTES)
+  if (totalBytes > MAX_BUNDLE_TOTAL_BYTES) {
     throw new Error(`bundle total size limit exceeded (${MAX_BUNDLE_TOTAL_BYTES} bytes)`);
+  }
   const skills = skillSummaries(files);
   if (skills.length > MAX_BUNDLE_SKILLS) throw new Error(`bundle Skill count limit exceeded (${MAX_BUNDLE_SKILLS})`);
   if (input.importType === "skill") {
@@ -256,21 +279,18 @@ export function normalizeSkillBundleInput(input: {
     if (!skills.length) throw new Error("collection import must contain at least one SKILL.md");
     assertCollectionRootsNotNested(skills);
   }
-  const replacementRoot =
-    input.importType === "skill" && skillPath ? `skills/${namespace}/${skillPath}` : `skills/${namespace}`;
   const snapshotSha256 = canonicalTreeHash(files);
   return {
     namespace,
     importType: input.importType,
     ...(skillPath ? { skillPath } : {}),
-    replacementRoot,
+    replacementRoot: target.replacementRoot,
     files,
     skills,
     snapshotSha256,
     expectedTreeSha256: snapshotSha256,
   };
 }
-
 export function diffSkillBundleTrees(
   before: Array<Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode"> | SkillBundleInputFile>,
   after: Array<Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode"> | SkillBundleInputFile>,

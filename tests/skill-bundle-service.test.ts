@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { openSkillHubDatabase } from "../src/storage/database.js";
@@ -136,6 +136,73 @@ async function publisherFixture(finalTreeMatches = true) {
   });
   return { ...base, service, calls };
 }
+
+test("default merge adds one file without deleting existing Skill files", async () => {
+  const { dir, sourceRoot, db, service } = await fixture();
+  try {
+    const root = path.join(sourceRoot, "skills", "ota", "usage");
+    await mkdir(path.join(root, "references"), { recursive: true });
+    await mkdir(path.join(root, "scripts"), { recursive: true });
+    await mkdir(path.join(root, "assets"), { recursive: true });
+    await writeFile(path.join(root, "references", "api.md"), "existing api\n");
+    await writeFile(path.join(root, "scripts", "build.sh"), "#!/bin/sh\necho build\n");
+    await chmod(path.join(root, "scripts", "build.sh"), 0o755);
+    await writeFile(path.join(root, "assets", "diagram.png"), Buffer.from([0, 1, 2, 255]));
+
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "usage",
+      files: [{ path: "references/new-api.md", content: "new api\n" }],
+      sourceType: "mcp",
+    });
+
+    const snapshot = service.getSnapshot(created.snapshotId);
+    assert.ok(snapshot);
+    assert.deepEqual(
+      snapshot.files.map((file) => file.path),
+      ["SKILL.md", "assets/diagram.png", "references/api.md", "references/new-api.md", "scripts/build.sh"],
+    );
+    assert.equal(snapshot.files.find((file) => file.path === "references/api.md")?.content, "existing api\n");
+    assert.equal(snapshot.files.find((file) => file.path === "scripts/build.sh")?.mode, "0755");
+    assert.equal(
+      snapshot.files.find((file) => file.path === "assets/diagram.png")?.contentBase64,
+      Buffer.from([0, 1, 2, 255]).toString("base64"),
+    );
+
+    const preview = await service.previewImport(principal, repository, created.id);
+    assert.deepEqual(preview.diff.added, ["references/new-api.md"]);
+    assert.deepEqual(preview.diff.modified, []);
+    assert.deepEqual(preview.diff.deleted, []);
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("explicit replace still deletes omitted Skill files", async () => {
+  const { dir, sourceRoot, db, service } = await fixture();
+  try {
+    const root = path.join(sourceRoot, "skills", "ota", "usage");
+    await mkdir(path.join(root, "references"), { recursive: true });
+    await writeFile(path.join(root, "references", "old.md"), "old\n");
+
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "usage",
+      submissionMode: "replace",
+      files: [{ path: "SKILL.md", content: skill("ota-usage") + "\nreplacement\n" }],
+      sourceType: "mcp",
+    });
+    const preview = await service.previewImport(principal, repository, created.id);
+    assert.deepEqual(preview.diff.deleted, ["references/old.md"]);
+    assert.equal(created.submissionMode, "replace");
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("submit validates the whole repository while replacing only the skill root", async () => {
   const { dir, db, service } = await fixture();

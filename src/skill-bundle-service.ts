@@ -10,17 +10,20 @@ import {
   createSkillBundleSnapshot,
   diffSkillBundleTrees,
   normalizeSkillBundleInput,
+  normalizeSkillBundleTarget,
   skillBundleFileBytes,
   type NormalizedSkillBundleInput,
   type SkillBundleDiff,
   type SkillBundleFile,
   type SkillBundleImport,
   type SkillBundleImportType,
+  type SkillBundleSubmissionMode,
 } from "./skill-bundles.js";
 import type { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundlePublisher, SkillBundleReviewStaleError } from "./skill-bundle-publishing.js";
 import { artifactIdentity, matchArtifact, type ArtifactMatch } from "./artifact-relation.js";
 import { buildArtifactPreview, type ArtifactPreviewContract } from "./artifact-preview.js";
+import { planArtifactFinalTree } from "./artifact-bundles.js";
 
 export interface SkillBundleMaterializedRepository {
   sourceRoot: string;
@@ -40,6 +43,7 @@ export interface SkillBundlePreview {
   diff: SkillBundleDiff;
   fileDiffs: SkillBundleFileDiff[];
   skills: Skill[];
+  submissionMode: SkillBundleSubmissionMode;
   /** Advisory only: explicit namespace/skillPath and replacementRoot always win. */
   artifactMatch?: ArtifactMatch;
 }
@@ -75,6 +79,7 @@ export interface SubmitSkillBundleServiceInput {
   importType: SkillBundleImportType;
   skillPath?: string;
   files: Array<{ path: string; content?: string; contentBase64?: string; mode?: "0644" | "0755" }>;
+  submissionMode?: SkillBundleSubmissionMode;
   sourceType: SkillBundleImport["sourceType"];
   sourceMetadata?: Record<string, string>;
   submissionKey?: string;
@@ -93,7 +98,12 @@ interface SkillBundleServiceOptions {
   publisher?: SkillBundlePublisher;
 }
 
-function semanticsHash(repository: RepositoryConfig, normalized: NormalizedSkillBundleInput): string {
+function semanticsHash(
+  repository: RepositoryConfig,
+  normalized: NormalizedSkillBundleInput,
+  submissionMode: SkillBundleSubmissionMode,
+  targetScopeSha256: string,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -102,12 +112,13 @@ function semanticsHash(repository: RepositoryConfig, normalized: NormalizedSkill
         namespace: normalized.namespace,
         importType: normalized.importType,
         skillPath: normalized.skillPath ?? null,
+        submissionMode,
+        targetScopeSha256,
         snapshotSha256: normalized.snapshotSha256,
       }),
     )
     .digest("hex");
 }
-
 async function readTextTree(root: string): Promise<SkillBundleFile[]> {
   const files: SkillBundleFile[] = [];
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -274,13 +285,52 @@ export class SkillBundleService {
     }
   }
 
+  private async prepareSubmission(
+    repository: RepositoryConfig,
+    input: Pick<SubmitSkillBundleServiceInput, "namespace" | "importType" | "skillPath" | "files" | "submissionMode">,
+  ): Promise<{
+    normalized: NormalizedSkillBundleInput;
+    submissionMode: SkillBundleSubmissionMode;
+    materialized: SkillBundleMaterializedRepository;
+    before: SkillBundleFile[];
+  }> {
+    const target = normalizeSkillBundleTarget(input);
+    const materialized = await this.options.materialize(repository);
+    const currentRoot = path.join(materialized.sourceRoot, ...target.replacementRoot.split("/"));
+    const before = await readTextTree(currentRoot);
+    const submissionMode = input.submissionMode ?? "merge";
+    const finalFiles = planArtifactFinalTree({
+      targetKind: "directory",
+      mode: submissionMode,
+      before,
+      submitted: input.files,
+    });
+    const normalized = normalizeSkillBundleInput({
+      namespace: target.namespace,
+      importType: target.importType,
+      skillPath: target.skillPath,
+      files: finalFiles.map((file) => ({
+        path: file.path,
+        ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }),
+        mode: file.mode,
+      })),
+    });
+    return { normalized, submissionMode, materialized, before };
+  }
+
   private async previewNormalized(
     repository: RepositoryConfig,
     normalized: NormalizedSkillBundleInput,
+    context?: {
+      submissionMode?: SkillBundleSubmissionMode;
+      materialized?: SkillBundleMaterializedRepository;
+      before?: SkillBundleFile[];
+    },
   ): Promise<SkillBundlePreview> {
-    const materialized = await this.options.materialize(repository);
+    const materialized = context?.materialized ?? (await this.options.materialize(repository));
     const currentRoot = path.join(materialized.sourceRoot, ...normalized.replacementRoot.split("/"));
-    const before = await readTextTree(currentRoot);
+    const before = context?.before ?? (await readTextTree(currentRoot));
+    const submissionMode = context?.submissionMode ?? "replace";
     // Skill imports already update the explicit replacementRoot. Provide a safe,
     // same-repository match hint for renamed Skills without redirecting it.
     let artifactMatch: ArtifactMatch | undefined;
@@ -338,6 +388,7 @@ export class SkillBundleService {
         diff,
         fileDiffs: buildSkillBundleFileDiffs(before, normalized.files, diff),
         skills,
+        submissionMode,
         artifactPreview: buildArtifactPreview({
           artifactType: "skill",
           targetPath: normalized.replacementRoot,
@@ -363,8 +414,8 @@ export class SkillBundleService {
     input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey">,
   ): Promise<SkillBundlePreview> {
     this.assertAuthorized(principal, repository);
-    const normalized = normalizeSkillBundleInput(input);
-    return await this.previewNormalized(repository, normalized);
+    const prepared = await this.prepareSubmission(repository, input);
+    return await this.previewNormalized(repository, prepared.normalized, prepared);
   }
 
   async submitDetailed(
@@ -373,8 +424,10 @@ export class SkillBundleService {
     input: SubmitSkillBundleServiceInput,
   ): Promise<SkillBundleSubmitResult> {
     this.assertAuthorized(principal, repository);
-    const normalized = normalizeSkillBundleInput(input);
-    const requestSemanticsSha256 = semanticsHash(repository, normalized);
+    const prepared = await this.prepareSubmission(repository, input);
+    const { normalized, submissionMode, materialized, before } = prepared;
+    const targetScopeSha256 = canonicalTreeHash(before);
+    const requestSemanticsSha256 = semanticsHash(repository, normalized, submissionMode, targetScopeSha256);
     if (input.submissionKey) {
       const existing = this.options.storage.findBySubmissionKey(principal.id, input.submissionKey);
       if (existing) {
@@ -383,7 +436,7 @@ export class SkillBundleService {
         return { import: existing, created: false };
       }
     }
-    await this.previewNormalized(repository, normalized);
+    await this.previewNormalized(repository, normalized, prepared);
     const snapshot = this.options.storage.saveSnapshot(createSkillBundleSnapshot(normalized));
     const now = new Date().toISOString();
     const record: SkillBundleImport = {
@@ -403,6 +456,10 @@ export class SkillBundleService {
       submitter: principal.id,
       ...(input.submissionKey ? { submissionKey: input.submissionKey } : {}),
       requestSemanticsSha256,
+      submissionMode,
+      targetKind: "directory",
+      targetRevision: materialized.revision,
+      targetScopeSha256,
       createdAt: now,
       updatedAt: now,
     };
@@ -448,7 +505,7 @@ export class SkillBundleService {
     this.assertAuthorized(principal, repository);
     const record = this.options.storage.getImport(id);
     if (!record || record.repository !== repository.id) throw new Error("Skill Bundle import not found");
-    return await this.previewNormalized(repository, this.normalizedFromImport(record));
+    return await this.previewNormalized(repository, this.normalizedFromImport(record), { submissionMode: record.submissionMode ?? "replace" });
   }
 
   async review(
