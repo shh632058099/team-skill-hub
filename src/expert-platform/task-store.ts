@@ -137,10 +137,17 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("deployment_id", "TEXT");
     this.ensureTaskColumn("deployment_config_version", "INTEGER");
     this.ensureTaskColumn("deployment_snapshot_json", "TEXT");
+    this.ensureTaskColumn("created_at", "INTEGER");
+    // Older tasks already have a queued lifecycle event created at submission time.
+    // Backfill from that event so the new history column remains useful after upgrade.
+    this.db.exec(
+      `UPDATE expert_tasks SET created_at=(SELECT MIN(created_at) FROM expert_events WHERE expert_events.task_id=expert_tasks.task_id) WHERE created_at IS NULL`,
+    );
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);`);
+      CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);
+      CREATE INDEX IF NOT EXISTS idx_expert_task_created_at ON expert_tasks(created_at DESC);`);
   }
 
   submit(input: Submission): TaskRecord {
@@ -234,7 +241,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,deployment_id,deployment_config_version,deployment_snapshot_json,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -252,6 +259,7 @@ export class ExpertTaskStore {
           snapshot?.deploymentId ?? null,
           snapshot?.configVersion ?? null,
           snapshot ? JSON.stringify(snapshot) : null,
+          Date.now(),
         );
       this.event(taskId, null, "queued");
       this.db.exec("COMMIT");
@@ -564,7 +572,7 @@ export class ExpertTaskStore {
     );
     const rows = this.db
       .prepare(
-        `SELECT task_id,principal_id,scope,expert_id,repository_id,selection_mode,status,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha FROM expert_tasks${clause} ORDER BY rowid DESC LIMIT ? OFFSET ?`,
+        `SELECT task_id,principal_id,scope,expert_id,repository_id,selection_mode,status,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,created_at FROM expert_tasks${clause} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`,
       )
       .all(...args, limit, offset);
     return { total, limit, offset, tasks: rows };
@@ -573,7 +581,7 @@ export class ExpertTaskStore {
   adminTaskDetail(taskId: string) {
     const task = this.db
       .prepare(
-        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,cancellation_requested FROM expert_tasks WHERE task_id=?",
+        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,created_at,cancellation_requested FROM expert_tasks WHERE task_id=?",
       )
       .get(taskId);
     if (!task) return null;

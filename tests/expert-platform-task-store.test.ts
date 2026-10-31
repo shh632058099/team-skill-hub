@@ -27,6 +27,42 @@ test("idempotent submissions preserve task identity and reject changed input", (
   }
 });
 
+test("admin task history returns creation timestamps newest first", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-time-order-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const store = new ExpertTaskStore(file);
+    const older = store.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "older",
+      problem: "older task",
+    });
+    const newer = store.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "newer",
+      problem: "newer task",
+    });
+    const db = new DatabaseSync(file);
+    db.prepare("UPDATE expert_tasks SET created_at=? WHERE task_id=?").run(1_000, older.taskId);
+    db.prepare("UPDATE expert_tasks SET created_at=? WHERE task_id=?").run(2_000, newer.taskId);
+    db.close();
+    const result = store.adminTasks();
+    assert.deepEqual(
+      result.tasks.map((row: any) => row.task_id),
+      [newer.taskId, older.taskId],
+    );
+    assert.deepEqual(
+      result.tasks.map((row: any) => row.created_at),
+      [2_000, 1_000],
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("claim uses fencing and stale workers cannot complete the task", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-"));
   try {
@@ -87,10 +123,22 @@ test("opening a legacy task database migrates expert routing columns in place", 
         fencing INTEGER NOT NULL DEFAULT 0,
         UNIQUE(principal_id, scope, idempotency_key)
       );
+      INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,status)
+        VALUES('legacy-task','legacy-user','org','legacy-key','digest','legacy task','queued');
+      CREATE TABLE expert_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        run_id TEXT,
+        event_type TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO expert_events(task_id,run_id,event_type,created_at)
+        VALUES('legacy-task',NULL,'queued',123456789);
     `);
     legacy.close();
 
     const store = new ExpertTaskStore(file);
+    assert.equal((store.adminTasks({ q: "legacy-task" }).tasks[0] as any).created_at, 123456789);
     const task = store.submit({
       principalId: "alice",
       scope: "org",

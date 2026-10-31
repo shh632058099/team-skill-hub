@@ -10,7 +10,7 @@ export const ADMIN_EXPERTS_HTML = `<!doctype html>
 <section id="tasks" class="view hidden">
 <div class="card"><h2>专家任务运行记录</h2><p class="muted">任务历史及按 Run 区分的结构化执行阶段；不展示模型原始日志或密钥。旧任务仅有生命周期事件。</p>
 <div class="actions"><label>状态 <select id="taskStatus"><option value="">全部</option><option>queued</option><option>running</option><option>succeeded</option><option>failed</option><option>cancelled</option></select></label><label>专家 <input id="taskExpert" placeholder="Expert ID"></label><label>Worker <input id="taskWorker" placeholder="Worker ID"></label><label>搜索 <input id="taskQuery" placeholder="Task ID / 仓库"></label><button type="button" id="taskRefresh">刷新</button></div>
-<div id="taskSummary" class="muted"></div><div style="overflow-x:auto"><table><thead><tr><th>Task ID</th><th>Expert</th><th>仓库</th><th>Worker</th><th>状态</th><th>路由</th><th>操作</th></tr></thead><tbody id="taskRows"></tbody></table></div>
+<div id="taskSummary" class="muted"></div><div style="overflow-x:auto"><table><thead><tr><th>时间</th><th>Task ID</th><th>Expert</th><th>仓库</th><th>Worker</th><th>状态</th><th>路由</th><th>操作</th></tr></thead><tbody id="taskRows"></tbody></table></div>
 <div class="actions"><button class="secondary" id="taskPrev" type="button">上一页</button><button class="secondary" id="taskNext" type="button">下一页</button></div></div>
 </section>
 <section id="taskPage" class="view hidden">
@@ -22,7 +22,7 @@ async function loadTaskList(){
   try { const params=new URLSearchParams({limit:'20',offset:String(taskOffset)});
     for(const [key,id] of [['status','taskStatus'],['expertId','taskExpert'],['workerId','taskWorker'],['q','taskQuery']]){const value=$(id).value.trim();if(value)params.set(key,value)}
     const data=await api('/admin/api/expert-tasks?'+params);$('taskRows').replaceChildren();
-    for(const item of data.tasks||[]){const tr=document.createElement('tr');for(const key of ['task_id','expert_id','repository_id','worker_id','status','selection_mode']){const td=document.createElement('td');td.textContent=String(item[key]??'—');tr.appendChild(td)}const td=document.createElement('td');const btn=document.createElement('button');btn.textContent='详情';btn.onclick=()=>{location.hash='task/'+encodeURIComponent(item.task_id)};td.append(btn);tr.append(td);$('taskRows').append(tr)}
+    for(const item of data.tasks||[]){const tr=document.createElement('tr');const timeCell=document.createElement('td');timeCell.textContent=item.created_at==null?'—':new Date(Number(item.created_at)).toLocaleString();timeCell.title=item.created_at==null?'历史任务没有可用的创建时间':new Date(Number(item.created_at)).toISOString();tr.appendChild(timeCell);for(const key of ['task_id','expert_id','repository_id','worker_id','status','selection_mode']){const td=document.createElement('td');td.textContent=String(item[key]??'—');tr.appendChild(td)}const td=document.createElement('td');const btn=document.createElement('button');btn.textContent='详情';btn.onclick=()=>{location.hash='task/'+encodeURIComponent(item.task_id)};td.append(btn);tr.append(td);$('taskRows').append(tr)}
     $('taskSummary').textContent='总计 '+data.total+' 条 · 当前偏移 '+data.offset;$('taskPrev').disabled=taskOffset===0;$('taskNext').disabled=taskOffset+20>=data.total;
   }catch(e){$('taskSummary').textContent=e.message}
 }

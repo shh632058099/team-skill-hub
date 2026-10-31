@@ -270,6 +270,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     const listed = await list.json();
     assert.equal(listed.total, 1);
     assert.equal(listed.tasks[0].task_id, task.taskId);
+    assert.ok(Number.isSafeInteger(listed.tasks[0].created_at) && listed.tasks[0].created_at > 0);
     assert.equal(listed.tasks[0].result, undefined, "list must not expose full report");
     const detail = await fetch(base + "/admin/api/expert-tasks/" + task.taskId);
     assert.equal(detail.status, 200);
@@ -279,6 +280,8 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.ok(body.events.some((x: any) => x.event_type === "repository.started"));
     assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid")).status, 400);
     assert.match(html, /id="taskPage"/);
+    assert.match(html, /<th>时间<\/th>/);
+    assert.match(html, /item\.created_at/);
     assert.match(html, /id="taskStop"/);
     assert.match(html, /id="taskDelete"/);
     assert.match(html, /hashchange/);
