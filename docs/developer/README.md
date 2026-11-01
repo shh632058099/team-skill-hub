@@ -12,7 +12,7 @@
   -> 配置 Codex / Claude Code MCP
   -> 验证 teamSkillHub
   -> discover / 使用 Skill / Knowledge
-  -> 创建完整 Skill 目录并提交 Skill Bundle
+  -> 创建/更新 Skill Bundle（默认 Merge，按需显式 Replace）
   -> 自动或手工回流 Knowledge
   -> 把 Candidate ID 发给管理员审批
   -> 管理员创建 PR/MR

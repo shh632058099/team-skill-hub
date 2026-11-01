@@ -138,16 +138,18 @@ Prefer progressive loading instead of loading all Skills, Knowledge, and resourc
 
 When a task produces a stable, reusable, verified procedure, turn it into a Skill.
 
-Ask the client to generate and validate the complete Skill directory, review it, and then submit it as a Skill Bundle. A single-file Skill is still a Bundle with one `SKILL.md`. For example:
+Skills use the Artifact Bundle model. For a new Skill you may submit the complete directory. When updating an existing Skill, the default mode is **merge**: submit only the files added or changed in this update, and omitted existing `scripts/`, `references/`, `assets/`, and other files are preserved. Use `submission_mode=replace` only when the submitted tree is intentionally the complete desired Skill.
+
+For example:
 
 ```text
 Turn the verified workflow we just completed into a reusable Skill.
-Generate the complete SKILL.md first and let me review it.
+Generate SKILL.md and the files changed by this update and let me review them first.
 After confirmation, use teamSkillHub submit_skill_bundle with import_type=skill.
-Submit the complete Skill root, including SKILL.md and any scripts/, references/, or assets/ files.
+Omit submission_mode for the default merge; use replace only for an intentional full replacement.
 ```
 
-Submission creates a pending Skill Bundle import for administrator review. It does not write directly to the formal repository.
+Submission creates a pending Artifact Bundle for administrator review. It does not write directly to the formal repository.
 
 ## 8. Feed back Knowledge
 
@@ -155,10 +157,10 @@ Knowledge is for current facts such as design details, API behavior, root causes
 
 ### Automatic feedback
 
-When Codex is installed with the setup script, automatic Knowledge candidates are enabled by default. A Candidate is created only when the task contains a meaningful engineering action, verification evidence, and reusable content.
-
 Automatic candidates still require administrator review and are never published directly.
-New Knowledge candidates are compared with published Markdown in the same repository. A unique high-confidence match targets the existing file for update; ambiguous matches are suggestions only. Review the target path and diff before approval. An administrator can explicitly choose a new document. Skill Bundle previews may expose advisory matches, but never override the submitted namespace/skill path.
+New Knowledge candidates are compared with published Markdown in the same repository. A unique high-confidence match targets the existing file for update; ambiguous matches are suggestions only. Review the target path and diff before approval.
+
+Each new Knowledge Candidate is also bound to a file-scoped Artifact Bundle. The default `submission_mode` is `merge`. For a single-file Knowledge artifact, both Merge and Replace affect only that exact Markdown file and never delete sibling documents.
 
 ### Manual feedback
 
@@ -167,7 +169,8 @@ For stable, reusable, verified knowledge, use the server-managed Knowledge Submi
 1. Call `get_knowledge_submission_spec` immediately before submission.
 2. Follow the returned current rules, Markdown template, and safety requirements.
 3. Call `submit_knowledge_candidate` with the returned `spec_version`.
-4. If the server returns `KNOWLEDGE_SPEC_OUTDATED`, fetch the current spec again and retry.
+4. Omit `submission_mode` for the default Merge; use `replace` only for an intentional replacement of the selected Artifact Scope.
+5. If the server returns `KNOWLEDGE_SPEC_OUTDATED`, fetch the current spec again and retry.
 
 The administrator can edit and version the active specification at `/admin/knowledge-submission-spec`. Clients do not need a new hard-coded format when the server-side policy changes.
 
@@ -181,9 +184,11 @@ If the existing asset is no longer suitable, submit a new Knowledge Candidate or
 
 ## 10. Get administrator approval
 
-After submitting a Candidate, send the **Candidate ID** to the administrator.
+After submission, send the **Candidate ID for Knowledge** or **Bundle Import ID for Skill** to the administrator.
 
-Knowledge and Skill use the same main lifecycle:
+The Review Center shows the diff, Submission Mode, Target Scope, Snapshot hash, and Review Baseline. Knowledge Candidate detail also shows the bound Artifact Bundle ID and Bundle status.
+
+Knowledge and Skill use the same main publication lifecycle:
 
 ```text
 pending
@@ -192,15 +197,15 @@ pending
   -> published   (PR/MR merged)
 ```
 
-Rejected Candidates can be approved again. Failed publication can be retried.
+If the selected target scope changes before approval or publication, the record becomes `review_stale` and must be reviewed again. An approved Snapshot is never silently re-merged onto changed content.
 
 Important:
 
 - `approved` does not mean formally published;
 - creating a PR/MR does not mean formally published;
-- only a merged PR/MR transitions the Candidate to `published`.
-
-If a Candidate is rejected, the administrator provides a reason. Update the content and resubmit, or ask the administrator to re-approve the existing Candidate when appropriate.
+- only a merged PR/MR transitions the record to `published`;
+- Merge does not delete an existing file merely because it was omitted from this submission;
+- Replace is explicit and administrators should inspect its deletion list carefully.
 
 ## 11. Permissions and responsibility boundaries
 
@@ -262,6 +267,7 @@ PowerShell:
 ```
 
 Restart Codex or Claude Code after a required upgrade. Use the original setup `--upgrade` / `-Upgrade` command only if the stable launcher is missing or damaged.
+
 ## 13. Safe usage principles
 
 - Keep the Developer API Key in an environment variable or approved secret store.

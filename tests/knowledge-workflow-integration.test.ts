@@ -126,6 +126,14 @@ test("published Knowledge is automatically related and updated through review an
     assert.equal(bundleRecord?.targetKind, "file");
     assert.equal(bundleRecord?.replacementRoot, existingPath);
     assert.equal(bundleRecord?.submissionMode, "merge");
+    const bundleSummary = await service.getKnowledgeCandidateArtifactBundle(candidate.id);
+    assert.equal(bundleSummary?.id, candidate.artifactBundleId);
+    assert.equal(bundleSummary?.kind, "knowledge");
+    assert.equal(bundleSummary?.targetKind, "file");
+    assert.equal(bundleSummary?.submissionMode, "merge");
+    assert.equal(bundleSummary?.replacementRoot, existingPath);
+    assert.ok(bundleSummary?.targetScopeSha256);
+    assert.ok(bundleSummary?.snapshotSha256);
     const editedCandidate = await service.updateKnowledgeCandidate(candidate.id, {
       content: candidate.content.replace(
         "Updated recovery instructions with new verified checkpoints.",

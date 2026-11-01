@@ -3836,6 +3836,32 @@ export class SkillHubApplicationService {
     return await this.observability.getCandidate(id);
   }
 
+  async getKnowledgeCandidateArtifactBundle(id: string) {
+    const candidate = await this.observability.getCandidate(id);
+    if (!candidate?.artifactBundleId) return undefined;
+    const record = this.skillBundles.getImport(candidate.artifactBundleId);
+    if (!record) return undefined;
+    const snapshot = this.skillBundles.getSnapshot(record.snapshotId);
+    return {
+      id: record.id,
+      kind: record.kind ?? (record.importType === "knowledge" ? "knowledge" : "skill"),
+      importType: record.importType,
+      targetKind: record.targetKind ?? "directory",
+      replacementRoot: record.replacementRoot,
+      submissionMode: record.submissionMode ?? "merge",
+      status: record.status,
+      repository: record.repository,
+      targetRevision: record.targetRevision,
+      targetScopeSha256: record.targetScopeSha256,
+      snapshotSha256: record.snapshotSha256,
+      snapshotFileCount: snapshot?.fileCount ?? 0,
+      review: record.review,
+      publication: record.publication,
+      publishError: record.publishError,
+      updatedAt: record.updatedAt,
+    };
+  }
+
   async deleteKnowledgeCandidate(id: string) {
     return await this.observability.deleteCandidate(id);
   }

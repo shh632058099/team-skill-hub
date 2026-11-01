@@ -138,16 +138,18 @@ setup 会记录实际解析后的 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`，后续升
 
 当一次任务形成了稳定、可复用、已经验证的操作流程时，可以整理成 Skill。
 
-先让客户端生成并验证完整 Skill 目录，检查后再作为 Skill Bundle 提交。即使只有一个 `SKILL.md`，也仍然是 Bundle。例如：
+Skill 使用 Artifact Bundle 模型。创建新 Skill 时可以提交完整目录；更新已有 Skill 时默认使用 **Merge**，只需要提交本次新增或修改的文件，未提交的 `scripts/`、`references/`、`assets/` 等旧文件会保留。只有明确希望“以本次文件树完整替换目标 Skill”时才使用 `submission_mode=replace`。
+
+例如：
 
 ```text
 把刚才已经验证通过的流程整理成一个可复用 Skill。
-先生成完整 SKILL.md 给我检查，不要直接发布。
+先生成 SKILL.md 和本次需要新增/修改的资源给我检查，不要直接发布。
 确认后使用 teamSkillHub 的 submit_skill_bundle，并设置 import_type=skill。
-提交完整 Skill 根目录，包括 SKILL.md 以及可选的 scripts/、references/、assets/ 等文件。
+默认不传 submission_mode（即 Merge）；仅完整替换现有 Skill 时显式传 replace。
 ```
 
-提交只会创建待管理员审核的 Skill Bundle Import，不会直接写正式仓库。
+提交只会创建待管理员审核的 Artifact Bundle，不会直接写正式仓库。
 
 ## 8. 如何回流 Knowledge
 
@@ -158,7 +160,9 @@ Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、�
 使用 Codex 接入脚本时，自动知识候选默认开启。系统只会在任务包含明确工程动作和验证证据、并满足可复用条件时创建 Candidate。
 
 自动候选仍然必须经过管理员审核，不会直接发布。
-新的 Knowledge Candidate 会与同仓库已发布的 Markdown 文档进行匹配。唯一且高置信度的匹配会指向原文档路径，供管理员审核更新 Diff；存在歧义时仅给出建议，不自动覆盖。管理员可明确选择新建。Skill Bundle 的匹配结果仅作为预览建议，不会覆盖提交时指定的 namespace/skillPath。
+新的 Knowledge Candidate 会与同仓库已发布的 Markdown 文档进行匹配。唯一且高置信度的匹配会指向原文档路径，供管理员审核更新 Diff；存在歧义时仅给出建议，不自动覆盖。管理员可明确选择新建。
+
+新 Knowledge Candidate 同时绑定一个 file-scoped Artifact Bundle。默认 `submission_mode=merge`；对于单文件 Knowledge，Merge 和 Replace 都只作用于该精确 Markdown 文件，不会删除同目录其他文档。
 
 ### 手工回流
 
@@ -172,11 +176,11 @@ Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、�
 1. 调用 get_knowledge_submission_spec 获取当前规则、模板和 spec_version。
 2. 按当前模板整理本次已经验证的结论，不要补写 unknown / N/A / 未验证内容。
 3. 调用 submit_knowledge_candidate，并传入刚刚获取的 spec_version。
-4. 不要包含 Token、密码、客户敏感信息或未经验证的推测。
+4. submission_mode 可省略，默认 Merge；仅明确替换目标 Artifact Scope 时使用 replace。
+5. 不要包含 Token、密码、客户敏感信息或未经验证的推测。
 ```
 
-如果服务端返回 `KNOWLEDGE_SPEC_OUTDATED`，说明提交期间规则已经升级；重新调用 `get_knowledge_submission_spec`，按最新规则重新整理后再提交。
-## 9. 如何反馈已有内容有问题
+如果服务端返回 `KNOWLEDGE_SPEC_OUTDATED`，说明提交期间规则已经升级；重新调用 `get_knowledge_submission_spec`，按最新规则重新整理后再提交。## 9. 如何反馈已有内容有问题
 
 如果发现 Knowledge 或 Skill 已经过期、错误或质量较差，可以使用 `submit_feedback`，写清楚可验证的原因。
 
@@ -184,9 +188,11 @@ Knowledge 适合沉淀“当前事实”，例如设计说明、接口说明、�
 
 ## 10. 如何找管理员审批
 
-提交 Candidate 后，把 **Candidate ID** 发给管理员即可。
+提交后，把 **Candidate ID（Knowledge）** 或 **Bundle Import ID（Skill）** 发给管理员即可。
 
-管理员会在 Review Inbox 中查找并审核。Knowledge 和 Skill 共用同一套主要状态：
+管理员会在审核中心查看 Diff、Submission Mode、Target Scope、Snapshot Hash 和 Review Baseline。Knowledge Candidate 详情还会显示它绑定的 Artifact Bundle ID 和 Bundle 状态。
+
+Knowledge 和 Skill 共用同一套主要发布生命周期：
 
 ```text
 pending（待审核）
@@ -195,15 +201,17 @@ pending（待审核）
   -> published（PR/MR 已合并）
 ```
 
+如果目标 Scope 在审核前或发布前发生变化，系统会进入 `review_stale`，要求重新查看 Diff 并审核，不会把已批准 Snapshot 自动合并到新内容上。
+
 被拒绝后可以重新批准；发布失败后可以重试发布。
 
 需要特别注意：
 
 - `approved` 不等于已经正式发布；
 - PR/MR 创建成功也不等于正式发布；
-- 只有 PR/MR 合并后，Candidate 才进入 `published`。
-
-如果管理员拒绝 Candidate，会给出审核原因；开发者可以修改内容后重新提交，或者让管理员重新批准现有 Candidate。
+- 只有 PR/MR 合并后，记录才进入 `published`；
+- Merge 不会因为本次未提交某个旧文件而删除它；
+- Replace 必须是显式操作，管理员应重点检查删除列表。
 
 ## 11. 权限和职责边界
 
@@ -265,6 +273,7 @@ PowerShell：
 ```
 
 如果是 required update，升级后重新启动 Codex 或 Claude Code。只有 stable launcher 丢失或损坏时，才使用原 setup 的 `--upgrade` / `-Upgrade` 作为灾难恢复手段。
+
 ## 13. 安全使用原则
 
 - Developer API Key 只放在环境变量或公司认可的 Secret Store 中；

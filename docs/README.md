@@ -21,10 +21,9 @@
 - MCP 地址和 API Key 从哪里拿；
 - Codex / Claude Code 如何配置 MCP；
 - 如何搜索和使用 Skill / Knowledge；
-- 如何创建并提交 Skill Bundle；
-- 如何自动或手工回流 Knowledge；
-- 如何让管理员审批 Knowledge / Skill；
-- PR/MR 合并后如何进入正式发布状态。
+- 如何创建并更新 Skill Bundle（默认 Merge / 显式 Replace）；
+- 如何自动或手工回流 Knowledge，并使用统一 Artifact Bundle 生命周期；
+- 如何让管理员审批 Knowledge / Skill；- PR/MR 合并后如何进入正式发布状态。
 
 - [普通开发者入口](developer/README.md)
 

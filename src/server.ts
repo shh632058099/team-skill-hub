@@ -2514,7 +2514,10 @@ export async function startServer(
       reply.code(404);
       return { error: "knowledge candidate not found" };
     }
-    return { candidate };
+    return {
+      candidate,
+      artifactBundle: await service.getKnowledgeCandidateArtifactBundle(request.params.id),
+    };
   });
 
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>(
