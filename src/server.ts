@@ -83,6 +83,7 @@ const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
     target_path: z.string().min(1).max(700).optional(),
     repository: z.string().min(1).optional(),
     source_type: z.enum(["files", "zip", "git"]).default("files"),
+    submission_mode: z.enum(["merge", "replace"]).optional(),
     source_root: z.string().max(1000).optional(),
     submission_key: z.string().min(1).max(500).optional(),
     files: z.array(skillBundleWebFileSchema).max(500).optional(),
@@ -97,6 +98,7 @@ const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
     target_path: z.never().optional(),
     repository: z.string().min(1).optional(),
     source_type: z.enum(["files", "zip", "git"]).default("files"),
+    submission_mode: z.enum(["merge", "replace"]).optional(),
     source_root: z.string().max(1000).optional(),
     submission_key: z.string().min(1).max(500).optional(),
     files: z.array(skillBundleWebFileSchema).max(500).optional(),
@@ -2304,6 +2306,7 @@ export async function startServer(
           namespace: target.namespace,
           importType: body.import_type,
           skillPath: target.skillPath,
+          submissionMode: body.submission_mode ?? "merge",
           files: source.files,
           repository: body.repository,
         });
@@ -2330,6 +2333,7 @@ export async function startServer(
           namespace: target.namespace,
           importType: body.import_type,
           skillPath: target.skillPath,
+          submissionMode: body.submission_mode ?? "merge",
           files: source.files,
           sourceType: source.sourceType,
           sourceMetadata: source.sourceMetadata,
@@ -2687,6 +2691,7 @@ export async function startServer(
       repository?: string;
       suggestedPath?: string;
       traceId?: string;
+      submission_mode?: "merge" | "replace";
     };
   }>("/admin/api/knowledge-candidates", async (request, reply) => {
     if (!hasAdminAccess(request)) {
@@ -2705,6 +2710,7 @@ export async function startServer(
           repository: request.body.repository,
           suggestedPath: request.body.suggestedPath,
           traceId: request.body.traceId,
+          bundleSubmissionMode: request.body.submission_mode ?? "merge",
         }),
       };
     } catch (error) {

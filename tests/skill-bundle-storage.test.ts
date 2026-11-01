@@ -298,6 +298,23 @@ test("admin import paging filters in SQLite before applying the page limit", asy
     assert.equal(repo.listImportsPage({ sourceType: "web-files" } as any).total, 1);
     assert.equal(repo.listImportsPage({ reviewer: "reviewer-1" } as any).total, 1);
     assert.equal(repo.listImportsPage({ submitter: "review-author" } as any).total, 1);
+    repo.createImport({
+      ...base,
+      id: "knowledge-hidden",
+      namespace: "knowledge",
+      importType: "knowledge",
+      replacementRoot: "knowledge/hidden.md",
+      status: "pending",
+      submissionKey: undefined,
+      updatedAt: "2026-10-14T00:04:00.000Z",
+    });
+    assert.equal(repo.listImportsPage({ excludeImportType: "knowledge" } as any).total, 3);
+    assert.equal(
+      repo
+        .listImportsPage({ excludeImportType: "knowledge" } as any)
+        .items.some((item: any) => item.importType === "knowledge"),
+      false,
+    );
   } finally {
     db.close();
     await rm(dir, { recursive: true, force: true });

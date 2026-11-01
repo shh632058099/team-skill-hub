@@ -8,6 +8,10 @@ test("Skill Bundle admin page is an import flow that hands review to the unified
   assert.match(ADMIN_SKILL_BUNDLES_HTML, /Replacement Root/);
   assert.match(ADMIN_SKILL_BUNDLES_HTML, /import_type/);
   assert.match(ADMIN_SKILL_BUNDLES_HTML, /source_type/);
+  assert.match(ADMIN_SKILL_BUNDLES_HTML, /name="submission_mode"/);
+  assert.match(ADMIN_SKILL_BUNDLES_HTML, /value="merge"/);
+  assert.match(ADMIN_SKILL_BUNDLES_HTML, /value="replace"/);
+  assert.match(ADMIN_SKILL_BUNDLES_HTML, /submission_mode:mode/);
   assert.match(ADMIN_SKILL_BUNDLES_HTML, /\/admin\/api\/skill-bundles\/preview/);
   assert.match(ADMIN_SKILL_BUNDLES_HTML, /\/admin\/api\/skill-bundles\/import/);
   assert.match(ADMIN_SKILL_BUNDLES_HTML, /\/admin\/review\/items\/skill-bundle\//);

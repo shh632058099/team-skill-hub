@@ -495,7 +495,11 @@ export class SkillBundlePublisher {
       const remoteBranch = await this.gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], worktree);
       const remoteBranchSha = remoteBranch.trim() ? remoteBranch.trim().split(/\s+/)[0] : undefined;
       await this.gitRun(["checkout", "-B", branch], worktree);
-      await applyArtifactFileActions(worktree, record.replacementRoot, buildArtifactFileActions(before, snapshot.files));
+      await applyArtifactFileActions(
+        worktree,
+        record.replacementRoot,
+        buildArtifactFileActions(before, snapshot.files),
+      );
       await this.gitRun(["add", "-A", "--", record.replacementRoot], worktree);
       await this.gitRun(["config", "user.name", "Team Skill Hub"], worktree);
       await this.gitRun(["config", "user.email", "team-skill-hub@localhost"], worktree);

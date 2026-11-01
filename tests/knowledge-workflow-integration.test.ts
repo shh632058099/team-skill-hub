@@ -120,6 +120,23 @@ test("published Knowledge is automatically related and updated through review an
     assert.equal(candidate.status, "pending");
     assert.equal(candidate.knowledgeRelation?.type, "updates");
     assert.equal(candidate.knowledgeRelation?.target?.path, existingPath);
+    assert.ok(candidate.artifactBundleId, "new Knowledge candidates must bind to an Artifact Bundle");
+    const bundleRecord = service.getSkillBundleImport(candidate.artifactBundleId!);
+    assert.equal(bundleRecord?.importType, "knowledge");
+    assert.equal(bundleRecord?.targetKind, "file");
+    assert.equal(bundleRecord?.replacementRoot, existingPath);
+    assert.equal(bundleRecord?.submissionMode, "merge");
+    const editedCandidate = await service.updateKnowledgeCandidate(candidate.id, {
+      content: candidate.content.replace(
+        "Updated recovery instructions with new verified checkpoints.",
+        "Updated recovery instructions with new verified checkpoints and bundle refresh.",
+      ),
+    });
+    assert.equal(editedCandidate.artifactBundleId, candidate.artifactBundleId);
+    const refreshedBundle = service.getSkillBundleImport(candidate.artifactBundleId!);
+    assert.equal(refreshedBundle?.status, "pending");
+    const refreshedSnapshot = service.getSkillBundleSnapshot(refreshedBundle!.snapshotId);
+    assert.match(refreshedSnapshot?.files[0]?.content ?? "", /bundle refresh/);
 
     process.env.TEST_ARTIFACT_E2E_TOKEN = "fake-token";
     let updatedPath = "";
@@ -171,12 +188,17 @@ test("published Knowledge is automatically related and updated through review an
       "useful",
     );
     assert.equal(approved.status, "approved");
+    const approvedBundle = service.getSkillBundleImport(candidate.artifactBundleId!);
+    assert.equal(approvedBundle?.status, "approved");
+    assert.ok(approvedBundle?.review?.targetTreeSha256);
     const published = await service.publishKnowledgeCandidate(candidate.id);
     assert.equal(published.status, "publishing");
     assert.equal(published.publication?.filePath, existingPath);
     assert.equal(published.publication?.action, "update");
     assert.equal(updatedPath, existingPath);
     assert.match(updatedContent, /Updated recovery instructions/);
+    const publishingBundle = service.getSkillBundleImport(candidate.artifactBundleId!);
+    assert.equal(publishingBundle?.status, "publishing");
   } finally {
     globalThis.fetch = oldFetch;
     delete process.env.TEST_ARTIFACT_E2E_TOKEN;
@@ -404,6 +426,9 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
     assert.equal(reconciled.publication?.mergeRequestState, "merged");
     assert.equal(reconciled.publication?.pipelineStatus, "success");
     assert.equal(reconciled.publication?.hasConflicts, false);
+    assert.ok(generated.artifactBundleId);
+    const publishedBundle = service.getSkillBundleImport(generated.artifactBundleId!);
+    assert.equal(publishedBundle?.status, "published");
     const results = service.searchKnowledge("OTA 断电 恢复 安全 检查点", 5, ["rd-skills"], principal);
     assert.ok(
       results.some((item) => item.chunk.relativePath === autoPath),

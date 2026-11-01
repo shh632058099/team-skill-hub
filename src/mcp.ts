@@ -871,7 +871,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       "submit_knowledge_candidate",
       {
         description:
-          "Knowledge ONLY. Submit a candidate team Knowledge item for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
+          "Knowledge ONLY. Submit a Knowledge Artifact Bundle for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. submission_mode defaults to merge; replace explicitly replaces only the selected Knowledge artifact scope. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
           spec_version: z.number().int().min(1),
@@ -879,9 +879,10 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           content: z.string().min(1).max(50_000),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
           repository: z.string().min(1).optional(),
+          submission_mode: z.enum(["merge", "replace"]).optional(),
         }),
       },
-      async ({ trace_id, spec_version, title, content, source_type, repository }) =>
+      async ({ trace_id, spec_version, title, content, source_type, repository, submission_mode }) =>
         toolResult({
           candidate: await appService.submitKnowledgeCandidate(principal, {
             traceId: trace_id,
@@ -892,6 +893,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             repository,
             submittedSpecVersion: spec_version,
             submissionMode: "mcp",
+            bundleSubmissionMode: submission_mode ?? "merge",
           }),
         }),
     );
@@ -900,7 +902,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       "submit_skill_bundle",
       {
         description:
-          "The only MCP entrypoint for submitting Skills. Use this for every Skill, including a single-file Skill containing only SKILL.md, and for explicit multi-Skill collections. Submit one complete Skill root with import_type=skill or one complete namespace snapshot with import_type=collection. The Bundle is validated against the target repository and is never published directly.",
+          "The only MCP entrypoint for submitting Skills. submission_mode defaults to merge: submitted paths are added/updated and omitted existing files are preserved. Use submission_mode=replace only when the submitted files are the complete desired target and omitted files should be deleted. The Bundle is validated against the target repository and is never published directly.",
         inputSchema: z
           .object({
             trace_id: z.string().min(1).optional(),
@@ -909,6 +911,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             skill_path: z.string().min(1).max(500).optional(),
             skill_collection: z.literal("rd-skills"),
             repository: z.string().min(1).optional(),
+            submission_mode: z.enum(["merge", "replace"]).optional(),
             files: z
               .array(
                 z
@@ -976,6 +979,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             namespace: input.namespace,
             importType: input.import_type,
             ...(input.import_type === "skill" ? { skillPath: input.skill_path! } : {}),
+            submissionMode: input.submission_mode ?? "merge",
             files: input.files.map(
               (file: { path: string; content?: string; content_base64?: string; mode?: "0644" | "0755" }) => {
                 const useBinary =

@@ -197,6 +197,7 @@ export class SqliteSkillBundleRepository {
     repository?: string;
     namespace?: string;
     importType?: string;
+    excludeImportType?: string;
     sourceType?: string;
     reviewer?: string;
     submitter?: string;
@@ -216,6 +217,10 @@ export class SqliteSkillBundleRepository {
     addExact("repository", query.repository);
     addExact("namespace", query.namespace);
     addExact("import_type", query.importType);
+    if (query.excludeImportType) {
+      where.push("import_type<>?");
+      params.push(query.excludeImportType);
+    }
     addExact("submission_principal", query.submitter);
     if (query.sourceType) {
       where.push("json_extract(record_json,'$.sourceType')=?");

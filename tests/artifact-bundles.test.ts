@@ -39,12 +39,15 @@ test("merge_directory_preserves_omitted_files", () => {
     const retained = finalTree.find((file) => file.path === original.path);
     assert.ok(retained, original.path);
     assert.equal(retained.mode, original.mode);
-    assert.equal(retained.sha256, planArtifactFinalTree({
-      targetKind: "directory",
-      mode: "merge",
-      before: [original],
-      submitted: [],
-    })[0]?.sha256);
+    assert.equal(
+      retained.sha256,
+      planArtifactFinalTree({
+        targetKind: "directory",
+        mode: "merge",
+        before: [original],
+        submitted: [],
+      })[0]?.sha256,
+    );
   }
 });
 
@@ -85,7 +88,10 @@ test("file_scope_merge_and_replace_touch_only_one_entry", () => {
       before,
       submitted: [text("target.md", "new")],
     });
-    assert.deepEqual(finalTree.map((file) => file.path), ["target.md"]);
+    assert.deepEqual(
+      finalTree.map((file) => file.path),
+      ["target.md"],
+    );
     assert.equal(finalTree[0]?.content, "new");
   }
   assert.throws(
@@ -122,7 +128,10 @@ test("merge_preserves_binary_bytes_and_execute_mode", () => {
 test("canonical_hash_is_stable_for_sorted_equivalent_trees", () => {
   const files = [text("b.md", "b"), text("a.md", "a")];
   assert.equal(canonicalArtifactTreeHash(files), canonicalArtifactTreeHash([...files].reverse()));
-  assert.notEqual(canonicalArtifactTreeHash(files), canonicalArtifactTreeHash([text("b.md", "changed"), text("a.md", "a")]));
+  assert.notEqual(
+    canonicalArtifactTreeHash(files),
+    canonicalArtifactTreeHash([text("b.md", "changed"), text("a.md", "a")]),
+  );
 });
 
 test("case_collisions_and_invalid_paths_are_rejected", () => {

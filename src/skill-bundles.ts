@@ -9,9 +9,10 @@ import {
   type ArtifactBundleFileMode,
 } from "./artifact-bundles.js";
 
-export type SkillBundleImportType = "skill" | "collection";
+export type SkillBundleImportType = "skill" | "collection" | "knowledge";
 export type SkillBundleSubmissionMode = "merge" | "replace";
-export type SkillBundleFileMode = ArtifactBundleFileMode;export type SkillBundleImportStatus =
+export type SkillBundleFileMode = ArtifactBundleFileMode;
+export type SkillBundleImportStatus =
   | "pending"
   | "approved"
   | "review_stale"
@@ -97,6 +98,7 @@ export type SkillBundlePublication = SkillBundlePullRequestPublication | SkillBu
 export interface SkillBundleImport {
   id: string;
   revision: number;
+  kind?: "skill" | "knowledge";
   namespace: string;
   importType: SkillBundleImportType;
   skillPath?: string;
@@ -112,7 +114,7 @@ export interface SkillBundleImport {
   submissionKey?: string;
   requestSemanticsSha256?: string;
   submissionMode?: SkillBundleSubmissionMode;
-  targetKind?: "directory";
+  targetKind?: "directory" | "file";
   targetRevision?: string;
   targetScopeSha256?: string;
   review?: SkillBundleReview;
@@ -232,6 +234,7 @@ export function normalizeSkillBundleTarget(input: {
   skillPath?: string;
 }): { namespace: string; importType: SkillBundleImportType; skillPath?: string; replacementRoot: string } {
   const namespace = normalizeNamespace(input.namespace);
+  if (input.importType === "knowledge") throw new Error("Knowledge artifacts must use the Artifact Bundle adapter");
   const skillPath =
     input.importType === "skill" && input.skillPath !== undefined
       ? normalizeRelativePath(input.skillPath, "skill_path")

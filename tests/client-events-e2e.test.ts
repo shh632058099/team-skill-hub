@@ -972,6 +972,19 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(automatic?.submissionSpecVersion, 1);
     assert.equal(automatic?.validationSpecVersion, 1);
     assert.equal(automatic?.submissionSpecSchemaVersion, 1);
+    assert.ok((automatic as any)?.artifactBundleId);
+    const editable = await service.updateKnowledgeCandidate((automatic as any).id, {
+      content: assistantResult.replace(
+        "仍需在目标硬件上验证掉电时序。",
+        "仍需在目标硬件上验证掉电时序，并保留 Bundle 草稿。",
+      ),
+    });
+    assert.equal(editable.status, "pending");
+    const editableBundle = service.getSkillBundleImport((automatic as any).artifactBundleId);
+    assert.equal(editableBundle?.status, "pending");
+    assert.match(service.getSkillBundleSnapshot(editableBundle!.snapshotId)?.files[0]?.content ?? "", /Bundle 草稿/);
+    const restored = await service.updateKnowledgeCandidate((automatic as any).id, { content: assistantResult });
+    assert.equal(restored.content, assistantResult);
 
     const eventsAfterEvidence = await fetch(base + "/admin/api/client-events", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" },

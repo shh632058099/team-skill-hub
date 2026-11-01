@@ -1,9 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  buildArtifactFileActions,
-  type ArtifactFileAction,
-} from "../src/artifact-bundle-publishing.js";
+import { buildArtifactFileActions, type ArtifactFileAction } from "../src/artifact-bundle-publishing.js";
 import type { ArtifactBundleFileInput } from "../src/artifact-bundles.js";
 
 const text = (path: string, content: string, mode: "0644" | "0755" = "0644"): ArtifactBundleFileInput => ({

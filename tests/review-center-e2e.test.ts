@@ -133,6 +133,7 @@ test("application review paging reads only the requested global window while pre
   };
   (service as any).skillBundles.listImportsPage = (query: any) => {
     bundleCalls += 1;
+    assert.equal(query.excludeImportType, "knowledge");
     const offset = Number(query.cursor ?? 0);
     const limit = Number(query.limit ?? 100);
     const items = Array.from({ length: limit }, (_, index) => ({

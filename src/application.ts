@@ -166,6 +166,7 @@ export class SkillHubApplicationService {
       authorize: (principal, repository) =>
         this.allowedRepositories(principal).some((candidate) => candidate.id === repository.id) &&
         Boolean(this.publishingRoute("skill", repository.id)),
+      authorizeKnowledge: (_principal, repository) => Boolean(this.publishingRoute("knowledge", repository.id)),
     });
     for (const repo of config.repositories) {
       this.states.set(repo.id, {
@@ -2154,6 +2155,7 @@ export class SkillHubApplicationService {
         ...(query.reviewer ? { reviewer: query.reviewer } : {}),
         ...(query.submitter ? { submitter: query.submitter } : {}),
         ...(query.importType || impliedImportType ? { importType: query.importType || impliedImportType } : {}),
+        excludeImportType: "knowledge",
       });
       return { items: page.items, total: page.total, nextCursor: page.nextCursor };
     };
@@ -3356,10 +3358,33 @@ export class SkillHubApplicationService {
       submissionSpecSchemaVersion: normalized.schemaVersion,
       submissionMode: options.submissionMode,
     });
-    if (!created.suggestedPath && created.knowledgeRelation?.type !== "updates") {
-      return await this.observability.updateCandidate(created.id, { suggestedPath: defaultCandidatePath(created) });
+    let finalized = created;
+    if (!finalized.suggestedPath && finalized.knowledgeRelation?.type !== "updates") {
+      finalized = await this.observability.updateCandidate(finalized.id, {
+        suggestedPath: defaultCandidatePath(finalized),
+      });
     }
-    return created;
+    if (finalized.suggestedType === "knowledge" && finalized.repository) {
+      const { repositoryId, targetRoot, desiredContent } = this.resolveKnowledgeBundleDraftTarget(finalized);
+      const bundleRepository = this.knowledgeBundleSubmissionRepository(principal, repositoryId);
+      const baselineDocument = [...this.knowledgeDocuments.values()].find(
+        (document) => document.repositoryId === repositoryId && document.relativePath === targetRoot,
+      );
+      const bundle = await this.skillBundles.submitKnowledgeFile(principal, bundleRepository, {
+        targetRoot,
+        content: desiredContent,
+        submissionMode: finalized.bundleSubmissionMode ?? "merge",
+        sourceMetadata: { candidate_id: finalized.id, source_type: finalized.sourceType },
+        baseline: baselineDocument
+          ? { exists: true, content: baselineDocument.content, revision: baselineDocument.revision }
+          : { exists: false },
+      });
+      finalized = await this.observability.updateCandidate(finalized.id, {
+        artifactBundleId: bundle.id,
+        bundleSubmissionMode: bundle.submissionMode ?? "merge",
+      });
+    }
+    return finalized;
   }
 
   async submitKnowledgeCandidate(
@@ -3374,12 +3399,19 @@ export class SkillHubApplicationService {
       | "repository"
       | "suggestedPath"
       | "traceId"
-    > & { submittedSpecVersion?: number; submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]> },
+    > & {
+      submittedSpecVersion?: number;
+      submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]>;
+      bundleSubmissionMode?: NonNullable<KnowledgeCandidate["bundleSubmissionMode"]>;
+    },
   ) {
     if (input.suggestedType === "skill") {
       throw new Error("Skills must use Skill Bundle submission; Knowledge Candidate accepts Knowledge only");
     }
-    let candidateInput: Parameters<McpObservabilityStore["createCandidate"]>[1] = input;
+    let candidateInput: Parameters<McpObservabilityStore["createCandidate"]>[1] = {
+      ...input,
+      bundleSubmissionMode: input.bundleSubmissionMode ?? "merge",
+    };
     const allowedRepositories = this.allowedRepositories(principal);
     if (!candidateInput.repository) {
       const repository = this.defaultPublishingRepository("knowledge", allowedRepositories);
@@ -3394,6 +3426,56 @@ export class SkillHubApplicationService {
       submittedSpecVersion: input.submittedSpecVersion,
       submissionMode: input.submissionMode ?? (input.sourceType === "mcp-session" ? "mcp" : "admin"),
     });
+  }
+
+  private knowledgeBundleSubmissionRepository(principal: Principal, repositoryId: string): RepositoryConfig {
+    const route = this.publishingRoute("knowledge", repositoryId);
+    if (route) return { ...route.targetRepository, knowledgePublishing: route.publishing };
+    const repository = this.config.repositories.find((item) => item.id === repositoryId);
+    if (!repository) throw new Error("Repository not found");
+    return repository;
+  }
+
+  private resolveKnowledgeBundleDraftTarget(candidate: KnowledgeCandidate): {
+    repositoryId: string;
+    targetRoot: string;
+    desiredContent: string;
+  } {
+    const relationTarget =
+      candidate.knowledgeRelation?.type === "updates" || candidate.knowledgeRelation?.type === "supersedes"
+        ? candidate.knowledgeRelation.target
+        : undefined;
+    const repositoryId =
+      candidate.repository ?? relationTarget?.repositoryId ?? this.defaultPublishingRepository("knowledge");
+    if (!repositoryId) throw new Error("Unable to determine Knowledge repository for Artifact Bundle");
+    if (relationTarget && relationTarget.repositoryId !== repositoryId) {
+      throw new Error("Knowledge update target must be in the candidate repository");
+    }
+    const relation: ArtifactRelation | undefined = relationTarget
+      ? { type: "updates", source: "manual", target: { kind: "knowledge", ...relationTarget } }
+      : undefined;
+    const autoDefault = candidate.suggestedPath === defaultCandidatePath(candidate);
+    const targetRoot = resolveArtifactTarget(
+      autoDefault ? undefined : candidate.suggestedPath,
+      relation,
+      defaultCandidatePath(candidate),
+    );
+    const body = candidate.content.trim();
+    const desiredContent = /^#\s+/m.test(body) ? body + "\n" : "# " + candidate.title.trim() + "\n\n" + body + "\n";
+    return { repositoryId, targetRoot, desiredContent };
+  }
+
+  private knowledgeBundlePublishingRepository(principal: Principal, repositoryId: string): RepositoryConfig {
+    const allowedRepositories = this.allowedRepositories(principal);
+    if (
+      !principal.roles.includes("admin") &&
+      !allowedRepositories.some((repository) => repository.id === repositoryId) &&
+      principal.roles.length > 0
+    ) {
+      throw new Error("Repository not found");
+    }
+    const route = this.requirePublishingRoute("knowledge", repositoryId);
+    return { ...route.targetRepository, knowledgePublishing: route.publishing };
   }
 
   private skillBundlePublishingRepository(principal: Principal, repositoryId?: string): RepositoryConfig {
@@ -3436,6 +3518,7 @@ export class SkillHubApplicationService {
       namespace: input.namespace,
       importType: input.importType,
       skillPath: input.skillPath,
+      submissionMode: input.submissionMode,
       files: input.files,
     });
   }
@@ -3450,6 +3533,7 @@ export class SkillHubApplicationService {
         namespace: input.namespace,
         importType: input.importType,
         skillPath: input.skillPath,
+        submissionMode: input.submissionMode,
         files: input.files,
         sourceType: input.sourceType,
         sourceMetadata: input.sourceMetadata,
@@ -3893,7 +3977,30 @@ export class SkillHubApplicationService {
         };
       }
     }
-    return await this.observability.updateCandidate(id, candidateUpdate);
+    const updated = await this.observability.updateCandidate(id, candidateUpdate);
+    if (updated.artifactBundleId && updated.suggestedType === "knowledge") {
+      const artifact = this.skillBundles.getImport(updated.artifactBundleId);
+      if (!artifact) throw new Error("Knowledge Artifact Bundle not found");
+      const { repositoryId, targetRoot, desiredContent } = this.resolveKnowledgeBundleDraftTarget(updated);
+      const principal: Principal = {
+        id: updated.actorId,
+        tenantId: updated.tenantId,
+        roles: ["admin"],
+      };
+      const repository = this.knowledgeBundleSubmissionRepository(principal, repositoryId);
+      const baselineDocument = [...this.knowledgeDocuments.values()].find(
+        (document) => document.repositoryId === repositoryId && document.relativePath === targetRoot,
+      );
+      await this.skillBundles.refreshKnowledgeFile(principal, repository, updated.artifactBundleId, {
+        targetRoot,
+        content: desiredContent,
+        submissionMode: updated.bundleSubmissionMode ?? artifact.submissionMode ?? "merge",
+        baseline: baselineDocument
+          ? { exists: true, content: baselineDocument.content, revision: baselineDocument.revision }
+          : { exists: false },
+      });
+    }
+    return updated;
   }
 
   async reviewKnowledgeCandidate(
@@ -3903,6 +4010,24 @@ export class SkillHubApplicationService {
     reviewNote?: string,
     reviewReason?: CandidateReviewReason,
   ) {
+    const candidate = await this.observability.getCandidate(id);
+    if (!candidate) throw new Error("Knowledge candidate not found");
+    if (candidate.artifactBundleId) {
+      const artifact = this.skillBundles.getImport(candidate.artifactBundleId);
+      if (!artifact) throw new Error("Knowledge Artifact Bundle not found");
+      const principal: Principal = { id: reviewer, tenantId: candidate.tenantId, roles: ["admin"] };
+      const repository = this.knowledgeBundlePublishingRepository(principal, artifact.repository);
+      const bundle = await this.skillBundles.reviewKnowledgeFile(
+        principal,
+        repository,
+        candidate.artifactBundleId,
+        status,
+        reviewNote,
+      );
+      if (bundle.status === "review_stale") {
+        throw new Error("Knowledge target changed after submission; refresh the candidate before approval");
+      }
+    }
     return await this.observability.reviewCandidate(id, status, reviewer, reviewNote, reviewReason);
   }
 
@@ -3949,7 +4074,23 @@ export class SkillHubApplicationService {
     if (!candidate) throw new Error("Knowledge candidate not found");
     if (candidate.status !== "pending") throw new Error("Knowledge candidate must be pending to preview diff");
 
-    const { repositoryId, publishingRepository, target } = this.resolveKnowledgeCandidatePublishContext(candidate);
+    let { repositoryId, publishingRepository, target } = this.resolveKnowledgeCandidatePublishContext(candidate);
+    if (candidate.artifactBundleId) {
+      const artifact = this.skillBundles.getImport(candidate.artifactBundleId);
+      const snapshot = artifact ? this.skillBundles.getSnapshot(artifact.snapshotId) : undefined;
+      const snapshotFile = snapshot?.files[0];
+      if (!artifact || !snapshotFile?.content) throw new Error("Knowledge Artifact Bundle snapshot not found");
+      repositoryId = artifact.repository;
+      publishingRepository = this.knowledgeBundlePublishingRepository(
+        { id: candidate.actorId, tenantId: candidate.tenantId, roles: [] },
+        artifact.repository,
+      );
+      target = {
+        ...target,
+        filePath: artifact.replacementRoot,
+        desiredContent: snapshotFile.content,
+      };
+    }
     const publisher = createKnowledgePublisher(publishingRepository);
     const baseline = await publisher.readTargetFile(target, publishingRepository);
     const staleAutoTarget = candidate.autoRelation && !baseline.exists;
@@ -4076,22 +4217,56 @@ export class SkillHubApplicationService {
     if (candidate.knowledgeRelation?.type === "duplicate_of") {
       throw new Error("Duplicate Knowledge candidate should not be published");
     }
-    const { repositoryId, publishPath, publishingRepository, target } =
+    let { repositoryId, publishPath, publishingRepository, target } =
       this.resolveKnowledgeCandidatePublishContext(candidate);
 
     const candidatePatch: Partial<KnowledgeCandidate> = {};
     if (!candidate.repository) candidatePatch.repository = repositoryId;
     if (!candidate.suggestedPath && candidate.suggestedType === "knowledge") candidatePatch.suggestedPath = publishPath;
-    const candidateForPublish = Object.keys(candidatePatch).length
+    let candidateForPublish = Object.keys(candidatePatch).length
       ? await this.observability.updateCandidate(id, candidatePatch)
       : candidate;
-
     if (candidate.autoRelation) {
       const baseline = await createKnowledgePublisher(publishingRepository).readTargetFile(
         target,
         publishingRepository,
       );
       if (!baseline.exists) throw new Error("Knowledge update target no longer exists; select a new target");
+    }
+    if (candidate.artifactBundleId) {
+      const artifact = this.skillBundles.getImport(candidate.artifactBundleId);
+      const snapshot = artifact ? this.skillBundles.getSnapshot(artifact.snapshotId) : undefined;
+      const snapshotFile = snapshot?.files[0];
+      if (!artifact || !snapshotFile?.content) throw new Error("Knowledge Artifact Bundle snapshot not found");
+      repositoryId = artifact.repository;
+      publishPath = artifact.replacementRoot;
+      publishingRepository = this.knowledgeBundlePublishingRepository(
+        { id: candidate.actorId, tenantId: candidate.tenantId, roles: [] },
+        artifact.repository,
+      );
+      target = {
+        ...target,
+        filePath: artifact.replacementRoot,
+        desiredContent: snapshotFile.content,
+      };
+      candidateForPublish = {
+        ...candidateForPublish,
+        repository: artifact.repository,
+        suggestedPath: artifact.replacementRoot,
+        content: snapshotFile.content,
+      };
+      const bundle = await this.skillBundles.ensureKnowledgeFileReviewFresh(
+        { id: candidate.actorId, tenantId: candidate.tenantId, roles: [] },
+        publishingRepository,
+        candidate.artifactBundleId,
+      );
+      if (bundle.status === "review_stale") {
+        throw new Error("Knowledge target changed after approval; re-review before publishing");
+      }
+      if (!["approved", "publish_failed"].includes(bundle.status)) {
+        throw new Error("Knowledge Artifact Bundle must be approved before publishing");
+      }
+      this.skillBundles.markKnowledgeExternalStatus(candidate.artifactBundleId, "publishing");
     }
     await this.observability.markCandidatePublishing(id);
     try {
@@ -4103,6 +4278,9 @@ export class SkillHubApplicationService {
       return await this.observability.updateCandidatePublication(id, publication);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (candidate.artifactBundleId) {
+        this.skillBundles.markKnowledgeExternalStatus(candidate.artifactBundleId, "publish_failed", message);
+      }
       await this.observability.markCandidatePublishFailed(id, message);
       throw error;
     }
@@ -4166,6 +4344,7 @@ export class SkillHubApplicationService {
     const route = this.requirePublishingRoute(publishingType, candidate.repository);
     const publishingRepository = { ...route.configRepository, knowledgePublishing: route.publishing };
     const publisher = createKnowledgePublisher(publishingRepository);
+
     if (["deleting", "deleted"].includes(candidate.status)) {
       if (!candidate.deletionPublication) throw new Error("Knowledge candidate deletion has not created a PR/MR");
       const status = await publisher.reconcile(candidate.deletionPublication, publishingRepository);
@@ -4175,26 +4354,44 @@ export class SkillHubApplicationService {
       }
       return await this.observability.updateCandidateDeletionPublication(id, deletionPublication);
     }
+
     if (!candidate.publication) throw new Error("Knowledge candidate has not been published");
     const status = await publisher.reconcile(candidate.publication, publishingRepository);
-    const publication = {
-      ...candidate.publication,
-      ...status,
-    };
+    const publication = { ...candidate.publication, ...status };
+
     if (candidate.status === "published" && publication.mergeRequestState !== "merged") {
+      const correctedStatus = publication.mergeRequestState === "closed" ? "publish_failed" : "publishing";
+      if (candidate.artifactBundleId) {
+        this.skillBundles.markKnowledgeExternalStatus(
+          candidate.artifactBundleId,
+          correctedStatus,
+          correctedStatus === "publish_failed" ? "Original PR/MR was closed without merge" : undefined,
+        );
+      }
       return await this.observability.correctCandidatePublishedState(
         id,
         publication,
-        publication.mergeRequestState === "closed" ? "publish_failed" : "publishing",
+        correctedStatus,
         publication.mergeRequestState === "closed" ? "Original PR/MR was closed without merge" : undefined,
       );
     }
+
     if (candidate.status === "publishing" && publication.mergeRequestState === "merged") {
+      if (candidate.artifactBundleId) {
+        this.skillBundles.markKnowledgeExternalStatus(candidate.artifactBundleId, "published");
+      }
       return await this.observability.markCandidatePublished(id, publication);
+    }
+
+    if (candidate.artifactBundleId) {
+      this.skillBundles.markKnowledgeExternalStatus(
+        candidate.artifactBundleId,
+        publication.mergeRequestState === "closed" ? "publish_failed" : "publishing",
+        publication.mergeRequestState === "closed" ? "PR/MR was closed without merge" : undefined,
+      );
     }
     return await this.observability.updateCandidatePublication(id, publication);
   }
-
   getKnowledgeCuratorStatus() {
     return new HttpKnowledgeCurator().status();
   }

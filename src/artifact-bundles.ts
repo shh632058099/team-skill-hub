@@ -124,9 +124,7 @@ export function diffArtifactTrees(
 ): ArtifactBundleDiff {
   const left = new Map(normalizeArtifactFiles(before).map((file) => [file.path, file]));
   const right = new Map(normalizeArtifactFiles(after).map((file) => [file.path, file]));
-  const paths = [...new Set([...left.keys(), ...right.keys()])].sort((a, b) =>
-    Buffer.from(a).compare(Buffer.from(b)),
-  );
+  const paths = [...new Set([...left.keys(), ...right.keys()])].sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
   const added: string[] = [];
   const modified: string[] = [];
   const deleted: string[] = [];
@@ -136,7 +134,9 @@ export function diffArtifactTrees(
     const a = left.get(path);
     const b = right.get(path);
     const change = !a ? "added" : !b ? "deleted" : fileIdentity(a) === fileIdentity(b) ? "unchanged" : "modified";
-    (change === "added" ? added : change === "deleted" ? deleted : change === "modified" ? modified : unchanged).push(path);
+    (change === "added" ? added : change === "deleted" ? deleted : change === "modified" ? modified : unchanged).push(
+      path,
+    );
     if (change !== "unchanged") {
       hash.update(`${path}\0${change}\0${a ? fileIdentity(a) : "-"}\0${b ? fileIdentity(b) : "-"}\n`, "utf8");
     }
