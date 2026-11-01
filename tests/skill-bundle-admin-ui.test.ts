@@ -38,4 +38,7 @@ test("unified review detail exposes Artifact Bundle state for Skill and Knowledg
   assert.match(ADMIN_MODULE_HTML, /Snapshot SHA256/);
   assert.match(ADMIN_MODULE_HTML, /默认增量合并，未提交路径保持不变/);
   assert.match(ADMIN_MODULE_HTML, /显式替换目标 Scope/);
+  assert.match(ADMIN_MODULE_HTML, /bundle\?\.status\|\|value\.status/);
+  assert.match(ADMIN_MODULE_HTML, /review_stale/);
+  assert.match(ADMIN_MODULE_HTML, /重新审核批准/);
 });
