@@ -235,9 +235,21 @@ export function normalizeSkillBundleTarget(input: {
 }): { namespace: string; importType: SkillBundleImportType; skillPath?: string; replacementRoot: string } {
   const namespace = normalizeNamespace(input.namespace);
   if (input.importType === "knowledge") throw new Error("Knowledge artifacts must use the Artifact Bundle adapter");
+  let rawSkillPath = input.skillPath?.trim();
+  if (input.importType === "skill" && rawSkillPath) {
+    if (rawSkillPath.startsWith("skills/")) {
+      const parts = rawSkillPath.split("/");
+      if (parts.length < 3 || parts[1] !== namespace) {
+        throw new Error("skill_path namespace does not match namespace");
+      }
+      rawSkillPath = parts.slice(2).join("/");
+    } else if (rawSkillPath.startsWith(namespace + "/")) {
+      rawSkillPath = rawSkillPath.slice(namespace.length + 1);
+    }
+  }
   const skillPath =
-    input.importType === "skill" && input.skillPath !== undefined
-      ? normalizeRelativePath(input.skillPath, "skill_path")
+    input.importType === "skill" && rawSkillPath !== undefined
+      ? normalizeRelativePath(rawSkillPath, "skill_path")
       : undefined;
   if (input.importType === "collection" && input.skillPath !== undefined) {
     throw new Error("skill_path is only valid for skill imports");

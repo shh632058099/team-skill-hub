@@ -93,7 +93,7 @@ test("MCP exposes current knowledge submission spec and accepts 50k contract sub
       spec_version: 1,
       title: "ignored",
       content: large,
-      submission_mode: "replace",
+      submission_mode: null,
     });
     assert.match(submitText, /"candidate"/);
     const candidates = await f.service.listKnowledgeCandidates(10);
@@ -102,7 +102,7 @@ test("MCP exposes current knowledge submission spec and accepts 50k contract sub
     assert.equal(candidates[0]!.submissionSpecVersion, 1);
     assert.equal(candidates[0]!.submissionSpecSchemaVersion, 1);
     assert.equal(candidates[0]!.submissionMode, "mcp");
-    assert.equal(candidates[0]!.bundleSubmissionMode, "replace");
+    assert.equal(candidates[0]!.bundleSubmissionMode, "merge");
   } finally {
     await f.app.close();
     f.search.close();

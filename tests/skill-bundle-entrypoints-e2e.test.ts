@@ -234,11 +234,11 @@ test("MCP submit_skill_bundle maps Codex payload to Bundle application workflow"
           arguments: {
             namespace: "ota",
             import_type: "skill",
-            skill_path: "design",
+            skill_path: "skills/ota/design",
             skill_collection: "rd-skills",
             files: [{ path: "SKILL.md", content: "skill", content_base64: "" }],
             submission_key: "codex-retry-1",
-            submission_mode: "replace",
+            submission_mode: null,
           },
         },
       }),
@@ -247,8 +247,8 @@ test("MCP submit_skill_bundle maps Codex payload to Bundle application workflow"
     const text = await response.text();
     assert.match(text, /sbi_mcp/);
     assert.equal(captured.input.importType, "skill");
-    assert.equal(captured.input.submissionMode, "replace");
-    assert.equal(captured.input.skillPath, "design");
+    assert.equal(captured.input.submissionMode, "merge");
+    assert.equal(captured.input.skillPath, "skills/ota/design");
     assert.equal(captured.input.submissionKey, "codex-retry-1");
     assert.equal(captured.input.sourceType, "mcp");
     assert.equal(captured.input.files[0].content, "skill");

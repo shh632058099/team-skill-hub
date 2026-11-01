@@ -879,7 +879,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           content: z.string().min(1).max(50_000),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
           repository: z.string().min(1).optional(),
-          submission_mode: z.enum(["merge", "replace"]).optional(),
+          submission_mode: z.enum(["merge", "replace"]).nullish(),
         }),
       },
       async ({ trace_id, spec_version, title, content, source_type, repository, submission_mode }) =>
@@ -908,10 +908,17 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             trace_id: z.string().min(1).optional(),
             namespace: z.string().min(1).max(200),
             import_type: z.enum(["skill", "collection"]),
-            skill_path: z.string().min(1).max(500).optional(),
+            skill_path: z
+              .string()
+              .min(1)
+              .max(500)
+              .optional()
+              .describe(
+                "Skill path relative to namespace (for example systematic-debugging). Full paths such as skills/<namespace>/<path> are also accepted and normalized.",
+              ),
             skill_collection: z.literal("rd-skills"),
             repository: z.string().min(1).optional(),
-            submission_mode: z.enum(["merge", "replace"]).optional(),
+            submission_mode: z.enum(["merge", "replace"]).nullish(),
             files: z
               .array(
                 z
