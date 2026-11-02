@@ -456,3 +456,106 @@ test("activity events are bounded, deduplicated and owner-cursor scoped", () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("source request dedup reuses active auto delegation despite changed problem and idempotency key", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-source-request-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const common = {
+      principalId: "alice",
+      scope: "tenant-a",
+      sourceClient: "claude_code",
+      sourceSessionId: "session-1",
+      sourceRequestId: "srq_" + "a".repeat(64),
+      selectionMode: "auto" as const,
+    };
+    const first = store.submit({ ...common, idempotencyKey: "first", problem: "locate pipe ring full" });
+    const replay = store.submit({ ...common, idempotencyKey: "second", problem: "find OTA pipe writer timeout log" });
+    assert.equal(replay.taskId, first.taskId);
+    assert.equal(replay.reusedExistingTask, true);
+    assert.equal(replay.deduplicationReason, "same_source_request");
+
+    const autoOtherRepository = store.submit({
+      ...common,
+      repositoryId: "repo-other",
+      idempotencyKey: "auto-other-repository",
+      problem: "same source request but another repository",
+    });
+    assert.notEqual(autoOtherRepository.taskId, first.taskId);
+
+    const nextTurn = store.submit({
+      ...common,
+      sourceRequestId: "srq_" + "b".repeat(64),
+      idempotencyKey: "third",
+      problem: "same issue, new user turn",
+    });
+    assert.notEqual(nextTurn.taskId, first.taskId);
+
+    const explicitSameTarget = store.submit({
+      ...common,
+      selectionMode: "explicit",
+      expertId: "ota",
+      repositoryId: "repo-1",
+      deploymentId: "deployment-1",
+      idempotencyKey: "fourth",
+      problem: "explicit first wording",
+    });
+    const explicitSameTargetReplay = store.submit({
+      ...common,
+      selectionMode: "explicit",
+      expertId: "ota",
+      repositoryId: "repo-1",
+      deploymentId: "deployment-1",
+      idempotencyKey: "fourth-replay",
+      problem: "explicit rephrased wording",
+    });
+    assert.equal(explicitSameTargetReplay.taskId, explicitSameTarget.taskId);
+    assert.equal(explicitSameTargetReplay.deduplicationReason, "same_source_request");
+
+    const explicitOtherExpert = store.submit({
+      ...common,
+      selectionMode: "explicit",
+      expertId: "code-review",
+      idempotencyKey: "sixth",
+      problem: "review same issue",
+    });
+    assert.notEqual(explicitOtherExpert.taskId, first.taskId);
+
+    const explicitOtherRepo = store.submit({
+      ...common,
+      selectionMode: "explicit",
+      expertId: "ota",
+      repositoryId: "repo-2",
+      idempotencyKey: "fifth",
+      problem: "inspect same issue",
+    });
+    assert.notEqual(explicitOtherRepo.taskId, first.taskId);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("source request dedup applies only to active tasks; terminal task can be resubmitted", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-source-terminal-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const common = {
+      principalId: "alice",
+      scope: "tenant-a",
+      sourceClient: "claude_code",
+      sourceSessionId: "session-1",
+      sourceRequestId: "srq_" + "c".repeat(64),
+      selectionMode: "auto" as const,
+    };
+    const first = store.submit({ ...common, idempotencyKey: "first", problem: "inspect OTA" });
+    const claim = store.claim("worker-1", Date.now(), 30_000)!;
+    store.complete(claim, "done");
+    const rerun = store.submit({ ...common, idempotencyKey: "rerun", problem: "inspect OTA again" });
+    assert.notEqual(rerun.taskId, first.taskId);
+    assert.equal(rerun.reusedExistingTask, false);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

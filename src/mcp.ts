@@ -1080,7 +1080,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task_auto",
         {
           description:
-            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Never call submit_expert_task_auto and submit_expert_task for the same user request. Before submitting, check the conversation context: if this session already has a queued/running task for the same user intent, do NOT submit again; call wait_expert_task with that existing taskId. Use a fresh idempotencyKey only for a genuinely new task; when retrying the same call after an error or uncertain outcome, reuse the original idempotencyKey (never generate a new key for a retry). The response includes reusedExistingTask/deduplicationReason when an existing task was reused. When activeSessionTaskId is returned, it identifies the oldest queued/running task in this session (including the newly submitted task); if it already covers the same user intent, wait on that task instead of submitting another. A genuinely different user request may be submitted as a separate task; the session queue serializes it. Provide the user's problem. Session identity is injected by the installed Claude Code or Codex CLI PreToolUse hook; do not invent or generate clientSessionId. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a taskId immediately; when the user wants results, automatically call wait_expert_task with its cursor until terminal, then get_expert_task_result on success. Share actual progress while waiting.",
+            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Never call submit_expert_task_auto and submit_expert_task for the same user request. Before submitting, check the conversation context: if this session already has a queued/running task for the same user intent, do NOT submit again; call wait_expert_task with that existing taskId. Use a fresh idempotencyKey only for a genuinely new task; when retrying the same call after an error or uncertain outcome, reuse the original idempotencyKey (never generate a new key for a retry). The response includes reusedExistingTask/deduplicationReason when an existing task was reused. When activeSessionTaskId is returned, it identifies the oldest queued/running task in this session (including the newly submitted task); if it already covers the same user intent, wait on that task instead of submitting another. A genuinely different user request may be submitted as a separate task; the session queue serializes it. Provide the user's problem. Native session and source-request identity are injected by the installed Claude Code or Codex CLI hooks and authenticated by the hook proof; do not invent clientSessionId or sourceRequestId. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a taskId immediately; when the user wants results, automatically call wait_expert_task with its cursor until terminal, then get_expert_task_result on success. Share actual progress while waiting.",
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
@@ -1096,22 +1096,41 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               .describe(
                 "Client-injected native conversation session UUID; omit this field unless supplied by trusted client integration.",
               ),
+            sourceRequestId: z
+              .string()
+              .regex(/^srq_[a-f0-9]{64}$/)
+              .optional()
+              .describe("Trusted hook-injected identity for the current native user turn; do not invent."),
           }),
         },
-        async ({ problem, idempotencyKey, clientSessionId, clientSessionProof }) => {
+        async ({ problem, idempotencyKey, clientSessionId, clientSessionProof, sourceRequestId }) => {
           if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
+          const trustedClientSession = verifyClientSessionProof(
+            credential,
+            clientSessionId,
+            idempotencyKey,
+            clientSessionProof,
+          );
+          const trustedSourceRequest =
+            sourceRequestId !== undefined &&
+            verifyClientSessionProof(
+              credential,
+              clientSessionId,
+              idempotencyKey,
+              clientSessionProof,
+              Date.now(),
+              sourceRequestId,
+            );
           return toolResult({
             ...expertDispatchService.submit({
               principalId: principal.id,
               scope: principal.tenantId,
               idempotencyKey,
-              sourceSessionId:
-                sessionId ??
-                transportSessionId ??
-                (verifyClientSessionProof(credential, clientSessionId, idempotencyKey, clientSessionProof)
-                  ? clientSessionId
-                  : undefined),
+              sourceSessionId: trustedSourceRequest
+                ? clientSessionId
+                : (sessionId ?? transportSessionId ?? (trustedClientSession ? clientSessionId : undefined)),
               sourceClient: client?.slice(0, 200) || "mcp",
+              sourceRequestId: trustedSourceRequest ? sourceRequestId : undefined,
               problem,
               selectionMode: "auto",
             }),
@@ -1123,7 +1142,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task",
         {
           description:
-            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. Never call submit_expert_task_auto and submit_expert_task for the same user request. Before submitting, check the conversation context: if this session already has a queued/running task for the same user intent, do NOT submit again; call wait_expert_task with that existing taskId. Use a fresh idempotencyKey only for a genuinely new task; when retrying the same call after an error or uncertain outcome, reuse the original idempotencyKey (never generate a new key for a retry). The response includes reusedExistingTask/deduplicationReason when an existing task was reused. When activeSessionTaskId is returned, it identifies the oldest queued/running task in this session (including the newly submitted task); if it already covers the same user intent, wait on that task instead of submitting another. A genuinely different user request may be submitted as a separate task; the session queue serializes it. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode; for a result-seeking request automatically call wait_expert_task in bounded windows and pass nextEventId each time until terminal, then get_expert_task_result after succeeded. Do not require the user to ask again. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request. Claude Code and Codex CLI PreToolUse hooks inject native session identity when installed; do not invent or generate clientSessionId.',
+            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. Never call submit_expert_task_auto and submit_expert_task for the same user request. Before submitting, check the conversation context: if this session already has a queued/running task for the same user intent, do NOT submit again; call wait_expert_task with that existing taskId. Use a fresh idempotencyKey only for a genuinely new task; when retrying the same call after an error or uncertain outcome, reuse the original idempotencyKey (never generate a new key for a retry). The response includes reusedExistingTask/deduplicationReason when an existing task was reused. When activeSessionTaskId is returned, it identifies the oldest queued/running task in this session (including the newly submitted task); if it already covers the same user intent, wait on that task instead of submitting another. A genuinely different user request may be submitted as a separate task; the session queue serializes it. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode; for a result-seeking request automatically call wait_expert_task in bounded windows and pass nextEventId each time until terminal, then get_expert_task_result after succeeded. Do not require the user to ask again. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request. Claude Code and Codex CLI hooks inject native session and source-request identity when installed; do not invent or generate clientSessionId or sourceRequestId.',
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
@@ -1143,6 +1162,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               .describe(
                 "Client-injected native conversation session UUID; omit unless supplied by trusted client integration.",
               ),
+            sourceRequestId: z
+              .string()
+              .regex(/^srq_[a-f0-9]{64}$/)
+              .optional()
+              .describe("Trusted hook-injected identity for the current native user turn; do not invent."),
           }),
         },
         async ({
@@ -1154,20 +1178,35 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           deploymentId,
           clientSessionId,
           clientSessionProof,
+          sourceRequestId,
         }) => {
           if (!expertDispatchService) throw new Error("EXPERT_RUNTIME_UNAVAILABLE");
+          const trustedClientSession = verifyClientSessionProof(
+            credential,
+            clientSessionId,
+            idempotencyKey,
+            clientSessionProof,
+          );
+          const trustedSourceRequest =
+            sourceRequestId !== undefined &&
+            verifyClientSessionProof(
+              credential,
+              clientSessionId,
+              idempotencyKey,
+              clientSessionProof,
+              Date.now(),
+              sourceRequestId,
+            );
           return toolResult({
             ...expertDispatchService.submit({
               principalId: principal.id,
               scope: principal.tenantId,
               idempotencyKey,
-              sourceSessionId:
-                sessionId ??
-                transportSessionId ??
-                (verifyClientSessionProof(credential, clientSessionId, idempotencyKey, clientSessionProof)
-                  ? clientSessionId
-                  : undefined),
+              sourceSessionId: trustedSourceRequest
+                ? clientSessionId
+                : (sessionId ?? transportSessionId ?? (trustedClientSession ? clientSessionId : undefined)),
               sourceClient: client?.slice(0, 200) || "mcp",
+              sourceRequestId: trustedSourceRequest ? sourceRequestId : undefined,
               problem,
               expertId,
               selectionMode,

@@ -237,6 +237,10 @@ foreach ($Event in $Events) {
         $SessionHandler = [pscustomobject]@{ type="command"; command=('python3 "' + $SessionHookPy + '"'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionHookPs + '"'); async=$false; timeout=2 }
         $Kept += [pscustomobject]@{ matcher='^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$'; hooks=@($SessionHandler) }
     }
+    if ($Event -eq "UserPromptSubmit") {
+        $PromptSessionHandler = [pscustomobject]@{ type="command"; command=('python3 "' + $SessionHookPy + '"'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionHookPs + '"'); async=$false; timeout=2 }
+        $Kept += [pscustomobject]@{ hooks=@($PromptSessionHandler) }
+    }
     if ($null -ne $Prop) { $HooksRoot.hooks.$Event = @($Kept) }
     else { Add-Member -InputObject $HooksRoot.hooks -MemberType NoteProperty -Name $Event -Value @($Kept) }
 }

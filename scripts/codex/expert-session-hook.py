@@ -43,7 +43,34 @@ def main() -> None:
     payload = None
     try:
         payload = json.load(sys.stdin)
-        if not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse":
+        if not isinstance(payload, dict):
+            return
+        event = payload.get("hook_event_name")
+        try:
+            provided_session = payload.get("session_id")
+            session_id = str(uuid.UUID(provided_session))
+            if provided_session.lower() != session_id:
+                raise ValueError("non-canonical session UUID")
+        except (ValueError, TypeError, AttributeError):
+            return
+        state_root = Path(os.environ.get("TEAM_SKILL_HUB_REQUEST_STATE_DIR") or Path.home() / ".team-skill-hub" / "request-state" / "codex")
+        state_path = state_root / f"{session_id}.json"
+        if event == "UserPromptSubmit":
+            try:
+                state_path.unlink()
+            except FileNotFoundError:
+                pass
+            turn_id = payload.get("turn_id")
+            if isinstance(turn_id, str) and turn_id.strip() and len(turn_id) <= 200:
+                material = f"team-skill-hub/source-request/v1\ncodex\n{session_id}\n{turn_id.strip()}".encode()
+                request_id = "srq_" + hashlib.sha256(material).hexdigest()
+                state_root.mkdir(parents=True, exist_ok=True)
+                temporary = state_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"session_id": session_id, "turn_id": turn_id.strip(), "source_request_id": request_id}), encoding="utf-8")
+                os.chmod(temporary, 0o600)
+                temporary.replace(state_path)
+            return
+        if event != "PreToolUse":
             return
         tool_name = payload.get("tool_name")
         server_name, key_env = configuration()
@@ -52,15 +79,6 @@ def main() -> None:
             f"mcp__{server_name}__submit_expert_task_auto",
         }
         if tool_name not in allowed_tools:
-            return
-
-        try:
-            provided_session = payload.get("session_id")
-            session_id = str(uuid.UUID(provided_session))
-            if provided_session.lower() != session_id:
-                raise ValueError("non-canonical session UUID")
-        except (ValueError, TypeError, AttributeError):
-            emit("deny", "Team Skill Hub cannot verify the native Codex session ID; submission was blocked.")
             return
 
         tool_input = payload.get("tool_input")
@@ -78,13 +96,31 @@ def main() -> None:
             return
 
         timestamp = str(int(time.time() * 1000))
-        message = (
-            f"team-skill-hub/client-session/v1\n{session_id}\n"
-            f"{idempotency_key}\n{timestamp}"
-        )
-        signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
         updated = dict(tool_input)
+        updated.pop("sourceRequestId", None)
+        updated.pop("clientSessionProof", None)
         updated["clientSessionId"] = session_id
+        turn_id = payload.get("turn_id")
+        source_request_id = None
+        if isinstance(turn_id, str) and turn_id.strip() and len(turn_id) <= 200:
+            material = f"team-skill-hub/source-request/v1\ncodex\n{session_id}\n{turn_id.strip()}".encode()
+            source_request_id = "srq_" + hashlib.sha256(material).hexdigest()
+        else:
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                if state.get("session_id") == session_id:
+                    source_request_id = state.get("source_request_id")
+            except (OSError, ValueError, TypeError):
+                pass
+        if isinstance(source_request_id, str) and re.fullmatch(r"srq_[a-f0-9]{64}", source_request_id):
+            updated["sourceRequestId"] = source_request_id
+        else:
+            source_request_id = None
+        if source_request_id:
+            message = f"team-skill-hub/client-session/v2\n{session_id}\n{source_request_id}\n{idempotency_key}\n{timestamp}"
+        else:
+            message = f"team-skill-hub/client-session/v1\n{session_id}\n{idempotency_key}\n{timestamp}"
+        signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
         updated["clientSessionProof"] = f"{timestamp}.{signature}"
         emit("allow", updated=updated)
     except Exception:

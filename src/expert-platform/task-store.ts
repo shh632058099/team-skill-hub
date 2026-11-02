@@ -26,10 +26,13 @@ export type Submission = {
   idempotencyKey: string;
   sourceSessionId?: string;
   sourceClient?: string;
+  sourceRequestId?: string;
   problem: string;
   expertId?: string;
   repositoryId?: string;
   selectionMode?: "explicit" | "auto";
+  deploymentId?: string;
+  sourceRequestSlot?: string;
   schemaVersion?: number;
   deploymentSnapshot?: DeploymentTaskSnapshot;
 };
@@ -46,13 +49,14 @@ export type TaskRecord = {
   deploymentSnapshot?: DeploymentTaskSnapshot | null;
   sourceSessionId?: string | null;
   sourceClient?: string | null;
+  sourceRequestId?: string | null;
   repositoryUrl?: string | null;
   repositoryBranch?: string | null;
   commitSha?: string | null;
   cancellationRequested?: boolean;
   /** True when this submission reused a task created by an earlier submission. */
   reusedExistingTask?: boolean;
-  deduplicationReason?: "idempotency_key" | "same_active_session_task";
+  deduplicationReason?: "idempotency_key" | "same_source_request" | "same_active_session_task";
   /** Oldest queued/running task for this authenticated client session, including this task. */
   activeSessionTaskId?: string;
   activeSessionTaskStatus?: TaskStatus;
@@ -140,6 +144,8 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("cancellation_requested", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("source_session_id", "TEXT");
     this.ensureTaskColumn("source_client", "TEXT");
+    this.ensureTaskColumn("source_request_id", "TEXT");
+    this.ensureTaskColumn("source_request_slot", "TEXT");
     this.ensureTaskColumn("deployment_id", "TEXT");
     this.ensureTaskColumn("deployment_config_version", "INTEGER");
     this.ensureTaskColumn("deployment_snapshot_json", "TEXT");
@@ -153,7 +159,53 @@ export class ExpertTaskStore {
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);
+      CREATE INDEX IF NOT EXISTS idx_expert_task_source_request ON expert_tasks(principal_id,scope,source_client,source_session_id,source_request_id,source_request_slot,status);
       CREATE INDEX IF NOT EXISTS idx_expert_task_created_at ON expert_tasks(created_at DESC);`);
+  }
+
+  findActiveSourceRequest(
+    input: Pick<
+      Submission,
+      | "principalId"
+      | "scope"
+      | "sourceClient"
+      | "sourceSessionId"
+      | "sourceRequestId"
+      | "repositoryId"
+      | "sourceRequestSlot"
+    >,
+  ): TaskRecord | null {
+    const sourceSessionId = input.sourceSessionId?.trim();
+    const sourceClient = input.sourceClient?.trim();
+    const sourceRequestId = input.sourceRequestId?.trim();
+    if (!sourceSessionId || !sourceClient || !sourceRequestId || !/^srq_[a-f0-9]{64}$/.test(sourceRequestId))
+      return null;
+    const sourceRequestSlot = input.sourceRequestSlot ?? JSON.stringify(["auto", input.repositoryId ?? null]);
+    const row = this.db
+      .prepare(
+        `SELECT * FROM expert_tasks
+       WHERE principal_id=? AND scope=? AND source_client=? AND source_session_id=?
+         AND source_request_id=? AND source_request_slot=?
+         AND status IN ('queued','running') ORDER BY rowid LIMIT 1`,
+      )
+      .get(input.principalId, input.scope, sourceClient, sourceSessionId, sourceRequestId, sourceRequestSlot) as
+      Row | undefined;
+    if (!row) return null;
+    const active = this.db
+      .prepare(
+        `SELECT task_id,status FROM expert_tasks
+       WHERE principal_id=? AND scope=? AND source_client=? AND source_session_id=?
+         AND status IN ('queued','running')
+       ORDER BY CASE WHEN created_at IS NULL THEN 1 ELSE 0 END, created_at ASC, rowid ASC LIMIT 1`,
+      )
+      .get(input.principalId, input.scope, sourceClient, sourceSessionId) as
+      { task_id: string; status: TaskStatus } | undefined;
+    return {
+      ...this.fromRow(row),
+      reusedExistingTask: true,
+      deduplicationReason: "same_source_request",
+      ...(active ? { activeSessionTaskId: String(active.task_id), activeSessionTaskStatus: active.status } : {}),
+    };
   }
 
   submit(input: Submission): TaskRecord {
@@ -162,6 +214,9 @@ export class ExpertTaskStore {
     }
     const sourceSessionId = input.sourceSessionId?.trim() || null;
     const sourceClient = input.sourceClient?.trim() || null;
+    const sourceRequestId = input.sourceRequestId?.trim() || null;
+    if (sourceRequestId && (!/^srq_[a-f0-9]{64}$/.test(sourceRequestId) || !sourceSessionId || !sourceClient))
+      throw new Error("INVALID_SOURCE_REQUEST_ID");
     if (
       (sourceSessionId && (sourceSessionId.length > 200 || !sourceClient || sourceClient.length > 200)) ||
       (!sourceSessionId && sourceClient && sourceClient.length > 200)
@@ -172,6 +227,11 @@ export class ExpertTaskStore {
     const selectionMode = input.selectionMode ?? "explicit";
     const schemaVersion = input.schemaVersion ?? (input.deploymentSnapshot ? 2 : 1);
     const snapshot = input.deploymentSnapshot;
+    const sourceRequestSlot =
+      input.sourceRequestSlot ??
+      (selectionMode === "auto"
+        ? JSON.stringify(["auto", repositoryId ?? null])
+        : JSON.stringify([expertId, repositoryId, snapshot?.deploymentId ?? input.deploymentId ?? null]));
     if (
       snapshot &&
       (!snapshot.deploymentId ||
@@ -240,8 +300,27 @@ export class ExpertTaskStore {
           ...sessionTask,
         };
       }
-      // Reuse only identical active work scoped to the same authenticated principal,
-      // client session, expert and repository. Different questions remain queued.
+      // A trusted source request ID identifies one native user turn. Reuse only
+      // the same delegation slot while it is active; auto-routing is one slot,
+      // while explicit expert/repository/deployment requests remain independent.
+      if (sourceSessionId && sourceRequestId) {
+        const duplicate = this.db
+          .prepare(
+            `SELECT * FROM expert_tasks
+             WHERE principal_id=? AND scope=? AND source_client=? AND source_session_id=?
+               AND source_request_id=? AND source_request_slot=?
+               AND status IN ('queued','running') ORDER BY rowid LIMIT 1`,
+          )
+          .get(input.principalId, input.scope, sourceClient, sourceSessionId, sourceRequestId, sourceRequestSlot) as
+          Row | undefined;
+        if (duplicate) {
+          const record = this.fromRow(duplicate);
+          const sessionTask = activeSessionTask();
+          this.db.exec("COMMIT");
+          return { ...record, reusedExistingTask: true, deduplicationReason: "same_source_request", ...sessionTask };
+        }
+      }
+      // Legacy fallback for clients without a trusted source request ID.
       if (sourceSessionId) {
         const duplicate = this.db
           .prepare(
@@ -274,7 +353,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,'queued')",
         )
         .run(
           taskId,
@@ -289,7 +368,9 @@ export class ExpertTaskStore {
           schemaVersion,
           sourceSessionId,
           sourceClient,
-          snapshot?.deploymentId ?? null,
+          sourceRequestId,
+          sourceRequestId ? sourceRequestSlot : null,
+          snapshot?.deploymentId ?? input.deploymentId ?? null,
           snapshot?.configVersion ?? null,
           snapshot ? JSON.stringify(snapshot) : null,
           Date.now(),
@@ -311,9 +392,12 @@ export class ExpertTaskStore {
               deploymentConfigVersion: snapshot.configVersion,
               deploymentSnapshot: snapshot,
             }
-          : {}),
+          : input.deploymentId
+            ? { deploymentId: input.deploymentId }
+            : {}),
         sourceSessionId,
         sourceClient,
+        sourceRequestId,
         reusedExistingTask: false,
         ...sessionTask,
       };
@@ -829,7 +913,9 @@ export class ExpertTaskStore {
       ...(row.deployment_id
         ? {
             deploymentId: String(row.deployment_id),
-            deploymentConfigVersion: Number(row.deployment_config_version),
+            ...(row.deployment_config_version != null
+              ? { deploymentConfigVersion: Number(row.deployment_config_version) }
+              : {}),
             deploymentSnapshot: row.deployment_snapshot_json
               ? (JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot)
               : null,
@@ -837,6 +923,7 @@ export class ExpertTaskStore {
         : {}),
       sourceSessionId: row.source_session_id == null ? null : String(row.source_session_id),
       sourceClient: row.source_client == null ? null : String(row.source_client),
+      sourceRequestId: row.source_request_id == null ? null : String(row.source_request_id),
       repositoryUrl: row.repository_url == null ? null : String(row.repository_url),
       repositoryBranch: row.repository_branch == null ? null : String(row.repository_branch),
       commitSha: row.commit_sha == null ? null : String(row.commit_sha),

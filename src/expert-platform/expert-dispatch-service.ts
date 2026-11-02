@@ -8,6 +8,7 @@ export interface DispatchInput {
   idempotencyKey: string;
   sourceSessionId?: string;
   sourceClient?: string;
+  sourceRequestId?: string;
   problem: string;
   expertId?: string;
   selectionMode?: "explicit" | "auto";
@@ -53,6 +54,13 @@ export class ExpertDispatchService {
   }
 
   submit(input: DispatchInput): TaskRecord {
+    // Resolve an already-active auto delegation before attempting to route a
+    // rephrased problem. Router availability/scoring must not defeat idempotency.
+    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
+    if ((input.selectionMode ?? "auto") === "auto" && input.sourceRequestId) {
+      const existing = this.tasks.findActiveSourceRequest({ ...input, sourceRequestSlot: autoSourceRequestSlot });
+      if (existing) return existing;
+    }
     const deployments = this.experts.listDeployments();
     const candidates = deployments.flatMap((deployment) => {
       if (!deployment.active) return [];
@@ -154,10 +162,16 @@ export class ExpertDispatchService {
       idempotencyKey: input.idempotencyKey,
       sourceSessionId: input.sourceSessionId,
       sourceClient: input.sourceClient,
+      sourceRequestId: input.sourceRequestId,
       problem: input.problem,
       expertId: route.expertId,
       repositoryId: configuredRepositoryId,
       selectionMode: route.selectionMode,
+      deploymentId: selected.id,
+      sourceRequestSlot:
+        route.selectionMode === "auto"
+          ? autoSourceRequestSlot
+          : JSON.stringify([route.expertId, configuredRepositoryId ?? null, selected.id]),
       schemaVersion: deploymentSnapshot ? 2 : 1,
       ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
     });

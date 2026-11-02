@@ -137,6 +137,33 @@ Linux 使用 `scripts/codex/expert-session-hook.py`，Windows 使用 `scripts/co
 
 从 Hub 下载 `setup-claude-code.sh` 或 `setup-claude-code.ps1` 后，脚本会自动下载客户端 Release v12，内含 Linux `scripts/claude/expert-session-hook.py` 和 Windows `scripts/claude/expert-session-hook.ps1`。Setup 将 Hook 复制到用户 Claude `hooks` 目录并注册只匹配两个 Expert 提交工具的 `PreToolUse`，重复执行不叠加 Hook，不覆盖其他 Hooks。以后客户端升级需重启 Claude Code 才能确保新 Hooks 生效。此能力适用于默认 MCP 名称 `teamSkillHub`；使用自定义 MCP server name 时当前不会安装该专用 Hook。Linux 需要 `python3`；Windows 使用 PowerShell，不要求 Python。
 
+### 基于原始用户 Turn 的专家任务去重（Source Request ID）
+
+仅靠 `clientSessionId` 和模型上下文无法可靠识别同一用户请求：上游 Router 可能裁掉之前的 `tool_use/tool_result`，模型随后用不同措辞和新的 `idempotencyKey` 再次提交。现在增加由本地 Hook 生成、Hub 验证的 `sourceRequestId`，不依赖模型记忆或 prompt 文本。
+
+- Claude Code：`UserPromptSubmit` Hook 读取原生 `session_id + prompt_id`，只保存派生后的 request ID；`PreToolUse` Hook 为两个 Expert 提交工具注入 `clientSessionId`、`sourceRequestId` 和 v2 HMAC proof。
+- Codex CLI：`UserPromptSubmit` Hook 读取原生 `session_id + turn_id` 并保存派生 ID；`PreToolUse` Hook 读取同一会话状态并注入相同字段。若当前 CLI 事件没有可用 turn ID，则退回 v1 Session proof，不伪造 request ID。
+- 派生规则：`srq_` + SHA-256(`team-skill-hub/source-request/v1\n<client>\n<session_id>\n<turn_id>`)，不保存用户 prompt 或 transcript 内容。Linux 状态文件权限为 `0600`；新 prompt 到来时先清理旧状态，避免缺少 turn ID 时误用上一次请求。
+- v2 proof 签名 `sessionId + sourceRequestId + idempotencyKey + timestamp`。Hub 同时兼容旧 v1 proof；只有有效 v2 proof 才信任 `sourceRequestId`，模型手动填写但没有匹配 proof 的字段不会参与去重。
+
+Hub 的去重顺序为：`idempotencyKey` → `same_source_request` → 旧客户端的 `same_active_session_task` exact-request fallback。Source request 去重仅作用于 `queued/running`：同一 principal、tenant、client、native session、source request 和 delegation slot 复用原任务，不比较重新措辞后的 `problem` 或新的 `idempotencyKey`。Auto delegation 按 `auto + repositoryId` 隔离；显式专家任务按 `expertId + repositoryId + deploymentId` 隔离，避免同一用户请求中的不同专家/仓库被误合并。Auto 请求会在路由前先查询 active source request，因此重新措辞导致路由器无法再次识别时仍能返回原任务。终态任务不参与 source-request active dedup；用户明确重新执行时使用新的 `idempotencyKey`。
+
+标准安装脚本会自动注册 `UserPromptSubmit` 状态 Hook 和 `PreToolUse` 签名 Hook：
+
+- Claude：`scripts/setup-claude-code.sh` / `.ps1`
+- Codex：`scripts/setup-codex-mcp.sh` / `.ps1`
+
+升级 Hub 后也要升级客户端集成并重启 Claude Code / Codex，使新 Hook 生效。旧客户端仍可用 v1 proof 和原有 exact-request fallback，但不具备跨措辞的 source-request 去重。Hook 不会 deny 提交，也不替代 Hub 服务端校验；服务端才是任务复用的权威。
+
+#### 2026-11-02 Claude CLI 真实验收
+
+在 WSL2 使用 Claude Code 2.1.316、真实 `teamSkillHub` HTTP MCP 和 OTA Worker 完成验收：
+
+- 首次只读分析任务 `94d3fa75-0b93-48d4-aeb3-e650a5a2cdbe` 成功提交，确认原生 Hook 能取得本轮 turn ID 并生成 `sourceRequestId`。
+- 在同一个 Claude CLI user turn 内，故意连续调用两次 `submit_expert_task_auto`；两次 `problem` 措辞不同、`idempotencyKey` 不同，第二次返回 `reusedExistingTask=true`、`deduplicationReason=same_source_request`，两次 Task ID 均为 `198ba617-bc75-4b87-9532-9205db3ff5e5`。
+- 随后在同一 Claude CLI session 发起新的 user turn，提交不同的 OTA 配置解析分析请求，得到独立 Task `b6291f85-1b2c-4217-9c76-6ec66a8ee9a3`，没有错误复用前一 turn 的任务。
+- 两个验收任务均通过 Claude CLI 的 `wait_expert_task` 等待至 `succeeded`；Worker 实际执行并返回结果。全程只读，没有修改 OTA 仓库或创建 PR。
+
 ### Claude 任务最大回合数
 
 Worker 环境变量 `EXPERT_CLAUDE_MAX_TURNS` 用来配置 Claude CLI 的 `--max-turns`，默认 `12`（兼容原有行为），允许 `1`～`1000` 的整数；非法值在 Worker 启动时拒绝。此参数适用于默认 Claude Model 和 Hub 下发的 Claude AI Router Model，Codex 后端不受影响。其限制不同于任务整体超时 `EXPERT_TASK_TIMEOUT_MS`，两者可独立设置。修改 Worker 环境变量后需要重启 Worker 才会生效。

@@ -153,6 +153,13 @@ if os.environ["SERVER_NAME"] == "teamSkillHub":
     command='python3 "'+os.path.join(os.environ["HOOKS_DIR"],"team-skill-hub-expert-session.py")+'"'
     kept.append({"matcher":matcher,"hooks":[{"type":"command","command":command,"timeout":5}]})
     hooks["PreToolUse"]=kept
+    prompt_kept=[]
+    for group in hooks.get("UserPromptSubmit",[]) or []:
+        handlers=[h for h in (group.get("hooks",[]) or []) if "team-skill-hub-expert-session.py" not in str(h.get("command",""))]
+        if handlers:
+            copy=dict(group); copy["hooks"]=handlers; prompt_kept.append(copy)
+    prompt_kept.append({"hooks":[{"type":"command","command":command,"timeout":2}]})
+    hooks["UserPromptSubmit"]=prompt_kept
 client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
 kept=[]
 for group in hooks.get("SessionStart",[]) or []:

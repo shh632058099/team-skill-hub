@@ -24,3 +24,20 @@ test("accepts only authenticated fresh hook session identity bound to the submit
   assert.equal(verifyClaudeSessionProof(auth, sid, key, undefined, now), false);
   assert.equal(verifyClaudeSessionProof(auth, sid, key, `${now}.${"0".repeat(64)}`, now), false);
 });
+
+test("v2 proof authenticates the source request identity and remains separate from legacy v1", () => {
+  const sid = "57fa17ba-1e37-4f5d-b504-d7aa9c3c89df";
+  const requestId = "srq_" + "a".repeat(64);
+  const key = "submit-2";
+  const auth = "secret";
+  const now = 1761700000000;
+  const mac = createHmac("sha256", auth)
+    .update(`team-skill-hub/client-session/v2\n${sid}\n${requestId}\n${key}\n${now}`)
+    .digest("hex");
+  const proof = `${now}.${mac}`;
+  assert.equal(verifyClientSessionProof(auth, sid, key, proof, now, requestId), true);
+  assert.equal(verifyClientSessionProof(auth, sid, key, proof, now, "srq_" + "b".repeat(64)), false);
+  assert.equal(verifyClientSessionProof(auth, sid, "different-key", proof, now, requestId), false);
+  assert.equal(verifyClientSessionProof(auth, sid, key, proof, now), false);
+  assert.equal(verifyClientSessionProof(auth, sid, key, undefined, now, requestId), false);
+});

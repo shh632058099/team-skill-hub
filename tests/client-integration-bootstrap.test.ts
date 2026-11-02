@@ -57,6 +57,17 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   );
   assert.ok(codexSessionHook);
   assert.equal(codexSessionHook.hooks[0].async, false);
+  const codexPromptHooks = codexHooks.hooks.UserPromptSubmit.flatMap(
+    (group: { hooks?: Array<{ command?: string; async?: boolean }> }) => group.hooks ?? [],
+  );
+  assert.equal(
+    codexPromptHooks.filter((hook: { command?: string }) => hook.command?.includes("expert-session-hook.py")).length,
+    1,
+  );
+  assert.equal(
+    codexPromptHooks.find((hook: { command?: string }) => hook.command?.includes("expert-session-hook.py"))?.async,
+    false,
+  );
   assert.match(await readFile(path.join(codex, "hooks.json"), "utf8"), /team-skill-hub-client.*session-start/);
   const codexConfig = await readFile(path.join(codex, "config.toml"), "utf8");
   assert.match(codexConfig, /\[sandbox_workspace_write\]/);
@@ -79,6 +90,14 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     hooks?: Array<{ command?: string }>;
   }>;
   assert.equal(groups.filter((group) => group.matcher === sessionMatcher).length, 1);
+  const promptStateHooks = JSON.parse(claudeSettings).hooks.UserPromptSubmit.flatMap(
+    (group: { hooks?: Array<{ command?: string }> }) => group.hooks ?? [],
+  );
+  assert.equal(
+    promptStateHooks.filter((hook: { command?: string }) => hook.command?.includes("team-skill-hub-expert-session.py"))
+      .length,
+    1,
+  );
   // Re-run Setup from the installed release itself. Bootstrap must not delete its source.
   await execFileAsync(
     "bash",
@@ -98,6 +117,15 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   });
   groups = JSON.parse(await readFile(path.join(claude, "settings.json"), "utf8")).hooks.PreToolUse;
   assert.equal(groups.filter((group) => group.matcher === sessionMatcher).length, 1);
+  const promptStateHooksAfterRerun = JSON.parse(
+    await readFile(path.join(claude, "settings.json"), "utf8"),
+  ).hooks.UserPromptSubmit.flatMap((group: { hooks?: Array<{ command?: string }> }) => group.hooks ?? []);
+  assert.equal(
+    promptStateHooksAfterRerun.filter((hook: { command?: string }) =>
+      hook.command?.includes("team-skill-hub-expert-session.py"),
+    ).length,
+    1,
+  );
 
   const codexGuidance = await readFile(path.join(codex, "AGENTS.md"), "utf8");
   const claudeGuidance = await readFile(path.join(claude, "CLAUDE.md"), "utf8");

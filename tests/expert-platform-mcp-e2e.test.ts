@@ -300,6 +300,37 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
         .digest("hex");
       return `${stamp}.${hash}`;
     };
+    const sourceRequestId = "srq_" + "d".repeat(64);
+    const sourceRequestSessionId = "9c4d43d0-7bd4-4a72-9e6b-b47dce6eec2f";
+    const sourceRequestProof = (session: string, requestId: string, key: string) => {
+      const stamp = String(Date.now());
+      const hash = createHmac("sha256", apiKey)
+        .update(`team-skill-hub/client-session/v2\n${session}\n${requestId}\n${key}\n${stamp}`)
+        .digest("hex");
+      return `${stamp}.${hash}`;
+    };
+    const sourceRequestFirst = await callMcp(mcpUrl, apiKey, 50, "submit_expert_task_auto", {
+      problem: "OTA locate pipe writer ring full logging branch",
+      idempotencyKey: "source-request-first",
+      clientSessionId: sourceRequestSessionId,
+      sourceRequestId,
+      clientSessionProof: sourceRequestProof(sourceRequestSessionId, sourceRequestId, "source-request-first"),
+    });
+    const sourceRequestReplay = await callMcp(mcpUrl, apiKey, 49, "submit_expert_task_auto", {
+      problem: "completely rephrased words with no expert routing keywords",
+      idempotencyKey: "source-request-rephrased",
+      clientSessionId: sourceRequestSessionId,
+      sourceRequestId,
+      clientSessionProof: sourceRequestProof(sourceRequestSessionId, sourceRequestId, "source-request-rephrased"),
+    });
+    assert.equal(sourceRequestReplay.taskId, sourceRequestFirst.taskId);
+    assert.equal(sourceRequestReplay.reusedExistingTask, true);
+    assert.equal(sourceRequestReplay.deduplicationReason, "same_source_request");
+    assert.equal(
+      tasks!.get(String(sourceRequestFirst.taskId), "ota-test-client", "rd").sourceRequestId,
+      sourceRequestId,
+    );
+
     const firstOfSession = await callMcp(mcpUrl, apiKey, 51, "submit_expert_task_auto", {
       problem: duplicateProblem,
       idempotencyKey: "same-session-first",
@@ -352,7 +383,14 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     assert.notEqual(noSession.taskId, firstOfSession.taskId, "missing session must not cross-dedup");
     assert.equal(noSession.activeSessionTaskId, undefined);
     // Do not leave additional queue entries running; the main assertion concerns pending tasks.
-    for (const pending of [firstOfSession, differentTaskSameSession, separateSession, spoofed, noSession]) {
+    for (const pending of [
+      sourceRequestFirst,
+      firstOfSession,
+      differentTaskSameSession,
+      separateSession,
+      spoofed,
+      noSession,
+    ]) {
       tasks!.cancel(String(pending.taskId), "ota-test-client", "rd");
     }
 

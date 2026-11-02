@@ -207,7 +207,7 @@ cp "$CLIENT_RELEASE_DIR/scripts/codex/expert-session-hook.ps1" "$SESSION_HOOK_PS
 chmod +x "$SH_HOOK" "$SESSION_HOOK_PY"
 printf 'event_url=%s\nserver_name=%s\napi_key_env=%s\ncapture_stop_message=%s\nruntime_version=%s\nhook_schema_version=%s\n' "$EVENT_URL" "$SERVER_NAME" "$API_KEY_ENV" "$AUTO_KNOWLEDGE" "$HOOK_RUNTIME_VERSION" "$HOOK_SCHEMA_VERSION" > "$HOOK_CONF"
 
-export HOOKS_JSON SH_HOOK PS_HOOK CLIENT_LAUNCHER SESSION_HOOK_PY SESSION_HOOK_PS
+export HOOKS_JSON SH_HOOK PS_HOOK CLIENT_LAUNCHER SESSION_HOOK_PY SESSION_HOOK_PS SERVER_NAME
 if command -v python3 >/dev/null 2>&1; then
   python3 <<'PY'
 import json,os
@@ -234,6 +234,16 @@ for event in events:
         group["matcher"]="^__team_skill_hub_reserved__$"
     kept.append(group)
     hooks[event]=kept
+if os.environ.get("SERVER_NAME") == "teamSkillHub":
+    session_py=os.environ["SESSION_HOOK_PY"].replace("\\","/")
+    session_ps=os.environ["SESSION_HOOK_PS"]
+    kept=[]
+    for group in hooks.get("UserPromptSubmit",[]) or []:
+        handlers=[h for h in (group.get("hooks",[]) or []) if "expert-session-hook" not in str(h.get("command","")) and "expert-session-hook" not in str(h.get("commandWindows",""))]
+        if handlers:
+            g=dict(group);g["hooks"]=handlers;kept.append(g)
+    kept.append({"hooks":[{"type":"command","command":f'python3 "{session_py}"',"commandWindows":f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{session_ps}"',"async":False,"timeout":2}]})
+    hooks["UserPromptSubmit"]=kept
 client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
 kept=[]
 for group in hooks.get("SessionStart",[]) or []:
@@ -251,6 +261,11 @@ const fs=require("fs");const path=process.env.HOOKS_JSON;let root={};if(fs.exist
 root.hooks ||= {};
 const events=["SessionStart","UserPromptSubmit","PreToolUse","PostToolUse","PreCompact","PostCompact","Stop","SessionEnd"];
 for(const event of events){const handler={type:"command",command:`bash "${process.env.SH_HOOK.replaceAll("\\","/")}"`,commandWindows:`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${process.env.PS_HOOK}"`,async:!["SessionStart","PostToolUse","Stop","SessionEnd"].includes(event),timeout:2};const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-hook")&&!String(h.commandWindows||"").includes("team-skill-hub-hook"));if(hs.length)kept.push({...group,hooks:hs})}const group={hooks:[handler]};if(["PreToolUse","PreCompact","PostCompact"].includes(event))group.matcher="^__team_skill_hub_reserved__$";kept.push(group);root.hooks[event]=kept}
+if(process.env.SERVER_NAME==="teamSkillHub"){
+ const py=process.env.SESSION_HOOK_PY.replaceAll("\\","/"),ps=process.env.SESSION_HOOK_PS;const kept=[];
+ for(const group of (root.hooks.UserPromptSubmit||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.commandWindows||"").includes("expert-session-hook"));if(hs.length)kept.push({...group,hooks:hs})}
+ kept.push({hooks:[{type:"command",command:`python3 "${py}"`,commandWindows:`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${ps}"`,async:false,timeout:2}]});root.hooks.UserPromptSubmit=kept;
+}
 const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client")&&!String(h.commandWindows||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client codex`,timeout:2}]});root.hooks.SessionStart=sk;
 root.description ||= "Codex lifecycle hooks including Team Skill Hub client events.";
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");

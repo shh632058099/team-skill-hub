@@ -217,6 +217,15 @@ if ($ServerName -eq 'teamSkillHub') {
   $sessionCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionGate + '"'
   $kept += ,@{ matcher='^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$'; hooks=@(@{type='command';command=$sessionCommand;timeout=5}) }
   $root['hooks']['PreToolUse'] = @($kept)
+  $promptKept = @()
+  foreach ($groupValue in @($root['hooks']['UserPromptSubmit'])) {
+    if ($null -eq $groupValue) { continue }
+    $group = Convert-ToHashtable $groupValue
+    $handlers = @($group['hooks']) | Where-Object { -not ([string]$_['command'] -like '*team-skill-hub-expert-session*') }
+    if ($handlers.Count -gt 0) { $copy=@{}; foreach($key in $group.Keys){$copy[$key]=$group[$key]}; $copy['hooks']=@($handlers); $promptKept += ,$copy }
+  }
+  $promptKept += ,@{ hooks=@(@{type='command';command=$sessionCommand;timeout=2}) }
+  $root['hooks']['UserPromptSubmit'] = @($promptKept)
 }
 
 $json = $root | ConvertTo-Json -Depth 20
