@@ -25,7 +25,7 @@ sudo docker load -i expert-claude-image-0.1.0.tar
 sudo docker image inspect team-skill-hub-expert-claude:0.1.0
 ```
 
-编辑 Worker 主机 `/etc/team-skill-hub-worker/worker.env`，在原有连接 Hub、Worker ID、Git 凭据等设置基础上使用以下 Claude 配置：
+为 Claude Worker 创建独立 instance，例如 `worker-control.sh init claude-01`，然后编辑 `/etc/team-skill-hub-worker/workers/claude-01.env`，在连接 Hub、Worker ID、Git 凭据等设置基础上使用以下 Claude 配置：
 
 ```dotenv
 EXPERT_EXECUTOR_BACKEND=claude
@@ -41,8 +41,8 @@ ANTHROPIC_AUTH_TOKEN=从安全密钥系统注入的实际值
 改用 OAuth token 时，将上面的 `ANTHROPIC_API_KEY` 替换为 `CLAUDE_CODE_OAUTH_TOKEN` 并在 `EXPERT_MODEL_ENV_NAMES` 中同步替换。**绝对不要**把密钥写进镜像、Git、发布 tar 包或文档。模型必须是安装的 Claude CLI 认可且当前账户有权限访问的模型 ID；使用代理网关时，所需 `ANTHROPIC_BASE_URL` 等变量也必须在 Worker 环境及 `EXPERT_MODEL_ENV_NAMES` 白名单内显式配置。
 
 ```bash
-sudo systemctl restart team-skill-hub-worker
-sudo journalctl -u team-skill-hub-worker -n 100 --no-pager
+sudo systemctl restart team-skill-hub-worker@claude-01
+sudo journalctl -u team-skill-hub-worker@claude-01 -n 100 --no-pager
 ```
 
 ## 2. 隔离与兼容性

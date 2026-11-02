@@ -75,7 +75,7 @@ IMAGE_TAG="team-skill-hub-expert-claude:$VERSION"
 test -s "$RUNTIME" && test -s "$IMAGE_TAR"
 
 # 安装器、服务配置和启动文件必须存在
-for f in ./install-worker.sh ./worker.env.example ./team-skill-hub-worker.service ./check-worker-config.js ./src/cli/expert-worker.js; do
+for f in ./install-worker.sh ./worker.env.example './team-skill-hub-worker@.service' ./check-worker-config.js ./src/cli/expert-worker.js; do
   tar -tzf "$RUNTIME" | grep -Fx -- "$f" >/dev/null || {
     echo "Runtime 缺少 $f" >&2
     exit 1

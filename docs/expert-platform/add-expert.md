@@ -86,13 +86,13 @@ command -v git tar sha256sum
 
 在“专家配置”区域选择创建专家，填写以下字段：
 
-| 字段              | 示例                                          | 填写原则                                                         |
-| ----------------- | --------------------------------------------- | ---------------------------------------------------------------- |
-| 专家 ID           | `yocto`                                       | 稳定、唯一，建议小写英文和连字符；创建后作为调用/路由标识使用    |
-| 显示名称          | `Yocto 构建专家`                              | 给管理员和用户看的名称                                           |
-| Capabilities      | `yocto,build,linux`                           | 专家能处理的能力标签；多个值用逗号或换行分隔                     |
-| Keywords          | `bitbake,recipe,layer,CVE`                    | 描述典型任务的关键词，帮助自动路由                               |
-| 启用              | 勾选                                          | 保存后专家配置应处于启用状态                                     |
+| 字段         | 示例                       | 填写原则                                                      |
+| ------------ | -------------------------- | ------------------------------------------------------------- |
+| 专家 ID      | `yocto`                    | 稳定、唯一，建议小写英文和连字符；创建后作为调用/路由标识使用 |
+| 显示名称     | `Yocto 构建专家`           | 给管理员和用户看的名称                                        |
+| Capabilities | `yocto,build,linux`        | 专家能处理的能力标签；多个值用逗号或换行分隔                  |
+| Keywords     | `bitbake,recipe,layer,CVE` | 描述典型任务的关键词，帮助自动路由                            |
+| 启用         | 勾选                       | 保存后专家配置应处于启用状态                                  |
 
 **模型已迁至 Deployment。** 新建专家仅管理能力、关键词、启停；历史 Expert.modelConfig 暂为 V1 兼容数据。
 
@@ -100,24 +100,24 @@ command -v git tar sha256sum
 
 在“执行配置”区域选择创建执行配置，将刚才创建的专家绑定到可访问仓库。
 
-| 字段                    | 示例                                          | 填写原则                                                             |
-| ----------------------- | --------------------------------------------- | -------------------------------------------------------------------- |
-| 执行配置 ID             | `yocto-default`                               | 唯一、稳定的标识                                                     |
-| 专家配置                | `yocto · Yocto 构建专家`                      | 选择第 2 步创建的专家                                                |
-| 源码仓库地址            | `https://github.com/your-org/yocto-layer.git` | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码          |
-| 分支                    | `main`                                        | 与仓库地址逐行对应；留空默认 `main`                                  |
-| 仓库凭据引用            | `yocto-github-readonly`                       | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                 |
-| Git 代理地址            | `http://proxy-host:7890`                      | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息 |
-| 允许调用者 Principal ID | `实际的 principal.id`                         | 每行一个；只授权确实需要使用此 Deployment 的调用者                   |
-| Runtime Profile         | `linux-yocto`                                 | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`              |
-| 启用执行配置            | 勾选                                          | 只有启用的 Deployment 才能参与任务派发                               |
-| Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名 |
-| 模型 Credential Ref     | `model-readonly`                              | Worker 本地模型凭据映射，不存 Key 明文 |
-| MCP Profile            | `default`                                     | Admin 全局 Profile，可由 Deployment 引用/覆盖 |
-| MCP URL                | `http://hub.internal:8080/mcp`                | 必须从任务容器网络可达；不能用 127.0.0.1 指向外部 Hub |
-| MCP Credential Ref     | `skillhub-readonly`                           | 独立只读 API Key 的本地文件映射 |
-| MCP Allowed Tools      | `search_skills,get_skill,search_knowledge,get_knowledge` | 只读工具白名单；禁止管理、发布、派发 |
-| MCP Required           | 按需                                        | Key/URL 不可用时是否直接失败 |
+| 字段                    | 示例                                                     | 填写原则                                                                 |
+| ----------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 执行配置 ID             | `yocto-default`                                          | 唯一、稳定的标识                                                         |
+| 专家配置                | `yocto · Yocto 构建专家`                                 | 选择第 2 步创建的专家                                                    |
+| 源码仓库地址            | `https://github.com/your-org/yocto-layer.git`            | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码              |
+| 分支                    | `main`                                                   | 与仓库地址逐行对应；留空默认 `main`                                      |
+| 仓库凭据引用            | `yocto-github-readonly`                                  | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                     |
+| Git 代理地址            | `http://proxy-host:7890`                                 | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息     |
+| 允许调用者 Principal ID | `实际的 principal.id`                                    | 每行一个；只授权确实需要使用此 Deployment 的调用者                       |
+| Runtime Profile         | `linux-yocto`                                            | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`                  |
+| 启用执行配置            | 勾选                                                     | 只有启用的 Deployment 才能参与任务派发                                   |
+| Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages     | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名 |
+| 模型 Credential Ref     | `model-readonly`                                         | Worker 本地模型凭据映射，不存 Key 明文                                   |
+| MCP Profile             | `default`                                                | Admin 全局 Profile，可由 Deployment 引用/覆盖                            |
+| MCP URL                 | `http://hub.internal:8080/mcp`                           | 必须从任务容器网络可达；不能用 127.0.0.1 指向外部 Hub                    |
+| MCP Credential Ref      | `skillhub-readonly`                                      | 独立只读 API Key 的本地文件映射                                          |
+| MCP Allowed Tools       | `search_skills,get_skill,search_knowledge,get_knowledge` | 只读工具白名单；禁止管理、发布、派发                                     |
+| MCP Required            | 按需                                                     | Key/URL 不可用时是否直接失败                                             |
 
 可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。
 
@@ -210,29 +210,52 @@ EXPERT_WORKER_BOOTSTRAP_ALLOWED_CAPABILITIES=ota,yocto
 
 ### 5.2 Worker 主机配置
 
-在 `/etc/team-skill-hub-worker/worker.env` 设置：
+Worker Runtime 是宿主机级安装；实际可运行配置必须按 instance 存放：
+
+```text
+/etc/team-skill-hub-worker/workers/<instance>.env
+```
+
+例如先创建一个 Yocto/Claude Worker：
+
+```bash
+sudo /opt/team-skill-hub-worker/current/worker-control.sh init yocto-claude-01
+sudoedit /etc/team-skill-hub-worker/workers/yocto-claude-01.env
+sudo chmod 600 /etc/team-skill-hub-worker/workers/yocto-claude-01.env
+```
+
+填写：
 
 ```dotenv
 EXPERT_HUB_ADDRESS=hub.internal.example:7443
 EXPERT_WORKER_ID=yocto-worker-01
 EXPERT_CAPABILITY=yocto
 EXPERT_WORKER_BOOTSTRAP_TOKEN=与 Hub 配置相同的部署级 Token
-EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
+EXPERT_EXECUTOR_BACKEND=claude
+EXPERT_RUNTIME_PROFILES=claude-readonly
 ```
 
-保留该文件为 root 所有、权限 `600`。Bootstrap Token 只用于首次登记/审批后的凭据交换；Worker 成功保存正式 credential 后，会从当前进程环境中清除该 Token，并优先使用凭据文件。确认凭据文件已生成后，建议从 `worker.env` 删除 `EXPERT_WORKER_BOOTSTRAP_TOKEN`，以免长期保留引导凭据；之后重启会直接复用凭据文件。凭据文件默认由 `expert-worker` 用户持有、权限 `600`。不要把正式 credential 写入 Git、工单或日志。
+`EXPERT_WORKER_INSTANCE` 由 controller/systemd 自动注入，不要在 env 中手工配置。默认 credential、source、repositories 路径分别位于：
+
+```text
+/var/lib/team-skill-hub-worker/<instance>/worker-credential
+/var/lib/team-skill-hub-worker/<instance>/source
+/var/lib/team-skill-hub-worker/<instance>/repositories
+```
+
+Bootstrap Token 只用于首次登记/审批后的凭据交换。正式 credential 保存后，从该实例 env 中删除 `EXPERT_WORKER_BOOTSTRAP_TOKEN`。
 
 ### 5.3 网页审批和状态管理
 
 1. 打开 `/admin/experts`，切换到 **Worker 管理**。
 2. Worker 首次启动后会自动出现在列表中，状态为 `pending`。
 3. 核对 Worker ID 和 capabilities 后点击“批准”。
-4. Worker 会自动轮询注册接口，在激活后交换并保存正式 credential，随后开始正常心跳和领取任务；管理员不需要手工复制 credential。
+4. Worker 自动交换并保存正式 credential，随后开始正常心跳和领取任务。
 5. 不再使用某个 Worker 时，确认没有任务正在运行，再点击“吊销”。
 
 ### 5.4 备用方式：手动 CLI
 
-Bootstrap 不适用或需要运维排障时，仍可使用 CLI 手动注册、审批和签发凭据。在 Hub 主机执行：
+Bootstrap 不适用或需要运维排障时，可在 Hub 主机使用：
 
 ```bash
 docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js enroll yocto-worker-01 yocto
@@ -240,151 +263,144 @@ docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js approve yoct
 docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js issue-credential yocto-worker-01
 ```
 
-CLI 签发的凭据可通过 `EXPERT_WORKER_CREDENTIAL` 提供给 Worker，或按运维流程安全写入 `EXPERT_WORKER_CREDENTIAL_FILE`。若正式 credential 丢失且 Hub 已保存其 hash，需由管理员重新签发并更新 Worker 本地凭据文件；Bootstrap 不会覆盖已有的有效凭据。
+CLI 签发的凭据可安全写入对应 instance 的 credential 文件。不要在多个 Worker ID 之间共用 credential。
 
 ## 6. 领取并校验运行包 / 执行镜像（不构建）
 
-由团队发布方将 **同一批次的两个制品** 安全传到 Worker 主机，例如 `/tmp/team-skill-hub-worker-release/`。以下用版本 `0.1.0` 演示；升级时应使用发布方提供的实际版本，**不要把示例版本当作永远固定的最新版**。
+由团队发布方将 **同一批次的 Runtime 与执行镜像** 安全传到 Worker 主机，例如：
 
 ```bash
 cd /tmp/team-skill-hub-worker-release
-ls -lh worker-runtime-0.1.0.tar.gz expert-claude-image-0.1.0.tar
 sha256sum worker-runtime-0.1.0.tar.gz expert-claude-image-0.1.0.tar
-# 人工与发布方通过受信任渠道交付的 SHA-256 清单逐一比对，不匹配即停止
 ```
 
-该发行包的职责必须区分：
+Worker 主机只需要制品，不需要 Hub 源码。
 
-- `worker-runtime-0.1.0.tar.gz` **不是容器镜像**：它安装成 Worker 主机的 systemd 服务，负责连接 Hub、注册、领任务、管理工作区和启动 Docker 容器。
-- `expert-claude-image-0.1.0.tar` **不是 Worker daemon**：这是每个专家任务默认使用的 Claude Code 执行镜像，导入 Docker 后由 Runtime 按需调用。
+## 7. 在 Worker 主机安装共享 Runtime
 
-如果发布方改为提供私有镜像仓库地址而非 `.tar`，应同时给出可验证的镜像 digest、架构和拉取凭据。当前下面的安装步骤按**离线 tar 制品**展开；不要求 Worker 主机运行任何 `docker build` 或 `npm run build`。
-
-## 7. 在 Worker 主机安装（最短可执行流程）
-
-### 7.1 安装 Worker Runtime
-
-在**已安装 Node.js 24、Docker Engine 的 Linux Worker 主机**执行（systemd 可选）。安装器会创建 `expert-worker` 系统用户、版本化安装目录，并仅在 systemd 运行时注册服务单元，首次生成 `worker.env` 配置模板。
+### 7.1 安装一次 Runtime
 
 ```bash
 cd /tmp/team-skill-hub-worker-release
 mkdir -p /tmp/team-skill-hub-worker-bootstrap
 tar -xzf worker-runtime-0.1.0.tar.gz -C /tmp/team-skill-hub-worker-bootstrap
-sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh   /tmp/team-skill-hub-worker-release/worker-runtime-0.1.0.tar.gz
+sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
+  /tmp/team-skill-hub-worker-release/worker-runtime-0.1.0.tar.gz
 ```
 
-安装完成后应有：
+安装完成后核心布局为：
 
 ```text
-/opt/team-skill-hub-worker/current/         # 指向当前版本运行包
-/etc/team-skill-hub-worker/worker.env       # 私有配置文件，root:root，0600
-/etc/team-skill-hub-worker/keys/           # 可选的 Git SSH 私钥目录
-/var/lib/team-skill-hub-worker/            # Worker credential、私有仓库副本
-/etc/systemd/system/team-skill-hub-worker.service
+/opt/team-skill-hub-worker/current/
+/etc/team-skill-hub-worker/worker.env.example
+/etc/team-skill-hub-worker/workers/
+/etc/team-skill-hub-worker/instances/
+/var/lib/team-skill-hub-worker/
+/etc/systemd/system/team-skill-hub-worker@.service   # systemd 主机
 ```
 
-> 仅安装 Runtime **不会**自动为你配置 Hub 地址或模型密钥；在完成第 8 节前不要启动服务。
+安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；若检测到该文件，只提示管理员人工迁移已审核的配置。
 
-### 7.2 导入配套的 Docker 执行镜像
+### 7.2 导入执行镜像
 
 ```bash
-cd /tmp/team-skill-hub-worker-release
 sudo docker load -i expert-claude-image-0.1.0.tar
-sudo docker image inspect team-skill-hub-expert-claude:0.1.0   --format '{{.RepoTags}} {{.Os}}/{{.Architecture}}'
+sudo docker image inspect team-skill-hub-expert-claude:0.1.0 \
+  --format '{{.RepoTags}} {{.Os}}/{{.Architecture}}'
 ```
 
-**校验的 tag 必须与后面 `EXPERT_DOCKER_IMAGE` 完全一致**，架构需与目标机器兼容；检查失败则联系发布方重新获取正确制品，部署者不需要自己构建镜像。
-
-### 7.3 没有 systemd 的主机
-
-`install-worker.sh` 不要求 systemd。检测到运行中的 systemd 时，它会注册 `team-skill-hub-worker.service`；没有 systemd（例如部分容器/WSL）则跳过服务注册，保留完整安装。
-
-配置完成后，如果主机**没有运行 systemd**，使用安装包自带的脚本手动管理：
+### 7.3 创建一个或多个 Worker instance
 
 ```bash
-sudo /opt/team-skill-hub-worker/current/worker-control.sh start
-sudo /opt/team-skill-hub-worker/current/worker-control.sh status
-sudo /opt/team-skill-hub-worker/current/worker-control.sh logs
-sudo /opt/team-skill-hub-worker/current/worker-control.sh stop
-sudo /opt/team-skill-hub-worker/current/worker-control.sh restart
+sudo /opt/team-skill-hub-worker/current/worker-control.sh init claude-01
+sudo /opt/team-skill-hub-worker/current/worker-control.sh init codex-01
+sudo /opt/team-skill-hub-worker/current/worker-control.sh list
 ```
 
-手动运行以 `expert-worker` 身份启动，不需要复制 Hub 源码；日志保存在 `/var/lib/team-skill-hub-worker/worker.log`。**无 systemd 时不会自动重启崩溃进程，也不会自动开机启动**，长期部署可结合外部进程管理器。不要同时用 systemd 和手动脚本启动同一 Worker。第 8 节中 `systemctl` / `journalctl` 命令仅适用于 systemd 主机。
+配置文件分别是：
 
-## 8. 配置 Worker、自动注册和启动
-
-### 8.1 编辑受保护环境文件
-
-```bash
-sudoedit /etc/team-skill-hub-worker/worker.env
-sudo chown root:root /etc/team-skill-hub-worker/worker.env
-sudo chmod 600 /etc/team-skill-hub-worker/worker.env
+```text
+/etc/team-skill-hub-worker/workers/claude-01.env
+/etc/team-skill-hub-worker/workers/codex-01.env
 ```
 
-按发布方提供的 Hub 接入信息和 Admin 专家配置填写。**下面是示例，不是可以不修改就直接运行的配置**：
+密钥文件放在各自：
+
+```text
+/etc/team-skill-hub-worker/instances/<instance>/keys/
+```
+
+不要让不同 instance 指向同一个 repository checkout。
+
+## 8. 配置、启动和日常管理
+
+### 8.1 配置实例
+
+示例：
 
 ```dotenv
-# Hub 的私网 gRPC 地址；跨主机不要写 127.0.0.1
 EXPERT_HUB_ADDRESS=hub.internal.example:7443
 EXPERT_WORKER_ID=yocto-worker-01
 EXPERT_CAPABILITY=yocto
 EXPERT_ID=yocto
 EXPERT_WORKER_BOOTSTRAP_TOKEN=与Hub部署方安全交付的Token
-EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
-
-# Runtime 自动为每个 Worker ID 创建隔离的 Git checkout 目录
-EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
-EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
-
-# 每个 Worker 只声明一个执行后端；模型由 Deployment 决定
 EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_RUNTIME_PROFILES=claude-readonly
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=default
-
-# 对应 Admin 执行配置 executor.modelConfig.credentialRef
 EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
 EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"ANTHROPIC_AUTH_TOKEN"}'
-ANTHROPIC_AUTH_TOKEN=在Worker主机通过安全方式配置真实模型密钥
-
-# 私有 Git 仓库才需要以下映射（公开仓库可不填）
-# EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/keys/git-readonly"}'
-# HTTPS_PROXY=http://proxy.internal:7890
-# NO_PROXY=127.0.0.1,localhost
+ANTHROPIC_AUTH_TOKEN=通过安全方式配置真实模型密钥
+# EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/git-readonly"}'
 ```
 
-配置时确认：
+默认 credential/source/repositories 会自动使用 instance-local 路径，通常无需显式填写。
 
-- `EXPERT_WORKER_ID` 在 Hub 注册表内唯一；`EXPERT_CAPABILITY` 与目标 Expert 的能力标签匹配。
-- 模型名、Provider、Base URL、协议来自 **Deployment**；Worker 只声明 Backend / Runtime Profile，并通过 `EXPERT_MODEL_CREDENTIAL_REFS_JSON` 把 Deployment 的 `credentialRef` 映射到本机受保护环境变量。Claude 可使用 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，Codex 使用其 Deployment 允许的 Provider 环境变量。
-- 如果使用私有仓库，在 `/etc/team-skill-hub-worker/keys/` 安全放入**只读 Git key**，按第 4 节配置 SSH/HTTPS 凭据映射；不要复制整个 Hub `.env`。
-- 需要跨主机连接时，Hub 管理员负责发布可达的私网 gRPC 地址，设置 `EXPERT_GRPC_PUBLISH_BIND`、防火墙白名单及必要的 TLS/mTLS；不应把 gRPC 端口暴露到公网。
-- 不要直接把密钥复制进文档或版本库。`EXPERT_DOCKER_SECCOMP_PROFILE=unconfined` 仅用于复现沙箱不兼容后的受控排障，默认保持 `default`。
-
-### 8.2 启动并通过 Admin 批准
+### 8.2 systemd 主机
 
 ```bash
-sudo systemctl enable --now team-skill-hub-worker
-sudo systemctl status team-skill-hub-worker --no-pager
-sudo journalctl -u team-skill-hub-worker -n 80 --no-pager
+sudo systemctl enable --now team-skill-hub-worker@claude-01
+sudo systemctl status team-skill-hub-worker@claude-01 --no-pager
+sudo journalctl -u team-skill-hub-worker@claude-01 -n 80 --no-pager
 ```
 
-在 Hub 的 `/admin/experts` → **Worker 管理**中观察 `yocto-worker-01`：
+多个 instance 可独立启停。
 
-1. 首次启动自动注册，状态先变成 `pending`（默认不开启自动批准）。
-2. 管理员核对 Worker ID 和 capabilities，点击 **批准**。
-3. Worker 自动交换并保存正式 credential，开始心跳与领任务；不需要手工执行 `enroll` 或复制 credential。
-4. 在 Worker 主机确认 `/var/lib/team-skill-hub-worker/worker-credential` 已生成并受保护；随后**移除 `worker.env` 中的 Bootstrap Token**，重启后应继续使用凭据文件。
-
-旧版手动注册/签发 CLI 仍可作故障排查备用，见第 11 节。
-
-### 8.3 日常检查、升级与回滚
+### 8.3 无 systemd 主机
 
 ```bash
-sudo systemctl status team-skill-hub-worker --no-pager
-sudo journalctl -u team-skill-hub-worker -f
-sudo docker image ls team-skill-hub-expert-worker
+sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 start
+sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 status
+sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 logs
+sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 stop
+```
+
+查看整机 Worker：
+
+```bash
+sudo /opt/team-skill-hub-worker/current/worker-control.sh list
+sudo /opt/team-skill-hub-worker/current/worker-control.sh list --json
+```
+
+一个坏配置只会显示为 `invalid-config`，不会阻塞其他 Worker inventory。列表绝不显示 token、credential 或 key 内容。
+
+### 8.4 首次批准后
+
+在 Hub 的 `/admin/experts` → **Worker 管理**批准 Worker 后，确认对应实例：
+
+```text
+/var/lib/team-skill-hub-worker/<instance>/worker-credential
+```
+
+已生成，然后从该实例 env 移除 Bootstrap Token。
+
+日常检查示例：
+
+```bash
+sudo /opt/team-skill-hub-worker/current/worker-control.sh list
+sudo systemctl status team-skill-hub-worker@claude-01 --no-pager
+sudo journalctl -u team-skill-hub-worker@claude-01 -f
 ```
 
 升级需要发布方提供**新版本 Runtime 包与配套 Image**，由管理员安排任务排空/维护窗口后重复第 6～7 节；先导入新镜像，确认环境中的 `EXPERT_DOCKER_IMAGE` 指向新 tag，再重启 Worker 服务并完成一条只读任务验收。安装器使用 `/opt/team-skill-hub-worker/releases/<version>/` 与 `current` 软链接，便于保留旧 Runtime 作为回滚候选，但**切换旧版本前需一并恢复与其兼容的镜像 tag、配置和所需数据库/协议兼容性**，不能只改软链接就认定完成回滚。

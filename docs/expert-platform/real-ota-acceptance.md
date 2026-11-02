@@ -53,25 +53,21 @@ Credential 只显示一次。把它填入下面的本地 Worker 配置，不要�
 
 ## 4. 配置真实 Codex Worker
 
-在 Worker 所在的 WSL2 Linux 文件系统创建 `/etc/expert/ota-worker.env`。不要把密钥保存在 `/mnt/d` 下并依赖 `chmod 600`，因为 Windows 盘的 WSL 权限显示可能仍为 `777`。
+在 Worker 所在的 WSL2 Linux 文件系统创建独立 instance，不要把密钥放在 `/mnt/d`：
 
 ```bash
-sudo install -d -m 700 /etc/expert
-sudoedit /etc/expert/ota-worker.env
-sudo chown root:root /etc/expert/ota-worker.env
-sudo chmod 600 /etc/expert/ota-worker.env
+sudo /opt/team-skill-hub-worker/current/worker-control.sh init ota-codex-01
+sudoedit /etc/team-skill-hub-worker/workers/ota-codex-01.env
+sudo chmod 600 /etc/team-skill-hub-worker/workers/ota-codex-01.env
 ```
 
-环境文件应包含：
+环境文件示例：
 
 ```dotenv
 EXPERT_HUB_ADDRESS=127.0.0.1:7443
 EXPERT_WORKER_ID=ota-worker-01
-EXPERT_WORKER_CREDENTIAL_FILE=/var/lib/team-skill-hub-worker/worker-credential
 EXPERT_CAPABILITY=ota
 EXPERT_ID=ota
-EXPERT_SOURCE_PATH=/var/lib/team-skill-hub-worker/source
-EXPERT_REPOSITORY_ROOT=/var/lib/team-skill-hub-worker/repositories
 EXPERT_EXECUTOR_BACKEND=codex
 EXPERT_RUNTIME_PROFILES=codex-readonly
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-worker:0.1.0
@@ -80,13 +76,14 @@ EXPERT_DOCKER_SECCOMP_PROFILE=unconfined
 EXPERT_MODEL_ENV_NAMES=TEAM_SKILL_HUB_API_KEY,HTTPS_PROXY,NO_PROXY
 EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"TEAM_SKILL_HUB_API_KEY"}'
 EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
-EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/keys/skillhub-readonly"}'
+EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/ota-codex-01/keys/skillhub-readonly"}'
 EXPERT_HEARTBEAT_MS=10000
 EXPERT_POLL_MS=3000
 EXPERT_TASK_TIMEOUT_MS=120000
 TEAM_SKILL_HUB_API_KEY=填入你为当前Provider准备的APIKey
 ```
 
+credential、source 和 repository root 默认从 instance 自动推导，不需要写固定全局路径。
 不再要求运维人员维护固定 `/etc/expert/ota-codex.toml`。Provider、Model、Base URL、协议和 MCP 策略来自 Deployment 快照；Worker 每任务生成临时 Codex 配置。长期密钥只保存在 Worker 受保护环境或 key 文件中。
 
 确认本机已配置密钥，但不要打印密钥值：
@@ -100,7 +97,7 @@ test -d "$EXPERT_SOURCE_PATH" && echo OTA_SOURCE_PRESENT || echo OTA_SOURCE_MISS
 docker run --rm "$EXPERT_DOCKER_IMAGE" --version
 ```
 
-正式部署应使用发布管理员交付的 `worker-runtime-<version>.tar.gz` 和 `expert-worker-image-<version>.tar`，Worker 主机无需 Hub 源码。没有 systemd 时使用 `/opt/team-skill-hub-worker/current/worker-control.sh` 或受控进程管理器启动；有 systemd 时使用 `team-skill-hub-worker.service`。
+正式部署应使用发布管理员交付的 `worker-runtime-<version>.tar.gz` 和 `expert-worker-image-<version>.tar`，Worker 主机无需 Hub 源码。没有 systemd 时使用 `worker-control.sh <instance> start`；有 systemd 时使用 `team-skill-hub-worker@<instance>.service`。一台主机可以运行多个隔离 instance。
 
 Docker Codex Executor 将源码以只读方式挂载，容器禁用新增 Linux capabilities、使用只读根文件系统和受限资源。此验收不允许 Expert 自动修改或提交 OTA 仓库。
 
