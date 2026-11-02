@@ -1,0 +1,274 @@
+import path from "node:path";
+import { loadGitCredentialConfigs, type GitCredentialConfig } from "./repository-workspace.js";
+
+export interface ExpertWorkerRuntimeConfig {
+  hubAddress: string;
+  workerId: string;
+  workerCredential: string;
+  capability: string;
+  expertId?: string;
+  sourcePath: string;
+  repositoryRoot: string;
+  sharedTempRoot: string;
+  gitCredentialConfigs: Record<string, GitCredentialConfig>;
+  dockerImage: string;
+  executorBackend?: "codex" | "claude";
+  supportedRuntimeProfiles?: string[];
+  claudeModel?: string;
+  claudeMaxTurns?: number;
+  dockerNetwork: string;
+  dockerSeccompProfile: "default" | "unconfined";
+  codexAuthFilePath?: string;
+  codexConfigFilePath?: string;
+  modelEnvNames: string[];
+  modelCredentialEnvNames: Record<string, string>;
+  mcpCredentialFiles?: Record<string, string>;
+  mcpDefaultUrl?: string;
+  heartbeatMs: number;
+  pollMs: number;
+  taskTimeoutMs: number;
+  tlsCaPath?: string;
+  tlsCertPath?: string;
+  tlsKeyPath?: string;
+}
+
+function parseModelCredentialEnvNames(
+  value: string | undefined,
+  allowedEnvNames: readonly string[],
+): Record<string, string> {
+  if (!value?.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("INVALID_WORKER_CONFIG");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("INVALID_WORKER_CONFIG");
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length > 100) throw new Error("INVALID_WORKER_CONFIG");
+  const result: Record<string, string> = {};
+  const forbidden = new Set([
+    "PATH",
+    "HOME",
+    "CODEX_HOME",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "NODE_OPTIONS",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "SHELLOPTS",
+  ]);
+  for (const [ref, envName] of entries) {
+    if (
+      !ref.trim() ||
+      ref.length > 100 ||
+      typeof envName !== "string" ||
+      !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(envName) ||
+      forbidden.has(envName) ||
+      envName.startsWith("DOCKER_") ||
+      !allowedEnvNames.includes(envName)
+    ) {
+      throw new Error("INVALID_WORKER_CONFIG");
+    }
+    result[ref] = envName;
+  }
+  return result;
+}
+
+function parseMcpCredentialFiles(raw: string | undefined): Record<string, string> {
+  if (!raw?.trim()) return {};
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("INVALID_WORKER_MCP_CONFIG");
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("INVALID_WORKER_MCP_CONFIG");
+  const entries = Object.entries(data as Record<string, unknown>);
+  if (entries.length > 50) throw new Error("INVALID_WORKER_MCP_CONFIG");
+  const result: Record<string, string> = {};
+  for (const [ref, file] of entries) {
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(ref) ||
+      typeof file !== "string" ||
+      !path.isAbsolute(file) ||
+      file === "/"
+    )
+      throw new Error("INVALID_WORKER_MCP_CONFIG");
+    result[ref] = file;
+  }
+  return result;
+}
+
+function positiveInteger(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error("INVALID_WORKER_CONFIG");
+  return parsed;
+}
+
+const WORKER_INSTANCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const WORKER_MANAGED_DATA_ROOT = "/var/lib/team-skill-hub-worker";
+
+export function assertWorkerInstanceManagedPath(env: Record<string, string | undefined>, candidate: string): void {
+  const instanceDataRoot = workerInstanceDataRoot(env);
+  if (!instanceDataRoot || env.EXPERT_ALLOW_MANAGED_PATH_OVERRIDES?.trim() === "true") return;
+  const resolved = path.resolve(candidate);
+  const managedRoot = path.resolve(WORKER_MANAGED_DATA_ROOT);
+  const managedRelative = path.relative(managedRoot, resolved);
+  const insideManagedRoot =
+    managedRelative === "" || (!managedRelative.startsWith("..") && !path.isAbsolute(managedRelative));
+  if (!insideManagedRoot) return;
+  const instanceRelative = path.relative(path.resolve(instanceDataRoot), resolved);
+  const insideInstance =
+    instanceRelative === "" || (!instanceRelative.startsWith("..") && !path.isAbsolute(instanceRelative));
+  if (!insideInstance) throw new Error("INVALID_WORKER_INSTANCE_PATH");
+}
+
+export function workerInstanceDataRoot(env: Record<string, string | undefined>): string | undefined {
+  const instance = env.EXPERT_WORKER_INSTANCE?.trim();
+  if (instance === undefined || instance === "") return undefined;
+  if (!WORKER_INSTANCE_PATTERN.test(instance)) throw new Error("INVALID_WORKER_CONFIG");
+  return path.join("/var/lib/team-skill-hub-worker", instance);
+}
+
+export function parseExpertWorkerConfig(env: Record<string, string | undefined>): ExpertWorkerRuntimeConfig {
+  const hubAddress = env.EXPERT_HUB_ADDRESS?.trim() ?? "";
+  const workerId = env.EXPERT_WORKER_ID?.trim() ?? "";
+  const workerCredential = env.EXPERT_WORKER_CREDENTIAL?.trim() ?? "";
+  const capability = env.EXPERT_CAPABILITY?.trim() ?? "";
+  const expertId = env.EXPERT_ID?.trim() || capability;
+  const instanceDataRoot = workerInstanceDataRoot(env);
+  const explicitSourcePath = env.EXPERT_SOURCE_PATH?.trim();
+  const explicitRepositoryRoot = env.EXPERT_REPOSITORY_ROOT?.trim();
+  if (explicitSourcePath) assertWorkerInstanceManagedPath(env, explicitSourcePath);
+  if (explicitRepositoryRoot) assertWorkerInstanceManagedPath(env, explicitRepositoryRoot);
+  const sourcePath = explicitSourcePath || (instanceDataRoot ? path.join(instanceDataRoot, "source") : "");
+  const repositoryRootBase =
+    explicitRepositoryRoot ||
+    (instanceDataRoot
+      ? path.join(instanceDataRoot, "repositories")
+      : sourcePath
+        ? path.join(path.dirname(sourcePath), "expert-repositories")
+        : ""); // EXPERT_REPOSITORY_ROOT is a base directory, never a shared checkout root.  // Every worker gets a private clone namespace keyed by its stable worker ID.
+  const repositoryRoot =
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(workerId) && repositoryRootBase
+      ? path.join(repositoryRootBase, workerId)
+      : "";
+  const gitCredentialConfigs = loadGitCredentialConfigs(env.EXPERT_GIT_CREDENTIALS_JSON);
+  const executorBackend = env.EXPERT_EXECUTOR_BACKEND?.trim() || "claude";
+  const supportedRuntimeProfiles = (env.EXPERT_RUNTIME_PROFILES ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (
+    supportedRuntimeProfiles.length > 20 ||
+    supportedRuntimeProfiles.some((value) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value))
+  )
+    throw new Error("INVALID_WORKER_CONFIG");
+  const dockerImage =
+    env.EXPERT_DOCKER_IMAGE?.trim() ||
+    (executorBackend === "claude" ? "team-skill-hub-expert-claude:0.1.0" : "team-skill-hub-expert-worker:0.1.0");
+  const claudeModel = env.EXPERT_CLAUDE_MODEL?.trim() || "sonnet";
+  const claudeMaxTurns = positiveInteger(env.EXPERT_CLAUDE_MAX_TURNS, 12);
+  if (claudeMaxTurns > 1000) throw new Error("INVALID_WORKER_CONFIG");
+  const dockerNetwork = env.EXPERT_DOCKER_NETWORK?.trim() ?? "";
+  const dockerSeccompProfile = env.EXPERT_DOCKER_SECCOMP_PROFILE?.trim() || "default";
+  const codexAuthFilePath = env.EXPERT_CODEX_AUTH_FILE?.trim() || undefined;
+  const codexConfigFilePath = env.EXPERT_CODEX_CONFIG_FILE?.trim() || undefined;
+  const modelEnvNames = (
+    env.EXPERT_MODEL_ENV_NAMES ?? (executorBackend === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")
+  )
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const modelCredentialEnvNames = parseModelCredentialEnvNames(env.EXPERT_MODEL_CREDENTIAL_REFS_JSON, modelEnvNames);
+  const mcpCredentialFiles = parseMcpCredentialFiles(env.EXPERT_MCP_CREDENTIAL_FILES_JSON);
+  const mcpDefaultUrl = env.EXPERT_MCP_URL?.trim() || undefined;
+  if (mcpDefaultUrl) {
+    let url: URL;
+    try {
+      url = new URL(mcpDefaultUrl);
+    } catch {
+      throw new Error("INVALID_WORKER_MCP_CONFIG");
+    }
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      url.search ||
+      ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname)
+    )
+      throw new Error("INVALID_WORKER_MCP_CONFIG");
+  }
+
+  const tlsCaPath = env.EXPERT_TLS_CA_PATH?.trim() || undefined;
+  const tlsCertPath = env.EXPERT_TLS_CERT_PATH?.trim() || undefined;
+  const tlsKeyPath = env.EXPERT_TLS_KEY_PATH?.trim() || undefined;
+  const tlsConfigured = [tlsCaPath, tlsCertPath, tlsKeyPath].filter(Boolean).length;
+  if (tlsConfigured !== 0 && tlsConfigured !== 3) {
+    throw new Error("INVALID_WORKER_CONFIG");
+  }
+
+  if (
+    !hubAddress ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(workerId) ||
+    !workerCredential ||
+    !capability ||
+    (sourcePath !== "" && (!path.isAbsolute(sourcePath) || sourcePath === "/")) ||
+    (!sourcePath && !env.EXPERT_REPOSITORY_ROOT?.trim() && !instanceDataRoot) ||
+    !path.isAbsolute(repositoryRoot) ||
+    repositoryRoot === "/" ||
+    !dockerImage ||
+    (executorBackend !== "codex" && executorBackend !== "claude") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(claudeModel) ||
+    (executorBackend === "claude" && (codexAuthFilePath !== undefined || codexConfigFilePath !== undefined)) ||
+    (executorBackend === "claude" &&
+      !modelEnvNames.some((name) =>
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"].includes(name),
+      )) ||
+    !dockerNetwork ||
+    dockerNetwork === "host" ||
+    dockerNetwork === "none" ||
+    (dockerSeccompProfile !== "default" && dockerSeccompProfile !== "unconfined") ||
+    (codexAuthFilePath !== undefined && (!path.isAbsolute(codexAuthFilePath) || codexAuthFilePath === "/")) ||
+    (codexConfigFilePath !== undefined && (!path.isAbsolute(codexConfigFilePath) || codexConfigFilePath === "/")) ||
+    modelEnvNames.length === 0
+  ) {
+    throw new Error("INVALID_WORKER_CONFIG");
+  }
+
+  return {
+    hubAddress,
+    workerId,
+    workerCredential,
+    capability,
+    expertId,
+    sourcePath,
+    repositoryRoot,
+    sharedTempRoot: path.join(repositoryRoot, ".runtime-tmp"),
+    gitCredentialConfigs,
+    dockerImage,
+    executorBackend,
+    supportedRuntimeProfiles,
+    claudeModel,
+    claudeMaxTurns,
+    dockerNetwork,
+    dockerSeccompProfile,
+    codexAuthFilePath,
+    codexConfigFilePath,
+    modelEnvNames,
+    modelCredentialEnvNames,
+    mcpCredentialFiles,
+    mcpDefaultUrl,
+    heartbeatMs: positiveInteger(env.EXPERT_HEARTBEAT_MS, 10_000),
+    pollMs: positiveInteger(env.EXPERT_POLL_MS, 3_000),
+    taskTimeoutMs: positiveInteger(env.EXPERT_TASK_TIMEOUT_MS, 120_000),
+    tlsCaPath,
+    tlsCertPath,
+    tlsKeyPath,
+  };
+}

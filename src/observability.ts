@@ -188,6 +188,8 @@ export interface KnowledgeCandidate {
   validationSpecVersion?: number;
   submissionSpecSchemaVersion?: number;
   submissionMode?: "mcp" | "admin" | "automatic" | "gap" | "curator" | "server";
+  artifactBundleId?: string;
+  bundleSubmissionMode?: "merge" | "replace";
   automation?: {
     detector: string;
     classification: "root-cause" | "verified-fix" | "workaround" | "reusable-constraint";
@@ -1017,6 +1019,8 @@ export class McpObservabilityStore {
           | "relationHint"
           | "knowledgeRelation"
           | "autoRelation"
+          | "artifactBundleId"
+          | "bundleSubmissionMode"
         >
       >,
   ): Promise<KnowledgeCandidate> {
@@ -1135,6 +1139,8 @@ export class McpObservabilityStore {
         | "autoRelation"
         | "validationSpecVersion"
         | "submissionSpecSchemaVersion"
+        | "artifactBundleId"
+        | "bundleSubmissionMode"
       >
     >,
   ): Promise<KnowledgeCandidate> {
@@ -1174,6 +1180,8 @@ export class McpObservabilityStore {
       ...(input.submissionSpecSchemaVersion !== undefined
         ? { submissionSpecSchemaVersion: input.submissionSpecSchemaVersion }
         : {}),
+      ...(input.artifactBundleId !== undefined ? { artifactBundleId: input.artifactBundleId } : {}),
+      ...(input.bundleSubmissionMode !== undefined ? { bundleSubmissionMode: input.bundleSubmissionMode } : {}),
       status: current.status === "pending" ? "pending" : "approved",
       publishError: undefined,
       updatedAt: new Date().toISOString(),

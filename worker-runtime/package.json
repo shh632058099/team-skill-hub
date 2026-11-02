@@ -1,0 +1,17 @@
+{
+  "name": "@team-skill-hub/expert-worker-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "start": "node src/cli/expert-worker.js",
+    "check-config": "node check-worker-config.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "1.14.6",
+    "@grpc/proto-loader": "0.8.1"
+  }
+}

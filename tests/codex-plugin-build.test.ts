@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -55,11 +55,16 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /PLUGIN_ROOT/);
     assert.match(hooks.hooks.SessionStart[0].hooks[0].commandWindows, /PLUGIN_ROOT/);
     assert.equal(hooks.hooks.PreToolUse[0].matcher, "^__team_skill_hub_reserved__$");
+    assert.equal(hooks.hooks.PreToolUse[1].matcher, "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$");
+    assert.equal(hooks.hooks.PreToolUse[1].hooks[0].async, false);
+    assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /codex\/expert-session-hook\.py/);
+    await stat(path.join(out, "hooks", "codex", "expert-session-hook.py"));
+    await stat(path.join(out, "hooks", "codex", "expert-session-hook.ps1"));
 
     const conf = await readFile(path.join(out, "hooks", "team-skill-hub.conf"), "utf8");
     assert.match(conf, /event_url=https:\/\/hub\.example\.test\/client-events/);
     assert.match(conf, /api_key_env=TEST_TEAM_HUB_TOKEN/);
-    assert.match(conf, /runtime_version=1\.2\.0/);
+    assert.match(conf, /runtime_version=1\.3\.0/);
     assert.match(conf, /hook_schema_version=1/);
 
     const catalog = JSON.parse(

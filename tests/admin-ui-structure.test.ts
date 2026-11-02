@@ -49,6 +49,23 @@ test("legacy admin tabs route migrated modules to stable pages", () => {
   ]);
 });
 
+test("access control explains roles and exposes expert deployment authorization", () => {
+  assertContainsAll(ADMIN_HTML, [
+    "角色与通用权限",
+    "developer",
+    "internal",
+    "customer-write",
+    "restricted-env",
+    "专家部署访问权限",
+    "expertAuthUserId",
+    "loadExpertAuth",
+    "saveExpertAuth",
+    "专家授权",
+    "/admin/api/expert-config/deployments",
+    "同一个 User ID 的所有 API Key 共享这里的授权",
+  ]);
+});
+
 test("migrated admin modules are removed from the legacy dashboard payload", () => {
   for (const legacyView of ["observability", "review", "gaps", "governance"]) {
     assert.ok(

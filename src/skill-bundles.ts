@@ -1,8 +1,17 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import YAML from "yaml";
+import {
+  artifactBundleFileBytes,
+  canonicalArtifactTreeHash,
+  diffArtifactTrees,
+  normalizeArtifactFiles,
+  normalizeArtifactRelativePath,
+  type ArtifactBundleFileMode,
+} from "./artifact-bundles.js";
 
-export type SkillBundleImportType = "skill" | "collection";
-export type SkillBundleFileMode = "0644" | "0755";
+export type SkillBundleImportType = "skill" | "collection" | "knowledge";
+export type SkillBundleSubmissionMode = "merge" | "replace";
+export type SkillBundleFileMode = ArtifactBundleFileMode;
 export type SkillBundleImportStatus =
   | "pending"
   | "approved"
@@ -89,6 +98,7 @@ export type SkillBundlePublication = SkillBundlePullRequestPublication | SkillBu
 export interface SkillBundleImport {
   id: string;
   revision: number;
+  kind?: "skill" | "knowledge";
   namespace: string;
   importType: SkillBundleImportType;
   skillPath?: string;
@@ -103,6 +113,10 @@ export interface SkillBundleImport {
   submitter?: string;
   submissionKey?: string;
   requestSemanticsSha256?: string;
+  submissionMode?: SkillBundleSubmissionMode;
+  targetKind?: "directory" | "file";
+  targetRevision?: string;
+  targetScopeSha256?: string;
   review?: SkillBundleReview;
   publication?: SkillBundlePublication;
   publishError?: string;
@@ -145,25 +159,7 @@ const MAX_BUNDLE_FILE_BYTES = 512 * 1024;
 const MAX_BUNDLE_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_BUNDLE_SKILLS = 100;
 
-function sha256(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-export function skillBundleFileBytes(
-  file: Pick<SkillBundleFile, "content" | "contentBase64"> | SkillBundleInputFile,
-): Buffer {
-  const hasText = file.content !== undefined;
-  const hasBinary = file.contentBase64 !== undefined;
-  if (hasText === hasBinary) throw new Error("bundle file must contain exactly one of content or contentBase64");
-  if (hasText) return Buffer.from(file.content!, "utf8");
-  const encoded = file.contentBase64!;
-  if (!encoded || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))
-    throw new Error("bundle file contentBase64 is invalid");
-  const bytes = Buffer.from(encoded, "base64");
-  if (bytes.toString("base64") !== encoded) throw new Error("bundle file contentBase64 is invalid");
-  return bytes;
-}
-
+export const skillBundleFileBytes = artifactBundleFileBytes;
 function normalizeNamespace(value: string): string {
   const normalized = value.trim();
   if (!SAFE_SEGMENT.test(normalized) || normalized === "." || normalized === "..") {
@@ -173,60 +169,21 @@ function normalizeNamespace(value: string): string {
 }
 
 function normalizeRelativePath(value: string, label: string, allowNested = true): string {
-  const raw = value.trim();
-  if (!raw || raw.includes("\\") || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) {
-    throw new Error(`${label} is invalid`);
-  }
-  const parts = raw.split("/");
-  if (
-    (!allowNested && parts.length !== 1) ||
-    parts.some((part) => !part || part === "." || part === ".." || !SAFE_SEGMENT.test(part))
-  ) {
-    throw new Error(`${label} is invalid`);
-  }
-  return parts.join("/");
+  const normalized = normalizeArtifactRelativePath(value, label);
+  if (!allowNested && normalized.includes("/")) throw new Error(`${label} is invalid`);
+  return normalized;
 }
 
 function normalizedTreeFiles(
   files: Array<Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode"> | SkillBundleInputFile>,
 ): SkillBundleFile[] {
-  const seen = new Set<string>();
-  return files
-    .map((file) => {
-      const normalizedPath = normalizeRelativePath(file.path, "file path");
-      const folded = normalizedPath.toLocaleLowerCase("en-US");
-      if (seen.has(folded)) throw new Error(`file path case collision: ${normalizedPath}`);
-      seen.add(folded);
-      const mode: SkillBundleFileMode = file.mode ?? "0644";
-      if (mode !== "0644" && mode !== "0755") throw new Error(`file mode is invalid: ${normalizedPath}`);
-      const bytes = skillBundleFileBytes(file);
-      return {
-        path: normalizedPath,
-        ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64! }),
-        sha256: sha256(bytes),
-        sizeBytes: bytes.byteLength,
-        mode,
-      };
-    })
-    .sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
+  return normalizeArtifactFiles(files);
 }
-
 export function canonicalTreeHash(
   files: Array<Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode"> | SkillBundleInputFile>,
 ): string {
-  const normalized = normalizedTreeFiles(files);
-  const hash = createHash("sha256");
-  for (const file of normalized) {
-    hash.update(file.path, "utf8");
-    hash.update("\0");
-    hash.update(file.mode, "utf8");
-    hash.update("\0");
-    hash.update(file.sha256, "utf8");
-    hash.update("\n");
-  }
-  return hash.digest("hex");
+  return canonicalArtifactTreeHash(files);
 }
-
 function rootForSkillFile(path: string): string {
   const suffix = "/SKILL.md";
   return path === "SKILL.md" ? "" : path.endsWith(suffix) ? path.slice(0, -suffix.length) : "";
@@ -271,20 +228,50 @@ function assertCollectionRootsNotNested(skills: SkillBundleSkillSummary[]): void
   }
 }
 
+export function normalizeSkillBundleTarget(input: {
+  namespace: string;
+  importType: SkillBundleImportType;
+  skillPath?: string;
+}): { namespace: string; importType: SkillBundleImportType; skillPath?: string; replacementRoot: string } {
+  const namespace = normalizeNamespace(input.namespace);
+  if (input.importType === "knowledge") throw new Error("Knowledge artifacts must use the Artifact Bundle adapter");
+  let rawSkillPath = input.skillPath?.trim();
+  if (input.importType === "skill" && rawSkillPath) {
+    if (rawSkillPath.startsWith("skills/")) {
+      const parts = rawSkillPath.split("/");
+      if (parts.length < 3 || parts[1] !== namespace) {
+        throw new Error("skill_path namespace does not match namespace");
+      }
+      rawSkillPath = parts.slice(2).join("/");
+    } else if (rawSkillPath.startsWith(namespace + "/")) {
+      rawSkillPath = rawSkillPath.slice(namespace.length + 1);
+    }
+  }
+  const skillPath =
+    input.importType === "skill" && rawSkillPath !== undefined
+      ? normalizeRelativePath(rawSkillPath, "skill_path")
+      : undefined;
+  if (input.importType === "collection" && input.skillPath !== undefined) {
+    throw new Error("skill_path is only valid for skill imports");
+  }
+  const replacementRoot =
+    input.importType === "skill" && skillPath ? `skills/${namespace}/${skillPath}` : `skills/${namespace}`;
+  return {
+    namespace,
+    importType: input.importType,
+    ...(skillPath ? { skillPath } : {}),
+    replacementRoot,
+  };
+}
+
 export function normalizeSkillBundleInput(input: {
   namespace: string;
   importType: SkillBundleImportType;
   skillPath?: string;
   files: SkillBundleInputFile[];
 }): NormalizedSkillBundleInput {
-  const namespace = normalizeNamespace(input.namespace);
-  const skillPath =
-    input.importType === "skill" && input.skillPath !== undefined
-      ? normalizeRelativePath(input.skillPath, "skill_path")
-      : undefined;
-  if (input.importType === "collection" && input.skillPath !== undefined) {
-    throw new Error("skill_path is only valid for skill imports");
-  }
+  const target = normalizeSkillBundleTarget(input);
+  const { namespace, skillPath } = target;
   if (!input.files.length) throw new Error("bundle files must not be empty");
   if (input.files.length > MAX_BUNDLE_FILES) throw new Error(`bundle file count limit exceeded (${MAX_BUNDLE_FILES})`);
   const files = normalizedTreeFiles(input.files);
@@ -294,8 +281,9 @@ export function normalizeSkillBundleInput(input: {
     }
   }
   const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0);
-  if (totalBytes > MAX_BUNDLE_TOTAL_BYTES)
+  if (totalBytes > MAX_BUNDLE_TOTAL_BYTES) {
     throw new Error(`bundle total size limit exceeded (${MAX_BUNDLE_TOTAL_BYTES} bytes)`);
+  }
   const skills = skillSummaries(files);
   if (skills.length > MAX_BUNDLE_SKILLS) throw new Error(`bundle Skill count limit exceeded (${MAX_BUNDLE_SKILLS})`);
   if (input.importType === "skill") {
@@ -306,53 +294,24 @@ export function normalizeSkillBundleInput(input: {
     if (!skills.length) throw new Error("collection import must contain at least one SKILL.md");
     assertCollectionRootsNotNested(skills);
   }
-  const replacementRoot =
-    input.importType === "skill" && skillPath ? `skills/${namespace}/${skillPath}` : `skills/${namespace}`;
   const snapshotSha256 = canonicalTreeHash(files);
   return {
     namespace,
     importType: input.importType,
     ...(skillPath ? { skillPath } : {}),
-    replacementRoot,
+    replacementRoot: target.replacementRoot,
     files,
     skills,
     snapshotSha256,
     expectedTreeSha256: snapshotSha256,
   };
 }
-
-function fileIdentity(
-  file: Pick<SkillBundleFile, "content" | "contentBase64" | "mode"> | SkillBundleInputFile,
-): string {
-  return `${file.mode ?? "0644"}\0${sha256(skillBundleFileBytes(file))}`;
-}
-
 export function diffSkillBundleTrees(
   before: Array<Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode"> | SkillBundleInputFile>,
   after: Array<Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode"> | SkillBundleInputFile>,
 ): SkillBundleDiff {
-  const left = new Map(normalizedTreeFiles(before).map((file) => [file.path, file]));
-  const right = new Map(normalizedTreeFiles(after).map((file) => [file.path, file]));
-  const paths = [...new Set([...left.keys(), ...right.keys()])].sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
-  const added: string[] = [];
-  const modified: string[] = [];
-  const deleted: string[] = [];
-  const unchanged: string[] = [];
-  const hash = createHash("sha256");
-  for (const path of paths) {
-    const a = left.get(path);
-    const b = right.get(path);
-    const change = !a ? "added" : !b ? "deleted" : fileIdentity(a) === fileIdentity(b) ? "unchanged" : "modified";
-    (change === "added" ? added : change === "deleted" ? deleted : change === "modified" ? modified : unchanged).push(
-      path,
-    );
-    if (change !== "unchanged") {
-      hash.update(`${path}\0${change}\0${a ? fileIdentity(a) : "-"}\0${b ? fileIdentity(b) : "-"}\n`, "utf8");
-    }
-  }
-  return { added, modified, deleted, unchanged, sha256: hash.digest("hex") };
+  return diffArtifactTrees(before, after);
 }
-
 export function legacyRdSkillPathToTarget(
   value: string,
 ): { namespace: string; skillPath: string; replacementRoot: string } | undefined {

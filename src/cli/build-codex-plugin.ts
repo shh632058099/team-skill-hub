@@ -117,6 +117,21 @@ async function main(): Promise<void> {
       timeout: 2,
     };
     hooks[event] = [{ matcher: "^__team_skill_hub_reserved__$", hooks: [handler] }];
+    if (event === "PreToolUse") {
+      hooks[event].push({
+        matcher: "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$",
+        hooks: [
+          {
+            type: "command",
+            command: 'python3 "$PLUGIN_ROOT/hooks/codex/expert-session-hook.py"',
+            commandWindows:
+              'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:PLUGIN_ROOT\\hooks\\codex\\expert-session-hook.ps1"',
+            async: false,
+            timeout: 2,
+          },
+        ],
+      });
+    }
   }
   await writeFile(
     path.join(opts.out, "hooks", "hooks.json"),
@@ -133,6 +148,15 @@ async function main(): Promise<void> {
   await cp(
     path.join(root, "scripts", "team-skill-hub-hook.ps1"),
     path.join(opts.out, "hooks", "team-skill-hub-hook.ps1"),
+  );
+  await mkdir(path.join(opts.out, "hooks", "codex"), { recursive: true });
+  await cp(
+    path.join(root, "scripts", "codex", "expert-session-hook.py"),
+    path.join(opts.out, "hooks", "codex", "expert-session-hook.py"),
+  );
+  await cp(
+    path.join(root, "scripts", "codex", "expert-session-hook.ps1"),
+    path.join(opts.out, "hooks", "codex", "expert-session-hook.ps1"),
   );
   await writeFile(
     path.join(opts.out, "hooks", "team-skill-hub.conf"),

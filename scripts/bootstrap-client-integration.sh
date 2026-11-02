@@ -57,16 +57,18 @@ installed=state.get('installed_version')
 if isinstance(installed,int) and installed > version:
     raise SystemExit(f'A newer Team Skill Hub client integration v{installed} is already installed; refusing downgrade to v{version}')
 release_dir=root/'releases'/f'v{version}'; tmp=root/'releases'/f'v{version}.bootstrap-tmp'
-if tmp.exists(): shutil.rmtree(tmp)
-tmp.mkdir(parents=True)
-for name in ('runtime','updater','templates'):
-    src=pkg/name
-    if src.exists(): shutil.copytree(src,tmp/name)
-scripts=pathlib.Path(os.environ['PACKAGE_SCRIPTS'])
-if scripts.exists(): shutil.copytree(scripts,tmp/'scripts')
-shutil.copy2(pkg/'release.json',tmp/'release.json')
-if release_dir.exists(): shutil.rmtree(release_dir)
-tmp.rename(release_dir)
+# Re-running Setup from an installed release must not delete its own source.
+if pkg.resolve() != release_dir.resolve():
+    if tmp.exists(): shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    for name in ('runtime','updater','templates'):
+        src=pkg/name
+        if src.exists(): shutil.copytree(src,tmp/name)
+    scripts=pathlib.Path(os.environ['PACKAGE_SCRIPTS'])
+    if scripts.exists(): shutil.copytree(scripts,tmp/'scripts')
+    shutil.copy2(pkg/'release.json',tmp/'release.json')
+    if release_dir.exists(): shutil.rmtree(release_dir)
+    tmp.rename(release_dir)
 for name in ('team-skill-hub-client','team-skill-hub-client.ps1'):
     src=pkg/'runtime'/name
     if src.exists(): shutil.copy2(src,root/'bin'/name)
@@ -78,7 +80,7 @@ tmp_state=state_path.with_suffix('.json.tmp'); tmp_state.write_text(json.dumps(n
 PY
 else
 node <<'NODE'
-const fs=require('fs'),path=require('path');const pkg=process.env.PACKAGE_ROOT,root=process.env.ROOT,statePath=path.join(root,'state.json');const release=JSON.parse(fs.readFileSync(path.join(pkg,'release.json'),'utf8')),version=Number(release.version);let state={};if(fs.existsSync(statePath))state=JSON.parse(fs.readFileSync(statePath,'utf8'));const hub=process.env.HUB_BASE_URL.replace(/\/$/,'');if(state.hub_base_url&&state.hub_base_url.replace(/\/$/,'')!==hub)throw new Error(`Existing client integration points to a different Team Skill Hub: ${state.hub_base_url} != ${hub}`);if(Number.isInteger(state.installed_version)&&state.installed_version>version)throw new Error(`A newer Team Skill Hub client integration v${state.installed_version} is already installed; refusing downgrade to v${version}`);const target=path.join(root,'releases',`v${version}`);fs.rmSync(target,{recursive:true,force:true});fs.mkdirSync(target,{recursive:true});for(const n of ['runtime','updater','templates'])if(fs.existsSync(path.join(pkg,n)))fs.cpSync(path.join(pkg,n),path.join(target,n),{recursive:true});if(fs.existsSync(process.env.PACKAGE_SCRIPTS))fs.cpSync(process.env.PACKAGE_SCRIPTS,path.join(target,'scripts'),{recursive:true});fs.copyFileSync(path.join(pkg,'release.json'),path.join(target,'release.json'));for(const n of ['team-skill-hub-client','team-skill-hub-client.ps1'])if(fs.existsSync(path.join(pkg,'runtime',n)))fs.copyFileSync(path.join(pkg,'runtime',n),path.join(root,'bin',n));state={...state,schema_version:1,installed_version:version,hub_base_url:hub,api_key_env:process.env.API_KEY_ENV,clients:{...(state.clients||{}),[process.env.CLIENT]:{enabled:true,config_home:process.env.CONFIG_HOME,server_name:process.env.SERVER_NAME}}};fs.writeFileSync(statePath+'.tmp',JSON.stringify(state,null,2)+'\n');fs.renameSync(statePath+'.tmp',statePath);fs.writeFileSync(path.join(root,'current'),String(version)+'\n');
+const fs=require('fs'),path=require('path');const pkg=process.env.PACKAGE_ROOT,root=process.env.ROOT,statePath=path.join(root,'state.json');const release=JSON.parse(fs.readFileSync(path.join(pkg,'release.json'),'utf8')),version=Number(release.version);let state={};if(fs.existsSync(statePath))state=JSON.parse(fs.readFileSync(statePath,'utf8'));const hub=process.env.HUB_BASE_URL.replace(/\/$/,'');if(state.hub_base_url&&state.hub_base_url.replace(/\/$/,'')!==hub)throw new Error(`Existing client integration points to a different Team Skill Hub: ${state.hub_base_url} != ${hub}`);if(Number.isInteger(state.installed_version)&&state.installed_version>version)throw new Error(`A newer Team Skill Hub client integration v${state.installed_version} is already installed; refusing downgrade to v${version}`);const target=path.join(root,'releases',`v${version}`);if(path.resolve(pkg)!==path.resolve(target)){fs.rmSync(target,{recursive:true,force:true});fs.mkdirSync(target,{recursive:true});for(const n of ['runtime','updater','templates'])if(fs.existsSync(path.join(pkg,n)))fs.cpSync(path.join(pkg,n),path.join(target,n),{recursive:true});if(fs.existsSync(process.env.PACKAGE_SCRIPTS))fs.cpSync(process.env.PACKAGE_SCRIPTS,path.join(target,'scripts'),{recursive:true});fs.copyFileSync(path.join(pkg,'release.json'),path.join(target,'release.json'));}for(const n of ['team-skill-hub-client','team-skill-hub-client.ps1'])if(fs.existsSync(path.join(pkg,'runtime',n)))fs.copyFileSync(path.join(pkg,'runtime',n),path.join(root,'bin',n));state={...state,schema_version:1,installed_version:version,hub_base_url:hub,api_key_env:process.env.API_KEY_ENV,clients:{...(state.clients||{}),[process.env.CLIENT]:{enabled:true,config_home:process.env.CONFIG_HOME,server_name:process.env.SERVER_NAME}}};fs.writeFileSync(statePath+'.tmp',JSON.stringify(state,null,2)+'\n');fs.renameSync(statePath+'.tmp',statePath);fs.writeFileSync(path.join(root,'current'),String(version)+'\n');
 NODE
 fi
 chmod +x "$ROOT/bin/team-skill-hub-client" 2>/dev/null || true

@@ -1,4 +1,4 @@
-# Skill Bundle Import Design
+# Skill Bundle Import Design\n\n> **Status: Historical / Superseded.** 当前实现以 [Artifact Bundle](artifact-bundle.md) 为准。Skill 与 Knowledge 已统一到 Artifact Bundle 生命周期；默认更新模式为 Merge，显式 Replace 才执行目标 Scope 的完整替换。本文以下内容保留用于解释早期 Skill-only 设计，不再作为当前接口语义依据。
 
 ## 1. 目标
 

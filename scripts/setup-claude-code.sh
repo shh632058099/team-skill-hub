@@ -39,6 +39,7 @@ CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 HOOK_CONF="$HOOKS_DIR/team-skill-hub.conf"
 STOP_GATE="$HOOKS_DIR/team-skill-hub-claude-stop.sh"
+SESSION_GATE="$HOOKS_DIR/team-skill-hub-expert-session.py"
 
 if [[ "$UPGRADE" == "true" && -f "$HOOK_CONF" ]]; then
   existing_event_url="$(awk -F= '$1=="event_url"{print substr($0,index($0,"=")+1);exit}' "$HOOK_CONF")"
@@ -100,9 +101,12 @@ else
   echo "python3 or node is required to read client integration release metadata" >&2; exit 2
 fi
 
+if [[ "$SERVER_NAME" == "teamSkillHub" ]]; then
+  command -v python3 >/dev/null 2>&1 || { echo "python3 required for Claude expert session hook" >&2; exit 2; }
+fi
 mkdir -p "$CLAUDE_DIR" "$HOOKS_DIR"
 touch "$SETTINGS_FILE" "$CLAUDE_MD"
-export SETTINGS_FILE EVENT_URL API_KEY_ENV SERVER_NAME SKIP_MCP CLIENT_LAUNCHER
+export SETTINGS_FILE EVENT_URL API_KEY_ENV SERVER_NAME SKIP_MCP CLIENT_LAUNCHER HOOKS_DIR
 
 if command -v python3 >/dev/null 2>&1; then
   python3 <<'PY'
@@ -138,6 +142,17 @@ for group in hooks.get("Stop",[]) or []:
         copy=dict(group); copy["hooks"]=handlers; kept.append(copy)
 kept.append({"hooks":[{"type":"command","command":'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',"timeout":4}]})
 hooks["Stop"]=kept
+if os.environ["SERVER_NAME"] == "teamSkillHub":
+    # Preserve all unrelated PreToolUse handlers, replace only our managed hook.
+    matcher=r"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$"
+    kept=[]
+    for group in hooks.get("PreToolUse",[]) or []:
+        handlers=[h for h in (group.get("hooks",[]) or []) if "expert-session-hook" not in str(h.get("command","")) and "team-skill-hub-expert-session" not in str(h.get("command",""))]
+        if handlers:
+            copy=dict(group);copy["hooks"]=handlers;kept.append(copy)
+    command='python3 "'+os.path.join(os.environ["HOOKS_DIR"],"team-skill-hub-expert-session.py")+'"'
+    kept.append({"matcher":matcher,"hooks":[{"type":"command","command":command,"timeout":5}]})
+    hooks["PreToolUse"]=kept
 client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
 kept=[]
 for group in hooks.get("SessionStart",[]) or []:
@@ -159,6 +174,10 @@ if(!skipMcp){root.permissions ||= {};const allow=Array.isArray(root.permissions.
 const httpHandler={type:"http",url,timeout:2,headers:{Authorization:"Bearer ${"+key+"}"},allowedEnvVars:[key]};
 for(const event of ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"]){const kept=[];for(const group of (root.hooks[event]||[])){const hs=(group.hooks||[]).filter(h=>!(h.type==="http"&&String(h.url||"").includes("/client-events/claude-code")));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[httpHandler]});root.hooks[event]=kept}
 const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-claude-stop"));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[{type:"command",command:'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',timeout:4}]});root.hooks.Stop=kept;
+if(server==="teamSkillHub"){
+ const groups=[];for(const group of (root.hooks.PreToolUse||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.command||"").includes("team-skill-hub-expert-session"));if(hs.length)groups.push({...group,hooks:hs})}
+ groups.push({matcher:"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$",hooks:[{type:"command",command:`python3 "${process.env.HOOKS_DIR.replaceAll("\\","/")}/team-skill-hub-expert-session.py"`,timeout:5}]});root.hooks.PreToolUse=groups;
+}
 const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});sk.push({hooks:[{type:"command",command:`"${client}" session-start-display --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");
 NODE
@@ -168,6 +187,11 @@ else
 fi
 
 cp "$CLIENT_RELEASE_DIR/scripts/team-skill-hub-claude-stop.sh" "$STOP_GATE"
+if [[ "$SERVER_NAME" == "teamSkillHub" ]]; then
+  command -v python3 >/dev/null 2>&1 || { echo "python3 required for Claude expert session hook" >&2; exit 2; }
+  cp "$CLIENT_RELEASE_DIR/scripts/claude/expert-session-hook.py" "$SESSION_GATE"
+  chmod 700 "$SESSION_GATE"
+fi
 chmod +x "$STOP_GATE"
 
 printf 'event_url=%s\nmcp_url=%s\nserver_name=%s\napi_key_env=%s\ncapture_stop_message=%s\nruntime_version=%s\nhook_schema_version=%s\n' \

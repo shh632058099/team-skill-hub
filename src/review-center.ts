@@ -2,7 +2,8 @@ import type { KnowledgeCandidate } from "./observability.js";
 import type { SkillBundleImport } from "./skill-bundles.js";
 
 export type ReviewItemKind = "candidate" | "skill-bundle";
-export type ReviewContentType = "knowledge" | "legacy-skill" | "skill-bundle-skill" | "skill-bundle-collection";
+export type ReviewContentType =
+  "knowledge" | "legacy-skill" | "skill-bundle-skill" | "skill-bundle-collection" | "artifact-bundle-knowledge";
 export type ReviewStatusGroup =
   | "pending"
   | "approved"
@@ -35,7 +36,7 @@ export interface ReviewItem {
   repository?: string;
   namespace?: string;
   skillCollection?: string;
-  importType?: "skill" | "collection";
+  importType?: "skill" | "collection" | "knowledge";
   submitter?: string;
   reviewer?: string;
   updatedAt: string;
@@ -143,7 +144,12 @@ export function projectSkillBundleReviewItem(
     kind: "skill-bundle",
     id: record.id,
     title: record.namespace,
-    contentType: record.importType === "collection" ? "skill-bundle-collection" : "skill-bundle-skill",
+    contentType:
+      record.importType === "collection"
+        ? "skill-bundle-collection"
+        : record.importType === "knowledge"
+          ? "artifact-bundle-knowledge"
+          : "skill-bundle-skill",
     status: record.status,
     statusGroup: statusGroup(record.status),
     operationHint: "preview",

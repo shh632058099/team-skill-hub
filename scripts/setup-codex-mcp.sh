@@ -41,6 +41,8 @@ HOOKS_JSON="$CODEX_DIR/hooks.json"
 HOOK_CONF="$HOOKS_DIR/team-skill-hub.conf"
 SH_HOOK="$HOOKS_DIR/team-skill-hub-hook.sh"
 PS_HOOK="$HOOKS_DIR/team-skill-hub-hook.ps1"
+SESSION_HOOK_PY="$HOOKS_DIR/expert-session-hook.py"
+SESSION_HOOK_PS="$HOOKS_DIR/expert-session-hook.ps1"
 if [[ "$UPGRADE" == "true" && -f "$HOOK_CONF" ]]; then
   existing_event_url="$(awk -F= '$1=="event_url"{print substr($0,index($0,"=")+1);exit}' "$HOOK_CONF")"
   existing_server_name="$(awk -F= '$1=="server_name"{print substr($0,index($0,"=")+1);exit}' "$HOOK_CONF")"
@@ -200,10 +202,12 @@ rm -f "$agents_block"
 
 cp "$CLIENT_RELEASE_DIR/scripts/team-skill-hub-hook.sh" "$SH_HOOK"
 cp "$CLIENT_RELEASE_DIR/scripts/team-skill-hub-hook.ps1" "$PS_HOOK"
-chmod +x "$SH_HOOK"
+cp "$CLIENT_RELEASE_DIR/scripts/codex/expert-session-hook.py" "$SESSION_HOOK_PY"
+cp "$CLIENT_RELEASE_DIR/scripts/codex/expert-session-hook.ps1" "$SESSION_HOOK_PS"
+chmod +x "$SH_HOOK" "$SESSION_HOOK_PY"
 printf 'event_url=%s\nserver_name=%s\napi_key_env=%s\ncapture_stop_message=%s\nruntime_version=%s\nhook_schema_version=%s\n' "$EVENT_URL" "$SERVER_NAME" "$API_KEY_ENV" "$AUTO_KNOWLEDGE" "$HOOK_RUNTIME_VERSION" "$HOOK_SCHEMA_VERSION" > "$HOOK_CONF"
 
-export HOOKS_JSON SH_HOOK PS_HOOK CLIENT_LAUNCHER
+export HOOKS_JSON SH_HOOK PS_HOOK CLIENT_LAUNCHER SESSION_HOOK_PY SESSION_HOOK_PS
 if command -v python3 >/dev/null 2>&1; then
   python3 <<'PY'
 import json,os
@@ -255,6 +259,51 @@ else
   echo "Warning: python3 or node is required to merge hooks.json; MCP and AGENTS.md were configured, hooks were not." >&2
 fi
 
+if command -v node >/dev/null 2>&1; then
+  node <<'NODE'
+const fs = require("fs");
+const file = process.env.HOOKS_JSON;
+const root = JSON.parse(fs.readFileSync(file, "utf8"));
+root.hooks ||= {};
+const matcher = "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$";
+const groups = [];
+for (const group of root.hooks.PreToolUse || []) {
+  const handlers = (group.hooks || []).filter((handler) =>
+    !String(handler.command || "").includes("expert-session-hook") &&
+    !String(handler.commandWindows || "").includes("expert-session-hook")
+  );
+  if (handlers.length) groups.push({ ...group, hooks: handlers });
+}
+groups.push({ matcher, hooks: [{ type: "command", command: `python3 "${process.env.SESSION_HOOK_PY.split(String.fromCharCode(92)).join("/")}"`, commandWindows: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${process.env.SESSION_HOOK_PS}"`, async: false, timeout: 2 }] });
+root.hooks.PreToolUse = groups;
+fs.writeFileSync(file, JSON.stringify(root, null, 2) + "\n", "utf8");
+NODE
+elif command -v python3 >/dev/null 2>&1; then
+  python3 <<'PYHOOK'
+import json, os
+file = os.environ["HOOKS_JSON"]
+with open(file, encoding="utf-8") as stream:
+    root = json.load(stream)
+root.setdefault("hooks", {})
+matcher = r"^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$"
+groups = []
+for group in root["hooks"].get("PreToolUse", []) or []:
+    handlers = [h for h in (group.get("hooks", []) or []) if "expert-session-hook" not in str(h.get("command", "")) and "expert-session-hook" not in str(h.get("commandWindows", ""))]
+    if handlers:
+        copy = dict(group)
+        copy["hooks"] = handlers
+        groups.append(copy)
+groups.append({"matcher": matcher, "hooks": [{"type": "command", "command": "python3 \"" + os.environ["SESSION_HOOK_PY"].replace("\\", "/") + "\"", "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + os.environ["SESSION_HOOK_PS"] + "\"", "async": False, "timeout": 2}]})
+root["hooks"]["PreToolUse"] = groups
+with open(file, "w", encoding="utf-8") as stream:
+    json.dump(root, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+PYHOOK
+else
+  echo "python3 or node is required to configure the Codex Expert Session hook" >&2
+  exit 2
+fi
+
 echo "Configured MCP: $CODEX_CONFIG"
 echo "Configured global AGENTS.md: $AGENTS_FILE"
 echo "Configured Codex hooks: $HOOKS_JSON"
@@ -264,3 +313,4 @@ echo "Set the API key before restarting Codex:"
 echo "  export $API_KEY_ENV='<your-api-key>'"
 echo
 echo "Then verify: codex mcp list"
+echo "After restarting Codex, run /hooks and review/trust the Team Skill Hub Expert Session hook. Untrusted hooks are skipped."

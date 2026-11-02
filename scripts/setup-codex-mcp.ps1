@@ -24,6 +24,8 @@ $HooksJson = Join-Path $CodexDir "hooks.json"
 $HookConf = Join-Path $HooksDir "team-skill-hub.conf"
 $ShHook = Join-Path $HooksDir "team-skill-hub-hook.sh"
 $PsHook = Join-Path $HooksDir "team-skill-hub-hook.ps1"
+$SessionHookPy = Join-Path $HooksDir "expert-session-hook.py"
+$SessionHookPs = Join-Path $HooksDir "expert-session-hook.ps1"
 if ($Upgrade.IsPresent -and (Test-Path $HookConf)) {
     $Existing = @{}
     Get-Content $HookConf | ForEach-Object {
@@ -185,6 +187,8 @@ Write-Utf8NoBom -Path $AgentsFile -Content $AgentsContent
 
 Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-hook.sh") $ShHook
 Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\team-skill-hub-hook.ps1") $PsHook
+Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\codex\expert-session-hook.py") $SessionHookPy
+Copy-Item -Force (Join-Path $ClientReleaseDir "scripts\codex\expert-session-hook.ps1") $SessionHookPs
 $AutoKnowledgeValue = if ($NoAutoKnowledge.IsPresent) { "false" } elseif ($AutoKnowledge.IsPresent) { "true" } elseif ($Upgrade.IsPresent -and $Existing -and $Existing["capture_stop_message"]) { [string]$Existing["capture_stop_message"] } else { "true" }
 Write-Utf8NoBom -Path $HookConf -Content ("event_url=" + $EventUrl + [Environment]::NewLine + "server_name=" + $ServerName + [Environment]::NewLine + "api_key_env=" + $ApiKeyEnv + [Environment]::NewLine + "capture_stop_message=" + $AutoKnowledgeValue + [Environment]::NewLine + "runtime_version=" + $HookRuntimeVersion + [Environment]::NewLine + "hook_schema_version=" + $HookSchemaVersion + [Environment]::NewLine)
 
@@ -210,8 +214,8 @@ foreach ($Event in $Events) {
     if ($null -ne $Prop) {
         foreach ($Group in @($Prop.Value)) {
             $Handlers = @($Group.hooks | Where-Object {
-                ([string]$_.command) -notmatch 'team-skill-hub-hook' -and
-                ([string]$_.commandWindows) -notmatch 'team-skill-hub-hook'
+                ([string]$_.command) -notmatch '(team-skill-hub-hook|expert-session-hook)' -and
+                ([string]$_.commandWindows) -notmatch '(team-skill-hub-hook|expert-session-hook)'
             })
             if ($Handlers.Count -gt 0) {
                 $Group.hooks = $Handlers
@@ -229,6 +233,10 @@ foreach ($Event in $Events) {
     $TeamGroup = [ordered]@{ hooks = @($TeamHandler) }
     if ($Event -in @("PreToolUse","PreCompact","PostCompact")) { $TeamGroup.matcher = "^__team_skill_hub_reserved__$" }
     $Kept += [pscustomobject]$TeamGroup
+    if ($Event -eq "PreToolUse") {
+        $SessionHandler = [pscustomobject]@{ type="command"; command=('python3 "' + $SessionHookPy + '"'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionHookPs + '"'); async=$false; timeout=2 }
+        $Kept += [pscustomobject]@{ matcher='^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$'; hooks=@($SessionHandler) }
+    }
     if ($null -ne $Prop) { $HooksRoot.hooks.$Event = @($Kept) }
     else { Add-Member -InputObject $HooksRoot.hooks -MemberType NoteProperty -Name $Event -Value @($Kept) }
 }
@@ -254,3 +262,4 @@ Write-Host "Set the API key before restarting Codex:"
 Write-Host ('  $env:' + $ApiKeyEnv + '="<your-api-key>"')
 Write-Host ""
 Write-Host "Then verify: codex mcp list"
+Write-Host "After restarting Codex, run /hooks and review/trust the Team Skill Hub Expert Session hook. Untrusted hooks are skipped."

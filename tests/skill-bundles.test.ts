@@ -5,9 +5,37 @@ import {
   diffSkillBundleTrees,
   legacyRdSkillPathToTarget,
   normalizeSkillBundleInput,
+  normalizeSkillBundleTarget,
 } from "../src/skill-bundles.js";
 
 test("skill import normalizes a safe replacement root and one root SKILL.md", () => {
+  assert.deepEqual(
+    normalizeSkillBundleTarget({
+      namespace: "superpowers",
+      importType: "skill",
+      skillPath: "skills/superpowers/systematic-debugging",
+    }),
+    {
+      namespace: "superpowers",
+      importType: "skill",
+      skillPath: "systematic-debugging",
+      replacementRoot: "skills/superpowers/systematic-debugging",
+    },
+  );
+  assert.deepEqual(
+    normalizeSkillBundleTarget({
+      namespace: "superpowers",
+      importType: "skill",
+      skillPath: "superpowers/systematic-debugging",
+    }),
+    {
+      namespace: "superpowers",
+      importType: "skill",
+      skillPath: "systematic-debugging",
+      replacementRoot: "skills/superpowers/systematic-debugging",
+    },
+  );
+
   const result = normalizeSkillBundleInput({
     namespace: "ota",
     importType: "skill",

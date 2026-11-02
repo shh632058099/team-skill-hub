@@ -10,17 +10,27 @@ import {
   createSkillBundleSnapshot,
   diffSkillBundleTrees,
   normalizeSkillBundleInput,
+  normalizeSkillBundleTarget,
   skillBundleFileBytes,
   type NormalizedSkillBundleInput,
   type SkillBundleDiff,
   type SkillBundleFile,
   type SkillBundleImport,
   type SkillBundleImportType,
+  type SkillBundleSubmissionMode,
+  type SkillBundleSnapshot,
 } from "./skill-bundles.js";
 import type { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundlePublisher, SkillBundleReviewStaleError } from "./skill-bundle-publishing.js";
 import { artifactIdentity, matchArtifact, type ArtifactMatch } from "./artifact-relation.js";
 import { buildArtifactPreview, type ArtifactPreviewContract } from "./artifact-preview.js";
+import {
+  canonicalArtifactTreeHash,
+  diffArtifactTrees,
+  normalizeArtifactFiles,
+  normalizeArtifactRelativePath,
+  planArtifactFinalTree,
+} from "./artifact-bundles.js";
 
 export interface SkillBundleMaterializedRepository {
   sourceRoot: string;
@@ -40,6 +50,7 @@ export interface SkillBundlePreview {
   diff: SkillBundleDiff;
   fileDiffs: SkillBundleFileDiff[];
   skills: Skill[];
+  submissionMode: SkillBundleSubmissionMode;
   /** Advisory only: explicit namespace/skillPath and replacementRoot always win. */
   artifactMatch?: ArtifactMatch;
 }
@@ -75,6 +86,7 @@ export interface SubmitSkillBundleServiceInput {
   importType: SkillBundleImportType;
   skillPath?: string;
   files: Array<{ path: string; content?: string; contentBase64?: string; mode?: "0644" | "0755" }>;
+  submissionMode?: SkillBundleSubmissionMode;
   sourceType: SkillBundleImport["sourceType"];
   sourceMetadata?: Record<string, string>;
   submissionKey?: string;
@@ -90,10 +102,16 @@ interface SkillBundleServiceOptions {
   rules: ValidationRule[];
   materialize: (repository: RepositoryConfig) => Promise<SkillBundleMaterializedRepository>;
   authorize: (principal: Principal, repository: RepositoryConfig) => boolean;
+  authorizeKnowledge?: (principal: Principal, repository: RepositoryConfig) => boolean;
   publisher?: SkillBundlePublisher;
 }
 
-function semanticsHash(repository: RepositoryConfig, normalized: NormalizedSkillBundleInput): string {
+function semanticsHash(
+  repository: RepositoryConfig,
+  normalized: NormalizedSkillBundleInput,
+  submissionMode: SkillBundleSubmissionMode,
+  targetScopeSha256: string,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -102,12 +120,13 @@ function semanticsHash(repository: RepositoryConfig, normalized: NormalizedSkill
         namespace: normalized.namespace,
         importType: normalized.importType,
         skillPath: normalized.skillPath ?? null,
+        submissionMode,
+        targetScopeSha256,
         snapshotSha256: normalized.snapshotSha256,
       }),
     )
     .digest("hex");
 }
-
 async function readTextTree(root: string): Promise<SkillBundleFile[]> {
   const files: SkillBundleFile[] = [];
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -268,19 +287,318 @@ export class SkillBundleService {
     }
   }
 
+  private assertKnowledgeAuthorized(principal: Principal, repository: RepositoryConfig): void {
+    if (
+      !repository.enabled ||
+      !repository.knowledgePublishing?.enabled ||
+      !(this.options.authorizeKnowledge?.(principal, repository) ?? this.options.authorize(principal, repository))
+    ) {
+      throw new Error("principal is not authorized for Knowledge Artifact Bundle repository");
+    }
+  }
+
+  private async readKnowledgeFileScope(
+    materialized: SkillBundleMaterializedRepository,
+    targetRoot: string,
+  ): Promise<SkillBundleFile[]> {
+    const full = path.join(materialized.sourceRoot, ...targetRoot.split("/"));
+    let info;
+    try {
+      info = await lstat(full);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error("Knowledge artifact target must be a regular file");
+    const bytes = await readFile(full);
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error("Knowledge artifact target must be UTF-8 text");
+    }
+    return normalizeArtifactFiles([{ path: "target.md", content, mode: (info.mode & 0o111) !== 0 ? "0755" : "0644" }]);
+  }
+
+  async submitKnowledgeFile(
+    principal: Principal,
+    repository: RepositoryConfig,
+    input: {
+      targetRoot: string;
+      content: string;
+      submissionMode?: SkillBundleSubmissionMode;
+      sourceMetadata?: Record<string, string>;
+      baseline?: { exists: boolean; content?: string; revision?: string };
+    },
+  ): Promise<SkillBundleImport> {
+    if (!input.baseline) this.assertKnowledgeAuthorized(principal, repository);
+    const targetRoot = normalizeArtifactRelativePath(input.targetRoot, "knowledge target path");
+    if (!targetRoot.toLowerCase().endsWith(".md")) throw new Error("Knowledge artifact target must be a .md file");
+    const materialized = input.baseline ? undefined : await this.options.materialize(repository);
+    const before = input.baseline
+      ? input.baseline.exists
+        ? normalizeArtifactFiles([{ path: "target.md", content: input.baseline.content ?? "", mode: "0644" }])
+        : []
+      : await this.readKnowledgeFileScope(materialized!, targetRoot);
+    const submissionMode = input.submissionMode ?? "merge";
+    const finalFiles = planArtifactFinalTree({
+      targetKind: "file",
+      mode: submissionMode,
+      before,
+      submitted: [{ path: "target.md", content: input.content, mode: "0644" }],
+    });
+    const files = normalizeArtifactFiles(finalFiles);
+    const snapshotSha256 = canonicalArtifactTreeHash(files);
+    const snapshot: SkillBundleSnapshot = {
+      id: "sbs_" + randomUUID().replaceAll("-", ""),
+      files,
+      skills: [],
+      sha256: snapshotSha256,
+      fileCount: files.length,
+      totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
+      createdAt: new Date().toISOString(),
+    };
+    const saved = this.options.storage.saveSnapshot(snapshot);
+    const targetScopeSha256 = canonicalArtifactTreeHash(before);
+    const now = new Date().toISOString();
+    return this.options.storage.createImport({
+      id: "sbi_" + randomUUID().replaceAll("-", ""),
+      revision: 0,
+      kind: "knowledge",
+      namespace: "knowledge",
+      importType: "knowledge",
+      replacementRoot: targetRoot,
+      collection: "rd-skills",
+      repository: repository.id,
+      sourceType: "mcp",
+      ...(input.sourceMetadata ? { sourceMetadata: input.sourceMetadata } : {}),
+      snapshotId: saved.id,
+      snapshotSha256: saved.sha256,
+      status: "pending",
+      submitter: principal.id,
+      submissionMode,
+      targetKind: "file",
+      targetRevision: input.baseline?.revision ?? materialized?.revision ?? "knowledge-index",
+      targetScopeSha256,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  async refreshKnowledgeFile(
+    principal: Principal,
+    repository: RepositoryConfig,
+    id: string,
+    input: {
+      targetRoot: string;
+      content: string;
+      submissionMode?: SkillBundleSubmissionMode;
+      baseline?: { exists: boolean; content?: string; revision?: string };
+    },
+  ): Promise<SkillBundleImport> {
+    if (!input.baseline) this.assertKnowledgeAuthorized(principal, repository);
+    const current = this.options.storage.getImport(id);
+    if (!current || current.importType !== "knowledge") throw new Error("Knowledge Artifact Bundle not found");
+    if (!["pending", "approved", "rejected", "publish_failed", "review_stale"].includes(current.status)) {
+      throw new Error("Knowledge Artifact Bundle cannot be edited in its current state");
+    }
+    const targetRoot = normalizeArtifactRelativePath(input.targetRoot, "knowledge target path");
+    if (!targetRoot.toLowerCase().endsWith(".md")) throw new Error("Knowledge artifact target must be a .md file");
+    const materialized = input.baseline ? undefined : await this.options.materialize(repository);
+    const before = input.baseline
+      ? input.baseline.exists
+        ? normalizeArtifactFiles([{ path: "target.md", content: input.baseline.content ?? "", mode: "0644" }])
+        : []
+      : await this.readKnowledgeFileScope(materialized!, targetRoot);
+    const submissionMode = input.submissionMode ?? current.submissionMode ?? "merge";
+    const finalFiles = planArtifactFinalTree({
+      targetKind: "file",
+      mode: submissionMode,
+      before,
+      submitted: [{ path: "target.md", content: input.content, mode: "0644" }],
+    });
+    const files = normalizeArtifactFiles(finalFiles);
+    const snapshot: SkillBundleSnapshot = {
+      id: "sbs_" + randomUUID().replaceAll("-", ""),
+      files,
+      skills: [],
+      sha256: canonicalArtifactTreeHash(files),
+      fileCount: files.length,
+      totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
+      createdAt: new Date().toISOString(),
+    };
+    const saved = this.options.storage.saveSnapshot(snapshot);
+    return this.options.storage.updateImport({
+      ...current,
+      kind: "knowledge",
+      namespace: "knowledge",
+      importType: "knowledge",
+      repository: repository.id,
+      replacementRoot: targetRoot,
+      snapshotId: saved.id,
+      snapshotSha256: saved.sha256,
+      status: "pending",
+      submissionMode,
+      targetKind: "file",
+      targetRevision: input.baseline?.revision ?? materialized?.revision ?? "knowledge-index",
+      targetScopeSha256: canonicalArtifactTreeHash(before),
+      review: undefined,
+      publication: undefined,
+      publishError: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  async reviewKnowledgeFile(
+    principal: Principal,
+    repository: RepositoryConfig,
+    id: string,
+    status: "approved" | "rejected",
+    reason?: string,
+  ): Promise<SkillBundleImport> {
+    this.assertKnowledgeAuthorized(principal, repository);
+    this.assertAdmin(principal);
+    const current = this.options.storage.getImport(id);
+    if (!current || current.importType !== "knowledge" || current.repository !== repository.id) {
+      throw new Error("Knowledge Artifact Bundle not found");
+    }
+    if (!["pending", "approved", "rejected", "publish_failed", "review_stale"].includes(current.status)) {
+      throw new Error("Knowledge Artifact Bundle is not reviewable");
+    }
+    const now = new Date().toISOString();
+    if (status === "rejected") {
+      return this.options.storage.updateImport({
+        ...current,
+        status: "rejected",
+        review: { reviewer: principal.id, reviewedAt: now, ...(reason ? { reason } : {}) },
+        publishError: undefined,
+        updatedAt: now,
+      });
+    }
+    const materialized = await this.options.materialize(repository);
+    const before = await this.readKnowledgeFileScope(materialized, current.replacementRoot);
+    const currentHash = canonicalArtifactTreeHash(before);
+    if (current.targetScopeSha256 && currentHash !== current.targetScopeSha256) {
+      return this.options.storage.updateImport({
+        ...current,
+        status: "review_stale",
+        review: undefined,
+        publishError: undefined,
+        updatedAt: now,
+      });
+    }
+    const snapshot = this.options.storage.getSnapshot(current.snapshotId);
+    if (!snapshot) throw new Error("Knowledge Artifact Bundle snapshot not found");
+    const diff = diffArtifactTrees(before, snapshot.files);
+    return this.options.storage.updateImport({
+      ...current,
+      status: "approved",
+      review: {
+        reviewer: principal.id,
+        reviewedAt: now,
+        targetRevision: current.targetRevision ?? materialized.revision,
+        targetTreeSha256: current.targetScopeSha256 ?? currentHash,
+        diffSha256: diff.sha256,
+        added: diff.added.length,
+        modified: diff.modified.length,
+        deleted: diff.deleted.length,
+        ...(reason ? { reason } : {}),
+      },
+      publishError: undefined,
+      updatedAt: now,
+    });
+  }
+
+  async ensureKnowledgeFileReviewFresh(
+    principal: Principal,
+    repository: RepositoryConfig,
+    id: string,
+  ): Promise<SkillBundleImport> {
+    this.assertKnowledgeAuthorized(principal, repository);
+    const current = this.options.storage.getImport(id);
+    if (!current || current.importType !== "knowledge" || current.repository !== repository.id) {
+      throw new Error("Knowledge Artifact Bundle not found");
+    }
+    if (!current.review?.targetTreeSha256)
+      throw new Error("Knowledge Artifact Bundle approval is missing target baseline");
+    const materialized = await this.options.materialize(repository);
+    const before = await this.readKnowledgeFileScope(materialized, current.replacementRoot);
+    if (canonicalArtifactTreeHash(before) === current.review.targetTreeSha256) return current;
+    return this.options.storage.updateImport({
+      ...current,
+      status: "review_stale",
+      review: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  markKnowledgeExternalStatus(
+    id: string,
+    status: "publishing" | "published" | "publish_failed",
+    publishError?: string,
+  ): SkillBundleImport {
+    const current = this.options.storage.getImport(id);
+    if (!current || current.importType !== "knowledge") throw new Error("Knowledge Artifact Bundle not found");
+    return this.options.storage.updateImport({
+      ...current,
+      status,
+      publishError: status === "publish_failed" ? publishError : undefined,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
   private assertAdmin(principal: Principal): void {
     if (!principal.roles.includes("admin")) {
       throw new Error("administrator role is required for Skill Bundle review/publishing");
     }
   }
 
+  private async prepareSubmission(
+    repository: RepositoryConfig,
+    input: Pick<SubmitSkillBundleServiceInput, "namespace" | "importType" | "skillPath" | "files" | "submissionMode">,
+  ): Promise<{
+    normalized: NormalizedSkillBundleInput;
+    submissionMode: SkillBundleSubmissionMode;
+    materialized: SkillBundleMaterializedRepository;
+    before: SkillBundleFile[];
+  }> {
+    const target = normalizeSkillBundleTarget(input);
+    const materialized = await this.options.materialize(repository);
+    const currentRoot = path.join(materialized.sourceRoot, ...target.replacementRoot.split("/"));
+    const before = await readTextTree(currentRoot);
+    const submissionMode = input.submissionMode ?? "merge";
+    const finalFiles = planArtifactFinalTree({
+      targetKind: "directory",
+      mode: submissionMode,
+      before,
+      submitted: input.files,
+    });
+    const normalized = normalizeSkillBundleInput({
+      namespace: target.namespace,
+      importType: target.importType,
+      skillPath: target.skillPath,
+      files: finalFiles.map((file) => ({
+        path: file.path,
+        ...(file.content !== undefined ? { content: file.content } : { contentBase64: file.contentBase64 }),
+        mode: file.mode,
+      })),
+    });
+    return { normalized, submissionMode, materialized, before };
+  }
+
   private async previewNormalized(
     repository: RepositoryConfig,
     normalized: NormalizedSkillBundleInput,
+    context?: {
+      submissionMode?: SkillBundleSubmissionMode;
+      materialized?: SkillBundleMaterializedRepository;
+      before?: SkillBundleFile[];
+    },
   ): Promise<SkillBundlePreview> {
-    const materialized = await this.options.materialize(repository);
+    const materialized = context?.materialized ?? (await this.options.materialize(repository));
     const currentRoot = path.join(materialized.sourceRoot, ...normalized.replacementRoot.split("/"));
-    const before = await readTextTree(currentRoot);
+    const before = context?.before ?? (await readTextTree(currentRoot));
+    const submissionMode = context?.submissionMode ?? "replace";
     // Skill imports already update the explicit replacementRoot. Provide a safe,
     // same-repository match hint for renamed Skills without redirecting it.
     let artifactMatch: ArtifactMatch | undefined;
@@ -338,6 +656,7 @@ export class SkillBundleService {
         diff,
         fileDiffs: buildSkillBundleFileDiffs(before, normalized.files, diff),
         skills,
+        submissionMode,
         artifactPreview: buildArtifactPreview({
           artifactType: "skill",
           targetPath: normalized.replacementRoot,
@@ -363,8 +682,8 @@ export class SkillBundleService {
     input: Omit<SubmitSkillBundleServiceInput, "sourceType" | "sourceMetadata" | "submissionKey">,
   ): Promise<SkillBundlePreview> {
     this.assertAuthorized(principal, repository);
-    const normalized = normalizeSkillBundleInput(input);
-    return await this.previewNormalized(repository, normalized);
+    const prepared = await this.prepareSubmission(repository, input);
+    return await this.previewNormalized(repository, prepared.normalized, prepared);
   }
 
   async submitDetailed(
@@ -373,8 +692,10 @@ export class SkillBundleService {
     input: SubmitSkillBundleServiceInput,
   ): Promise<SkillBundleSubmitResult> {
     this.assertAuthorized(principal, repository);
-    const normalized = normalizeSkillBundleInput(input);
-    const requestSemanticsSha256 = semanticsHash(repository, normalized);
+    const prepared = await this.prepareSubmission(repository, input);
+    const { normalized, submissionMode, materialized, before } = prepared;
+    const targetScopeSha256 = canonicalTreeHash(before);
+    const requestSemanticsSha256 = semanticsHash(repository, normalized, submissionMode, targetScopeSha256);
     if (input.submissionKey) {
       const existing = this.options.storage.findBySubmissionKey(principal.id, input.submissionKey);
       if (existing) {
@@ -383,7 +704,7 @@ export class SkillBundleService {
         return { import: existing, created: false };
       }
     }
-    await this.previewNormalized(repository, normalized);
+    await this.previewNormalized(repository, normalized, prepared);
     const snapshot = this.options.storage.saveSnapshot(createSkillBundleSnapshot(normalized));
     const now = new Date().toISOString();
     const record: SkillBundleImport = {
@@ -403,6 +724,10 @@ export class SkillBundleService {
       submitter: principal.id,
       ...(input.submissionKey ? { submissionKey: input.submissionKey } : {}),
       requestSemanticsSha256,
+      submissionMode,
+      targetKind: "directory",
+      targetRevision: materialized.revision,
+      targetScopeSha256,
       createdAt: now,
       updatedAt: now,
     };
@@ -448,7 +773,9 @@ export class SkillBundleService {
     this.assertAuthorized(principal, repository);
     const record = this.options.storage.getImport(id);
     if (!record || record.repository !== repository.id) throw new Error("Skill Bundle import not found");
-    return await this.previewNormalized(repository, this.normalizedFromImport(record));
+    return await this.previewNormalized(repository, this.normalizedFromImport(record), {
+      submissionMode: record.submissionMode ?? "replace",
+    });
   }
 
   async review(
@@ -476,14 +803,23 @@ export class SkillBundleService {
       });
     }
     const preview = await this.previewImport(principal, repository, id);
+    if (current.targetScopeSha256 && preview.targetTreeSha256 !== current.targetScopeSha256) {
+      return this.options.storage.updateImport({
+        ...current,
+        status: "review_stale",
+        review: undefined,
+        publishError: undefined,
+        updatedAt: now,
+      });
+    }
     return this.options.storage.updateImport({
       ...current,
       status,
       review: {
         reviewer: principal.id,
         reviewedAt: now,
-        targetRevision: preview.targetRevision,
-        targetTreeSha256: preview.targetTreeSha256,
+        targetRevision: current.targetRevision ?? preview.targetRevision,
+        targetTreeSha256: current.targetScopeSha256 ?? preview.targetTreeSha256,
         diffSha256: preview.diff.sha256,
         added: preview.diff.added.length,
         modified: preview.diff.modified.length,

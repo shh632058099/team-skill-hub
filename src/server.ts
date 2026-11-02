@@ -19,6 +19,16 @@ import {
   ADMIN_MODULE_INDEX_HTML,
   ADMIN_SKILL_BUNDLES_HTML,
 } from "./admin-ui.js";
+import { ADMIN_EXPERTS_HTML } from "./expert-admin-ui.js";
+import {
+  ExpertStore,
+  type ExpertDefinition,
+  type ExpertDeploymentRecord,
+  type ExpertMcpProfile,
+} from "./expert-platform/expert-store.js";
+import { ExpertTaskStore } from "./expert-platform/task-store.js";
+import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
+import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
 import {
   applyAdminConfig,
   editableConfigFromApp,
@@ -73,6 +83,7 @@ const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
     target_path: z.string().min(1).max(700).optional(),
     repository: z.string().min(1).optional(),
     source_type: z.enum(["files", "zip", "git"]).default("files"),
+    submission_mode: z.enum(["merge", "replace"]).optional(),
     source_root: z.string().max(1000).optional(),
     submission_key: z.string().min(1).max(500).optional(),
     files: z.array(skillBundleWebFileSchema).max(500).optional(),
@@ -87,6 +98,7 @@ const skillBundleWebBodySchema = z.discriminatedUnion("import_type", [
     target_path: z.never().optional(),
     repository: z.string().min(1).optional(),
     source_type: z.enum(["files", "zip", "git"]).default("files"),
+    submission_mode: z.enum(["merge", "replace"]).optional(),
     source_root: z.string().max(1000).optional(),
     submission_key: z.string().min(1).max(500).optional(),
     files: z.array(skillBundleWebFileSchema).max(500).optional(),
@@ -732,6 +744,613 @@ export async function startServer(
       const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400;
       reply.code(code);
       return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get("/admin/experts", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
+    return ADMIN_EXPERTS_HTML;
+  });
+
+  const expertRuntimeDb = () => {
+    const dbPath = process.env.EXPERT_RUNTIME_DB?.trim();
+    if (!dbPath) throw new Error("EXPERT_RUNTIME_DB_NOT_CONFIGURED");
+    return dbPath;
+  };
+  const withExpertTaskStore = <T>(run: (store: ExpertTaskStore) => T): T => {
+    const store = new ExpertTaskStore(expertRuntimeDb());
+    try {
+      return run(store);
+    } finally {
+      store.close();
+    }
+  };
+  app.get<{
+    Querystring: { limit?: string; offset?: string; status?: string; expertId?: string; workerId?: string; q?: string };
+  }>("/admin/api/expert-tasks", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const { limit, offset, status, expertId, workerId, q } = request.query;
+    if (status && !["queued", "running", "succeeded", "failed", "cancelled"].includes(status)) {
+      reply.code(400);
+      return { error: "invalid status" };
+    }
+    try {
+      return withExpertTaskStore((store) =>
+        store.adminTasks({ limit: Number(limit || 20), offset: Number(offset || 0), status, expertId, workerId, q }),
+      );
+    } catch (error) {
+      reply.code(503);
+      return { error: error instanceof Error ? error.message : "TASK_LIST_FAILED" };
+    }
+  });
+  app.get<{ Params: { id: string } }>("/admin/api/expert-tasks/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) {
+      reply.code(400);
+      return { error: "invalid task ID" };
+    }
+    try {
+      const detail = withExpertTaskStore((store) => store.adminTaskDetail(request.params.id));
+      if (!detail) {
+        reply.code(404);
+        return { error: "task not found" };
+      }
+      return detail;
+    } catch (error) {
+      reply.code(503);
+      return { error: error instanceof Error ? error.message : "TASK_DETAIL_FAILED" };
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-tasks/:id/stop", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid task ID" });
+    try {
+      const outcome = withExpertTaskStore((store) => store.adminStopTask(request.params.id));
+      return { outcome };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TASK_STOP_FAILED";
+      return reply
+        .code(message === "TASK_NOT_FOUND" ? 404 : message === "TASK_NOT_ACTIVE" ? 409 : 503)
+        .send({ error: message });
+    }
+  });
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-tasks/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid task ID" });
+    try {
+      withExpertTaskStore((store) => store.adminDeleteTask(request.params.id));
+      return { deleted: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "TASK_DELETE_FAILED";
+      return reply
+        .code(message === "TASK_NOT_FOUND" ? 404 : message === "TASK_NOT_TERMINAL" ? 409 : 503)
+        .send({ error: message });
+    }
+  });
+  const withExpertStore = <T>(run: (store: ExpertStore) => T): T => {
+    const store = new ExpertStore(expertRuntimeDb());
+    try {
+      return run(store);
+    } finally {
+      store.close();
+    }
+  };
+  const expertDefinitionSchema = z
+    .object({
+      id: z.string().trim().min(1).max(100),
+      displayName: z.string().trim().min(1).max(200),
+      capabilities: z.array(z.string().trim().min(1).max(100)).max(100),
+      keywords: z.array(z.string().trim().min(1).max(100)).max(100),
+      active: z.boolean(),
+      modelConfig: z
+        .object({
+          providerId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+          model: z.string().trim().min(1).max(200),
+          baseUrl: z.string().trim().url().max(2048),
+          wireApi: z.enum(["responses", "anthropic-messages"]),
+          credentialRef: z.string().trim().min(1).max(100).optional(),
+          allowedEnvNames: z
+            .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/))
+            .min(1)
+            .max(50),
+        })
+        .optional(),
+    })
+    .superRefine((value, context) => {
+      if (!value.modelConfig) return;
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(value.modelConfig.baseUrl);
+      } catch {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "INVALID_MODEL_BASE_URL",
+          path: ["modelConfig", "baseUrl"],
+        });
+        return;
+      }
+      if (
+        !["https:", "http:"].includes(parsedUrl.protocol) ||
+        parsedUrl.username ||
+        parsedUrl.password ||
+        parsedUrl.search ||
+        parsedUrl.hash
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "INVALID_MODEL_BASE_URL",
+          path: ["modelConfig", "baseUrl"],
+        });
+      }
+      const forbidden = new Set([
+        "PATH",
+        "HOME",
+        "CODEX_HOME",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "NODE_OPTIONS",
+        "BASH_ENV",
+        "ENV",
+        "IFS",
+        "SHELLOPTS",
+      ]);
+      if (value.modelConfig.allowedEnvNames.some((name) => forbidden.has(name) || name.startsWith("DOCKER_"))) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "INVALID_MODEL_ENV_NAME",
+          path: ["modelConfig", "allowedEnvNames"],
+        });
+      }
+    });
+  const expertDeploymentSchema = z
+    .object({
+      id: z.string().trim().min(1).max(100),
+      expertId: z.string().trim().min(1).max(100),
+      repositoryIds: z.array(z.string().trim().min(1).max(200)).max(100).optional().default([]),
+      repositories: z
+        .array(
+          z.object({
+            url: z.string().trim().min(1).max(2048),
+            branch: z.string().trim().min(1).max(250),
+            credentialRef: z.string().trim().max(100).optional(),
+            gitProxyUrl: z.string().trim().max(2048).optional(),
+          }),
+        )
+        .max(100)
+        .optional()
+        .default([]),
+      principals: z.array(z.string().trim().min(1).max(200)).max(100),
+      runtimeProfile: z.string().trim().min(1).max(200),
+      executor: z
+        .object({
+          backend: z.enum(["claude", "codex"]),
+          modelConfig: z.object({
+            providerId: z.string().min(1),
+            model: z.string().min(1),
+            baseUrl: z.string().url(),
+            wireApi: z.enum(["responses", "anthropic-messages"]),
+            credentialRef: z.string().optional(),
+            allowedEnvNames: z.array(z.string()).min(1),
+          }),
+        })
+        .optional(),
+      mcp: z
+        .object({
+          profileRef: z.string().optional(),
+          urlOverride: z.string().url().optional(),
+          credentialRef: z.string().min(1),
+          allowedTools: z.array(
+            z.enum([
+              "list_skills",
+              "search_skills",
+              "resolve_skill",
+              "get_skill",
+              "get_skill_resource",
+              "list_knowledge_sources",
+              "search_knowledge",
+              "get_knowledge",
+            ]),
+          ),
+          required: z.boolean().optional(),
+        })
+        .optional(),
+      active: z.boolean(),
+    })
+    .superRefine((value, context) => {
+      if (value.repositoryIds.length === 0 && value.repositories.length === 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "At least one source repository is required",
+          path: ["repositories"],
+        });
+      }
+      value.repositories.forEach((repository, index) => {
+        try {
+          normalizeSourceRepository(repository);
+        } catch (error) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: error instanceof Error ? error.message : "INVALID_SOURCE_REPOSITORY",
+            path: ["repositories", index],
+          });
+        }
+      });
+    })
+    .transform((value) => ({
+      ...value,
+      repositories: value.repositories.map((repository) => normalizeSourceRepository(repository)),
+      repositoryIds: [
+        ...new Set([
+          ...value.repositoryIds,
+          ...value.repositories.map((repository) => normalizeSourceRepository(repository).id),
+        ]),
+      ],
+    }));
+  const withWorkerRegistry = <T>(fn: (registry: PersistentWorkerRegistry) => T): T => {
+    const runtimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+    const registryDb =
+      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
+      (runtimeDb ? path.join(path.dirname(runtimeDb), "expert-workers.sqlite") : "");
+    if (!registryDb) throw new Error("EXPERT_WORKER_REGISTRY_DB_NOT_CONFIGURED");
+    const registry = new PersistentWorkerRegistry(registryDb);
+    try {
+      return fn(registry);
+    } finally {
+      registry.close();
+    }
+  };
+  const expertAdminError = (error: unknown, reply: any) => {
+    const message = error instanceof Error ? error.message : String(error);
+    reply.code(
+      message === "EXPERT_RUNTIME_DB_NOT_CONFIGURED"
+        ? 503
+        : ["EXPERT_NOT_FOUND", "EXPERT_DEPLOYMENT_NOT_FOUND"].includes(message)
+          ? 404
+          : message === "EXPERT_IN_USE"
+            ? 409
+            : 400,
+    );
+    return { error: message };
+  };
+  app.get("/admin/api/expert-config/definitions", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { definitions: withExpertStore((store) => store.listDefinitions()) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+  app.post<{ Body: ExpertDefinition }>("/admin/api/expert-config/definitions", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const parsed = expertDefinitionSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "INVALID_EXPERT", issues: parsed.error.issues };
+    }
+    try {
+      const existing = withExpertStore((store) => {
+        try {
+          return store.getDefinition(parsed.data.id);
+        } catch {
+          return undefined;
+        }
+      });
+      if (existing) {
+        reply.code(409);
+        return { error: "EXPERT_ALREADY_EXISTS" };
+      }
+      withExpertStore((store) => store.putDefinition(parsed.data));
+      reply.code(201);
+      return { definition: withExpertStore((store) => store.getDefinition(parsed.data.id)) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+  app.put<{ Params: { id: string }; Body: ExpertDefinition }>(
+    "/admin/api/expert-config/definitions/:id",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = expertDefinitionSchema.safeParse({ ...request.body, id: request.params.id });
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT", issues: parsed.error.issues };
+      }
+      try {
+        withExpertStore((store) => {
+          store.getDefinition(request.params.id);
+          store.putDefinition(parsed.data);
+        });
+        return { definition: withExpertStore((store) => store.getDefinition(request.params.id)) };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-config/definitions/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      withExpertStore((store) => store.deleteDefinition(request.params.id));
+      return { deleted: true };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+
+  const expertMcpProfileSchema = z.object({
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+    url: z.string().url(),
+    credentialRef: z.string().trim().min(1).max(100),
+    allowedTools: z
+      .array(
+        z.enum([
+          "list_skills",
+          "search_skills",
+          "resolve_skill",
+          "get_skill",
+          "get_skill_resource",
+          "list_knowledge_sources",
+          "search_knowledge",
+          "get_knowledge",
+        ]),
+      )
+      .min(1),
+    required: z.boolean(),
+  });
+  app.get("/admin/api/expert-config/mcp-profiles", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { profiles: withExpertStore((store) => store.listMcpProfiles()) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+  app.put<{ Params: { id: string }; Body: ExpertMcpProfile }>(
+    "/admin/api/expert-config/mcp-profiles/:id",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = expertMcpProfileSchema.safeParse({ ...request.body, id: request.params.id });
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT_MCP_PROFILE", issues: parsed.error.issues };
+      }
+      try {
+        withExpertStore((store) => store.putMcpProfile(parsed.data));
+        return { profile: withExpertStore((store) => store.getMcpProfile(parsed.data.id)) };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+
+  app.get("/admin/api/expert-config/deployments", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { deployments: withExpertStore((store) => store.listDeployments()) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+  app.post<{ Body: ExpertDeploymentRecord }>("/admin/api/expert-config/deployments", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const parsed = expertDeploymentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+    }
+    try {
+      const existing = withExpertStore((store) => {
+        try {
+          return store.getDeployment(parsed.data.id);
+        } catch {
+          return undefined;
+        }
+      });
+      if (existing) {
+        reply.code(409);
+        return { error: "EXPERT_DEPLOYMENT_ALREADY_EXISTS" };
+      }
+      withExpertStore((store) => store.putDeployment(parsed.data));
+      reply.code(201);
+      return { deployment: withExpertStore((store) => store.getDeployment(parsed.data.id)) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+  app.put<{ Params: { id: string }; Body: ExpertDeploymentRecord }>(
+    "/admin/api/expert-config/deployments/:id",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = expertDeploymentSchema.safeParse({ ...request.body, id: request.params.id });
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+      }
+      try {
+        withExpertStore((store) => {
+          store.getDeployment(request.params.id);
+          store.putDeployment(parsed.data);
+        });
+        return { deployment: withExpertStore((store) => store.getDeployment(request.params.id)) };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: { principals: string[] } }>(
+    "/admin/api/expert-config/deployments/:id/principals",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = z
+        .object({ principals: z.array(z.string().trim().min(1).max(200)).max(100) })
+        .safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+      }
+      try {
+        return {
+          deployment: withExpertStore((store) =>
+            store.updateDeploymentPrincipals(request.params.id, parsed.data.principals),
+          ),
+        };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-config/deployments/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      withExpertStore((store) => store.deleteDeployment(request.params.id));
+      return { deleted: true };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
+  });
+
+  const workerAdminError = (error: unknown, reply: any) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const status =
+      message === "EXPERT_WORKER_REGISTRY_DB_NOT_CONFIGURED"
+        ? 503
+        : message === "WORKER_NOT_FOUND"
+          ? 404
+          : message === "WORKER_ALREADY_EXISTS"
+            ? 409
+            : 400;
+    reply.code(status);
+    return { error: message };
+  };
+  app.get("/admin/api/expert-workers", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { workers: withWorkerRegistry((registry) => registry.list()) };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Body: { id: string; capabilities: string[] } }>("/admin/api/expert-workers", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const parsed = z
+      .object({
+        id: z
+          .string()
+          .trim()
+          .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+        capabilities: z.array(z.string().trim().min(1).max(100)).min(1).max(100),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "INVALID_WORKER", issues: parsed.error.issues };
+    }
+    try {
+      const worker = withWorkerRegistry((registry) => registry.enroll(parsed.data.id, parsed.data.capabilities));
+      reply.code(201);
+      return { worker };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-workers/:id/approve", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return {
+        worker: withWorkerRegistry((registry) => {
+          registry.approve(request.params.id);
+          return registry.get(request.params.id);
+        }),
+      };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-workers/:id/issue-credential", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      const result = withWorkerRegistry((registry) => ({
+        worker: registry.get(request.params.id),
+        credential: registry.issueCredential(request.params.id),
+      }));
+      reply.header("cache-control", "no-store, no-cache, must-revalidate");
+      reply.header("pragma", "no-cache");
+      return result;
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>("/admin/api/expert-workers/:id/revoke", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return {
+        worker: withWorkerRegistry((registry) => {
+          registry.revoke(request.params.id);
+          return registry.get(request.params.id);
+        }),
+      };
+    } catch (error) {
+      return workerAdminError(error, reply);
     }
   });
 
@@ -1687,6 +2306,7 @@ export async function startServer(
           namespace: target.namespace,
           importType: body.import_type,
           skillPath: target.skillPath,
+          submissionMode: body.submission_mode ?? "merge",
           files: source.files,
           repository: body.repository,
         });
@@ -1713,6 +2333,7 @@ export async function startServer(
           namespace: target.namespace,
           importType: body.import_type,
           skillPath: target.skillPath,
+          submissionMode: body.submission_mode ?? "merge",
           files: source.files,
           sourceType: source.sourceType,
           sourceMetadata: source.sourceMetadata,
@@ -1893,7 +2514,10 @@ export async function startServer(
       reply.code(404);
       return { error: "knowledge candidate not found" };
     }
-    return { candidate };
+    return {
+      candidate,
+      artifactBundle: await service.getKnowledgeCandidateArtifactBundle(request.params.id),
+    };
   });
 
   app.get<{ Querystring: { limit?: string; cursor?: string; q?: string } }>(
@@ -2070,6 +2694,7 @@ export async function startServer(
       repository?: string;
       suggestedPath?: string;
       traceId?: string;
+      submission_mode?: "merge" | "replace";
     };
   }>("/admin/api/knowledge-candidates", async (request, reply) => {
     if (!hasAdminAccess(request)) {
@@ -2088,6 +2713,7 @@ export async function startServer(
           repository: request.body.repository,
           suggestedPath: request.body.suggestedPath,
           traceId: request.body.traceId,
+          bundleSubmissionMode: request.body.submission_mode ?? "merge",
         }),
       };
     } catch (error) {

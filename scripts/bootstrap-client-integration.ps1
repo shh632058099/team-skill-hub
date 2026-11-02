@@ -47,10 +47,17 @@ try {
   if(-not $State.clients){$State|Add-Member -Force NoteProperty clients ([pscustomobject]@{})}
   $ClientState=[pscustomobject]@{enabled=$true;config_home=$ConfigHome;server_name=$ServerName}
   if($State.clients.PSObject.Properties[$Client]){$State.clients.$Client=$ClientState}else{$State.clients|Add-Member NoteProperty $Client $ClientState}
-  $ReleaseDir=Join-Path $Root "releases\v$Version";Remove-Item -Recurse -Force $ReleaseDir -ErrorAction SilentlyContinue;New-Item -ItemType Directory -Force -Path $ReleaseDir|Out-Null
-  foreach($Name in @('runtime','updater','templates')){$Source=Join-Path $PackageRoot $Name;if(Test-Path $Source){Copy-Item -Recurse -Force $Source (Join-Path $ReleaseDir $Name)}}
-  if(Test-Path $PackageScripts){Copy-Item -Recurse -Force $PackageScripts (Join-Path $ReleaseDir 'scripts')}
-  Copy-Item -Force (Join-Path $PackageRoot 'release.json') (Join-Path $ReleaseDir 'release.json')
+  $ReleaseDir=Join-Path $Root "releases\v$Version"
+  # Setup may be invoked from the installed release itself. Never delete the
+  # package directory that this running bootstrap is currently reading.
+  $FromInstalledRelease=([System.IO.Path]::GetFullPath($PackageRoot).TrimEnd('\') -ieq [System.IO.Path]::GetFullPath($ReleaseDir).TrimEnd('\'))
+  if(-not $FromInstalledRelease){
+    Remove-Item -Recurse -Force $ReleaseDir -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $ReleaseDir|Out-Null
+    foreach($Name in @('runtime','updater','templates')){$Source=Join-Path $PackageRoot $Name;if(Test-Path $Source){Copy-Item -Recurse -Force $Source (Join-Path $ReleaseDir $Name)}}
+    if(Test-Path $PackageScripts){Copy-Item -Recurse -Force $PackageScripts (Join-Path $ReleaseDir 'scripts')}
+    Copy-Item -Force (Join-Path $PackageRoot 'release.json') (Join-Path $ReleaseDir 'release.json')
+  }
   foreach($Name in @('team-skill-hub-client','team-skill-hub-client.ps1')){$Source=Join-Path $PackageRoot "runtime\$Name";if(Test-Path $Source){Copy-Item -Force $Source (Join-Path $Root "bin\$Name")}}
   $Tmp="$StatePath.tmp";$Utf8NoBom=New-Object System.Text.UTF8Encoding($false);[System.IO.File]::WriteAllText($Tmp,(($State|ConvertTo-Json -Depth 20)+[Environment]::NewLine),$Utf8NoBom);Move-Item -Force $Tmp $StatePath
   Set-Content -Encoding ascii (Join-Path $Root 'current') "$Version"

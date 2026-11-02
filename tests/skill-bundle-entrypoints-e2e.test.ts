@@ -73,6 +73,7 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
   (service as any).submitSkillBundle = async (_principal: any, input: any) => {
     calls.push("import:" + input.sourceType);
     assert.equal(input.importType, "skill");
+    assert.equal(input.submissionMode, "replace");
     return record;
   };
   (service as any).skillBundleImportsPage = () => ({ items: [record], total: 1, limit: 20, cursor: "0" });
@@ -104,6 +105,7 @@ test("Admin Skill Bundle API exposes preview/import/list/detail/review actions",
       import_type: "skill",
       skill_path: "design",
       source_type: "files",
+      submission_mode: "replace",
       files: [{ path: "SKILL.md", content: "skill" }],
     });
     const preview = await fetch(base + "/admin/api/skill-bundles/preview", { method: "POST", headers, body });
@@ -232,10 +234,11 @@ test("MCP submit_skill_bundle maps Codex payload to Bundle application workflow"
           arguments: {
             namespace: "ota",
             import_type: "skill",
-            skill_path: "design",
+            skill_path: "skills/ota/design",
             skill_collection: "rd-skills",
             files: [{ path: "SKILL.md", content: "skill", content_base64: "" }],
             submission_key: "codex-retry-1",
+            submission_mode: null,
           },
         },
       }),
@@ -244,7 +247,8 @@ test("MCP submit_skill_bundle maps Codex payload to Bundle application workflow"
     const text = await response.text();
     assert.match(text, /sbi_mcp/);
     assert.equal(captured.input.importType, "skill");
-    assert.equal(captured.input.skillPath, "design");
+    assert.equal(captured.input.submissionMode, "merge");
+    assert.equal(captured.input.skillPath, "skills/ota/design");
     assert.equal(captured.input.submissionKey, "codex-retry-1");
     assert.equal(captured.input.sourceType, "mcp");
     assert.equal(captured.input.files[0].content, "skill");

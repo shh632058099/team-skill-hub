@@ -1,0 +1,29 @@
+# LEGACY / DIAGNOSTIC EXAMPLE ONLY.
+#
+# Current V2 Worker Runtime does NOT require a persistent EXPERT_CODEX_CONFIG_FILE
+# for normal tasks. Provider/model/base URL are taken from the selected Deployment
+# snapshot, and Runtime generates a per-task Codex config automatically.
+#
+# Keep this file only as a reference when diagnosing Codex provider compatibility
+# outside the normal Worker flow. Do not put API keys in this file.
+
+model = "your-model-id"
+model_provider = "custom-router"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.custom-router]
+name = "Custom OpenAI-compatible provider"
+base_url = "https://your-router.example/v1"
+wire_api = "responses"
+env_key = "MY_ROUTER_API_KEY"
+requires_openai_auth = false
+supports_websockets = false
+
+[shell_environment_policy]
+ignore_default_excludes = false
+
+[features]
+remote_plugin = false
+[features]
+remote_plugin = false

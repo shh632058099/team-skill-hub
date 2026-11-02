@@ -14,6 +14,7 @@ import { SkillHubApplicationService } from "./application.js";
 import { startServer } from "./server.js";
 import { AdminConfigStore } from "./admin-config.js";
 import { ManagedApiKeyStore } from "./api-keys.js";
+import { startExpertHubRuntimeFromEnv } from "./expert-platform/hub-runtime.js";
 
 const configPath = path.resolve(
   process.env.CONFIG_PATH ??
@@ -58,6 +59,16 @@ await startServer(
   apiKeyStore,
   auth instanceof ApiKeyAuthenticationProvider ? auth : undefined,
 );
+
+const expertRuntime = await startExpertHubRuntimeFromEnv(process.env);
+if (expertRuntime) {
+  console.log(
+    JSON.stringify({
+      event: "expert.grpc.started",
+      address: expertRuntime.address,
+    }),
+  );
+}
 
 const lastPolledAt = new Map<string, number>();
 const pollScheduler = setInterval(() => {
