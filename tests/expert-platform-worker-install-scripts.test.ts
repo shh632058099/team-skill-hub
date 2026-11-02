@@ -65,7 +65,10 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(packageScript, /mkdtempSync/);
   assert.match(packageScript, /tmpdir\(\)/);
   assert.doesNotMatch(packageScript, /"team-skill-hub-worker\.service"/);
-  assert.match(manual, /runuser --user expert-worker --preserve-environment/);
+  assert.match(manual, /RUNUSER=/);
+  assert.match(manual, /\/usr\/sbin\/runuser/);
+  assert.match(manual, /\/sbin\/runuser/);
+  assert.match(manual, /"\$RUNUSER" --user expert-worker --preserve-environment/);
   assert.match(manual, /worker_start_time/);
   assert.match(manual, /\/proc\/\$pid\/environ/);
   assert.match(manual, /EXPERT_WORKER_INSTANCE=\$INSTANCE/);

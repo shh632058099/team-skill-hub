@@ -18,6 +18,14 @@ if [[ -z "$NODE" ]]; then
   done
 fi
 
+RUNUSER=${WORKER_RUNTIME_RUNUSER:-}
+if [[ -z "$RUNUSER" ]]; then RUNUSER=$(command -v runuser || true); fi
+if [[ -z "$RUNUSER" ]]; then
+  for candidate in /usr/sbin/runuser /sbin/runuser; do
+    if [[ -x "$candidate" ]]; then RUNUSER="$candidate"; break; fi
+  done
+fi
+
 usage() {
   cat >&2 <<EOF
 Usage:
@@ -228,7 +236,7 @@ start_worker() {
     return 1
   fi
   if pid=$(running_pid 2>/dev/null); then echo "Worker $INSTANCE already running (PID $pid)"; return; fi
-  [[ -f "$WORKER_SCRIPT" && -n "$NODE" && -x "$NODE" ]] || { echo "Missing Node.js or installed Worker Runtime." >&2; return 1; }
+  [[ -f "$WORKER_SCRIPT" && -n "$NODE" && -x "$NODE" && -n "$RUNUSER" && -x "$RUNUSER" ]] || { echo "Missing Node.js, runuser, or installed Worker Runtime." >&2; return 1; }
   prepare_instance_env
   install -d -m 0750 "$DATA"
   "$NODE" "$BASE/check-worker-config.js"
@@ -238,7 +246,7 @@ start_worker() {
     chown expert-worker:expert-worker "$DATA" "$LOG_FILE"
   fi
   chmod 0600 "$LOG_FILE"
-  runuser --user expert-worker --preserve-environment -- "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+  "$RUNUSER" --user expert-worker --preserve-environment -- "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
   local supervisor=$! child=""
   for _ in $(seq 1 40); do
     if [[ -r "/proc/$supervisor/task/$supervisor/children" ]]; then
