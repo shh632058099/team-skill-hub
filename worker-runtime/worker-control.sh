@@ -8,7 +8,12 @@ WORKERS_DIR="$ETC/workers"
 INSTANCES_DIR="$ETC/instances"
 TEMPLATE="$ETC/worker.env.example"
 WORKER_SCRIPT="$BASE/src/cli/expert-worker.js"
-NODE=$(command -v node || true)
+NODE=${WORKER_RUNTIME_NODE:-$(command -v node || true)}
+if [[ -z "$NODE" ]]; then
+  for candidate in /usr/local/bin/node /usr/bin/node; do
+    if [[ -x "$candidate" ]]; then NODE="$candidate"; break; fi
+  done
+fi
 
 usage() {
   cat >&2 <<EOF
@@ -119,6 +124,10 @@ init_instance() {
 
 list_instances() {
   local format=$1 file instance worker_id backend capability profiles state pid
+  if [[ "$format" == "json" && ( -z "$NODE" || ! -x "$NODE" ) ]]; then
+    echo "Node.js executable unavailable; set WORKER_RUNTIME_NODE or add node to PATH." >&2
+    return 1
+  fi
   mkdir -p "$WORKERS_DIR"
   local rows=()
   shopt -s nullglob
@@ -148,7 +157,7 @@ list_instances() {
       [[ $first -eq 1 ]] || printf ','
       first=0
       INSTANCE_JSON="$instance" WORKER_ID_JSON="$worker_id" BACKEND_JSON="$backend" CAPABILITY_JSON="$capability" PROFILES_JSON="$profiles" STATUS_JSON="$state" PID_JSON="$pid" \
-        node -e 'const e=process.env; const profiles=e.PROFILES_JSON==="-"?[]:e.PROFILES_JSON.split(",").map(x=>x.trim()).filter(Boolean); process.stdout.write(JSON.stringify({instance:e.INSTANCE_JSON,workerId:e.WORKER_ID_JSON==="-"?null:e.WORKER_ID_JSON,backend:e.BACKEND_JSON==="-"?null:e.BACKEND_JSON,capability:e.CAPABILITY_JSON==="-"?null:e.CAPABILITY_JSON,runtimeProfiles:profiles,status:e.STATUS_JSON,pid:e.PID_JSON==="-"?null:Number(e.PID_JSON)}))'
+        "$NODE" -e 'const e=process.env; const profiles=e.PROFILES_JSON==="-"?[]:e.PROFILES_JSON.split(",").map(x=>x.trim()).filter(Boolean); process.stdout.write(JSON.stringify({instance:e.INSTANCE_JSON,workerId:e.WORKER_ID_JSON==="-"?null:e.WORKER_ID_JSON,backend:e.BACKEND_JSON==="-"?null:e.BACKEND_JSON,capability:e.CAPABILITY_JSON==="-"?null:e.CAPABILITY_JSON,runtimeProfiles:profiles,status:e.STATUS_JSON,pid:e.PID_JSON==="-"?null:Number(e.PID_JSON)}))'
     fi
   done
   [[ "$format" == "human" ]] || printf ']\n'

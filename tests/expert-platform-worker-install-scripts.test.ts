@@ -8,7 +8,7 @@ import { test } from "node:test";
 const runtime = new URL("../worker-runtime/", import.meta.url);
 const packageScript = readFileSync(new URL("../scripts/package-worker-runtime.mjs", import.meta.url), "utf8");
 
-function controllerFixture() {
+function controllerFixture(options: { runtimeNode?: boolean } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "skillhub-worker-control-"));
   const etc = path.join(root, "etc");
   const data = path.join(root, "data");
@@ -24,6 +24,8 @@ function controllerFixture() {
     WORKER_RUNTIME_DATA_ROOT: data,
     WORKER_RUNTIME_BASE: base,
     WORKER_RUNTIME_SKIP_ROOT_CHECK: "1",
+    ...(options.runtimeNode === false ? {} : { WORKER_RUNTIME_NODE: process.execPath }),
+    PATH: "/usr/bin:/bin",
   };
   return {
     etc,
@@ -95,7 +97,21 @@ test("manual controller initializes isolated worker instances and rejects unsafe
   }
 });
 
+test("manual controller finds a common Node installation when PATH omits node", () => {
+  const fx = controllerFixture({ runtimeNode: false });
+  assert.equal(fx.run(["init", "claude-01"]).status, 0);
+  const json = fx.run(["list", "--json"]);
+  assert.equal(json.status, 0, json.stderr);
+  assert.deepEqual(
+    JSON.parse(json.stdout).map((row: { instance: string }) => row.instance),
+    ["claude-01"],
+  );
+});
+
 test("manual controller lists valid invalid and stale worker instances without leaking secrets", () => {
+  // The controller must use its resolved/overridden Node executable rather than
+  // invoking a bare "node" from PATH; production WSL/NVM hosts may not expose it.
+
   const fx = controllerFixture();
   for (const instance of ["claude-01", "codex-01", "broken-01", "stale-01"]) {
     assert.equal(fx.run(["init", instance]).status, 0);
