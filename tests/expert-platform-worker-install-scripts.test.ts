@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -42,17 +42,32 @@ test("Worker installation and manual lifecycle scripts are valid Bash and includ
   }
 });
 
-test("installer only registers service when systemd is running and manual script drops privileges", () => {
+test("installer is host-scoped and runtime package uses a systemd template", () => {
   const installer = readFileSync(new URL("install-worker.sh", runtime), "utf8");
   const manual = readFileSync(new URL("worker-control.sh", runtime), "utf8");
   assert.match(installer, /\/run\/systemd\/system/);
   assert.match(installer, /systemctl show-environment/);
-  assert.match(installer, /worker-control\.sh start/);
+  assert.match(installer, /worker\.env\.example/);
+  assert.match(installer, /workers/);
+  assert.match(installer, /instances/);
+  assert.match(installer, /Legacy single-worker configuration detected/);
+  assert.doesNotMatch(installer, /install -m 0600 .*worker\.env/);
+  assert.match(packageScript, /team-skill-hub-worker@\.service/);
+  assert.doesNotMatch(packageScript, /"team-skill-hub-worker\.service"/);
   assert.match(manual, /runuser --user expert-worker --preserve-environment/);
   assert.match(manual, /worker_start_time/);
   assert.match(manual, /worker\.log/);
 });
 
+test("systemd template loads one instance config and isolates writable state", () => {
+  const templateUrl = new URL("team-skill-hub-worker@.service", runtime);
+  assert.equal(existsSync(templateUrl), true);
+  const service = readFileSync(templateUrl, "utf8");
+  assert.match(service, /Environment=EXPERT_WORKER_INSTANCE=%i/);
+  assert.match(service, /EnvironmentFile=\/etc\/team-skill-hub-worker\/workers\/%i\.env/);
+  assert.match(service, /ReadWritePaths=\/var\/lib\/team-skill-hub-worker\/%i/);
+  assert.match(service, /ExecStart=.*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/);
+});
 test("configuration checker runs as ESM in the packaged module", () => {
   const source = readFileSync(new URL("check-worker-config.js", runtime), "utf8");
   assert.match(source, /import \{ existsSync \} from "node:fs"/);

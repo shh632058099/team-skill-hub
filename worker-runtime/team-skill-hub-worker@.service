@@ -1,5 +1,5 @@
 [Unit]
-Description=Team Skill Hub Expert Worker
+Description=Team Skill Hub Expert Worker (%i)
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
@@ -8,7 +8,8 @@ Requires=docker.service
 Type=simple
 User=expert-worker
 Group=expert-worker
-EnvironmentFile=/etc/team-skill-hub-worker/worker.env
+Environment=EXPERT_WORKER_INSTANCE=%i
+EnvironmentFile=/etc/team-skill-hub-worker/workers/%i.env
 WorkingDirectory=/opt/team-skill-hub-worker/current
 ExecStartPre=/usr/bin/node /opt/team-skill-hub-worker/current/check-worker-config.js
 ExecStart=/usr/bin/node /opt/team-skill-hub-worker/current/src/cli/expert-worker.js
@@ -18,7 +19,7 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/team-skill-hub-worker /run/docker.sock
+ReadWritePaths=/var/lib/team-skill-hub-worker/%i /run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

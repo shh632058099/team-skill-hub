@@ -24,7 +24,7 @@ for (const file of [
   "package.json",
   "package-lock.json",
   "worker.env.example",
-  "team-skill-hub-worker.service",
+  "team-skill-hub-worker@.service",
   "install-worker.sh",
   "worker-control.sh",
   "README.md",
