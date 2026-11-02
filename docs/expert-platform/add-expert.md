@@ -299,7 +299,7 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
 /etc/systemd/system/team-skill-hub-worker@.service   # systemd 主机
 ```
 
-安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；若检测到该文件，只提示管理员人工迁移已审核的配置。
+安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；若旧固定 `team-skill-hub-worker.service` 仍 active/enabled，安装器会直接停止并要求先 `systemctl disable --now team-skill-hub-worker.service`，避免旧配置继续运行。安装器还会解析一个 `expert-worker` 可执行的 Node.js 24，并固定为 `/opt/team-skill-hub-worker/node`。
 
 ### 7.2 导入执行镜像
 
@@ -331,6 +331,8 @@ sudo /opt/team-skill-hub-worker/current/worker-control.sh list
 ```
 
 不要让不同 instance 指向同一个 repository checkout。
+
+默认情况下，位于 `/var/lib/team-skill-hub-worker` 下的显式 credential/source/repository 路径必须属于当前 instance。迁移旧部署时如必须短期引用旧全局路径，可显式设置 `EXPERT_ALLOW_MANAGED_PATH_OVERRIDES=true`；迁移完成后应删除该开关。
 
 ## 8. 配置、启动和日常管理
 

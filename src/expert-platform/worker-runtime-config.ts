@@ -109,6 +109,22 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 }
 
 const WORKER_INSTANCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const WORKER_MANAGED_DATA_ROOT = "/var/lib/team-skill-hub-worker";
+
+export function assertWorkerInstanceManagedPath(env: Record<string, string | undefined>, candidate: string): void {
+  const instanceDataRoot = workerInstanceDataRoot(env);
+  if (!instanceDataRoot || env.EXPERT_ALLOW_MANAGED_PATH_OVERRIDES?.trim() === "true") return;
+  const resolved = path.resolve(candidate);
+  const managedRoot = path.resolve(WORKER_MANAGED_DATA_ROOT);
+  const managedRelative = path.relative(managedRoot, resolved);
+  const insideManagedRoot =
+    managedRelative === "" || (!managedRelative.startsWith("..") && !path.isAbsolute(managedRelative));
+  if (!insideManagedRoot) return;
+  const instanceRelative = path.relative(path.resolve(instanceDataRoot), resolved);
+  const insideInstance =
+    instanceRelative === "" || (!instanceRelative.startsWith("..") && !path.isAbsolute(instanceRelative));
+  if (!insideInstance) throw new Error("INVALID_WORKER_INSTANCE_PATH");
+}
 
 export function workerInstanceDataRoot(env: Record<string, string | undefined>): string | undefined {
   const instance = env.EXPERT_WORKER_INSTANCE?.trim();
@@ -124,15 +140,18 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
   const capability = env.EXPERT_CAPABILITY?.trim() ?? "";
   const expertId = env.EXPERT_ID?.trim() || capability;
   const instanceDataRoot = workerInstanceDataRoot(env);
-  const sourcePath = env.EXPERT_SOURCE_PATH?.trim() || (instanceDataRoot ? path.join(instanceDataRoot, "source") : "");
+  const explicitSourcePath = env.EXPERT_SOURCE_PATH?.trim();
+  const explicitRepositoryRoot = env.EXPERT_REPOSITORY_ROOT?.trim();
+  if (explicitSourcePath) assertWorkerInstanceManagedPath(env, explicitSourcePath);
+  if (explicitRepositoryRoot) assertWorkerInstanceManagedPath(env, explicitRepositoryRoot);
+  const sourcePath = explicitSourcePath || (instanceDataRoot ? path.join(instanceDataRoot, "source") : "");
   const repositoryRootBase =
-    env.EXPERT_REPOSITORY_ROOT?.trim() ||
+    explicitRepositoryRoot ||
     (instanceDataRoot
       ? path.join(instanceDataRoot, "repositories")
       : sourcePath
         ? path.join(path.dirname(sourcePath), "expert-repositories")
-        : ""); // EXPERT_REPOSITORY_ROOT is a base directory, never a shared checkout root.
-  // Every worker gets a private clone namespace keyed by its stable worker ID.
+        : ""); // EXPERT_REPOSITORY_ROOT is a base directory, never a shared checkout root.  // Every worker gets a private clone namespace keyed by its stable worker ID.
   const repositoryRoot =
     /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(workerId) && repositoryRootBase
       ? path.join(repositoryRootBase, workerId)

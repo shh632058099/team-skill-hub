@@ -12,6 +12,18 @@ const repositoryRoot =
   process.env.EXPERT_REPOSITORY_ROOT?.trim() || (dataRoot ? path.join(dataRoot, "repositories") : "");
 const sourcePath = process.env.EXPERT_SOURCE_PATH?.trim() || (dataRoot ? path.join(dataRoot, "source") : "");
 
+function managedPathIsAllowed(candidate) {
+  if (!validInstance || process.env.EXPERT_ALLOW_MANAGED_PATH_OVERRIDES?.trim() === "true") return true;
+  const managedRoot = path.resolve("/var/lib/team-skill-hub-worker");
+  const resolved = path.resolve(candidate);
+  const managedRelative = path.relative(managedRoot, resolved);
+  const insideManaged =
+    managedRelative === "" || (!managedRelative.startsWith("..") && !path.isAbsolute(managedRelative));
+  if (!insideManaged) return true;
+  const instanceRelative = path.relative(path.resolve(dataRoot), resolved);
+  return instanceRelative === "" || (!instanceRelative.startsWith("..") && !path.isAbsolute(instanceRelative));
+}
+
 const required = [
   "EXPERT_HUB_ADDRESS",
   "EXPERT_WORKER_ID",
@@ -23,6 +35,13 @@ const required = [
 const missing = required.filter((key) => !process.env[key]?.trim());
 if (!validInstance) missing.push("EXPERT_WORKER_INSTANCE");
 if (!repositoryRoot || !sourcePath) missing.push("instance-local repository/source paths");
+if (
+  [credentialFile, repositoryRoot, sourcePath].some(
+    (candidate) => candidate && !managedPathIsAllowed(candidate),
+  )
+) {
+  missing.push("instance-managed paths must stay inside the selected Worker instance");
+}
 if (
   !process.env.EXPERT_WORKER_CREDENTIAL?.trim() &&
   !process.env.EXPERT_WORKER_BOOTSTRAP_TOKEN?.trim() &&

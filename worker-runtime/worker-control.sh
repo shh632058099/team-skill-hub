@@ -2,13 +2,16 @@
 set -Eeuo pipefail
 
 BASE=${WORKER_RUNTIME_BASE:-/opt/team-skill-hub-worker/current}
+HOST_ROOT=${WORKER_RUNTIME_HOST_ROOT:-$(dirname "$BASE")}
 ETC=${WORKER_RUNTIME_ETC_ROOT:-/etc/team-skill-hub-worker}
 DATA_ROOT=${WORKER_RUNTIME_DATA_ROOT:-/var/lib/team-skill-hub-worker}
 WORKERS_DIR="$ETC/workers"
 INSTANCES_DIR="$ETC/instances"
 TEMPLATE="$ETC/worker.env.example"
 WORKER_SCRIPT="$BASE/src/cli/expert-worker.js"
-NODE=${WORKER_RUNTIME_NODE:-$(command -v node || true)}
+NODE=${WORKER_RUNTIME_NODE:-}
+if [[ -z "$NODE" && -x "$HOST_ROOT/node" ]]; then NODE="$HOST_ROOT/node"; fi
+if [[ -z "$NODE" ]]; then NODE=$(command -v node || true); fi
 if [[ -z "$NODE" ]]; then
   for candidate in /usr/local/bin/node /usr/bin/node; do
     if [[ -x "$candidate" ]]; then NODE="$candidate"; break; fi
@@ -187,11 +190,19 @@ prepare_instance_env() {
     EXPERT_DOCKER_IMAGE \
     EXPERT_DOCKER_NETWORK \
     EXPERT_DOCKER_SECCOMP_PROFILE \
+    EXPERT_CODEX_AUTH_FILE \
+    EXPERT_CODEX_CONFIG_FILE \
+    EXPERT_CLAUDE_MODEL \
+    EXPERT_CLAUDE_MAX_TURNS \
     EXPERT_MODEL_ENV_NAMES \
     EXPERT_MODEL_CREDENTIAL_REFS_JSON \
     EXPERT_MCP_URL \
     EXPERT_MCP_CREDENTIAL_FILES_JSON \
     EXPERT_GIT_CREDENTIALS_JSON \
+    EXPERT_TLS_CA_PATH \
+    EXPERT_TLS_CERT_PATH \
+    EXPERT_TLS_KEY_PATH \
+    EXPERT_ALLOW_MANAGED_PATH_OVERRIDES \
     EXPERT_HEARTBEAT_MS \
     EXPERT_POLL_MS \
     EXPERT_TASK_TIMEOUT_MS

@@ -60,9 +60,10 @@ The installer:
 - installs `/etc/team-skill-hub-worker/worker.env.example`;
 - creates the shared `workers/` and `instances/` roots;
 - installs `team-skill-hub-worker@.service` when a running systemd manager is detected;
+- resolves a Node.js 24 executable that the `expert-worker` user can execute and pins it at `/opt/team-skill-hub-worker/node`;
 - does **not** create or start a Worker instance.
 
-If legacy `/etc/team-skill-hub-worker/worker.env` exists, the installer warns that it is no longer consumed. Review and migrate settings into a named instance; credentials and repository state are not migrated automatically.
+If legacy `/etc/team-skill-hub-worker/worker.env` exists, the installer warns that it is no longer consumed. If the old fixed `team-skill-hub-worker.service` is still active or enabled, installation stops and requires the administrator to disable it first; an inactive legacy unit is removed. Review and migrate settings into a named instance; credentials and repository state are not migrated automatically.
 
 ## Create Worker instances
 
@@ -90,6 +91,8 @@ Unless explicitly overridden, these paths are derived automatically:
 /var/lib/team-skill-hub-worker/<instance>/source
 /var/lib/team-skill-hub-worker/<instance>/repositories
 ```
+
+Explicit paths outside the managed `/var/lib/team-skill-hub-worker` tree remain supported. A path inside that managed tree may not point at another instance. For a reviewed legacy migration only, `EXPERT_ALLOW_MANAGED_PATH_OVERRIDES=true` temporarily permits such an override; remove it after moving the state into the selected instance.
 
 ## Inventory
 

@@ -53,6 +53,11 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(installer, /workers/);
   assert.match(installer, /instances/);
   assert.match(installer, /Legacy single-worker configuration detected/);
+  assert.match(installer, /team-skill-hub-worker\.service/);
+  assert.match(installer, /systemctl is-active/);
+  assert.match(installer, /systemctl is-enabled/);
+  assert.match(installer, /NODE_BIN/);
+  assert.match(installer, /\$BASE\/node/);
   assert.match(installer, /export PATH="\/usr\/sbin:/);
   assert.doesNotMatch(installer, /install -m 0600 .*worker\.env/);
   assert.match(packageScript, /team-skill-hub-worker@\.service/);
@@ -61,8 +66,22 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(manual, /worker_start_time/);
   assert.match(manual, /\/proc\/\$pid\/environ/);
   assert.match(manual, /EXPERT_WORKER_INSTANCE=\$INSTANCE/);
-  assert.match(manual, /unset[\s\\\n]+EXPERT_WORKER_INSTANCE[\s\S]*EXPERT_SOURCE_PATH[\s\S]*EXPERT_REPOSITORY_ROOT/);
+  for (const key of [
+    "EXPERT_CODEX_AUTH_FILE",
+    "EXPERT_CODEX_CONFIG_FILE",
+    "EXPERT_TLS_CA_PATH",
+    "EXPERT_TLS_CERT_PATH",
+    "EXPERT_TLS_KEY_PATH",
+    "EXPERT_CLAUDE_MODEL",
+    "EXPERT_CLAUDE_MAX_TURNS",
+  ]) {
+    assert.match(manual, new RegExp(key));
+  }
   assert.match(manual, /worker\.log/);
+  assert.ok(
+    manual.indexOf('-x "$HOST_ROOT/node"') < manual.indexOf("command -v node"),
+    "controller should prefer the installer-pinned Node before PATH lookup",
+  );
 });
 
 test("systemd template loads one instance config and isolates writable state", () => {
@@ -72,10 +91,14 @@ test("systemd template loads one instance config and isolates writable state", (
   assert.match(service, /Environment=EXPERT_WORKER_INSTANCE=%i/);
   assert.match(service, /Environment=PATH=\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
   assert.match(service, /EnvironmentFile=\/etc\/team-skill-hub-worker\/workers\/%i\.env/);
+  assert.ok(
+    service.indexOf("EnvironmentFile=/etc/team-skill-hub-worker/workers/%i.env") <
+      service.indexOf("Environment=EXPERT_WORKER_INSTANCE=%i"),
+  );
   assert.match(service, /ReadWritePaths=\/var\/lib\/team-skill-hub-worker\/%i/);
   assert.match(
     service,
-    /ExecStart=\/usr\/bin\/env node .*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/,
+    /ExecStart=\/opt\/team-skill-hub-worker\/node .*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/,
   );
 });
 test("configuration checker runs as ESM in the packaged module", () => {

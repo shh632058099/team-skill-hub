@@ -181,7 +181,7 @@ EXPERT_SOURCE_PATH
   /var/lib/team-skill-hub-worker/<instance>/source
 ```
 
-Explicit environment values may override these defaults when needed.
+Explicit environment values may override these defaults when needed. By default, an explicit path inside `/var/lib/team-skill-hub-worker` must remain inside the selected instance root; it cannot point at another instance. A reviewed legacy migration may temporarily set `EXPERT_ALLOW_MANAGED_PATH_OVERRIDES=true`, but this is an explicit escape hatch and should be removed after migration. Explicit paths outside the managed Worker data root remain supported.
 
 The config template should document the derived defaults rather than writing single-instance paths into each generated config.
 

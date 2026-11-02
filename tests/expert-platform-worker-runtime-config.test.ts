@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseExpertWorkerConfig } from "../src/expert-platform/worker-runtime-config.js";
+import {
+  assertWorkerInstanceManagedPath,
+  parseExpertWorkerConfig,
+} from "../src/expert-platform/worker-runtime-config.js";
 
 test("worker instance derives isolated source and repository roots", () => {
   const config = parseExpertWorkerConfig({
@@ -34,6 +37,51 @@ test("worker runtime rejects unsafe worker instance names", () => {
       /INVALID_WORKER_CONFIG/,
     );
   }
+});
+
+test("worker instance rejects another instance managed paths unless migration override is explicit", () => {
+  const base = {
+    EXPERT_HUB_ADDRESS: "hub.internal:7443",
+    EXPERT_WORKER_INSTANCE: "claude-01",
+    EXPERT_WORKER_ID: "ota-claude-worker-01",
+    EXPERT_WORKER_CREDENTIAL: "ewc_example",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_EXECUTOR_BACKEND: "claude",
+    EXPERT_DOCKER_IMAGE: "team-skill-hub-expert-claude:0.1.0",
+    EXPERT_DOCKER_NETWORK: "bridge",
+    EXPERT_MODEL_ENV_NAMES: "ANTHROPIC_API_KEY",
+  };
+  assert.throws(
+    () =>
+      parseExpertWorkerConfig({
+        ...base,
+        EXPERT_SOURCE_PATH: "/var/lib/team-skill-hub-worker/codex-01/source",
+      }),
+    /INVALID_WORKER_INSTANCE_PATH/,
+  );
+  assert.throws(
+    () =>
+      parseExpertWorkerConfig({
+        ...base,
+        EXPERT_REPOSITORY_ROOT: "/var/lib/team-skill-hub-worker/codex-01/repositories",
+      }),
+    /INVALID_WORKER_INSTANCE_PATH/,
+  );
+  assert.doesNotThrow(() =>
+    parseExpertWorkerConfig({
+      ...base,
+      EXPERT_SOURCE_PATH: "/var/lib/team-skill-hub-worker/codex-01/source",
+      EXPERT_ALLOW_MANAGED_PATH_OVERRIDES: "true",
+    }),
+  );
+  assert.throws(
+    () =>
+      assertWorkerInstanceManagedPath(
+        { EXPERT_WORKER_INSTANCE: "claude-01" },
+        "/var/lib/team-skill-hub-worker/codex-01/worker-credential",
+      ),
+    /INVALID_WORKER_INSTANCE_PATH/,
+  );
 });
 
 test("Claude worker accepts Anthropic auth token through a credential reference", () => {
