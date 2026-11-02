@@ -48,27 +48,26 @@ Worker 主机（Linux）
 
 ### 0.2 Worker 主机资源与依赖
 
-| 类别      | 基线与检查事项                                                                                                                                                           |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 系统      | 支持目标 Node.js 和 Docker Engine 的 Linux 主机；当前安装方式依赖 **systemd**；x86_64 或 ARM64 需与交付镜像架构一致                                                      |
-| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                |
-| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                            |
-| 软件      | Node.js **24.x**（systemd 单元当前固定使用 `/usr/bin/node`）、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`、systemd；安装时需要 sudo/root 权限 |
-| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API；如需代理/DNS/CA，三条路径分别验证                                                    |
-| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                     |
-| 数据目录  | `/opt/team-skill-hub-worker`（版本化 Runtime）、`/etc/team-skill-hub-worker`（配置和私钥）、`/var/lib/team-skill-hub-worker`（credential、仓库 checkout）                |
+| 类别      | 基线与检查事项                                                                                                                                                                                                       |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 系统      | 支持 Node.js 24 和 Docker Engine 的 Linux 主机；systemd **可选**。有 systemd 时使用 `team-skill-hub-worker@<instance>.service`，无 systemd 时使用 `worker-control.sh <instance> start`；CPU 架构需与交付镜像一致     |
+| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库、多个 Worker instance 或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                                     |
+| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                                                                        |
+| 软件      | Node.js **24.x**、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`；安装时需要 sudo/root 权限。安装器会解析一个 `expert-worker` 可执行的 Node.js 24 并固定到 `/opt/team-skill-hub-worker/node` |
+| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API / MCP；如需代理/DNS/CA，分别验证                                                                                                  |
+| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                                                                 |
+| 数据目录  | `/opt/team-skill-hub-worker`（共享版本化 Runtime）、`/etc/team-skill-hub-worker`（instance 配置和私钥）、`/var/lib/team-skill-hub-worker`（instance credential、仓库 checkout、日志）                                |
 
-**常见部署模式：** 一台 Worker 主机安装一个 Runtime 服务，并可由它派生多个任务执行容器（最终并发由 Hub 租约调度、Worker 能力和主机资源决定）；扩容时为另一台主机或另一套独立部署配置新的 Worker ID，不共享同一 Git checkout。**Hub 与 Worker 不必同机**，也不需要把 Hub 的整个 Docker Compose 或源码放到 Worker 主机。
+**常见部署模式：** 一台 Worker 主机只安装一套共享 Runtime，但可以创建并同时运行多个独立 Worker instance。每个 instance 有独立的 `EXPERT_WORKER_ID`、credential、key 文件、日志和 Git checkout，例如同一台主机同时运行 `claude-01` 与 `codex-01`。任务执行容器仍由各 Worker instance 按任务拉起。**Hub 与 Worker 不必同机**，也不需要把 Hub 的 Docker Compose 或源码放到 Worker 主机。
 
 在 Worker 主机提前检查环境：
 
 ```bash
 uname -m
 node --version            # 期望 v24.x
-/usr/bin/node --version   # 供 systemd 使用，必须同为 v24.x
 docker version            # Docker daemon 必须可用
-systemctl --version       # 需要 systemd
 command -v git tar sha256sum
+command -v systemctl      # 可选：仅 systemd 主机需要
 ```
 
 若 Hub 已部署但无法打开 Admin、专家 Runtime 数据库未初始化或 gRPC 端口未能从 Worker 主机访问，先由 **Hub 管理员**修复服务；Worker 主机部署者不负责构建或修复 Hub 源码。
@@ -354,10 +353,60 @@ EXPERT_DOCKER_SECCOMP_PROFILE=default
 EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
 EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"ANTHROPIC_AUTH_TOKEN"}'
 ANTHROPIC_AUTH_TOKEN=通过安全方式配置真实模型密钥
+
+# MCP API Key 不直接写入 env。这里仅配置 credentialRef -> key 文件路径：
+EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
+EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly"}'
+
+# 可选 Git credential：
 # EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/git-readonly"}'
 ```
 
 默认 credential/source/repositories 会自动使用 instance-local 路径，通常无需显式填写。
+
+#### 8.1.1 配置 MCP API Key
+
+假设 Admin 中执行配置的 MCP credentialRef 为：
+
+```text
+skillhub-readonly
+```
+
+则 `claude-01` 的 env 中配置：
+
+```dotenv
+EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
+EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly"}'
+```
+
+真正的 API Key 写入 instance 私有文件，不放到 env：
+
+```bash
+sudo install -d -o root -g expert-worker -m 0750 \
+  /etc/team-skill-hub-worker/instances/claude-01/keys
+
+printf '%s\n' '实际的 Skill Hub API Key' | \
+  sudo tee /etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly >/dev/null
+
+sudo chown expert-worker:expert-worker \
+  /etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly
+sudo chmod 600 \
+  /etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly
+```
+
+映射关系是：
+
+```text
+Deployment.mcp.credentialRef = skillhub-readonly
+            ↓
+EXPERT_MCP_CREDENTIAL_FILES_JSON
+            ↓
+/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly
+            ↓
+实际 MCP API Key
+```
+
+如果创建的是 `codex-01`，路径也必须替换成 `/instances/codex-01/keys/...`。不同 Worker instance 不应共用同一个 key 文件路径。
 
 ### 8.2 systemd 主机
 
