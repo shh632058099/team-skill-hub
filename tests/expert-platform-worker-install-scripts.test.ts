@@ -61,6 +61,9 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(installer, /export PATH="\/usr\/sbin:/);
   assert.doesNotMatch(installer, /install -m 0600 .*worker\.env/);
   assert.match(packageScript, /team-skill-hub-worker@\.service/);
+  assert.match(packageScript, /chmodSync\(path\.join\(stage, "team-skill-hub-worker@\.service"\), 0o644\)/);
+  assert.match(packageScript, /mkdtempSync/);
+  assert.match(packageScript, /tmpdir\(\)/);
   assert.doesNotMatch(packageScript, /"team-skill-hub-worker\.service"/);
   assert.match(manual, /runuser --user expert-worker --preserve-environment/);
   assert.match(manual, /worker_start_time/);

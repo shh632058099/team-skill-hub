@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, chmodSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -10,7 +11,8 @@ if (!existsSync(path.join(source, "cli", "expert-worker.js"))) {
 }
 const metadata = JSON.parse(readFileSync(path.join(root, "worker-runtime", "package.json"), "utf8"));
 const artifacts = path.join(root, "artifacts", "worker-runtime");
-const stage = path.join(artifacts, `worker-runtime-${metadata.version}`);
+const stageRoot = mkdtempSync(path.join(tmpdir(), "team-skill-hub-worker-runtime-"));
+const stage = path.join(stageRoot, `worker-runtime-${metadata.version}`);
 const archive = path.join(artifacts, `worker-runtime-${metadata.version}.tar.gz`);
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
@@ -35,12 +37,14 @@ for (const file of [
 chmodSync(path.join(stage, "install-worker.sh"), 0o755);
 chmodSync(path.join(stage, "worker-control.sh"), 0o755);
 chmodSync(path.join(stage, "check-worker-config.js"), 0o755);
+chmodSync(path.join(stage, "team-skill-hub-worker@.service"), 0o644);
 execFileSync("npm", ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], {
   cwd: stage,
   stdio: "inherit",
 });
 rmSync(archive, { force: true });
 execFileSync("tar", ["-czf", archive, "-C", stage, "."], { stdio: "inherit" });
+rmSync(stageRoot, { recursive: true, force: true });
 console.log(
   JSON.stringify(
     { artifact: path.relative(root, archive), version: metadata.version, includesHubSource: false },
