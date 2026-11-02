@@ -59,6 +59,9 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.doesNotMatch(packageScript, /"team-skill-hub-worker\.service"/);
   assert.match(manual, /runuser --user expert-worker --preserve-environment/);
   assert.match(manual, /worker_start_time/);
+  assert.match(manual, /\/proc\/\$pid\/environ/);
+  assert.match(manual, /EXPERT_WORKER_INSTANCE=\$INSTANCE/);
+  assert.match(manual, /unset[\s\\\n]+EXPERT_WORKER_INSTANCE[\s\S]*EXPERT_SOURCE_PATH[\s\S]*EXPERT_REPOSITORY_ROOT/);
   assert.match(manual, /worker\.log/);
 });
 
@@ -67,9 +70,13 @@ test("systemd template loads one instance config and isolates writable state", (
   assert.equal(existsSync(templateUrl), true);
   const service = readFileSync(templateUrl, "utf8");
   assert.match(service, /Environment=EXPERT_WORKER_INSTANCE=%i/);
+  assert.match(service, /Environment=PATH=\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
   assert.match(service, /EnvironmentFile=\/etc\/team-skill-hub-worker\/workers\/%i\.env/);
   assert.match(service, /ReadWritePaths=\/var\/lib\/team-skill-hub-worker\/%i/);
-  assert.match(service, /ExecStart=.*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/);
+  assert.match(
+    service,
+    /ExecStart=\/usr\/bin\/env node .*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/,
+  );
 });
 test("configuration checker runs as ESM in the packaged module", () => {
   const source = readFileSync(new URL("check-worker-config.js", runtime), "utf8");

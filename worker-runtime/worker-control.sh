@@ -53,16 +53,16 @@ load_instance_context() {
 worker_start_time() {
   local pid=$1 cmd uid
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ -r "/proc/$pid/stat" && -r "/proc/$pid/cmdline" ]] || return 1
+  [[ -r "/proc/$pid/stat" && -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || return 1
   cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline")
   [[ "$cmd" == *"$WORKER_SCRIPT"* ]] || return 1
+  tr '\0' '\n' < "/proc/$pid/environ" | grep -Fxq "EXPERT_WORKER_INSTANCE=$INSTANCE" || return 1
   if id expert-worker >/dev/null 2>&1; then
     uid=$(stat -c %u "/proc/$pid")
     [[ "$uid" == "$(id -u expert-worker)" ]] || return 1
   fi
   awk '{print $22}' "/proc/$pid/stat"
 }
-
 running_pid() {
   [[ -r "$PID_FILE" && -r "$START_FILE" ]] || return 1
   local pid expected observed
@@ -169,6 +169,32 @@ prepare_instance_env() {
     [[ $(stat -c %u "$CONFIG") -eq 0 ]] || { echo "$CONFIG must be root-owned" >&2; return 1; }
     [[ $(stat -c %a "$CONFIG") == 600 ]] || { echo "$CONFIG must have permissions 600" >&2; return 1; }
   fi
+  # Instance-owned settings must come from this instance config, not from a
+  # parent shell that may previously have managed another Worker.
+  unset \
+    EXPERT_WORKER_INSTANCE \
+    EXPERT_HUB_ADDRESS \
+    EXPERT_WORKER_ID \
+    EXPERT_WORKER_CREDENTIAL \
+    EXPERT_WORKER_BOOTSTRAP_TOKEN \
+    EXPERT_WORKER_CREDENTIAL_FILE \
+    EXPERT_CAPABILITY \
+    EXPERT_ID \
+    EXPERT_SOURCE_PATH \
+    EXPERT_REPOSITORY_ROOT \
+    EXPERT_EXECUTOR_BACKEND \
+    EXPERT_RUNTIME_PROFILES \
+    EXPERT_DOCKER_IMAGE \
+    EXPERT_DOCKER_NETWORK \
+    EXPERT_DOCKER_SECCOMP_PROFILE \
+    EXPERT_MODEL_ENV_NAMES \
+    EXPERT_MODEL_CREDENTIAL_REFS_JSON \
+    EXPERT_MCP_URL \
+    EXPERT_MCP_CREDENTIAL_FILES_JSON \
+    EXPERT_GIT_CREDENTIALS_JSON \
+    EXPERT_HEARTBEAT_MS \
+    EXPERT_POLL_MS \
+    EXPERT_TASK_TIMEOUT_MS
   set -a
   # shellcheck disable=SC1090
   source "$CONFIG"

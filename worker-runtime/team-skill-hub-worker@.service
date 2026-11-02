@@ -9,10 +9,11 @@ Type=simple
 User=expert-worker
 Group=expert-worker
 Environment=EXPERT_WORKER_INSTANCE=%i
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/etc/team-skill-hub-worker/workers/%i.env
 WorkingDirectory=/opt/team-skill-hub-worker/current
-ExecStartPre=/usr/bin/node /opt/team-skill-hub-worker/current/check-worker-config.js
-ExecStart=/usr/bin/node /opt/team-skill-hub-worker/current/src/cli/expert-worker.js
+ExecStartPre=/usr/bin/env node /opt/team-skill-hub-worker/current/check-worker-config.js
+ExecStart=/usr/bin/env node /opt/team-skill-hub-worker/current/src/cli/expert-worker.js
 Restart=always
 RestartSec=3
 UMask=0077
