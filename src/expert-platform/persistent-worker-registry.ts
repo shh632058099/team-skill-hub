@@ -48,6 +48,13 @@ export class PersistentWorkerRegistry {
     this.db.prepare("UPDATE expert_workers SET status='revoked' WHERE id=?").run(id);
   }
 
+  delete(id: string): void {
+    const worker = this.get(id);
+    if (worker.status === "active") throw new Error("WORKER_ACTIVE");
+    const result = this.db.prepare("DELETE FROM expert_workers WHERE id=?").run(id);
+    if (result.changes === 0) throw new Error("WORKER_NOT_FOUND");
+  }
+
   list(): WorkerRegistration[] {
     const rows = this.db.prepare("SELECT id FROM expert_workers ORDER BY id").all() as Array<{ id: string }>;
     return rows.map((row) => this.get(row.id));

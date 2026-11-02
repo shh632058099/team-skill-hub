@@ -53,6 +53,32 @@ test("approved worker survives registry reopen", () => {
   }
 });
 
+test("only non-active workers can be deleted and their ids can be re-enrolled", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "worker-registry-delete-"));
+  const file = path.join(dir, "runtime.sqlite");
+  try {
+    const registry = new PersistentWorkerRegistry(file);
+
+    registry.enroll("pending-worker", ["ota"]);
+    registry.delete("pending-worker");
+    assert.throws(() => registry.get("pending-worker"), /WORKER_NOT_FOUND/);
+    assert.equal(registry.enroll("pending-worker", ["ota"]).status, "pending");
+
+    registry.enroll("active-worker", ["ota"]);
+    registry.approve("active-worker");
+    assert.throws(() => registry.delete("active-worker"), /WORKER_ACTIVE/);
+    assert.equal(registry.get("active-worker").status, "active");
+
+    registry.revoke("active-worker");
+    registry.delete("active-worker");
+    assert.throws(() => registry.get("active-worker"), /WORKER_NOT_FOUND/);
+    assert.equal(registry.enroll("active-worker", ["ota"]).status, "pending");
+
+    registry.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 test("revocation survives reopen and blocks re-enrollment", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "worker-registry-"));
   const file = path.join(dir, "runtime.sqlite");

@@ -1261,7 +1261,7 @@ export async function startServer(
         ? 503
         : message === "WORKER_NOT_FOUND"
           ? 404
-          : message === "WORKER_ALREADY_EXISTS"
+          : ["WORKER_ALREADY_EXISTS", "WORKER_ACTIVE"].includes(message)
             ? 409
             : 400;
     reply.code(status);
@@ -1349,6 +1349,19 @@ export async function startServer(
           return registry.get(request.params.id);
         }),
       };
+    } catch (error) {
+      return workerAdminError(error, reply);
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/admin/api/expert-workers/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      withWorkerRegistry((registry) => registry.delete(request.params.id));
+      return { deleted: true };
     } catch (error) {
       return workerAdminError(error, reply);
     }

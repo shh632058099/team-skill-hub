@@ -234,6 +234,12 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(approvedWorker.status, 200);
     assert.equal((await approvedWorker.json()).worker.status, "active");
 
+    const rejectedActiveDelete = await fetch(base + "/admin/api/expert-workers/yocto-worker-01", {
+      method: "DELETE",
+    });
+    assert.equal(rejectedActiveDelete.status, 409);
+    assert.equal((await rejectedActiveDelete.json()).error, "WORKER_ACTIVE");
+
     const issuedCredentialResponse = await fetch(base + "/admin/api/expert-workers/yocto-worker-01/issue-credential", {
       method: "POST",
     });
@@ -251,6 +257,26 @@ test("Admin expert configuration UI manages definitions and execution configurat
     });
     assert.equal(revokedWorker.status, 200);
     assert.equal((await revokedWorker.json()).worker.status, "revoked");
+
+    const deletedWorker = await fetch(base + "/admin/api/expert-workers/yocto-worker-01", {
+      method: "DELETE",
+    });
+    assert.equal(deletedWorker.status, 200);
+    assert.equal((await deletedWorker.json()).deleted, true);
+
+    const workersAfterDelete = await fetch(base + "/admin/api/expert-workers");
+    assert.deepEqual((await workersAfterDelete.json()).workers, []);
+
+    const reEnrolledWorker = await fetch(base + "/admin/api/expert-workers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "yocto-worker-01", capabilities: ["yocto"] }),
+    });
+    assert.equal(reEnrolledWorker.status, 201);
+    assert.equal((await reEnrolledWorker.json()).worker.status, "pending");
+
+    assert.match(html, /永久删除 Worker/);
+    assert.match(html, /method:'DELETE'/);
 
     const taskStore = new ExpertTaskStore(runtimeDb);
     const task = taskStore.submit({
