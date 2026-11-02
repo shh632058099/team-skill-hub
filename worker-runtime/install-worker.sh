@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Administrative tools such as usermod/groupadd live in /usr/sbin on many
+# minimal Linux/WSL root shells where /usr/sbin is not inherited in PATH.
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 if [[ $EUID -ne 0 ]]; then
   echo "Run as root: sudo ./install-worker.sh worker-runtime-<version>.tar.gz" >&2
   exit 1

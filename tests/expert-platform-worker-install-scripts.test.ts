@@ -51,6 +51,7 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(installer, /workers/);
   assert.match(installer, /instances/);
   assert.match(installer, /Legacy single-worker configuration detected/);
+  assert.match(installer, /export PATH="\/usr\/sbin:/);
   assert.doesNotMatch(installer, /install -m 0600 .*worker\.env/);
   assert.match(packageScript, /team-skill-hub-worker@\.service/);
   assert.doesNotMatch(packageScript, /"team-skill-hub-worker\.service"/);
