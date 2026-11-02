@@ -103,6 +103,12 @@ test("systemd template loads one instance config and isolates writable state", (
     service,
     /ExecStart=\/opt\/team-skill-hub-worker\/node .*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/,
   );
+  assert.match(
+    service,
+    /^ExecStart=\/opt\/team-skill-hub-worker\/node \/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js$/m,
+  );
+  assert.match(service, /^Restart=always$/m);
+  assert.doesNotMatch(service, /expert-worker\.jsRestart=/);
 });
 test("configuration checker runs as ESM in the packaged module", () => {
   const source = readFileSync(new URL("check-worker-config.js", runtime), "utf8");
