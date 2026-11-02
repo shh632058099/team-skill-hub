@@ -277,6 +277,44 @@ Worker 主机只需要制品，不需要 Hub 源码。
 
 ## 7. 在 Worker 主机安装共享 Runtime
 
+### 7.0 Hub gRPC：本机与局域网 Worker
+
+Hub 容器内部的 Expert gRPC 监听地址为 `0.0.0.0:7443`，宿主机是否只允许本机访问由 `EXPERT_GRPC_PUBLISH_BIND` 控制。默认保持最小暴露：
+
+```bash
+EXPERT_GRPC_PUBLISH_BIND=127.0.0.1
+```
+
+同一主机上的 Worker 使用：
+
+```dotenv
+EXPERT_HUB_ADDRESS=127.0.0.1:7443
+```
+
+如果 Worker 部署在局域网其他机器，在 Hub 主机部署前设置：
+
+```bash
+export EXPERT_GRPC_PUBLISH_BIND=0.0.0.0
+./deploy-local-wsl2.sh
+```
+
+远程 Worker 使用 Hub 主机的局域网地址，例如：
+
+```dotenv
+EXPERT_HUB_ADDRESS=192.168.1.100:7443
+```
+
+`0.0.0.0` 只表示 Docker/宿主 Linux 对所有接口发布 `7443`，并不代表防火墙或 WSL2 NAT 已自动放行。若 Hub 运行在 WSL2 NAT 模式，局域网客户端通常还需要 Windows 将 LAN `7443` 转发到当前 WSL2 地址，或使用支持局域网入站的 mirrored networking；同时放行 Windows/Linux 防火墙。跨主机使用时应优先启用 Expert gRPC TLS/mTLS，并仅允许受信网段访问 `7443`。
+
+验证宿主侧发布地址：
+
+```bash
+docker port team-skill-hub 7443/tcp
+ss -lntp | grep ':7443'
+```
+
+本机模式应看到 `127.0.0.1:7443`；LAN 模式应看到 `0.0.0.0:7443`（或显式指定的某个 LAN IP）。
+
 ### 7.1 安装一次 Runtime
 
 ```bash

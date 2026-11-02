@@ -27,7 +27,7 @@ docker compose -f docker-compose.yml -f docker-compose.expert.yml up -d --build
 docker logs team-skill-hub 2>&1 | grep expert.grpc.started
 ```
 
-同一台 WSL2 主机上的 Worker 使用 `127.0.0.1:7443`。Compose override 默认只把 gRPC 端口发布到本机回环地址。
+同一台 WSL2 主机上的 Worker 使用 `127.0.0.1:7443`。默认 `EXPERT_GRPC_PUBLISH_BIND=127.0.0.1`，只把 gRPC 端口发布到本机回环地址；跨主机 Worker 可在部署前显式设置 `EXPERT_GRPC_PUBLISH_BIND=0.0.0.0`，并使用 Hub 主机 LAN IP 作为 `EXPERT_HUB_ADDRESS`。WSL2 NAT 场景还需单独处理 Windows 到 WSL2 的 `7443` 入站转发/防火墙。
 
 ## 2. 注册 OTA Expert 和 Deployment
 
