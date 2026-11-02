@@ -108,17 +108,30 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+const WORKER_INSTANCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function workerInstanceDataRoot(env: Record<string, string | undefined>): string | undefined {
+  const instance = env.EXPERT_WORKER_INSTANCE?.trim();
+  if (instance === undefined || instance === "") return undefined;
+  if (!WORKER_INSTANCE_PATTERN.test(instance)) throw new Error("INVALID_WORKER_CONFIG");
+  return path.join("/var/lib/team-skill-hub-worker", instance);
+}
+
 export function parseExpertWorkerConfig(env: Record<string, string | undefined>): ExpertWorkerRuntimeConfig {
   const hubAddress = env.EXPERT_HUB_ADDRESS?.trim() ?? "";
   const workerId = env.EXPERT_WORKER_ID?.trim() ?? "";
   const workerCredential = env.EXPERT_WORKER_CREDENTIAL?.trim() ?? "";
   const capability = env.EXPERT_CAPABILITY?.trim() ?? "";
   const expertId = env.EXPERT_ID?.trim() || capability;
-  const sourcePath = env.EXPERT_SOURCE_PATH?.trim() ?? "";
+  const instanceDataRoot = workerInstanceDataRoot(env);
+  const sourcePath = env.EXPERT_SOURCE_PATH?.trim() || (instanceDataRoot ? path.join(instanceDataRoot, "source") : "");
   const repositoryRootBase =
     env.EXPERT_REPOSITORY_ROOT?.trim() ||
-    (sourcePath ? path.join(path.dirname(sourcePath), "expert-repositories") : "");
-  // EXPERT_REPOSITORY_ROOT is a base directory, never a shared checkout root.
+    (instanceDataRoot
+      ? path.join(instanceDataRoot, "repositories")
+      : sourcePath
+        ? path.join(path.dirname(sourcePath), "expert-repositories")
+        : ""); // EXPERT_REPOSITORY_ROOT is a base directory, never a shared checkout root.
   // Every worker gets a private clone namespace keyed by its stable worker ID.
   const repositoryRoot =
     /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(workerId) && repositoryRootBase
@@ -187,7 +200,7 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     !workerCredential ||
     !capability ||
     (sourcePath !== "" && (!path.isAbsolute(sourcePath) || sourcePath === "/")) ||
-    (!sourcePath && !env.EXPERT_REPOSITORY_ROOT?.trim()) ||
+    (!sourcePath && !env.EXPERT_REPOSITORY_ROOT?.trim() && !instanceDataRoot) ||
     !path.isAbsolute(repositoryRoot) ||
     repositoryRoot === "/" ||
     !dockerImage ||

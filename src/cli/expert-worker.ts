@@ -4,7 +4,7 @@ import path from "node:path";
 import { requestWorkerBootstrap } from "../expert-platform/grpc-transport.js";
 import { createExpertWorkerRuntime } from "../expert-platform/worker-daemon.js";
 import { runExpertWorkerLoop } from "../expert-platform/worker-runtime.js";
-import { parseExpertWorkerConfig } from "../expert-platform/worker-runtime-config.js";
+import { parseExpertWorkerConfig, workerInstanceDataRoot } from "../expert-platform/worker-runtime-config.js";
 
 function grpcCode(error: unknown): number | undefined {
   return error && typeof error === "object" && "code" in error ? Number(error.code) : undefined;
@@ -14,8 +14,12 @@ async function resolveWorkerCredential(env: NodeJS.ProcessEnv): Promise<string> 
   const configured = env.EXPERT_WORKER_CREDENTIAL?.trim();
   if (configured) return configured;
 
+  const instanceDataRoot = workerInstanceDataRoot(env);
   const credentialFile =
-    env.EXPERT_WORKER_CREDENTIAL_FILE?.trim() || "/var/lib/team-skill-hub-worker/worker-credential";
+    env.EXPERT_WORKER_CREDENTIAL_FILE?.trim() ||
+    (instanceDataRoot
+      ? path.join(instanceDataRoot, "worker-credential")
+      : "/var/lib/team-skill-hub-worker/worker-credential");
   if (!path.isAbsolute(credentialFile) || credentialFile === "/") throw new Error("INVALID_WORKER_CREDENTIAL_FILE");
   try {
     const saved = readFileSync(credentialFile, "utf8").trim();

@@ -2,6 +2,40 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseExpertWorkerConfig } from "../src/expert-platform/worker-runtime-config.js";
 
+test("worker instance derives isolated source and repository roots", () => {
+  const config = parseExpertWorkerConfig({
+    EXPERT_HUB_ADDRESS: "hub.internal:7443",
+    EXPERT_WORKER_INSTANCE: "claude-01",
+    EXPERT_WORKER_ID: "ota-claude-worker-01",
+    EXPERT_WORKER_CREDENTIAL: "ewc_example",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_EXECUTOR_BACKEND: "claude",
+    EXPERT_DOCKER_IMAGE: "team-skill-hub-expert-claude:0.1.0",
+    EXPERT_DOCKER_NETWORK: "bridge",
+    EXPERT_MODEL_ENV_NAMES: "ANTHROPIC_API_KEY",
+  });
+  assert.equal(config.sourcePath, "/var/lib/team-skill-hub-worker/claude-01/source");
+  assert.equal(config.repositoryRoot, "/var/lib/team-skill-hub-worker/claude-01/repositories/ota-claude-worker-01");
+});
+
+test("worker runtime rejects unsafe worker instance names", () => {
+  for (const instance of ["../bad", "a/b", "space name", ""]) {
+    assert.throws(
+      () =>
+        parseExpertWorkerConfig({
+          EXPERT_HUB_ADDRESS: "hub.internal:7443",
+          EXPERT_WORKER_INSTANCE: instance,
+          EXPERT_WORKER_ID: "ota-worker-01",
+          EXPERT_WORKER_CREDENTIAL: "ewc_example",
+          EXPERT_CAPABILITY: "ota",
+          EXPERT_EXECUTOR_BACKEND: "codex",
+          EXPERT_DOCKER_NETWORK: "bridge",
+        }),
+      /INVALID_WORKER_CONFIG/,
+    );
+  }
+});
+
 test("Claude worker accepts Anthropic auth token through a credential reference", () => {
   const config = parseExpertWorkerConfig({
     EXPERT_HUB_ADDRESS: "hub.internal:7443",
