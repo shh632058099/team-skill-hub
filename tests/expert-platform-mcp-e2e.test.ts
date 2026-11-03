@@ -127,31 +127,16 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     const readonlyTools = await listMcpTools(mcpUrl, "worker-readonly-test-key");
     assert.ok(readonlyTools.some((item) => item.name === "search_skills"));
     assert.ok(readonlyTools.some((item) => item.name === "search_knowledge"));
-    assert.equal(
-      readonlyTools.some((item) => item.name === "submit_expert_task"),
-      false,
-    );
-    assert.equal(
-      readonlyTools.some((item) => item.name === "submit_expert_task_auto"),
-      false,
-    );
-    assert.equal(
-      readonlyTools.some((item) => item.name === "submit_knowledge_candidate"),
-      false,
-    );
-    assert.ok(
-      readonlyTools.every((item) =>
-        [
-          "list_skills",
-          "search_skills",
-          "resolve_skill",
-          "get_skill",
-          "get_skill_resource",
-          "list_knowledge_sources",
-          "search_knowledge",
-          "get_knowledge",
-        ].includes(item.name),
-      ),
+    assert.ok(readonlyTools.some((item) => item.name === "discover"));
+    assert.ok(readonlyTools.some((item) => item.name === "get_server_info"));
+    // Tool discovery is no longer a hard-coded permission boundary. The credential principal and
+    // each application handler decide whether an invocation is authorized.
+    assert.ok(readonlyTools.some((item) => item.name === "submit_expert_task"));
+    assert.ok(readonlyTools.some((item) => item.name === "submit_knowledge_candidate"));
+    assert.deepEqual(
+      readonlyTools.map((item) => item.name).sort(),
+      listedTools.map((item) => item.name).sort(),
+      "tools/list should describe the MCP surface; authorization happens when tools execute",
     );
     const readonlySearch = await callMcp(mcpUrl, "worker-readonly-test-key", 987, "search_skills", {
       query: "ota upgrade",
@@ -161,7 +146,15 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
       query: "firmware",
     });
     assert.ok(Array.isArray(readonlyKnowledge.results));
-    await assert.rejects(() => callMcp(mcpUrl, "worker-readonly-test-key", 989, "submit_expert_task", {}));
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, "worker-readonly-test-key", 989, "submit_knowledge_candidate", {
+          spec_version: 1,
+          title: "should be blocked",
+          content: "readonly principal must not write",
+        }),
+      /MCP_TOOL_FORBIDDEN_FOR_PRINCIPAL/,
+    );
     const catalogDescription = listedTools.find((tool) => tool.name === "list_available_experts")?.description ?? "";
     assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task_auto"));
     const submitDescription = listedTools.find((tool) => tool.name === "submit_expert_task")?.description ?? "";

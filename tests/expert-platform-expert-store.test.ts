@@ -145,7 +145,7 @@ test("deployment executor and MCP policy persist with versioned updates", () => 
       /INVALID_EXPERT_DEPLOYMENT/,
     );
     assert.throws(
-      () => store.putDeployment({ ...deployment, mcp: { ...mcp, allowedTools: ["submit_expert_task"] } }),
+      () => store.putDeployment({ ...deployment, mcp: { ...mcp, allowedTools: ["bad tool name"] } }),
       /INVALID_EXPERT_DEPLOYMENT/,
     );
     store.close();

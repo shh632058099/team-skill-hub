@@ -7,7 +7,7 @@ import * as z from "zod/v4";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { KnowledgeSubmissionSpec } from "./knowledge-submission-spec.js";
 import type { SkillHubApplicationService } from "./application.js";
-import { createSkillHubMcpHandler } from "./mcp.js";
+import { createSkillHubMcpHandler, listSkillHubMcpTools } from "./mcp.js";
 import {
   ADMIN_GOVERNANCE_HTML,
   ADMIN_HTML,
@@ -913,6 +913,7 @@ export async function startServer(
         });
       }
     });
+  const mcpToolNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/);
   const expertDeploymentSchema = z
     .object({
       id: z.string().trim().min(1).max(100),
@@ -950,18 +951,7 @@ export async function startServer(
           profileRef: z.string().optional(),
           urlOverride: z.string().url().optional(),
           credentialRef: z.string().min(1),
-          allowedTools: z.array(
-            z.enum([
-              "list_skills",
-              "search_skills",
-              "resolve_skill",
-              "get_skill",
-              "get_skill_resource",
-              "list_knowledge_sources",
-              "search_knowledge",
-              "get_knowledge",
-            ]),
-          ),
+          allowedTools: z.array(mcpToolNameSchema),
           required: z.boolean().optional(),
         })
         .optional(),
@@ -1103,21 +1093,19 @@ export async function startServer(
     id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
     url: z.string().url(),
     credentialRef: z.string().trim().min(1).max(100),
-    allowedTools: z
-      .array(
-        z.enum([
-          "list_skills",
-          "search_skills",
-          "resolve_skill",
-          "get_skill",
-          "get_skill_resource",
-          "list_knowledge_sources",
-          "search_knowledge",
-          "get_knowledge",
-        ]),
-      )
-      .min(1),
+    allowedTools: z.array(mcpToolNameSchema).min(1),
     required: z.boolean(),
+  });
+  app.get("/admin/api/expert-config/mcp-tools", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { tools: await listSkillHubMcpTools(service) };
+    } catch (error) {
+      return expertAdminError(error, reply);
+    }
   });
   app.get("/admin/api/expert-config/mcp-profiles", async (request, reply) => {
     if (!hasAdminAccess(request)) {
@@ -1142,6 +1130,12 @@ export async function startServer(
         reply.code(400);
         return { error: "INVALID_EXPERT_MCP_PROFILE", issues: parsed.error.issues };
       }
+      const availableMcpTools = new Set((await listSkillHubMcpTools(service)).map((tool) => tool.name));
+      const unavailableTools = parsed.data.allowedTools.filter((tool) => !availableMcpTools.has(tool));
+      if (unavailableTools.length) {
+        reply.code(400);
+        return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools };
+      }
       try {
         withExpertStore((store) => store.putMcpProfile(parsed.data));
         return { profile: withExpertStore((store) => store.getMcpProfile(parsed.data.id)) };
@@ -1150,6 +1144,12 @@ export async function startServer(
       }
     },
   );
+
+  const unavailableDeploymentMcpTools = async (deployment: ExpertDeploymentRecord): Promise<string[]> => {
+    if (!deployment.mcp?.allowedTools?.length) return [];
+    const available = new Set((await listSkillHubMcpTools(service)).map((tool) => tool.name));
+    return deployment.mcp.allowedTools.filter((tool) => !available.has(tool));
+  };
 
   app.get("/admin/api/expert-config/deployments", async (request, reply) => {
     if (!hasAdminAccess(request)) {
@@ -1171,6 +1171,11 @@ export async function startServer(
     if (!parsed.success) {
       reply.code(400);
       return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+    }
+    const unavailableTools = await unavailableDeploymentMcpTools(parsed.data);
+    if (unavailableTools.length) {
+      reply.code(400);
+      return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools };
     }
     try {
       const existing = withExpertStore((store) => {
@@ -1202,6 +1207,11 @@ export async function startServer(
       if (!parsed.success) {
         reply.code(400);
         return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+      }
+      const unavailableTools = await unavailableDeploymentMcpTools(parsed.data);
+      if (unavailableTools.length) {
+        reply.code(400);
+        return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools };
       }
       try {
         withExpertStore((store) => {

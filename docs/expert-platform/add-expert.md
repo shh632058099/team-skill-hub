@@ -99,24 +99,24 @@ command -v systemctl      # 可选：仅 systemd 主机需要
 
 在“执行配置”区域选择创建执行配置，将刚才创建的专家绑定到可访问仓库。
 
-| 字段                    | 示例                                                     | 填写原则                                                                 |
-| ----------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------ |
-| 执行配置 ID             | `yocto-default`                                          | 唯一、稳定的标识                                                         |
-| 专家配置                | `yocto · Yocto 构建专家`                                 | 选择第 2 步创建的专家                                                    |
-| 源码仓库地址            | `https://github.com/your-org/yocto-layer.git`            | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码              |
-| 分支                    | `main`                                                   | 与仓库地址逐行对应；留空默认 `main`                                      |
-| 仓库凭据引用            | `yocto-github-readonly`                                  | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                     |
-| Git 代理地址            | `http://proxy-host:7890`                                 | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息     |
-| 允许调用者 Principal ID | `实际的 principal.id`                                    | 每行一个；只授权确实需要使用此 Deployment 的调用者                       |
-| Runtime Profile         | `linux-yocto`                                            | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`                  |
-| 启用执行配置            | 勾选                                                     | 只有启用的 Deployment 才能参与任务派发                                   |
-| Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages     | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名 |
-| 模型 Credential Ref     | `model-readonly`                                         | Worker 本地模型凭据映射，不存 Key 明文                                   |
-| MCP Profile             | `default`                                                | Admin 全局 Profile，可由 Deployment 引用/覆盖                            |
-| MCP URL                 | `http://hub.internal:8080/mcp`                           | 必须从任务容器网络可达；不能用 127.0.0.1 指向外部 Hub                    |
-| MCP Credential Ref      | `skillhub-readonly`                                      | 独立只读 API Key 的本地文件映射                                          |
-| MCP Allowed Tools       | `search_skills,get_skill,search_knowledge,get_knowledge` | 只读工具白名单；禁止管理、发布、派发                                     |
-| MCP Required            | 按需                                                     | Key/URL 不可用时是否直接失败                                             |
+| 字段                    | 示例                                                 | 填写原则                                                                                      |
+| ----------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 执行配置 ID             | `yocto-default`                                      | 唯一、稳定的标识                                                                              |
+| 专家配置                | `yocto · Yocto 构建专家`                             | 选择第 2 步创建的专家                                                                         |
+| 源码仓库地址            | `https://github.com/your-org/yocto-layer.git`        | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码                                   |
+| 分支                    | `main`                                               | 与仓库地址逐行对应；留空默认 `main`                                                           |
+| 仓库凭据引用            | `yocto-github-readonly`                              | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                                          |
+| Git 代理地址            | `http://proxy-host:7890`                             | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息                          |
+| 允许调用者 Principal ID | `实际的 principal.id`                                | 每行一个；只授权确实需要使用此 Deployment 的调用者                                            |
+| Runtime Profile         | `linux-yocto`                                        | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`                                       |
+| 启用执行配置            | 勾选                                                 | 只有启用的 Deployment 才能参与任务派发                                                        |
+| Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名                      |
+| 模型 Credential Ref     | `model-readonly`                                     | Worker 本地模型凭据映射，不存 Key 明文                                                        |
+| MCP Profile             | `default`                                            | Admin 全局 Profile，可由 Deployment 引用/覆盖                                                 |
+| MCP URL                 | `http://hub.internal:8080/mcp`                       | 必须从任务容器网络可达；不能用 127.0.0.1 指向外部 Hub                                         |
+| MCP Credential Ref      | `skillhub-readonly`                                  | 独立只读 API Key 的本地文件映射                                                               |
+| MCP Allowed Tools       | 从 Admin 动态工具列表中选择                          | 工具列表来自当前 Hub MCP `tools/list`；最终能否调用由 Credential 对应 principal/role 权限决定 |
+| MCP Required            | 按需                                                 | Key/URL 不可用时是否直接失败                                                                  |
 
 可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。
 
@@ -136,11 +136,11 @@ docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 
 ### V2 Worker 只读 MCP 安装与测试
 
-1. 在 Admin 的 API Key 页面创建专属身份，roles **仅** `worker-mcp-readonly`，不要复用 Admin Key。Hub 服务端仅注册只读 Skill/Knowledge 工具。
+1. 在 Admin 的 API Key 页面创建专属身份。只需要读取 Skill/Knowledge/Prompt/Agent/Tool 等内容时，roles 使用 **仅** `worker-mcp-readonly`，不要复用 Admin Key。Hub 的 `tools/list` 会返回完整 MCP 工具目录，但该角色调用写操作时会被服务端拒绝。
 2. 安全保存密钥于 Worker 本地受权限保护的文件（`0600`、Worker 可读取），如 `/etc/team-skill-hub-worker/keys/skillhub-readonly`；不要写入 Git、Hub 数据库、任务日志。
 3. 在 `worker.env` 设置 `EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/keys/skillhub-readonly"}'`、`EXPERT_MCP_URL=http://hub.internal:8080/mcp`、`EXPERT_RUNTIME_PROFILES=linux-yocto`，并选择匹配 Docker 镜像的 `EXPERT_EXECUTOR_BACKEND`。
-4. 执行配置选择 Admin 全局 MCP Profile（默认 `default`）或按 Deployment 覆盖。覆盖不允许扩大 Profile 的只读工具权限。Worker 会在每个任务中生成隔离的 Claude/Codex MCP 配置，而不挂载个人配置或运行开发者 Hook。
-5. 发布前从**实际任务容器**测试 Hub DNS/网络、TLS/代理、MCP `tools/list`、Skill/Knowledge 检索，并验证提交/发布/专家再次派发工具不可用；同时测试无 Key、撤销 Key、协议不匹配、旧 Worker 不领取 V2 等负路径。
+4. 执行配置选择 Admin 全局 MCP Profile（默认 `default`）或按 Deployment 覆盖。Admin 工具列表从当前 Hub MCP `tools/list` 动态加载，不再维护固定工具白名单；Deployment 仍不能选择 Profile 未允许的工具。Worker 会在每个任务中生成隔离的 Claude/Codex MCP 配置，而不挂载个人配置或运行开发者 Hook。
+5. 发布前从**实际任务容器**测试 Hub DNS/网络、TLS/代理、MCP `tools/list` 和配置中允许的工具。若使用 `worker-mcp-readonly` Key，还应验证写操作返回权限拒绝；若确实需要写工具，应使用具备相应角色/资源权限的专用 Credential，而不是放宽只读 Key。
 
 > 现有版本化 Worker Runtime 是独立发布包，无须 Hub 源码。任务容器不复用开发者完整 Setup，而是由 Worker Runtime 按 Deployment 动态生成最小只读 Claude/Codex MCP 配置。Claude 与 Codex 两种 Backend 的真实 MCP 端到端链路均已验收通过；自动升级/版本分发仍应由发布流程单独管理。
 

@@ -83,16 +83,9 @@ function buildExpertCodexConfig(
   return { content, envNames };
 }
 
-const MCP_READ_TOOLS = new Set([
-  "list_skills",
-  "search_skills",
-  "resolve_skill",
-  "get_skill",
-  "get_skill_resource",
-  "list_knowledge_sources",
-  "search_knowledge",
-  "get_knowledge",
-]);
+function validMcpToolName(tool: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(tool);
+}
 
 function validateMcpEndpoint(raw: string): void {
   let url: URL;
@@ -347,7 +340,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           if (
             !Array.isArray(mcp.allowedTools) ||
             mcp.allowedTools.length === 0 ||
-            mcp.allowedTools.some((tool) => !MCP_READ_TOOLS.has(tool))
+            mcp.allowedTools.some((tool) => !validMcpToolName(tool))
           )
             throw new Error("WORKER_MCP_TOOLS_INVALID");
           token = readMcpWorkerKey(options.mcpCredentialFiles?.[mcp.credentialRef]);

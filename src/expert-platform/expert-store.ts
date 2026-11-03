@@ -144,16 +144,9 @@ function validMcpUrl(raw: string): boolean {
   }
 }
 
-export const READ_ONLY_MCP_TOOLS = new Set([
-  "list_skills",
-  "search_skills",
-  "resolve_skill",
-  "get_skill",
-  "get_skill_resource",
-  "list_knowledge_sources",
-  "search_knowledge",
-  "get_knowledge",
-]);
+function validMcpToolName(tool: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(tool);
+}
 
 export class ExpertStore {
   private readonly db: DatabaseSync;
@@ -207,7 +200,7 @@ export class ExpertStore {
       !profile.credentialRef?.trim() ||
       !Array.isArray(profile.allowedTools) ||
       profile.allowedTools.length === 0 ||
-      profile.allowedTools.some((tool) => !READ_ONLY_MCP_TOOLS.has(tool)) ||
+      profile.allowedTools.some((tool) => !validMcpToolName(tool)) ||
       typeof profile.required !== "boolean"
     )
       throw new Error("INVALID_EXPERT_MCP_PROFILE");
@@ -297,19 +290,7 @@ export class ExpertStore {
       (deployment.mcp !== undefined &&
         (!deployment.mcp.credentialRef?.trim() ||
           !Array.isArray(deployment.mcp.allowedTools) ||
-          deployment.mcp.allowedTools.some(
-            (tool) =>
-              ![
-                "list_skills",
-                "search_skills",
-                "resolve_skill",
-                "get_skill",
-                "get_skill_resource",
-                "list_knowledge_sources",
-                "search_knowledge",
-                "get_knowledge",
-              ].includes(tool),
-          ) ||
+          deployment.mcp.allowedTools.some((tool) => !validMcpToolName(tool)) ||
           (deployment.mcp.urlOverride !== undefined && !validMcpUrl(deployment.mcp.urlOverride))))
     ) {
       throw new Error("INVALID_EXPERT_DEPLOYMENT");

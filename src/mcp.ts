@@ -100,6 +100,43 @@ function toolResult(value: unknown) {
   };
 }
 
+const WORKER_MCP_READ_ONLY_TOOLS = new Set([
+  "get_server_info",
+  "discover",
+  "project_recommendations",
+  "list_skill_repositories",
+  "resolve_agent_tools",
+  "list_skills",
+  "search_skills",
+  "resolve_skill",
+  "get_skill",
+  "get_skill_resource",
+  "list_knowledge_sources",
+  "search_knowledge",
+  "get_knowledge",
+  "list_prompts",
+  "search_prompts",
+  "get_prompt",
+  "list_agents",
+  "search_agents",
+  "list_tools",
+  "search_tools",
+  "get_tool",
+  "resolve_agent",
+  "get_agent",
+  "list_evaluation_suites",
+  "list_evaluation_runs",
+  "get_evaluation_run",
+  "get_knowledge_submission_spec",
+  "list_repository_revisions",
+  "list_sync_audit",
+  "list_available_experts",
+  "get_expert_task_status",
+  "get_expert_task_events",
+  "wait_expert_task",
+  "get_expert_task_result",
+]);
+
 const activeExpertWaits = new Map<string, number>();
 function safeExpertActivityMessage(event: { type: string; tool: string | null; count: number | null }): string {
   const tool = event.tool && ["Read", "Glob", "Grep", "other"].includes(event.tool) ? event.tool : "other";
@@ -146,22 +183,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       requestHeaders?.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     const client = requestHeaders?.get("x-skill-hub-client") ?? requestHeaders?.get("user-agent") ?? undefined;
 
-    // A dedicated Worker MCP principal can only discover/call the read-only view.
-    // This is enforced at the server tool registry, not merely by CLI prompts or flags.
+    // Tool existence is independent from authorization. All MCP tools are registered for every principal so
+    // Admin can build profiles from tools/list. Invocation is still authorized by the credential principal.
     const readOnlyWorker = principal.roles.includes("worker-mcp-readonly");
-    const workerReadTools = new Set([
-      "list_skills",
-      "search_skills",
-      "resolve_skill",
-      "get_skill",
-      "get_skill_resource",
-      "list_knowledge_sources",
-      "search_knowledge",
-      "get_knowledge",
-    ]);
     const registerTool = (name: string, definition: any, handler: (...args: any[]) => Promise<any>) => {
-      if (readOnlyWorker && !workerReadTools.has(name)) return;
       return server.registerTool(name, definition as any, async (...args: any[]) => {
+        if (readOnlyWorker && !WORKER_MCP_READ_ONLY_TOOLS.has(name)) {
+          throw new Error("MCP_TOOL_FORBIDDEN_FOR_PRINCIPAL");
+        }
         const started = performance.now();
         try {
           const result = await handler(...args);
@@ -1370,4 +1399,51 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
 
     return server;
   });
+}
+
+export interface SkillHubMcpToolCatalogEntry {
+  name: string;
+  description?: string;
+}
+
+export async function listSkillHubMcpTools(
+  appService: SkillHubApplicationService,
+): Promise<SkillHubMcpToolCatalogEntry[]> {
+  const catalogService = new Proxy(appService, {
+    get(target, property, receiver) {
+      if (property === "authenticateRequest") {
+        return () => ({ id: "admin-mcp-catalog", roles: ["admin", "internal", "developer"], tenantId: "default" });
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as SkillHubApplicationService;
+  const handler = createSkillHubMcpHandler(catalogService);
+  try {
+    const response = await handler.fetch(
+      new Request("http://team-skill-hub.local/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      }),
+    );
+    if (!response.ok) throw new Error("MCP_TOOL_CATALOG_UNAVAILABLE");
+    const body = await response.text();
+    const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
+    const payload = JSON.parse(dataLine ? dataLine.slice(6) : body) as {
+      result?: { tools?: Array<{ name?: unknown; description?: unknown }> };
+    };
+    return (payload.result?.tools ?? [])
+      .filter((tool): tool is { name: string; description?: string } => typeof tool.name === "string")
+      .map((tool) => ({
+        name: tool.name,
+        ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  } finally {
+    await handler.close();
+  }
 }
