@@ -124,24 +124,35 @@ export class ExpertDispatchService {
     if (!selected) throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
     const source = (selected.repositories ?? []).find((repository) => repository.id === configuredRepositoryId);
     if (selected.executor && !source) throw new Error("SOURCE_REPOSITORY_UNAVAILABLE");
-    let effectiveMcp = selected.mcp ? structuredClone(selected.mcp) : undefined;
-    const profileId = selected.mcp?.profileRef ?? "default";
+    const configuredMcp = selected.mcp;
+    const profileId = configuredMcp?.profileRef ?? "default";
     let profile;
     try {
       profile = this.experts.getMcpProfile(profileId);
     } catch (error) {
-      if (selected.mcp?.profileRef || (error instanceof Error && error.message !== "EXPERT_MCP_PROFILE_NOT_FOUND"))
-        throw error;
+      if (configuredMcp || (error instanceof Error && error.message !== "EXPERT_MCP_PROFILE_NOT_FOUND")) throw error;
     }
+    let effectiveMcp: DeploymentTaskSnapshot["mcp"];
     if (profile) {
-      if (effectiveMcp && effectiveMcp.allowedTools.some((tool) => !profile!.allowedTools.includes(tool)))
+      if (
+        configuredMcp?.allowedTools &&
+        configuredMcp.allowedTools.some((tool) => !profile!.allowedTools.includes(tool))
+      )
         throw new Error("MCP_PROFILE_TOOL_NOT_ALLOWED");
       effectiveMcp = {
         profileRef: profile.id,
-        urlOverride: effectiveMcp?.urlOverride ?? profile.url,
-        credentialRef: effectiveMcp?.credentialRef ?? profile.credentialRef,
-        allowedTools: effectiveMcp?.allowedTools ?? profile.allowedTools,
-        required: effectiveMcp?.required ?? profile.required,
+        urlOverride: configuredMcp?.urlOverride ?? profile.url,
+        credentialRef: configuredMcp?.credentialRef ?? profile.credentialRef,
+        allowedTools: configuredMcp?.allowedTools ?? profile.allowedTools,
+        required: configuredMcp?.required ?? profile.required,
+      };
+    } else if (configuredMcp?.credentialRef && configuredMcp.allowedTools) {
+      // Compatibility for legacy full-field MCP records created before Profiles existed.
+      effectiveMcp = {
+        ...configuredMcp,
+        credentialRef: configuredMcp.credentialRef,
+        allowedTools: configuredMcp.allowedTools,
+        required: configuredMcp.required ?? false,
       };
     }
     const deploymentSnapshot: DeploymentTaskSnapshot | undefined =

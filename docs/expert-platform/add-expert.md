@@ -719,3 +719,9 @@ docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke yocto
 ```
 
 随后停止对应 Worker 进程，并按组织的密钥轮换流程删除主机上的旧 credential/Git Token。清理仓库 clone 前，必须确认任务已结束并且日志/证据已保留；只清理该 Worker 自己的目录，不要删除其他 Worker 的工作区。
+
+## Execution 配置中的 Skill Hub MCP Profile
+
+执行配置默认只选择全局 MCP Profile（通常为 `default`），不重复保存 URL、Credential、Tools 和 Required。Worker 派发任务时会读取 Profile 当前值，并把解析后的完整配置写入任务快照。Profile 后续更新只影响新任务，不改变已排队/运行任务的快照。
+
+如确有特殊需要，可开启执行配置中的「自定义覆盖」：URL、Credential、Tools 均为可选覆盖项；留空或不选择表示继承 Profile。Tools 覆盖必须是 Profile 允许工具的子集。Required 可选择继承、必需或非必需。历史执行配置中已有的 MCP 字段会按显式覆盖兼容加载，避免升级后改变既有行为。

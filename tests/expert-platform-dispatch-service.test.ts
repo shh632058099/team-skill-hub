@@ -335,3 +335,120 @@ test("dispatch requires an explicit repository when the selected expert has mult
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("dispatch resolves MCP Profile defaults with sparse overrides and snapshots effective values", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-mcp-profile-inherit-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({ id: "ota", displayName: "OTA", capabilities: ["ota"], keywords: [], active: true });
+    const base = {
+      expertId: "ota",
+      repositoryIds: ["repo"],
+      repositories: [{ id: "repo", url: "https://example.org/ota.git", branch: "main" }],
+      principals: ["alice"],
+      runtimeProfile: "runtime",
+      active: true,
+      executor: {
+        backend: "claude" as const,
+        modelConfig: {
+          providerId: "router",
+          model: "sonnet",
+          baseUrl: "https://router.example/v1",
+          wireApi: "anthropic-messages" as const,
+          allowedEnvNames: ["ANTHROPIC_API_KEY"],
+        },
+      },
+    };
+    experts.putMcpProfile({
+      id: "default",
+      url: "https://hub.example/mcp",
+      credentialRef: "hub-ro",
+      allowedTools: ["discover", "search_skills"],
+      required: true,
+    });
+    experts.putDeployment({ ...base, id: "inherit", mcp: { profileRef: "default" } });
+    experts.putDeployment({
+      ...base,
+      id: "inherit-codex",
+      executor: {
+        ...base.executor,
+        backend: "codex" as const,
+        modelConfig: { ...base.executor.modelConfig, wireApi: "responses" as const },
+      },
+      mcp: { profileRef: "default" },
+    });
+    experts.putDeployment({
+      ...base,
+      id: "override",
+      mcp: {
+        profileRef: "default",
+        urlOverride: "https://other.example/mcp",
+        allowedTools: ["discover"],
+        required: false,
+      },
+    });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    const input = {
+      principalId: "alice",
+      scope: "test",
+      problem: "inspect ota",
+      expertId: "ota",
+      repositoryId: "repo",
+      selectionMode: "explicit" as const,
+    };
+    const inherited = dispatch.submit({ ...input, idempotencyKey: "inherit", deploymentId: "inherit" });
+    assert.deepEqual(inherited.deploymentSnapshot?.mcp, {
+      profileRef: "default",
+      urlOverride: "https://hub.example/mcp",
+      credentialRef: "hub-ro",
+      allowedTools: ["discover", "search_skills"],
+      required: true,
+    });
+    const codex = dispatch.submit({ ...input, idempotencyKey: "inherit-codex", deploymentId: "inherit-codex" });
+    assert.equal(codex.deploymentSnapshot?.executor.backend, "codex");
+    assert.deepEqual(codex.deploymentSnapshot?.mcp, inherited.deploymentSnapshot?.mcp);
+    const overridden = dispatch.submit({ ...input, idempotencyKey: "override", deploymentId: "override" });
+    assert.deepEqual(overridden.deploymentSnapshot?.mcp, {
+      profileRef: "default",
+      urlOverride: "https://other.example/mcp",
+      credentialRef: "hub-ro",
+      allowedTools: ["discover"],
+      required: false,
+    });
+    experts.putMcpProfile({
+      id: "default",
+      url: "https://hub-v2.example/mcp",
+      credentialRef: "hub-v2",
+      allowedTools: ["discover"],
+      required: false,
+    });
+    const next = dispatch.submit({ ...input, idempotencyKey: "after-profile-update", deploymentId: "inherit" });
+    assert.equal(next.deploymentSnapshot?.mcp?.urlOverride, "https://hub-v2.example/mcp");
+    assert.equal(next.deploymentSnapshot?.mcp?.credentialRef, "hub-v2");
+    assert.deepEqual(
+      inherited.deploymentSnapshot?.mcp?.allowedTools,
+      ["discover", "search_skills"],
+      "existing snapshot remains immutable",
+    );
+    experts.putDeployment({ ...base, id: "bad-profile", mcp: { profileRef: "missing" } });
+    assert.throws(
+      () => dispatch.submit({ ...input, idempotencyKey: "missing-profile", deploymentId: "bad-profile" }),
+      /EXPERT_MCP_PROFILE_NOT_FOUND/,
+    );
+    experts.putDeployment({
+      ...base,
+      id: "bad-tools",
+      mcp: { profileRef: "default", allowedTools: ["search_skills"] },
+    });
+    assert.throws(
+      () => dispatch.submit({ ...input, idempotencyKey: "bad-tools", deploymentId: "bad-tools" }),
+      /MCP_PROFILE_TOOL_NOT_ALLOWED/,
+    );
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

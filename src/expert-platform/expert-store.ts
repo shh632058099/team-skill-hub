@@ -48,8 +48,8 @@ export interface ExpertDeploymentRecord {
   mcp?: {
     profileRef?: string;
     urlOverride?: string;
-    credentialRef: string;
-    allowedTools: string[];
+    credentialRef?: string;
+    allowedTools?: string[];
     required?: boolean;
   };
   configVersion?: number;
@@ -288,9 +288,12 @@ export class ExpertStore {
           (deployment.executor.backend === "claude" ? "anthropic-messages" : "responses") !==
             deployment.executor.modelConfig.wireApi)) ||
       (deployment.mcp !== undefined &&
-        (!deployment.mcp.credentialRef?.trim() ||
-          !Array.isArray(deployment.mcp.allowedTools) ||
-          deployment.mcp.allowedTools.some((tool) => !validMcpToolName(tool)) ||
+        ((deployment.mcp.profileRef !== undefined && !deployment.mcp.profileRef.trim()) ||
+          (deployment.mcp.credentialRef !== undefined && !deployment.mcp.credentialRef.trim()) ||
+          (deployment.mcp.allowedTools !== undefined &&
+            (!Array.isArray(deployment.mcp.allowedTools) ||
+              deployment.mcp.allowedTools.length === 0 ||
+              deployment.mcp.allowedTools.some((tool) => !validMcpToolName(tool)))) ||
           (deployment.mcp.urlOverride !== undefined && !validMcpUrl(deployment.mcp.urlOverride))))
     ) {
       throw new Error("INVALID_EXPERT_DEPLOYMENT");

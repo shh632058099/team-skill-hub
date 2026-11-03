@@ -16,7 +16,7 @@ export type DeploymentTaskSnapshot = {
     urlOverride?: string;
     credentialRef: string;
     allowedTools: string[];
-    required?: boolean;
+    required: boolean;
   };
 };
 

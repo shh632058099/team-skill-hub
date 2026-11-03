@@ -950,8 +950,8 @@ export async function startServer(
         .object({
           profileRef: z.string().optional(),
           urlOverride: z.string().url().optional(),
-          credentialRef: z.string().min(1),
-          allowedTools: z.array(mcpToolNameSchema),
+          credentialRef: z.string().trim().min(1).optional(),
+          allowedTools: z.array(mcpToolNameSchema).min(1).optional(),
           required: z.boolean().optional(),
         })
         .optional(),
@@ -1145,10 +1145,26 @@ export async function startServer(
     },
   );
 
-  const unavailableDeploymentMcpTools = async (deployment: ExpertDeploymentRecord): Promise<string[]> => {
-    if (!deployment.mcp?.allowedTools?.length) return [];
-    const available = new Set((await listSkillHubMcpTools(service)).map((tool) => tool.name));
-    return deployment.mcp.allowedTools.filter((tool) => !available.has(tool));
+  const validateDeploymentMcp = async (deployment: ExpertDeploymentRecord): Promise<string | string[]> => {
+    if (!deployment.mcp) return [];
+    const profileId = deployment.mcp.profileRef ?? "default";
+    let profile;
+    try {
+      profile = withExpertStore((store) => store.getMcpProfile(profileId));
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "EXPERT_MCP_PROFILE_NOT_FOUND") throw error;
+      if (deployment.mcp.profileRef || !deployment.mcp.credentialRef || !deployment.mcp.allowedTools)
+        return `EXPERT_MCP_PROFILE_NOT_FOUND:${profileId}`;
+      return []; // legacy full-field MCP record without a Profile
+    }
+    const unavailable = deployment.mcp.allowedTools?.filter((tool) => !profile.allowedTools.includes(tool)) ?? [];
+    if (unavailable.length) return `MCP_PROFILE_TOOL_NOT_ALLOWED:${unavailable.join(",")}`;
+    if (deployment.mcp.urlOverride) {
+      const available = new Set((await listSkillHubMcpTools(service)).map((tool) => tool.name));
+      const missing = (deployment.mcp.allowedTools ?? []).filter((tool) => !available.has(tool));
+      if (missing.length) return missing;
+    }
+    return [];
   };
 
   app.get("/admin/api/expert-config/deployments", async (request, reply) => {
@@ -1172,10 +1188,14 @@ export async function startServer(
       reply.code(400);
       return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
     }
-    const unavailableTools = await unavailableDeploymentMcpTools(parsed.data);
-    if (unavailableTools.length) {
+    const mcpValidation = await validateDeploymentMcp(parsed.data);
+    if (typeof mcpValidation === "string") {
       reply.code(400);
-      return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools };
+      return { error: mcpValidation };
+    }
+    if (mcpValidation.length) {
+      reply.code(400);
+      return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools: mcpValidation };
     }
     try {
       const existing = withExpertStore((store) => {
@@ -1208,10 +1228,14 @@ export async function startServer(
         reply.code(400);
         return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
       }
-      const unavailableTools = await unavailableDeploymentMcpTools(parsed.data);
-      if (unavailableTools.length) {
+      const mcpValidation = await validateDeploymentMcp(parsed.data);
+      if (typeof mcpValidation === "string") {
         reply.code(400);
-        return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools };
+        return { error: mcpValidation };
+      }
+      if (mcpValidation.length) {
+        reply.code(400);
+        return { error: "EXPERT_MCP_TOOL_NOT_AVAILABLE", unavailableTools: mcpValidation };
       }
       try {
         withExpertStore((store) => {
