@@ -166,4 +166,4 @@ Hub 的去重顺序为：`idempotencyKey` → `same_source_request` → 旧客�
 
 ### Claude 任务最大回合数
 
-Worker 环境变量 `EXPERT_CLAUDE_MAX_TURNS` 用来配置 Claude CLI 的 `--max-turns`，默认 `12`（兼容原有行为），允许 `1`～`1000` 的整数；非法值在 Worker 启动时拒绝。此参数适用于默认 Claude Model 和 Hub 下发的 Claude AI Router Model，Codex 后端不受影响。其限制不同于任务整体超时 `EXPERT_TASK_TIMEOUT_MS`，两者可独立设置。修改 Worker 环境变量后需要重启 Worker 才会生效。
+Worker 环境变量 `EXPERT_CLAUDE_MAX_TURNS` 用来配置 Claude CLI 的 `--max-turns`，默认 `12`（兼容原有行为），要求为大于等于 `1` 的安全整数；Team Skill Hub 不再额外设置固定最大值，具体可接受范围由 Claude CLI 自身决定；非法值在 Worker 启动时拒绝。此参数适用于默认 Claude Model 和 Hub 下发的 Claude AI Router Model，Codex 后端不受影响。其限制不同于任务整体超时 `EXPERT_TASK_TIMEOUT_MS`，两者可独立设置。修改 Worker 环境变量后需要重启 Worker 才会生效。

@@ -201,7 +201,8 @@ test("Claude max turns is configurable and validated", () => {
   const args = buildClaudeReadOnlyArgs("inspect", "sonnet", false, 38);
   assert.equal(args[args.indexOf("--max-turns") + 1], "38");
   assert.equal(buildClaudeReadOnlyArgs("inspect", "sonnet")[5], "12");
-  for (const bad of [0, -1, 1.5, 1001, NaN, Infinity]) {
+  assert.equal(buildClaudeReadOnlyArgs("inspect", "sonnet", false, 5000)[5], "5000");
+  for (const bad of [0, -1, 1.5, NaN, Infinity]) {
     assert.throws(() => buildClaudeReadOnlyArgs("inspect", "sonnet", false, bad), /INVALID_CLAUDE_MAX_TURNS/);
   }
 });

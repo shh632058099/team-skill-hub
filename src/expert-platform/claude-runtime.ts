@@ -2,7 +2,7 @@
  * Bash, Write, Edit, NotebookEdit and agent tools are never available. Deployment-approved read-only MCP tools may be appended.
  */
 export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false, maxTurns = 12): string[] {
-  if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 1000) throw new Error("INVALID_CLAUDE_MAX_TURNS");
+  if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("INVALID_CLAUDE_MAX_TURNS");
   if (
     !problem.trim() ||
     problem.length > 10000 ||
