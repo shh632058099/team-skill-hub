@@ -540,6 +540,104 @@ sudo journalctl -u team-skill-hub-worker@claude-01 -f
 
 ## 10. 常见问题排查
 
+### 10.1 Worker 日志报 `expert_worker.poll_failed`：按现象定位配置问题
+
+Worker 日志目前可能只有：
+
+```json
+{ "event": "expert_worker.poll_failed", "errorCode": "7" }
+```
+
+不要只对照 gRPC 数字表。排查时应先判断 Worker 是否已经成功注册、认证并持续向 Hub 报心跳，再检查 Worker 与 Expert 的配置关系。常见错误对应的实际原因和处理方式如下：
+
+| Worker 日志                                                  | 通常代表什么                                                                                   | 优先检查什么                                                                                     | 处理方式                                                                                                                                                         |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `7` / `PERMISSION_DENIED`，且 Worker 已 active、心跳持续更新 | **优先怀疑 Expert 配置与 Worker capability 不匹配**；也可能是 Expert ID 不存在或 Expert 未启用 | Worker 的 `EXPERT_CAPABILITY`、`EXPERT_ID`；Admin 中该 Expert 的 capabilities 和启用状态         | 让 Worker 请求的 capability 出现在目标 Expert 的 capabilities 中；确认 `EXPERT_ID` 指向正确且 active 的 Expert。只有修改 Worker env 时才需要重启 Worker instance |
+| `7` / `PERMISSION_DENIED`，Worker 没有正常心跳               | Worker 身份与请求身份不一致，或 Worker 注册 capability 不包含请求 capability                   | Admin 中 Worker 的 ID、状态、capabilities；Worker env 的 `EXPERT_WORKER_ID`、`EXPERT_CAPABILITY` | 确保 ID 一致、Worker 为 active，注册 capability 与 Worker 请求的 capability 一致；必要时修正配置后重新注册/审批                                                  |
+| `16` / `UNAUTHENTICATED`                                     | Worker credential 不存在、错误、过期/被替换，或 Worker 尚未完成审批                            | Admin 中 Worker 是否 pending/revoked；本机正式 credential 文件和读取权限                         | 完成审批和 credential 交换；重新签发后更新本机凭据并重启对应 instance                                                                                            |
+| `14` / `UNAVAILABLE`                                         | Worker 无法正常访问 Hub gRPC 服务                                                              | `EXPERT_HUB_ADDRESS`、DNS、TCP 7443、防火墙、WSL2 端口转发、Hub 服务状态                         | 先恢复 Worker 到 Hub 的网络连通，再检查 TLS/mTLS 配置                                                                                                            |
+| `12` / `UNIMPLEMENTED`                                       | Hub 与 Worker Runtime 的 gRPC 接口版本不兼容，或服务端未提供该 RPC                             | Hub 版本、Worker Runtime 制品版本                                                                | 部署匹配版本的 Hub 与 Worker Runtime                                                                                                                             |
+| `13` / `INTERNAL`                                            | Hub 处理请求时发生内部异常                                                                     | Hub 同一时间段的容器日志、异常堆栈                                                               | 由 Hub 管理员根据时间、Worker ID 关联服务端日志                                                                                                                  |
+
+#### `7 PERMISSION_DENIED`：优先检查 Expert capabilities
+
+这是最值得先检查的一类配置错误。当前 `ClaimTask` 的校验顺序是：
+
+1. 校验 Worker credential。
+2. 校验请求中的 Worker ID 是否与 credential 对应的 ID 一致。
+3. 校验 Worker 是否 active，以及 Worker 注册的 capabilities 是否包含本次请求的 capability。
+4. 更新 Worker 心跳。
+5. 校验 `EXPERT_ID` 对应的 Expert 是否存在、是否 active。
+6. 校验 Expert 的 capabilities 是否包含 Worker 本次请求的 capability。
+
+**因此，如果 Admin 中 Worker 状态为 active，且“最后心跳”在报错期间持续刷新，说明前面的身份认证和 Worker 自身 capability 检查已经通过。此时反复报 `7`，应首先检查第 5、6 步：`EXPERT_ID` 是否指向正确的专家，以及专家配置的 capabilities 是否包含 Worker 的 `EXPERT_CAPABILITY`。**
+
+例如：
+
+```dotenv
+# Worker instance 配置
+EXPERT_WORKER_ID=ota-worker-01
+EXPERT_CAPABILITY=ota
+EXPERT_ID=ota
+```
+
+那么 Admin 中 `ota` 专家的 capabilities 必须包含 `ota`。如果 Expert 只配置了 `yocto`，Worker 虽然在线、心跳正常，也会在领取任务时收到 `7 PERMISSION_DENIED`。修复方式是在 Admin 专家配置中补上正确 capability，或将 Worker 配置调整为该专家实际支持的 capability；两边必须使用同一个 capability 标识。修改 Admin 专家配置后可直接重试；只有修改 Worker env 时才需要重启对应 instance。
+
+检查步骤：
+
+1. 在 Worker 主机查看实际运行 instance 的配置文件 `/etc/team-skill-hub-worker/workers/<instance>.env`，只核对 `EXPERT_WORKER_ID`、`EXPERT_CAPABILITY`、`EXPERT_ID`，不要输出整个 env 文件或任何密钥。
+2. 在 Admin → **专家平台 → Worker 管理**确认 Worker 为 `active`，并查看报错时“最后心跳”是否持续刷新。
+3. 在 Admin → **专家配置**打开 `EXPERT_ID` 对应的专家，确认专家已启用，且 capabilities 列表包含 Worker 的 `EXPERT_CAPABILITY`。
+4. 若 Worker active 但心跳不刷新，检查 Worker 注册 capabilities 是否包含 `EXPERT_CAPABILITY`，以及当前运行的 instance 是否误用了其他 Worker ID/配置文件。
+5. 修复后重启对应 Worker instance，观察心跳是否继续更新，并重新提交一个只读任务验证。
+
+新版本 Worker Runtime 会在 Hub 返回已知业务原因时直接输出 `grpcStatus`、`reasonCode` 和可执行的 `diagnosis`，例如：
+
+```json
+{
+  "event": "expert_worker.poll_failed",
+  "errorCode": "7",
+  "grpcStatus": "PERMISSION_DENIED",
+  "reasonCode": "WORKER_EXPERT_CAPABILITY_MISMATCH",
+  "diagnosis": "Expert 配置的 capabilities 不包含该 Worker 的 EXPERT_CAPABILITY；请对比 Admin 专家配置与 Worker instance 配置。"
+}
+```
+
+看到上述日志时，直接按 `diagnosis` 检查 Expert capabilities。为了避免泄露服务端内部信息，只有白名单内的 Hub 业务原因会写入日志；未知 details 仍不会输出。旧版本 Runtime 若仍只有 `errorCode`，继续按本节的“Worker 是否在线/心跳是否更新”逻辑定位。
+
+#### `16 UNAUTHENTICATED`：检查 Worker 审批和 credential
+
+- 在 Admin → **专家平台 → Worker 管理**确认 Worker 已批准且未吊销。`pending` / `revoked` 会在身份认证阶段被拒绝。
+- 确认 Worker env 的 `EXPERT_WORKER_ID` 与 Admin 中登记的 ID 完全一致。
+- 确认正式 credential 文件存在、非空，且 Worker 进程有权限读取。默认路径为 `/var/lib/team-skill-hub-worker/<instance>/worker-credential`；如设置了 `EXPERT_WORKER_CREDENTIAL_FILE`，以实际配置为准。
+- 如果刚审批或重新签发 credential，确认 Worker 已完成 Bootstrap Token 到正式 credential 的交换；重新签发后重启对应 instance。
+- 不要把 credential 内容打印到日志。必要时由管理员重新签发，并安全更新 Worker 主机上的凭据。
+
+#### `14 UNAVAILABLE`：检查 Worker 到 Hub 的连接
+
+在 Worker 主机执行以下检查：
+
+```bash
+# DNS/地址解析（如果使用域名）
+getent hosts hub.internal.example
+
+# TCP 端口连通性
+nc -vz hub.internal.example 7443
+
+# 检查 Hub 主机上的监听与端口发布
+docker port team-skill-hub 7443/tcp
+ss -lntp | grep ':7443'
+
+# 将变量替换为本机实际的 instance 名称
+INSTANCE=claude-01
+sudo systemctl status "team-skill-hub-worker@${INSTANCE}" --no-pager
+sudo journalctl -u "team-skill-hub-worker@${INSTANCE}" -n 100 --no-pager
+```
+
+如果没有 systemd，使用 `/opt/team-skill-hub-worker/current/worker-control.sh <instance> status` 和 `/opt/team-skill-hub-worker/current/worker-control.sh <instance> logs`。确认 `EXPERT_HUB_ADDRESS` 指向 Worker 实际可达的 Hub 地址，而不是容器内部地址或 `0.0.0.0`；同时检查防火墙、WSL2 端口转发和 TLS/mTLS 配置。TCP 可达不代表 TLS 证书或 gRPC 协议一定正确。
+
+如果以上检查无法定位，记录错误发生时间（含时区）、Worker ID、instance 名称、Expert ID、Worker capability 和 Hub 地址，交由 Hub 管理员关联同一时间段的 gRPC/应用日志。分享日志前先脱敏地址、用户名、Token、credential 和仓库私有信息。
+
 ### 页面报 `EXPERT_RUNTIME_DB_NOT_CONFIGURED`
 
 检查 Hub 是否使用 `docker-compose.expert.yml`，以及容器内 `EXPERT_RUNTIME_DB` 是否指向预期数据库。不要通过新建空数据库绕过问题。
