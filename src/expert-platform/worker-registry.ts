@@ -1,9 +1,12 @@
 export type WorkerStatus = "pending" | "active" | "revoked";
+export type WorkerConnectionStatus = "not_connected" | "online" | "heartbeat_lost";
 
 export interface WorkerRegistration {
   id: string;
   capabilities: readonly string[];
   status: WorkerStatus;
+  connectionStatus?: WorkerConnectionStatus;
+  lastSeenAt?: number | null;
 }
 
 /**

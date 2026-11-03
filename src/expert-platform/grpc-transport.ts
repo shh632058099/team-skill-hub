@@ -254,6 +254,8 @@ export async function startExpertWorkerGrpcServer(
       const authenticatedId = authenticatedWorkerId(workers, call.metadata);
       requireIdentityMatch(authenticatedId, call.request.worker_id);
       requireAuthorized(workers, call.request.worker_id, call.request.capability);
+      // ClaimTask is also the idle-worker heartbeat: the runtime polls even when no task is available.
+      workers.recordHeartbeat(call.request.worker_id);
       if (!call.request.expert_id) throw new Error("INVALID_REQUEST");
       let modelConfigJson = "";
       if (options.experts) {
@@ -328,6 +330,7 @@ export async function startExpertWorkerGrpcServer(
       const claim = toClaim(call.request);
       const worker = workers.get(claim.workerId);
       if (worker.status !== "active") throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_FORBIDDEN");
+      workers.recordHeartbeat(claim.workerId);
       const cancellationRequested = tasks.renew(claim);
       callback(null, { cancellation_requested: cancellationRequested });
     } catch (error) {

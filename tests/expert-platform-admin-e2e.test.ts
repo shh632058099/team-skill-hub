@@ -219,7 +219,13 @@ test("Admin expert configuration UI manages definitions and execution configurat
     const pendingWorkers = await fetch(base + "/admin/api/expert-workers");
     assert.equal(pendingWorkers.status, 200);
     assert.deepEqual((await pendingWorkers.json()).workers, [
-      { id: "yocto-worker-01", capabilities: ["yocto", "build"], status: "pending" },
+      {
+        id: "yocto-worker-01",
+        capabilities: ["yocto", "build"],
+        status: "pending",
+        connectionStatus: "not_connected",
+        lastSeenAt: null,
+      },
     ]);
 
     const rejectedCredential = await fetch(base + "/admin/api/expert-workers/yocto-worker-01/issue-credential", {

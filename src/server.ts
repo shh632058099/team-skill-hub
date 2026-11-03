@@ -1273,7 +1273,15 @@ export async function startServer(
       return { error: "admin API access denied" };
     }
     try {
-      return { workers: withWorkerRegistry((registry) => registry.list()) };
+      const configuredTimeout = Number(process.env.EXPERT_WORKER_HEARTBEAT_TIMEOUT_MS ?? 45_000);
+      const heartbeatTimeoutMs =
+        Number.isSafeInteger(configuredTimeout) && configuredTimeout >= 5_000 && configuredTimeout <= 300_000
+          ? configuredTimeout
+          : 45_000;
+      return {
+        workers: withWorkerRegistry((registry) => registry.list(Date.now(), heartbeatTimeoutMs)),
+        heartbeatTimeoutMs,
+      };
     } catch (error) {
       return workerAdminError(error, reply);
     }

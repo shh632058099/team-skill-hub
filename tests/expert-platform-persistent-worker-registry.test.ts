@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { PersistentWorkerRegistry } from "../src/expert-platform/persistent-worker-registry.js";
 
 test("bootstrap registration is idempotent before and after approval and rejects changed credentials", () => {
@@ -94,6 +95,48 @@ test("revocation survives reopen and blocks re-enrollment", () => {
     assert.equal(second.get("worker-1").status, "revoked");
     assert.throws(() => second.enroll("worker-1", ["ota"]), /WORKER_ALREADY_EXISTS/);
     second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worker presence distinguishes never connected, online, and heartbeat timeout", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "worker-presence-"));
+  const file = path.join(dir, "runtime.sqlite");
+  try {
+    const registry = new PersistentWorkerRegistry(file);
+    registry.enroll("presence-worker", ["ota"]);
+    registry.approve("presence-worker");
+    assert.equal(registry.get("presence-worker").connectionStatus, "not_connected");
+    registry.recordHeartbeat("presence-worker", 100_000);
+    const online = registry.get("presence-worker", 110_000, 45_000);
+    assert.equal(online.connectionStatus, "online");
+    assert.equal(online.lastSeenAt, 100_000);
+    const stale = registry.get("presence-worker", 146_000, 45_000);
+    assert.equal(stale.connectionStatus, "heartbeat_lost");
+    assert.equal(stale.status, "active", "presence must not mutate approval state");
+    registry.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy worker registry schema is upgraded with nullable heartbeat state", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "worker-presence-migration-"));
+  const file = path.join(dir, "runtime.sqlite");
+  try {
+    const legacy = new DatabaseSync(file);
+    legacy.exec(
+      "CREATE TABLE expert_workers (id TEXT PRIMARY KEY, capabilities_json TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending','active','revoked')), credential_hash TEXT)",
+    );
+    legacy
+      .prepare("INSERT INTO expert_workers(id,capabilities_json,status) VALUES(?,?,?)")
+      .run("legacy-worker", '["ota"]', "active");
+    legacy.close();
+    const registry = new PersistentWorkerRegistry(file);
+    assert.equal(registry.get("legacy-worker").connectionStatus, "not_connected");
+    assert.equal(registry.get("legacy-worker").lastSeenAt, null);
+    registry.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

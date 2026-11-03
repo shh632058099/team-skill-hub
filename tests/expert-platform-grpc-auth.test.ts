@@ -140,6 +140,30 @@ test("gRPC worker identity is bound to metadata credential", async () => {
   }
 });
 
+test("idle ClaimTask polling updates worker heartbeat even when no task is available", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-heartbeat-"));
+  const tasks = new ExpertTaskStore(path.join(dir, "tasks.sqlite"));
+  const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+  workers.enroll("idle-worker", ["ota"]);
+  workers.approve("idle-worker");
+  const token = workers.issueCredential("idle-worker");
+  const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0");
+  try {
+    assert.equal(workers.get("idle-worker").connectionStatus, "not_connected");
+    const client = new ExpertWorkerClient(server.address, { workerId: "idle-worker", credential: token });
+    assert.equal(await client.claimTask("idle-worker", "ota"), null);
+    const worker = workers.get("idle-worker");
+    assert.equal(worker.connectionStatus, "online");
+    assert.ok(typeof worker.lastSeenAt === "number");
+    client.close();
+  } finally {
+    await server.close();
+    tasks.close();
+    workers.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("credential identity must match request worker id and revocation takes effect immediately", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-auth-"));
   const tasks = new ExpertTaskStore(path.join(dir, "tasks.sqlite"));

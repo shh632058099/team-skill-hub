@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { WorkerRegistration, WorkerStatus } from "./worker-registry.js";
 
-type Row = { id: string; capabilities_json: string; status: WorkerStatus };
+type Row = { id: string; capabilities_json: string; status: WorkerStatus; last_seen_at?: number | null };
 
 export class PersistentWorkerRegistry {
   private readonly db: DatabaseSync;
@@ -18,9 +18,14 @@ export class PersistentWorkerRegistry {
         id TEXT PRIMARY KEY,
         capabilities_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('pending','active','revoked')),
-        credential_hash TEXT
+        credential_hash TEXT,
+        last_seen_at INTEGER
       );
     `);
+    const columns = this.db.prepare("PRAGMA table_info(expert_workers)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "last_seen_at")) {
+      this.db.exec("ALTER TABLE expert_workers ADD COLUMN last_seen_at INTEGER");
+    }
   }
 
   enroll(id: string, capabilities: string[]): WorkerRegistration {
@@ -55,20 +60,38 @@ export class PersistentWorkerRegistry {
     if (result.changes === 0) throw new Error("WORKER_NOT_FOUND");
   }
 
-  list(): WorkerRegistration[] {
+  list(now = Date.now(), heartbeatTimeoutMs = 45_000): WorkerRegistration[] {
     const rows = this.db.prepare("SELECT id FROM expert_workers ORDER BY id").all() as Array<{ id: string }>;
-    return rows.map((row) => this.get(row.id));
+    return rows.map((row) => this.get(row.id, now, heartbeatTimeoutMs));
   }
 
-  get(id: string): WorkerRegistration {
-    const row = this.db.prepare("SELECT id,capabilities_json,status FROM expert_workers WHERE id=?").get(id) as
-      Row | undefined;
+  get(id: string, now = Date.now(), heartbeatTimeoutMs = 45_000): WorkerRegistration {
+    if (!Number.isFinite(now) || !Number.isFinite(heartbeatTimeoutMs) || heartbeatTimeoutMs <= 0) {
+      throw new Error("INVALID_WORKER_PRESENCE_WINDOW");
+    }
+    const row = this.db
+      .prepare("SELECT id,capabilities_json,status,last_seen_at FROM expert_workers WHERE id=?")
+      .get(id) as Row | undefined;
     if (!row) throw new Error("WORKER_NOT_FOUND");
     const capabilities = JSON.parse(row.capabilities_json) as unknown;
     if (!Array.isArray(capabilities) || capabilities.some((value) => typeof value !== "string")) {
       throw new Error("WORKER_RECORD_INVALID");
     }
-    return { id: row.id, capabilities, status: row.status };
+    const lastSeenAt = row.last_seen_at == null ? null : Number(row.last_seen_at);
+    const connectionStatus =
+      lastSeenAt == null ? "not_connected" : now - lastSeenAt <= heartbeatTimeoutMs ? "online" : "heartbeat_lost";
+    return { id: row.id, capabilities, status: row.status, connectionStatus, lastSeenAt };
+  }
+
+  recordHeartbeat(id: string, now = Date.now()): void {
+    if (!Number.isFinite(now) || now < 0) throw new Error("INVALID_WORKER_HEARTBEAT_TIME");
+    const result = this.db
+      .prepare("UPDATE expert_workers SET last_seen_at=? WHERE id=? AND status='active'")
+      .run(Math.trunc(now), id);
+    if (result.changes === 0) {
+      const worker = this.get(id);
+      if (worker.status !== "active") throw new Error("WORKER_NOT_ACTIVE");
+    }
   }
 
   isAuthorized(id: string, capability: string): boolean {
