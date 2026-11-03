@@ -310,12 +310,27 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(body.task.result, "Read-only findings");
     assert.equal(body.runs.length, 1);
     assert.ok(body.events.some((x: any) => x.event_type === "repository.started"));
+    assert.equal(body.eventsPage.limit, 50);
+    assert.equal(body.eventsPage.offset, 0);
+    assert.equal(body.eventsPage.hasNewer, false);
+    const newestPageResponse = await fetch(base + "/admin/api/expert-tasks/" + task.taskId + "?limit=1&offset=0");
+    assert.equal(newestPageResponse.status, 200);
+    const newestPage = await newestPageResponse.json();
+    assert.equal(newestPage.events.length, 1);
+    assert.equal(newestPage.eventsPage.hasOlder, true);
+    const olderPageResponse = await fetch(base + "/admin/api/expert-tasks/" + task.taskId + "?limit=1&offset=1");
+    const olderPage = await olderPageResponse.json();
+    assert.equal(olderPage.eventsPage.hasNewer, true);
+    assert.ok(Number(newestPage.events[0].event_id) > Number(olderPage.events[0].event_id));
     assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid")).status, 400);
     assert.match(html, /id="taskPage"/);
     assert.match(html, /<th>时间<\/th>/);
     assert.match(html, /item\.created_at/);
     assert.match(html, /id="taskStop"/);
     assert.match(html, /id="taskDelete"/);
+    assert.match(html, /id="taskEventsNewer"/);
+    assert.match(html, /id="taskEventsOlder"/);
+    assert.match(html, /taskEventOffset=0/);
     assert.match(html, /hashchange/);
     // Deletion is transactional and includes events + runs; active tasks cannot be removed.
     const deleted = await fetch(base + "/admin/api/expert-tasks/" + task.taskId, { method: "DELETE" });

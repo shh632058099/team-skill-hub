@@ -791,27 +791,39 @@ export async function startServer(
       return { error: error instanceof Error ? error.message : "TASK_LIST_FAILED" };
     }
   });
-  app.get<{ Params: { id: string } }>("/admin/api/expert-tasks/:id", async (request, reply) => {
-    if (!hasAdminAccess(request)) {
-      reply.code(403);
-      return { error: "admin API access denied" };
-    }
-    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) {
-      reply.code(400);
-      return { error: "invalid task ID" };
-    }
-    try {
-      const detail = withExpertTaskStore((store) => store.adminTaskDetail(request.params.id));
-      if (!detail) {
-        reply.code(404);
-        return { error: "task not found" };
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string } }>(
+    "/admin/api/expert-tasks/:id",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
       }
-      return detail;
-    } catch (error) {
-      reply.code(503);
-      return { error: error instanceof Error ? error.message : "TASK_DETAIL_FAILED" };
-    }
-  });
+      if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) {
+        reply.code(400);
+        return { error: "invalid task ID" };
+      }
+      try {
+        const limit = request.query.limit === undefined ? undefined : Number(request.query.limit);
+        const offset = request.query.offset === undefined ? undefined : Number(request.query.offset);
+        if (
+          (limit !== undefined && !Number.isSafeInteger(limit)) ||
+          (offset !== undefined && !Number.isSafeInteger(offset))
+        ) {
+          reply.code(400);
+          return { error: "invalid event pagination" };
+        }
+        const detail = withExpertTaskStore((store) => store.adminTaskDetail(request.params.id, { limit, offset }));
+        if (!detail) {
+          reply.code(404);
+          return { error: "task not found" };
+        }
+        return detail;
+      } catch (error) {
+        reply.code(503);
+        return { error: error instanceof Error ? error.message : "TASK_DETAIL_FAILED" };
+      }
+    },
+  );
   app.post<{ Params: { id: string } }>("/admin/api/expert-tasks/:id/stop", async (request, reply) => {
     if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
     if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid task ID" });

@@ -155,6 +155,11 @@ export class ExpertTaskStore {
     this.db.exec(
       `UPDATE expert_tasks SET created_at=(SELECT MIN(created_at) FROM expert_events WHERE expert_events.task_id=expert_tasks.task_id) WHERE created_at IS NULL`,
     );
+    // Enforce the per-task retention policy for databases upgraded from older versions.
+    this.db.exec(`DELETE FROM expert_events WHERE event_id NOT IN (
+      SELECT event_id FROM expert_events AS recent
+      WHERE recent.task_id=expert_events.task_id ORDER BY event_id DESC LIMIT 1000
+    )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
@@ -698,7 +703,9 @@ export class ExpertTaskStore {
     return { total, limit, offset, tasks: rows };
   }
 
-  adminTaskDetail(taskId: string) {
+  adminTaskDetail(taskId: string, query: { limit?: number; offset?: number } = {}) {
+    const limit = Number.isFinite(query.limit) ? Math.min(100, Math.max(1, Math.floor(query.limit!))) : 50;
+    const offset = Number.isFinite(query.offset) ? Math.min(1000 - limit, Math.max(0, Math.floor(query.offset!))) : 0;
     const task = this.db
       .prepare(
         "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,created_at,cancellation_requested FROM expert_tasks WHERE task_id=?",
@@ -708,12 +715,20 @@ export class ExpertTaskStore {
     const runs = this.db
       .prepare("SELECT run_id,task_id,worker_id,fencing,status FROM expert_runs WHERE task_id=? ORDER BY rowid")
       .all(taskId);
+    const total = Number(
+      (this.db.prepare("SELECT count(*) AS n FROM expert_events WHERE task_id=?").get(taskId) as { n: number }).n,
+    );
     const events = this.db
       .prepare(
-        "SELECT event_id,task_id,run_id,event_type,details,created_at FROM expert_events WHERE task_id=? ORDER BY event_id LIMIT 1000",
+        "SELECT event_id,task_id,run_id,event_type,details,created_at,tool_code,count FROM expert_events WHERE task_id=? ORDER BY event_id DESC LIMIT ? OFFSET ?",
       )
-      .all(taskId);
-    return { task, runs, events };
+      .all(taskId, limit, offset);
+    return {
+      task,
+      runs,
+      events,
+      eventsPage: { total, limit, offset, hasNewer: offset > 0, hasOlder: offset + events.length < total },
+    };
   }
 
   /** Existing status contract plus concise observed activity and session queue reason. */
@@ -840,6 +855,7 @@ export class ExpertTaskStore {
           VALUES(?,?,?,'',?,?,?,?)`,
             )
             .run(claim.taskId, claim.runId, stage, sourceSequence, toolCode || null, count || null, now);
+        this.trimTaskEvents(claim.taskId);
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -876,6 +892,7 @@ export class ExpertTaskStore {
       this.db
         .prepare("INSERT INTO expert_events(task_id,run_id,event_type,details,created_at) VALUES(?,?,?,?,?)")
         .run(claim.taskId, claim.runId, stage, safeDetails, now);
+      this.trimTaskEvents(claim.taskId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -895,10 +912,21 @@ export class ExpertTaskStore {
     this.db.exec(`ALTER TABLE expert_tasks ADD COLUMN ${name} ${definition}`);
   }
 
+  private trimTaskEvents(taskId: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM expert_events WHERE task_id=? AND event_id NOT IN (
+      SELECT event_id FROM expert_events WHERE task_id=? ORDER BY event_id DESC LIMIT 1000
+    )`,
+      )
+      .run(taskId, taskId);
+  }
+
   private event(taskId: string, runId: string | null, kind: string): void {
     this.db
       .prepare("INSERT INTO expert_events(task_id,run_id,event_type,created_at) VALUES(?,?,?,?)")
       .run(taskId, runId, kind, Date.now());
+    this.trimTaskEvents(taskId);
   }
 
   private fromRow(row: Row): TaskRecord {

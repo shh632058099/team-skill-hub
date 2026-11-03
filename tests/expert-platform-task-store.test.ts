@@ -66,6 +66,49 @@ test("admin task history returns creation timestamps newest first", () => {
   }
 });
 
+test("task event retention keeps the newest 1000 and admin timeline paginates newest-first", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-event-retention-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const store = new ExpertTaskStore(file);
+    const task = store.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "events",
+      problem: "event retention",
+    });
+    const db = new DatabaseSync(file);
+    const insert = db.prepare(
+      "INSERT INTO expert_events(task_id,run_id,event_type,details,created_at) VALUES(?,NULL,'test.event','',?)",
+    );
+    for (let i = 0; i < 1000; i++) insert.run(task.taskId, 10_000 + i);
+    db.close();
+
+    // A lifecycle write trims old rows in the same store operation.
+    store.cancel(task.taskId, "alice", "team-a");
+    const countDetail = store.adminTaskDetail(task.taskId, { limit: 100 });
+    assert.ok(countDetail);
+    assert.equal(countDetail.eventsPage.total, 1000);
+    const latest = store.adminTaskDetail(task.taskId, { limit: 50, offset: 0 });
+    assert.ok(latest);
+    const ids = latest.events.map((event: any) => Number(event.event_id));
+    assert.equal(ids.length, 50);
+    assert.ok(ids.every((id: number, index: number) => index === 0 || ids[index - 1]! > id));
+    const older = store.adminTaskDetail(task.taskId, { limit: 50, offset: 50 });
+    assert.ok(older);
+    assert.equal(older.eventsPage.hasNewer, true);
+    assert.equal(older.eventsPage.hasOlder, true);
+    assert.ok(Number((latest.events[49] as any).event_id) > Number((older.events[0] as any).event_id));
+    const oldest = store.adminTaskDetail(task.taskId, { limit: 50, offset: 950 });
+    assert.ok(oldest);
+    assert.equal(oldest.eventsPage.hasOlder, false);
+    assert.equal(oldest.eventsPage.hasNewer, true);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("claim uses fencing and stale workers cannot complete the task", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-"));
   try {
@@ -298,6 +341,11 @@ test("admin task history and bounded per-run stages reject stale workers and uns
     store.fail(second, "EXECUTION_FAILED", 114);
     const detail = store.adminTaskDetail(task.taskId)!;
     assert.equal(detail.runs.length, 2);
+    const eventIds = detail.events.map((event) => Number((event as any).event_id));
+    assert.ok(
+      eventIds.every((eventId, index) => index === 0 || eventIds[index - 1]! > eventId),
+      "admin task timeline is newest-first",
+    );
     assert.ok(Object.prototype.hasOwnProperty.call(detail.task, "source_session_id"));
     assert.ok(Object.prototype.hasOwnProperty.call(detail.task, "source_client"));
     assert.ok(detail.events.some((event) => (event as any).event_type === "lease_expired"));
