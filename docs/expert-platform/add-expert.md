@@ -603,7 +603,7 @@ EXPERT_ID=ota
 }
 ```
 
-看到上述日志时，直接按 `diagnosis` 检查 Expert capabilities。为了避免泄露服务端内部信息，只有白名单内的 Hub 业务原因会写入日志；未知 details 仍不会输出。旧版本 Runtime 若仍只有 `errorCode`，继续按本节的“Worker 是否在线/心跳是否更新”逻辑定位。
+看到上述日志时，直接按 `diagnosis` 检查 Expert capabilities。`reasonCode` 与 `diagnosis` 均由 **Hub 根据实际代码判断结果生成并通过结构化 gRPC metadata 返回**；Worker Runtime 只负责校验格式并展示，不再维护另一份错误解释表。为避免泄露服务端内部信息，Hub 只对明确的业务错误附带结构化提示，Worker 也不会把未知 `details` 原样写入日志。旧版本 Runtime 若仍只有 `errorCode`，继续按本节的“Worker 是否在线/心跳是否更新”逻辑定位。
 
 #### `16 UNAUTHENTICATED`：检查 Worker 审批和 credential
 

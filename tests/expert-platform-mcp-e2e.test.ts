@@ -255,7 +255,17 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     });
     await assert.rejects(
       () => workerClient!.claimTask("ota-worker", "yocto", "ota"),
-      /WORKER_EXPERT_CAPABILITY_MISMATCH/,
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /WORKER_EXPERT_CAPABILITY_MISMATCH/);
+        const serviceError = error as Error & { metadata?: { get(key: string): unknown[] } };
+        assert.equal(serviceError.metadata?.get("x-expert-error-code")[0], "WORKER_EXPERT_CAPABILITY_MISMATCH");
+        assert.match(
+          Buffer.from(serviceError.metadata?.get("x-expert-error-hint-bin")[0] as Buffer).toString("utf8"),
+          /Expert 配置的 capabilities 不包含该 Worker 的 EXPERT_CAPABILITY/,
+        );
+        return true;
+      },
     );
     assert.equal(tasks.get(unauthorizedExpertTask.taskId, "ota-test-client", "rd").status, "queued");
 

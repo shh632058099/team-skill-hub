@@ -59,9 +59,23 @@ test("worker loop logs actionable Hub reason for permission denied without leaki
         const error = new Error("7 PERMISSION_DENIED: WORKER_EXPERT_CAPABILITY_MISMATCH") as Error & {
           code: number;
           details: string;
+          metadata: { get(key: string): unknown[] };
         };
         error.code = 7;
         error.details = "WORKER_EXPERT_CAPABILITY_MISMATCH";
+        error.metadata = {
+          get(key: string) {
+            if (key === "x-expert-error-code") return ["WORKER_EXPERT_CAPABILITY_MISMATCH"];
+            if (key === "x-expert-error-hint-bin")
+              return [
+                Buffer.from(
+                  "Expert 配置的 capabilities 不包含该 Worker 的 EXPERT_CAPABILITY；请对比 Admin 专家配置与 Worker instance 配置。",
+                  "utf8",
+                ),
+              ];
+            return [];
+          },
+        };
         throw error;
       },
       { pollMs: 5, signal: controller.signal },
@@ -91,9 +105,17 @@ test("worker loop does not expose unknown server details in poll failure logs", 
         const error = new Error("7 PERMISSION_DENIED: internal-secret-or-private-detail") as Error & {
           code: number;
           details: string;
+          metadata: { get(key: string): unknown[] };
         };
         error.code = 7;
         error.details = "internal-secret-or-private-detail";
+        error.metadata = {
+          get(key: string) {
+            if (key === "x-expert-error-code") return ["not-safe-code"];
+            if (key === "x-expert-error-hint-bin") return [Buffer.from("internal-secret-or-private-detail", "utf8")];
+            return [];
+          },
+        };
         throw error;
       },
       { pollMs: 5, signal: controller.signal },

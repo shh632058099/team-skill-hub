@@ -148,8 +148,25 @@ function toClaim(request: LeaseRequest): Claim {
   };
 }
 
+const WORKER_ERROR_HINTS: Record<string, string> = {
+  WORKER_EXPERT_CAPABILITY_MISMATCH:
+    "Expert 配置的 capabilities 不包含该 Worker 的 EXPERT_CAPABILITY；请对比 Admin 专家配置与 Worker instance 配置。",
+  WORKER_FORBIDDEN: "Worker 未获授权使用当前 capability；请检查 Admin 中 Worker 的审批状态和注册 capabilities。",
+  WORKER_IDENTITY_MISMATCH:
+    "请求中的 Worker ID 与 credential 对应身份不一致；请检查 EXPERT_WORKER_ID 和该 instance 使用的 credential。",
+  EXPERT_NOT_FOUND: "Worker 配置的 EXPERT_ID 在 Hub 中不存在；请核对 Worker instance 配置和 Admin 中的 Expert ID。",
+  EXPERT_INACTIVE: "Worker 配置的 Expert 已停用；请在 Admin 中启用该 Expert，或改用已启用的 Expert。",
+  WORKER_UNAUTHENTICATED: "Worker 身份认证失败；请检查审批/吊销状态以及该 instance 的 credential 文件。",
+};
+
 function grpcError(code: grpc.status, message: string): grpc.ServiceError {
-  return Object.assign(new Error(message), { code, details: message, metadata: new grpc.Metadata() });
+  const metadata = new grpc.Metadata();
+  const hint = WORKER_ERROR_HINTS[message];
+  if (hint) {
+    metadata.set("x-expert-error-code", message);
+    metadata.set("x-expert-error-hint-bin", Buffer.from(hint, "utf8"));
+  }
+  return Object.assign(new Error(message), { code, details: message, metadata });
 }
 
 function requireAuthorized(workers: PersistentWorkerRegistry, workerId: string, capability: string): void {
