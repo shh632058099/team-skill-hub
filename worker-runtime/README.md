@@ -46,6 +46,39 @@ artifacts/worker-runtime/worker-runtime-<version>.tar.gz
 
 Deploy this artifact to Worker hosts; do not deploy the Hub source tree.
 
+## Unprivileged user installation (no root, no systemd)
+
+Use this mode when the Worker should run as your regular Linux account. The account must already be able to access Docker; membership in the `docker` group is the usual setup. The installer only verifies `docker info` and never creates users/groups, changes group membership, runs `sudo`, or writes under `/etc`, `/var/lib`, or systemd.
+
+```bash
+mkdir -p "$HOME/team-skill-hub-worker"
+./install-worker.sh worker-runtime-<version>.tar.gz \
+  --install-dir "$HOME/team-skill-hub-worker" --no-systemd
+
+WORKER="$HOME/team-skill-hub-worker/current/worker-control.sh"
+"$WORKER" init claude-01
+# Edit $HOME/team-skill-hub-worker/etc/team-skill-hub-worker/workers/claude-01.env
+"$WORKER" claude-01 start
+"$WORKER" claude-01 status
+"$WORKER" claude-01 logs
+"$WORKER" claude-01 stop
+"$WORKER" list
+```
+
+If Docker access fails, check `id -nG` and `docker info`. An administrator can add the account to the Docker group with `sudo usermod -aG docker "$USER"`; log out and back in before retrying. Docker group membership effectively grants root-equivalent control of the host, so only trusted users should receive it.
+
+All mutable files stay inside the selected install directory:
+
+```text
+$HOME/team-skill-hub-worker/
+  current -> releases/<version>
+  node
+  etc/team-skill-hub-worker/{workers,instances}/
+  data/<instance>/{worker-credential,worker.pid,worker.log,source,repositories}/
+```
+
+Node.js 24 must be executable by the installing account. The Worker process, config, credentials, PID and logs are owned by that account. This mode does not configure boot-time startup or automatic restart; use a user-level supervisor if needed. Do not run the same instance in user mode and systemd simultaneously.
+
 ## Install the shared Runtime
 
 ```bash
@@ -133,7 +166,7 @@ The control script resolves its Runtime and bundled Node from its own physical s
 
 Repeat independently for other instances. PID, process start time, logs, credentials, source, and repository roots are instance-local.
 
-Manual mode runs the daemon as `expert-worker`. It does not automatically restart crashed Workers or enable start-on-boot; use systemd or another trusted supervisor when required.
+System-mode manual installation runs the daemon as `expert-worker`; unprivileged user-mode installation runs it as the invoking account. Neither manual mode automatically restarts crashed Workers or enables start-on-boot; use systemd or another trusted supervisor when required.
 
 ## systemd lifecycle
 

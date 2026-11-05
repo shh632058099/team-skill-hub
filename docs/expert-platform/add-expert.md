@@ -53,10 +53,10 @@ Worker 主机（Linux）
 | 系统      | 支持 Node.js 24 和 Docker Engine 的 Linux 主机；systemd **可选**。默认检测 systemd；也可通过安装参数 `--no-systemd` 强制手动模式；CPU 架构需与交付镜像一致                                                         |
 | CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库、多个 Worker instance 或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                                   |
 | 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                                                                      |
-| 软件      | Node.js **24.x**、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`；安装时需要 sudo/root 权限。安装器会解析一个 `expert-worker` 可执行的 Node.js 24 并固定到所选 Runtime 安装目录下的 `node` |
+| 软件      | Node.js **24.x**、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`；系统模式安装需要 sudo/root；普通用户模式不需要 root，直接使用当前账号可执行的 Node.js 24。系统模式固定使用 `expert-worker` 身份运行，普通用户模式由当前账号运行 |
 | 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API / MCP；如需代理/DNS/CA，分别验证                                                                                                |
 | 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                                                               |
-| 数据目录  | 自定义 Runtime 安装目录（默认 `/opt/team-skill-hub-worker`）、`/etc/team-skill-hub-worker`（instance 配置和私钥）、`/var/lib/team-skill-hub-worker`（instance credential、仓库 checkout、日志）                    |
+| 数据目录  | 系统模式使用 `/opt/team-skill-hub-worker`、`/etc/team-skill-hub-worker`、`/var/lib/team-skill-hub-worker`；普通用户模式全部放在 `$HOME/team-skill-hub-worker`（或指定安装目录）下                    |
 
 **常见部署模式：** 一台 Worker 主机只安装一套共享 Runtime，但可以创建并同时运行多个独立 Worker instance。每个 instance 有独立的 `EXPERT_WORKER_ID`、credential、key 文件、日志和 Git checkout，例如同一台主机同时运行 `claude-01` 与 `codex-01`。任务执行容器仍由各 Worker instance 按任务拉起。**Hub 与 Worker 不必同机**，也不需要把 Hub 的 Docker Compose 或源码放到 Worker 主机。
 
@@ -325,7 +325,7 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
   /tmp/team-skill-hub-worker-release/worker-runtime-0.1.0.tar.gz
 ```
 
-默认安装目录为 `/opt/team-skill-hub-worker`。如需安装到其他磁盘/目录，可指定 `--install-dir`；如主机运行 systemd 但希望完全手动管理 Worker，增加 `--no-systemd`。该参数会跳过 systemd 探测、unit 安装/修改/清理和所有 `systemctl` 调用：
+系统模式默认安装目录为 `/opt/team-skill-hub-worker`，需 sudo/root。如需安装到其他磁盘/目录，可指定 `--install-dir`；如主机运行 systemd 但希望完全手动管理 Worker，增加 `--no-systemd`。普通用户模式请不要使用 sudo，并使用 `$HOME` 下的目录，命令见本节后面的“普通用户安装”。该参数会跳过 systemd 探测、unit 安装/修改/清理和所有 `systemctl` 调用：
 
 ```bash
 sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
@@ -333,7 +333,7 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
   --install-dir "/data/apps/team-skill-hub worker" --no-systemd
 ```
 
-安装目录可使用相对或绝对路径（相对路径按执行安装器时的当前目录解析）。`worker-control.sh` 会从自身真实安装位置定位 Runtime，不需要先 `cd` 到安装目录。`/etc/team-skill-hub-worker` 和 `/var/lib/team-skill-hub-worker` 不随 Runtime 目录改变。
+安装目录可使用相对或绝对路径（相对路径按执行安装器时的当前目录解析）。系统模式下，`worker-control.sh` 会从自身真实安装位置定位 Runtime，配置和数据分别固定在 `/etc/team-skill-hub-worker` 与 `/var/lib/team-skill-hub-worker`。普通用户模式则把配置和数据放在安装目录下的 `etc/`、`data/`，不访问系统目录。
 
 安装完成后核心布局为：
 
@@ -347,7 +347,7 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
 /etc/systemd/system/team-skill-hub-worker@.service   # systemd 主机
 ```
 
-安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；在 systemd 自动模式下，若旧固定 `team-skill-hub-worker.service` 仍 active/enabled，安装器会直接停止并要求先 `systemctl disable --now team-skill-hub-worker.service`，避免旧配置继续运行。`--no-systemd` 模式不会检查、停止、删除或修改任何 systemd unit。安装器还会解析一个 `expert-worker` 可执行的 Node.js 24，并固定为 `<install-dir>/node`。systemd 模式会生成指向实际安装目录的 unit；`--no-systemd` 模式不会触碰任何 unit。
+安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；在 systemd 自动模式下，若旧固定 `team-skill-hub-worker.service` 仍 active/enabled，安装器会直接停止并要求先 `systemctl disable --now team-skill-hub-worker.service`，避免旧配置继续运行。`--no-systemd` 模式不会检查、停止、删除或修改任何 systemd unit。系统模式安装器会解析一个 `expert-worker` 可执行的 Node.js 24；普通用户模式会解析当前账号可执行的 Node.js 24。两种模式都会固定为 `<install-dir>/node`。systemd 模式会生成指向实际安装目录的 unit；`--no-systemd` 模式不会触碰任何 unit。
 
 ### 7.2 导入执行镜像
 
@@ -715,6 +715,30 @@ docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke yocto
 ```
 
 CLI 的 `define` 命令只创建 Expert Definition；模型、Backend、MCP 策略均属于 Deployment，应在 Admin → **执行配置** 中维护。CLI 的 `deploy` 命令仍偏向旧式 `repositoryIds` 参数，不覆盖 Admin 页面直接填写仓库 URL、分支、Git 凭据引用、代理、Executor/Model 和 MCP 策略的完整体验，因此新建执行配置应优先使用 Admin 页面。
+
+### 普通用户安装（无需 root / systemd）
+
+如果 Worker 主机上的普通账号已经具备 Docker Socket 访问权限（通常已加入 `docker` 组），可以完全以该账号安装和运行 Worker：
+
+```bash
+mkdir -p "$HOME/team-skill-hub-worker"
+./install-worker.sh worker-runtime-<version>.tar.gz \
+  --install-dir "$HOME/team-skill-hub-worker" --no-systemd
+
+WORKER="$HOME/team-skill-hub-worker/current/worker-control.sh"
+"$WORKER" init claude-01
+# 编辑 $HOME/team-skill-hub-worker/etc/team-skill-hub-worker/workers/claude-01.env
+"$WORKER" claude-01 start
+"$WORKER" claude-01 status
+"$WORKER" claude-01 logs
+"$WORKER" claude-01 stop
+```
+
+普通用户模式不会创建 `expert-worker` 系统用户/组，不会修改 docker 组成员，不使用 `runuser`，也不会写入 `/etc`、`/var/lib` 或 systemd。配置、密钥、凭据、PID、日志和仓库数据均位于指定安装目录。安装时通过当前用户执行 `docker info` 验证 Docker 权限。
+
+如果 `docker info` 提示权限不足，请确认 `id -nG` 包含 `docker`，且 Docker daemon 正常。需要管理员执行 `sudo usermod -aG docker <用户名>` 后，用户注销并重新登录；安装脚本不会替用户修改组成员。注意：docker 组成员通常拥有宿主机 root 等价权限，只应授予可信账号。
+
+普通用户模式默认安装目录为 `$HOME/team-skill-hub-worker`；系统安装仍使用 root + `/opt`、`/etc`、`/var/lib` 和可选 systemd。两种模式由安装时写入的模式标记区分，控制脚本自动选择对应路径与进程身份。
 
 ## 12. 新增第二个 Worker 的注意事项
 

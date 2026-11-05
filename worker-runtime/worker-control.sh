@@ -14,8 +14,22 @@ else
   BASE="$HOST_ROOT/current"
 fi
 HOST_ROOT=${WORKER_RUNTIME_HOST_ROOT:-$(cd "$(dirname "$BASE")" && pwd -P)}
-ETC=${WORKER_RUNTIME_ETC_ROOT:-/etc/team-skill-hub-worker}
-DATA_ROOT=${WORKER_RUNTIME_DATA_ROOT:-/var/lib/team-skill-hub-worker}
+MODE_FILE="$HOST_ROOT/.worker-runtime-mode"
+USER_MODE=0
+if [[ -f "$MODE_FILE" ]] && [[ $(cat "$MODE_FILE") == user ]]; then USER_MODE=1; fi
+if [[ $USER_MODE -eq 1 && $EUID -eq 0 ]]; then
+  echo "This is an unprivileged user-mode installation; do not run worker-control.sh with sudo/root." >&2
+  exit 1
+fi
+if [[ $USER_MODE -eq 1 ]]; then
+  DEFAULT_ETC=$(cat "$HOST_ROOT/.worker-runtime-etc")
+  DEFAULT_DATA=$(cat "$HOST_ROOT/.worker-runtime-data")
+else
+  DEFAULT_ETC=/etc/team-skill-hub-worker
+  DEFAULT_DATA=/var/lib/team-skill-hub-worker
+fi
+ETC=${WORKER_RUNTIME_ETC_ROOT:-$DEFAULT_ETC}
+DATA_ROOT=${WORKER_RUNTIME_DATA_ROOT:-$DEFAULT_DATA}
 WORKERS_DIR="$ETC/workers"
 INSTANCES_DIR="$ETC/instances"
 TEMPLATE="$ETC/worker.env.example"
@@ -40,16 +54,16 @@ fi
 usage() {
   cat >&2 <<EOF
 Usage:
-  sudo $0 init <instance>
-  sudo $0 list [--json]
-  sudo $0 <instance> {start|stop|restart|status|logs}
+  $0 init <instance>
+  $0 list [--json]
+  $0 <instance> {start|stop|restart|status|logs}
 EOF
   exit 2
 }
 
 require_root() {
-  if [[ "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" && $EUID -ne 0 ]]; then
-    echo "Run as root/sudo." >&2
+  if [[ $USER_MODE -eq 0 && "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" && $EUID -ne 0 ]]; then
+    echo "System-mode Worker control requires root/sudo. User-mode installs do not." >&2
     exit 1
   fi
 }
@@ -79,7 +93,7 @@ worker_start_time() {
   cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline")
   [[ "$cmd" == *"$WORKER_SCRIPT"* ]] || return 1
   tr '\0' '\n' < "/proc/$pid/environ" | grep -Fxq "EXPERT_WORKER_INSTANCE=$INSTANCE" || return 1
-  if id expert-worker >/dev/null 2>&1; then
+  if [[ $USER_MODE -eq 0 ]] && id expert-worker >/dev/null 2>&1; then
     uid=$(stat -c %u "/proc/$pid")
     [[ "$uid" == "$(id -u expert-worker)" ]] || return 1
   fi
@@ -135,7 +149,7 @@ init_instance() {
   [[ ! -e "$CONFIG" ]] || { echo "Worker instance already exists: $instance" >&2; return 1; }
   install -d -m 0750 "$WORKERS_DIR" "$INSTANCES_DIR/$instance/keys" "$DATA"
   install -m 0600 "$TEMPLATE" "$CONFIG"
-  if [[ "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  if [[ $USER_MODE -eq 0 && "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
     chown root:root "$CONFIG"
     chown -R root:expert-worker "$INSTANCES_DIR/$instance"
     chown -R expert-worker:expert-worker "$DATA"
@@ -187,7 +201,7 @@ list_instances() {
 
 prepare_instance_env() {
   [[ -f "$CONFIG" ]] || { echo "Missing Worker config: $CONFIG; run '$0 init $INSTANCE' first." >&2; return 1; }
-  if [[ "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  if [[ $USER_MODE -eq 0 && "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
     [[ $(stat -c %u "$CONFIG") -eq 0 ]] || { echo "$CONFIG must be root-owned" >&2; return 1; }
     [[ $(stat -c %a "$CONFIG") == 600 ]] || { echo "$CONFIG must have permissions 600" >&2; return 1; }
   fi
@@ -248,19 +262,27 @@ start_worker() {
     return 1
   fi
   if pid=$(running_pid 2>/dev/null); then echo "Worker $INSTANCE already running (PID $pid)"; return; fi
-  [[ -f "$WORKER_SCRIPT" && -n "$NODE" && -x "$NODE" && -n "$RUNUSER" && -x "$RUNUSER" ]] || { echo "Missing Node.js, runuser, or installed Worker Runtime." >&2; return 1; }
+  [[ -f "$WORKER_SCRIPT" && -n "$NODE" && -x "$NODE" ]] || { echo "Missing Node.js or installed Worker Runtime." >&2; return 1; }
+  if [[ $USER_MODE -eq 0 ]]; then
+    [[ -n "$RUNUSER" && -x "$RUNUSER" ]] || { echo "Missing runuser for system-mode Worker." >&2; return 1; }
+  fi
   prepare_instance_env
   install -d -m 0750 "$DATA"
   "$NODE" "$BASE/check-worker-config.js"
   rm -f "$PID_FILE" "$START_FILE"
   touch "$LOG_FILE"
-  if [[ "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  if [[ $USER_MODE -eq 0 && "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
     chown expert-worker:expert-worker "$DATA" "$LOG_FILE"
   fi
   chmod 0600 "$LOG_FILE"
-  "$RUNUSER" --user expert-worker --preserve-environment -- "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+  if [[ $USER_MODE -eq 1 ]]; then
+    "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+  else
+    "$RUNUSER" --user expert-worker --preserve-environment -- "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+  fi
   local supervisor=$! child=""
   for _ in $(seq 1 40); do
+    if [[ $USER_MODE -eq 1 ]] && worker_start_time "$supervisor" >/dev/null 2>&1; then child=$supervisor; break; fi
     if [[ -r "/proc/$supervisor/task/$supervisor/children" ]]; then
       for candidate in $(cat "/proc/$supervisor/task/$supervisor/children"); do
         if worker_start_time "$candidate" >/dev/null 2>&1; then child=$candidate; break; fi
@@ -274,7 +296,7 @@ start_worker() {
   if [[ -z "$child" ]]; then echo "Worker did not start; see $LOG_FILE" >&2; wait "$supervisor" 2>/dev/null || true; return 1; fi
   printf '%s\n' "$child" > "$PID_FILE"
   worker_start_time "$child" > "$START_FILE"
-  [[ "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" == "1" ]] || chown expert-worker:expert-worker "$PID_FILE" "$START_FILE"
+  [[ $USER_MODE -eq 1 || "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" == "1" ]] || chown expert-worker:expert-worker "$PID_FILE" "$START_FILE"
   chmod 0600 "$PID_FILE" "$START_FILE"
   echo "Worker $INSTANCE started (PID $child); logs: $LOG_FILE"
 }

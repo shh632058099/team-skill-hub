@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -69,6 +79,10 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(manual, /\/usr\/sbin\/runuser/);
   assert.match(manual, /\/sbin\/runuser/);
   assert.match(manual, /"\$RUNUSER" --user expert-worker --preserve-environment/);
+  assert.match(manual, /USER_MODE/);
+  assert.match(manual, /DEFAULT_ETC/);
+  assert.match(manual, /DEFAULT_DATA/);
+  assert.match(manual, /if \[\[ \$USER_MODE -eq 1 \]\]; then/);
   assert.match(manual, /worker_start_time/);
   assert.match(manual, /\/proc\/\$pid\/environ/);
   assert.match(manual, /EXPERT_WORKER_INSTANCE=\$INSTANCE/);
@@ -199,6 +213,12 @@ test("installer accepts a custom install directory and explicit no-systemd mode"
   const installer = readFileSync(new URL("install-worker.sh", runtime), "utf8");
   assert.match(installer, /--install-dir/);
   assert.match(installer, /--no-systemd/);
+  assert.match(installer, /docker info/);
+  assert.match(installer, /invoking user's PATH precedence/);
+  assert.match(installer, /export PATH="\$\{PATH:-\}:\/usr\/sbin/);
+  assert.match(installer, /WORKER_RUNTIME_DOCKER/);
+  assert.match(installer, /USER_MODE|unprivileged user mode/);
+  assert.match(installer, /\$BASE\/\.worker-runtime-mode/);
   assert.match(installer, /BASE=\$\(cd \"\$INSTALL_DIR\" && pwd -P\)/);
   assert.match(installer, /NO_SYSTEMD -eq 0/);
   assert.match(installer, /if \[\[ \$NO_SYSTEMD -eq 0 && -e \"\$LEGACY_UNIT\" \]\]/);
@@ -254,4 +274,122 @@ test("worker control derives runtime and bundled Node from its installed locatio
   });
   assert.equal(inventory.status, 0, inventory.stderr);
   assert.equal(JSON.parse(inventory.stdout)[0].instance, "custom-01");
+});
+
+test("unprivileged user mode keeps config and data under install dir and does not require root tools", () => {
+  const installer = readFileSync(new URL("install-worker.sh", runtime), "utf8");
+  const control = readFileSync(new URL("worker-control.sh", runtime), "utf8");
+  assert.match(installer, /if \[\[ \$EUID -ne 0 \]\]; then/);
+  assert.match(installer, /ETC="\$BASE\/etc\/team-skill-hub-worker"/);
+  assert.match(installer, /DATA="\$BASE\/data"/);
+  assert.match(installer, /The installer will not modify system group membership/);
+  assert.doesNotMatch(
+    installer.slice(
+      installer.indexOf("# Non-root + --no-systemd"),
+      installer.indexOf("ETC=/etc/team-skill-hub-worker"),
+    ),
+    /groupadd|useradd|usermod|chown|runuser|systemctl/,
+  );
+  assert.match(control, /if \[\[ \$USER_MODE -eq 0 .*EUID -ne 0/);
+  assert.match(control, /if \[\[ \$USER_MODE -eq 1 \]\]; then/);
+  assert.match(control, /\$NODE" "\$WORKER_SCRIPT"/);
+});
+
+test("non-root user can install, initialize, start, inspect and stop Worker without system paths", (t) => {
+  if (process.getuid?.() !== 0) {
+    t.skip("integration test uses setpriv to exercise an actual non-root identity");
+    return;
+  }
+  let dockerGid = "";
+  try {
+    dockerGid = execFileSync("getent", ["group", "docker"], { encoding: "utf8" }).trim().split(":")[2] ?? "";
+    execFileSync("setpriv", ["--version"], { stdio: "ignore" });
+  } catch {
+    t.skip("setpriv or docker group is unavailable");
+    return;
+  }
+  const root = mkdtempSync(path.join(tmpdir(), "skillhub-worker-user-mode-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bootstrap = path.join(root, "bootstrap");
+  const payload = path.join(root, "payload");
+  const home = path.join(root, "home");
+  const mockbin = path.join(root, "mockbin");
+  const installDir = path.join(home, "team-skill-hub-worker");
+  mkdirSync(bootstrap);
+  mkdirSync(path.join(payload, "src", "cli"), { recursive: true });
+  mkdirSync(home);
+  mkdirSync(mockbin);
+  for (const directory of [
+    root,
+    bootstrap,
+    payload,
+    path.join(payload, "src"),
+    path.join(payload, "src", "cli"),
+    home,
+    mockbin,
+  ]) {
+    chmodSync(directory, 0o755);
+  }
+  for (const file of ["worker-control.sh", "worker.env.example", "check-worker-config.js"]) {
+    copyFileSync(new URL(file, runtime), path.join(payload, file));
+  }
+  writeFileSync(path.join(payload, "src", "cli", "expert-worker.js"), "// fixture worker\n");
+  const mockNode = path.join(mockbin, "node");
+  writeFileSync(
+    mockNode,
+    "#!/usr/bin/env bash\n" +
+      'if [[ "${1:-}" == "--version" ]]; then echo v24.19.0; exit 0; fi\n' +
+      'if [[ "${1:-}" == "-e" ]]; then printf \'{"instance":"%s"}\\n\' "${INSTANCE_JSON:-fixture}"; exit 0; fi\n' +
+      'if [[ "${1:-}" == */check-worker-config.js ]]; then echo config-ok; exit 0; fi\n' +
+      'if [[ "${1:-}" == */expert-worker.js ]]; then while :; do sleep 1; done; fi\n' +
+      "exit 0\n",
+  );
+  writeFileSync(path.join(mockbin, "docker"), '#!/usr/bin/env bash\n[[ "$1" == info ]]\n');
+  chmodSync(mockNode, 0o755);
+  chmodSync(path.join(mockbin, "docker"), 0o755);
+  const archive = path.join(bootstrap, "worker-runtime-9.9.9.tar.gz");
+  execFileSync("tar", ["-czf", archive, "-C", payload, "."]);
+  const bootstrapInstaller = path.join(bootstrap, "install-worker.sh");
+  copyFileSync(new URL("install-worker.sh", runtime), bootstrapInstaller);
+  chmodSync(bootstrapInstaller, 0o755);
+  execFileSync("chown", ["-R", "65534:65534", home]);
+
+  const asUser = (args: string[]) =>
+    spawnSync(
+      "setpriv",
+      [
+        "--reuid=65534",
+        "--regid=65534",
+        `--groups=${dockerGid}`,
+        "env",
+        `HOME=${home}`,
+        `PATH=${mockbin}:/usr/bin:/bin`,
+        `WORKER_RUNTIME_NODE=${mockNode}`,
+        `WORKER_RUNTIME_DOCKER=${path.join(mockbin, "docker")}`,
+        "bash",
+        ...args,
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+  const installed = asUser([bootstrapInstaller, archive, "--install-dir", installDir, "--no-systemd"]);
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.equal(readFileSync(path.join(installDir, ".worker-runtime-mode"), "utf8").trim(), "user");
+  assert.equal(existsSync(path.join(installDir, "etc", "team-skill-hub-worker", "workers")), true);
+
+  const control = path.join(installDir, "current", "worker-control.sh");
+  const rootInvocation = spawnSync("bash", [control, "list"], { encoding: "utf8" });
+  assert.notEqual(rootInvocation.status, 0);
+  assert.match(rootInvocation.stderr, /do not run worker-control\.sh with sudo\/root/);
+  const initialized = asUser([control, "init", "test-01"]);
+  assert.equal(initialized.status, 0, initialized.stderr);
+  const started = asUser([control, "test-01", "start"]);
+  assert.equal(started.status, 0, started.stderr);
+  const status = asUser([control, "test-01", "status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /running/);
+  const stopped = asUser([control, "test-01", "stop"]);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.stdout, /stopped/);
+  const data = path.join(installDir, "data", "test-01");
+  assert.equal(existsSync(path.join(data, "worker.log")), true);
 });
