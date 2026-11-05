@@ -22,8 +22,10 @@ if [[ $USER_MODE -eq 1 && $EUID -eq 0 ]]; then
   exit 1
 fi
 if [[ $USER_MODE -eq 1 ]]; then
-  DEFAULT_ETC=$(cat "$HOST_ROOT/.worker-runtime-etc")
-  DEFAULT_DATA=$(cat "$HOST_ROOT/.worker-runtime-data")
+  # User-mode layout is fixed relative to the installation root. Do not rely
+  # on persisted absolute-path markers: older installers wrote the root itself.
+  DEFAULT_ETC="$HOST_ROOT/etc/team-skill-hub-worker"
+  DEFAULT_DATA="$HOST_ROOT/data"
 else
   DEFAULT_ETC=/etc/team-skill-hub-worker
   DEFAULT_DATA=/var/lib/team-skill-hub-worker

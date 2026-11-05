@@ -393,3 +393,46 @@ test("non-root user can install, initialize, start, inspect and stop Worker with
   const data = path.join(installDir, "data", "test-01");
   assert.equal(existsSync(path.join(data, "worker.log")), true);
 });
+
+test("user-mode controller derives etc template from install root, not a stale etc marker", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "skillhub-worker-user-layout-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const release = path.join(root, "releases", "0.2.0");
+  const etc = path.join(root, "etc", "team-skill-hub-worker");
+  mkdirSync(path.join(release, "src", "cli"), { recursive: true });
+  mkdirSync(path.join(etc, "workers"), { recursive: true });
+  mkdirSync(path.join(root, "data"), { recursive: true });
+  copyFileSync(new URL("worker-control.sh", runtime), path.join(release, "worker-control.sh"));
+  copyFileSync(new URL("worker.env.example", runtime), path.join(etc, "worker.env.example"));
+  writeFileSync(path.join(release, "src", "cli", "expert-worker.js"), "");
+  writeFileSync(path.join(release, "check-worker-config.js"), "");
+  symlinkSync(release, path.join(root, "current"));
+  writeFileSync(path.join(root, ".worker-runtime-mode"), "user\n");
+  // Simulate an older/bad installer that stored only the install root in this marker.
+  writeFileSync(path.join(root, ".worker-runtime-etc"), `${root}\n`);
+  writeFileSync(path.join(root, ".worker-runtime-data"), `${root}\n`);
+  if (process.getuid?.() === 0) execFileSync("chown", ["-R", "65534:65534", root]);
+  const args = ["bash", path.join(root, "current", "worker-control.sh"), "init", "user-01"];
+  const result =
+    process.getuid?.() === 0
+      ? spawnSync(
+          "setpriv",
+          [
+            "--reuid=65534",
+            "--regid=65534",
+            "--clear-groups",
+            "env",
+            "PATH=/usr/bin:/bin",
+            "WORKER_RUNTIME_SKIP_ROOT_CHECK=1",
+            ...args,
+          ],
+          { cwd: tmpdir(), encoding: "utf8" },
+        )
+      : spawnSync(args[0]!, args.slice(1), {
+          cwd: tmpdir(),
+          env: { ...process.env, WORKER_RUNTIME_SKIP_ROOT_CHECK: "1", PATH: "/usr/bin:/bin" },
+          encoding: "utf8",
+        });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(path.join(etc, "workers", "user-01.env")), true);
+});
