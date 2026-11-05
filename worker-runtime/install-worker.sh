@@ -12,22 +12,44 @@ fi
 
 ARCHIVE=${1:-}
 if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
-  echo "Usage: $0 worker-runtime-<version>.tar.gz" >&2
+  echo "Usage: $0 worker-runtime-<version>.tar.gz [--install-dir PATH] [--no-systemd]" >&2
   exit 2
 fi
-
-BASE=/opt/team-skill-hub-worker
+shift
+INSTALL_DIR=/opt/team-skill-hub-worker
+NO_SYSTEMD=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --install-dir)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "--install-dir requires a non-empty path" >&2; exit 2; }
+      INSTALL_DIR=$2
+      shift 2
+      ;;
+    --no-systemd)
+      NO_SYSTEMD=1
+      shift
+      ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$INSTALL_DIR" ]] || { echo "Install directory cannot be empty" >&2; exit 2; }
+if [[ "$INSTALL_DIR" == *'"'* || "$INSTALL_DIR" == *'%'* || "$INSTALL_DIR" == *$'\n'* ]]; then
+  echo "Install directory cannot contain double quotes, percent signs, or newlines (systemd path syntax)." >&2
+  exit 2
+fi
+mkdir -p "$INSTALL_DIR"
+BASE=$(cd "$INSTALL_DIR" && pwd -P)
 ETC=/etc/team-skill-hub-worker
 DATA=/var/lib/team-skill-hub-worker
 VERSION=$(basename "$ARCHIVE" .tar.gz | sed 's/^worker-runtime-//')
 [[ "$VERSION" =~ ^[A-Za-z0-9._+-]+$ ]] || { echo "Invalid archive version" >&2; exit 2; }
 
 SYSTEMD_RUNNING=0
-if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1; then
+if [[ $NO_SYSTEMD -eq 0 ]] && [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1; then
   SYSTEMD_RUNNING=1
 fi
 LEGACY_UNIT=/etc/systemd/system/team-skill-hub-worker.service
-if [[ -e "$LEGACY_UNIT" && $SYSTEMD_RUNNING -eq 1 ]]; then
+if [[ $SYSTEMD_RUNNING -eq 1 && -e "$LEGACY_UNIT" ]]; then
   if systemctl is-active --quiet team-skill-hub-worker.service || systemctl is-enabled --quiet team-skill-hub-worker.service; then
     cat >&2 <<EOF
 Legacy team-skill-hub-worker.service is still active or enabled.
@@ -90,7 +112,7 @@ mv -Tf "$BASE/current.new" "$BASE/current"
 install -m 0644 "$BASE/current/worker.env.example" "$ETC/worker.env.example"
 chown root:root "$ETC/worker.env.example"
 
-if [[ -e "$LEGACY_UNIT" ]]; then
+if [[ $NO_SYSTEMD -eq 0 && -e "$LEGACY_UNIT" ]]; then
   rm -f "$LEGACY_UNIT" /etc/systemd/system/multi-user.target.wants/team-skill-hub-worker.service
   echo "Removed inactive legacy systemd unit: $LEGACY_UNIT" >&2
 fi
@@ -109,13 +131,26 @@ EOF
 fi
 
 if [[ $SYSTEMD_RUNNING -eq 1 ]]; then
-  install -m 0644 "$BASE/current/team-skill-hub-worker@.service" /etc/systemd/system/team-skill-hub-worker@.service
+  rm -f "$BASE/.no-systemd"
+  escaped_base=${BASE//\\/\\\\}
+  escaped_base=${escaped_base//&/\\&}
+  escaped_base=${escaped_base//|/\\|}
+  sed "s|/opt/team-skill-hub-worker|$escaped_base|g" "$BASE/current/team-skill-hub-worker@.service" > /etc/systemd/system/team-skill-hub-worker@.service.new
+  chmod 0644 /etc/systemd/system/team-skill-hub-worker@.service.new
+  mv -f /etc/systemd/system/team-skill-hub-worker@.service.new /etc/systemd/system/team-skill-hub-worker@.service
   systemctl daemon-reload
-  echo "Installed Worker runtime $VERSION (systemd detected)."
+  echo "Installed Worker runtime $VERSION (systemd mode)."
   echo "Next: $BASE/current/worker-control.sh init <instance>"
   echo "Then: systemctl enable --now team-skill-hub-worker@<instance>"
 else
-  echo "Installed Worker runtime $VERSION (no running systemd)."
+  if [[ $NO_SYSTEMD -eq 1 ]]; then
+    touch "$BASE/.no-systemd"
+    chmod 0644 "$BASE/.no-systemd"
+    echo "Installed Worker runtime $VERSION (systemd explicitly disabled)."
+  else
+    rm -f "$BASE/.no-systemd"
+    echo "Installed Worker runtime $VERSION (no running systemd)."
+  fi
   echo "Next: $BASE/current/worker-control.sh init <instance>"
   echo "Then: $BASE/current/worker-control.sh <instance> start"
 fi

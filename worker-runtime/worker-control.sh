@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BASE=${WORKER_RUNTIME_BASE:-/opt/team-skill-hub-worker/current}
-HOST_ROOT=${WORKER_RUNTIME_HOST_ROOT:-$(dirname "$BASE")}
+SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
+SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+if [[ -n "${WORKER_RUNTIME_BASE:-}" ]]; then
+  BASE=$WORKER_RUNTIME_BASE
+else
+  if [[ $(basename "$(dirname "$SCRIPT_DIR")") == "releases" ]]; then
+    HOST_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)
+  else
+    HOST_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
+  fi
+  BASE="$HOST_ROOT/current"
+fi
+HOST_ROOT=${WORKER_RUNTIME_HOST_ROOT:-$(cd "$(dirname "$BASE")" && pwd -P)}
 ETC=${WORKER_RUNTIME_ETC_ROOT:-/etc/team-skill-hub-worker}
 DATA_ROOT=${WORKER_RUNTIME_DATA_ROOT:-/var/lib/team-skill-hub-worker}
 WORKERS_DIR="$ETC/workers"
@@ -225,7 +236,8 @@ prepare_instance_env() {
 }
 
 matching_systemd_active() {
-  [[ -d /run/systemd/system ]] &&
+  [[ ! -e "$HOST_ROOT/.no-systemd" ]] &&
+    [[ -d /run/systemd/system ]] &&
     command -v systemctl >/dev/null 2>&1 &&
     systemctl is-active --quiet "team-skill-hub-worker@$INSTANCE.service"
 }

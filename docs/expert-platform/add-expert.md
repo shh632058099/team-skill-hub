@@ -34,13 +34,13 @@ Worker 主机（Linux）
 
 ### 0.1 向发布方领取的交付清单
 
-| 交付物                               | 形式与当前示例文件名                                                       | 部署位置 / 用途                                                             |
-| ------------------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| **Worker Runtime 包**                | `worker-runtime-0.1.0.tar.gz`                                              | 安装到 Worker 主机 `/opt/team-skill-hub-worker/`，作为 systemd 常驻服务运行 |
-| **Claude Code 任务执行镜像（默认）** | `expert-claude-image-0.1.0.tar`                                            | `docker load` 导入 Worker 主机 Docker Engine，供每次任务创建执行容器        |
-| **版本与完整性信息**                 | 发布方提供版本、目标 CPU 架构和 SHA-256 校验值                             | 确保 Runtime 与 Image 配套、文件在传输后未损坏                              |
-| **接入参数**                         | Hub 私网 gRPC 地址、Bootstrap Token 的安全交付渠道、Worker ID / capability | 用于连接和自动注册；不要通过 Git、聊天记录传播密钥                          |
-| **业务凭据（按需）**                 | 模型 API Key、私有 Git 仓库只读凭据、可信 CA / 代理配置                    | 由部署者在 Worker 主机安全配置，不包含在发行包内                            |
+| 交付物                               | 形式与当前示例文件名                                                       | 部署位置 / 用途                                                      |
+| ------------------------------------ | -------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **Worker Runtime 包**                | `worker-runtime-0.1.0.tar.gz`                                              | 安装到 Worker 主机默认 `/opt/team-skill-hub-worker/`，systemd 可选   |
+| **Claude Code 任务执行镜像（默认）** | `expert-claude-image-0.1.0.tar`                                            | `docker load` 导入 Worker 主机 Docker Engine，供每次任务创建执行容器 |
+| **版本与完整性信息**                 | 发布方提供版本、目标 CPU 架构和 SHA-256 校验值                             | 确保 Runtime 与 Image 配套、文件在传输后未损坏                       |
+| **接入参数**                         | Hub 私网 gRPC 地址、Bootstrap Token 的安全交付渠道、Worker ID / capability | 用于连接和自动注册；不要通过 Git、聊天记录传播密钥                   |
+| **业务凭据（按需）**                 | 模型 API Key、私有 Git 仓库只读凭据、可信 CA / 代理配置                    | 由部署者在 Worker 主机安全配置，不包含在发行包内                     |
 
 当前代码的示例版本是 **`0.1.0`**。上述两个 tar 文件在开发/发布环境可生成，但 `artifacts/` 被 Git 忽略，**不等于在 GitHub Releases、镜像仓库或任意 URL 已经公开发布**。实际领取地址、版本和 SHA-256 由团队发布方提供；不能通过直接 clone 仓库代替交付。
 
@@ -48,15 +48,15 @@ Worker 主机（Linux）
 
 ### 0.2 Worker 主机资源与依赖
 
-| 类别      | 基线与检查事项                                                                                                                                                                                                       |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 系统      | 支持 Node.js 24 和 Docker Engine 的 Linux 主机；systemd **可选**。有 systemd 时使用 `team-skill-hub-worker@<instance>.service`，无 systemd 时使用 `worker-control.sh <instance> start`；CPU 架构需与交付镜像一致     |
-| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库、多个 Worker instance 或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                                     |
-| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                                                                        |
-| 软件      | Node.js **24.x**、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`；安装时需要 sudo/root 权限。安装器会解析一个 `expert-worker` 可执行的 Node.js 24 并固定到 `/opt/team-skill-hub-worker/node` |
-| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API / MCP；如需代理/DNS/CA，分别验证                                                                                                  |
-| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                                                                 |
-| 数据目录  | `/opt/team-skill-hub-worker`（共享版本化 Runtime）、`/etc/team-skill-hub-worker`（instance 配置和私钥）、`/var/lib/team-skill-hub-worker`（instance credential、仓库 checkout、日志）                                |
+| 类别      | 基线与检查事项                                                                                                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 系统      | 支持 Node.js 24 和 Docker Engine 的 Linux 主机；systemd **可选**。默认检测 systemd；也可通过安装参数 `--no-systemd` 强制手动模式；CPU 架构需与交付镜像一致                                                         |
+| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库、多个 Worker instance 或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                                   |
+| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                                                                      |
+| 软件      | Node.js **24.x**、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`；安装时需要 sudo/root 权限。安装器会解析一个 `expert-worker` 可执行的 Node.js 24 并固定到所选 Runtime 安装目录下的 `node` |
+| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API / MCP；如需代理/DNS/CA，分别验证                                                                                                |
+| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                                                               |
+| 数据目录  | 自定义 Runtime 安装目录（默认 `/opt/team-skill-hub-worker`）、`/etc/team-skill-hub-worker`（instance 配置和私钥）、`/var/lib/team-skill-hub-worker`（instance credential、仓库 checkout、日志）                    |
 
 **常见部署模式：** 一台 Worker 主机只安装一套共享 Runtime，但可以创建并同时运行多个独立 Worker instance。每个 instance 有独立的 `EXPERT_WORKER_ID`、credential、key 文件、日志和 Git checkout，例如同一台主机同时运行 `claude-01` 与 `codex-01`。任务执行容器仍由各 Worker instance 按任务拉起。**Hub 与 Worker 不必同机**，也不需要把 Hub 的 Docker Compose 或源码放到 Worker 主机。
 
@@ -325,10 +325,21 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
   /tmp/team-skill-hub-worker-release/worker-runtime-0.1.0.tar.gz
 ```
 
+默认安装目录为 `/opt/team-skill-hub-worker`。如需安装到其他磁盘/目录，可指定 `--install-dir`；如主机运行 systemd 但希望完全手动管理 Worker，增加 `--no-systemd`。该参数会跳过 systemd 探测、unit 安装/修改/清理和所有 `systemctl` 调用：
+
+```bash
+sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
+  /tmp/team-skill-hub-worker-release/worker-runtime-0.1.0.tar.gz \
+  --install-dir "/data/apps/team-skill-hub worker" --no-systemd
+```
+
+安装目录可使用相对或绝对路径（相对路径按执行安装器时的当前目录解析）。`worker-control.sh` 会从自身真实安装位置定位 Runtime，不需要先 `cd` 到安装目录。`/etc/team-skill-hub-worker` 和 `/var/lib/team-skill-hub-worker` 不随 Runtime 目录改变。
+
 安装完成后核心布局为：
 
 ```text
-/opt/team-skill-hub-worker/current/
+<install-dir>/current/
+<install-dir>/node
 /etc/team-skill-hub-worker/worker.env.example
 /etc/team-skill-hub-worker/workers/
 /etc/team-skill-hub-worker/instances/
@@ -336,7 +347,7 @@ sudo /tmp/team-skill-hub-worker-bootstrap/install-worker.sh \
 /etc/systemd/system/team-skill-hub-worker@.service   # systemd 主机
 ```
 
-安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；若旧固定 `team-skill-hub-worker.service` 仍 active/enabled，安装器会直接停止并要求先 `systemctl disable --now team-skill-hub-worker.service`，避免旧配置继续运行。安装器还会解析一个 `expert-worker` 可执行的 Node.js 24，并固定为 `/opt/team-skill-hub-worker/node`。
+安装器不会自动创建或启动 Worker instance。旧 `/etc/team-skill-hub-worker/worker.env` 不再被读取；在 systemd 自动模式下，若旧固定 `team-skill-hub-worker.service` 仍 active/enabled，安装器会直接停止并要求先 `systemctl disable --now team-skill-hub-worker.service`，避免旧配置继续运行。`--no-systemd` 模式不会检查、停止、删除或修改任何 systemd unit。安装器还会解析一个 `expert-worker` 可执行的 Node.js 24，并固定为 `<install-dir>/node`。systemd 模式会生成指向实际安装目录的 unit；`--no-systemd` 模式不会触碰任何 unit。
 
 ### 7.2 导入执行镜像
 
@@ -459,7 +470,11 @@ sudo journalctl -u team-skill-hub-worker@claude-01 -n 80 --no-pager
 
 多个 instance 可独立启停。
 
-### 8.3 无 systemd 主机
+### 8.3 手动管理（无 systemd，或显式使用 `--no-systemd`）
+
+如果主机没有 systemd，安装器会自动输出手动命令；如果主机有 systemd 但希望手动管理，安装时指定 `--no-systemd`。安装器会在 Runtime 目录写入手动模式标记，`worker-control.sh` 不会再探测或调用 systemctl。
+
+以下以默认安装目录为例；自定义目录时将路径替换为安装时指定的目录：
 
 ```bash
 sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 start
@@ -467,6 +482,8 @@ sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 status
 sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 logs
 sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 stop
 ```
+
+`worker-control.sh` 会根据自身真实路径定位 `current`、release 和安装目录中的 Node，不依赖执行命令时所在的当前目录。配置仍保存在 `/etc/team-skill-hub-worker`，运行数据仍保存在 `/var/lib/team-skill-hub-worker`。
 
 查看整机 Worker：
 

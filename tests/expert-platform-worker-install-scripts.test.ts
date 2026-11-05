@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -104,11 +104,11 @@ test("systemd template loads one instance config and isolates writable state", (
   assert.match(service, /ReadWritePaths=\/var\/lib\/team-skill-hub-worker\/%i/);
   assert.match(
     service,
-    /ExecStart=\/opt\/team-skill-hub-worker\/node .*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/,
+    /ExecStart="\/opt\/team-skill-hub-worker\/node" .*\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js/,
   );
   assert.match(
     service,
-    /^ExecStart=\/opt\/team-skill-hub-worker\/node \/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js$/m,
+    /^ExecStart="\/opt\/team-skill-hub-worker\/node" "\/opt\/team-skill-hub-worker\/current\/src\/cli\/expert-worker\.js"$/m,
   );
   assert.match(service, /^Restart=always$/m);
   assert.doesNotMatch(service, /expert-worker\.jsRestart=/);
@@ -193,4 +193,65 @@ test("manual controller lists valid invalid and stale worker instances without l
   assert.equal(rows.find((row) => row.instance === "broken-01")?.status, "invalid-config");
   assert.equal(rows.find((row) => row.instance === "stale-01")?.status, "stale-pid");
   assert.doesNotMatch(json.stdout, /super-secret-token/);
+});
+
+test("installer accepts a custom install directory and explicit no-systemd mode", () => {
+  const installer = readFileSync(new URL("install-worker.sh", runtime), "utf8");
+  assert.match(installer, /--install-dir/);
+  assert.match(installer, /--no-systemd/);
+  assert.match(installer, /BASE=\$\(cd \"\$INSTALL_DIR\" && pwd -P\)/);
+  assert.match(installer, /NO_SYSTEMD -eq 0/);
+  assert.match(installer, /if \[\[ \$NO_SYSTEMD -eq 0 && -e \"\$LEGACY_UNIT\" \]\]/);
+  assert.match(installer, /sed .*team-skill-hub-worker@\.service/);
+  assert.match(installer, /touch \"\$BASE\/\.no-systemd\"/);
+  assert.match(installer, /Install directory cannot contain double quotes/);
+  assert.match(installer, /systemctl daemon-reload/);
+  const control = readFileSync(new URL("worker-control.sh", runtime), "utf8");
+  assert.match(control, /SCRIPT_PATH=\$\(readlink -f/);
+  assert.match(control, /HOST_ROOT\/\.no-systemd/);
+  assert.match(installer, /worker-control\.sh.*init/);
+});
+
+test("worker control derives runtime and bundled Node from its installed location, independent of cwd", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "skillhub-worker-custom install "));
+  const release = path.join(root, "releases", "0.1.0");
+  const etc = path.join(root, "etc");
+  const data = path.join(root, "data");
+  mkdirSync(release, { recursive: true });
+  mkdirSync(etc, { recursive: true });
+  mkdirSync(data, { recursive: true });
+  copyFileSync(new URL("worker-control.sh", runtime), path.join(release, "worker-control.sh"));
+  copyFileSync(new URL("worker.env.example", runtime), path.join(etc, "worker.env.example"));
+  mkdirSync(path.join(release, "src", "cli"), { recursive: true });
+  writeFileSync(path.join(release, "src", "cli", "expert-worker.js"), "");
+  writeFileSync(path.join(release, "check-worker-config.js"), "");
+  const node = path.join(root, "node");
+  symlinkSync(process.execPath, node);
+  symlinkSync(release, path.join(root, "current"));
+  const result = spawnSync("bash", [path.join(root, "current", "worker-control.sh"), "init", "custom-01"], {
+    cwd: tmpdir(),
+    env: {
+      ...process.env,
+      WORKER_RUNTIME_ETC_ROOT: etc,
+      WORKER_RUNTIME_DATA_ROOT: data,
+      WORKER_RUNTIME_SKIP_ROOT_CHECK: "1",
+      PATH: "/usr/bin:/bin",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(path.join(etc, "workers", "custom-01.env")), true);
+  const inventory = spawnSync("bash", [path.join(root, "current", "worker-control.sh"), "list", "--json"], {
+    cwd: tmpdir(),
+    env: {
+      ...process.env,
+      WORKER_RUNTIME_ETC_ROOT: etc,
+      WORKER_RUNTIME_DATA_ROOT: data,
+      WORKER_RUNTIME_SKIP_ROOT_CHECK: "1",
+      PATH: "/usr/bin:/bin",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(inventory.status, 0, inventory.stderr);
+  assert.equal(JSON.parse(inventory.stdout)[0].instance, "custom-01");
 });

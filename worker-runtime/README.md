@@ -7,8 +7,8 @@ The Worker Runtime package installs the host-side Expert Worker daemon. It does 
 One host installs the Runtime once and may run multiple independent Worker instances:
 
 ```text
-/opt/team-skill-hub-worker/current
-  shared immutable Runtime
+<install-dir>/current
+  shared immutable Runtime (default: /opt/team-skill-hub-worker)
 
 /etc/team-skill-hub-worker/workers/<instance>.env
   one runnable config per Worker instance
@@ -54,22 +54,34 @@ tar -xzf worker-runtime-<version>.tar.gz -C /tmp/worker-runtime-bootstrap
 sudo /tmp/worker-runtime-bootstrap/install-worker.sh worker-runtime-<version>.tar.gz
 ```
 
+Use `--install-dir PATH` to choose another Runtime directory. Relative paths are resolved to an absolute path from the installer's current working directory. If you want manual control even on a systemd host, add `--no-systemd`:
+
+```bash
+sudo /tmp/worker-runtime-bootstrap/install-worker.sh worker-runtime-<version>.tar.gz \
+  --install-dir "/data/apps/team-skill-hub worker" --no-systemd
+```
+
+The `--no-systemd` option skips systemd detection, unit installation/update/removal, daemon-reload and all `systemctl` calls. It leaves any existing unit untouched and writes a marker so `worker-control.sh` also avoids systemctl. The installer prints the exact manual commands after installation.
+
 The installer:
 
-- installs/updates the shared Runtime under `/opt/team-skill-hub-worker`;
+- installs/updates the shared Runtime under the selected directory (default `/opt/team-skill-hub-worker`);
 - installs `/etc/team-skill-hub-worker/worker.env.example`;
 - creates the shared `workers/` and `instances/` roots;
-- installs `team-skill-hub-worker@.service` when a running systemd manager is detected;
-- resolves a Node.js 24 executable that the `expert-worker` user can execute and pins it at `/opt/team-skill-hub-worker/node`;
+- installs a `team-skill-hub-worker@.service` rendered with the selected absolute install path when a running systemd manager is detected and `--no-systemd` was not specified;
+- resolves a Node.js 24 executable that the `expert-worker` user can execute and pins it at `<install-dir>/node`;
 - does **not** create or start a Worker instance.
 
-If legacy `/etc/team-skill-hub-worker/worker.env` exists, the installer warns that it is no longer consumed. If the old fixed `team-skill-hub-worker.service` is still active or enabled, installation stops and requires the administrator to disable it first; an inactive legacy unit is removed. Review and migrate settings into a named instance; credentials and repository state are not migrated automatically.
+If legacy `/etc/team-skill-hub-worker/worker.env` exists, the installer warns that it is no longer consumed. In systemd mode, if the old fixed `team-skill-hub-worker.service` is still active or enabled, installation stops and requires the administrator to disable it first; an inactive legacy unit is removed. `--no-systemd` does not inspect or alter legacy/systemd units. Review and migrate settings into a named instance; credentials and repository state are not migrated automatically.
 
 ## Create Worker instances
 
+Set the Runtime path once (use the default or the directory passed to `--install-dir`):
+
 ```bash
-sudo /opt/team-skill-hub-worker/current/worker-control.sh init claude-01
-sudo /opt/team-skill-hub-worker/current/worker-control.sh init codex-01
+WORKER_INSTALL_DIR=/opt/team-skill-hub-worker
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init claude-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init codex-01
 ```
 
 This creates:
@@ -97,8 +109,8 @@ Explicit paths outside the managed `/var/lib/team-skill-hub-worker` tree remain 
 ## Inventory
 
 ```bash
-sudo /opt/team-skill-hub-worker/current/worker-control.sh list
-sudo /opt/team-skill-hub-worker/current/worker-control.sh list --json
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" list
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" list --json
 ```
 
 The human view shows instance, Worker ID, backend, capability, runtime profiles, process status, and PID. One malformed config is reported as `invalid-config` without hiding valid instances. `stale-pid` means PID/start metadata exists but no matching Worker process is running.
@@ -107,15 +119,17 @@ Neither inventory form prints tokens, credentials, key contents, or model secret
 
 ## Manual lifecycle
 
-On hosts without systemd:
+On hosts without systemd, or on any host installed with `--no-systemd`:
 
 ```bash
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 start
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 status
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 logs
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 restart
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 stop
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 start
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 status
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 logs
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 restart
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 stop
 ```
+
+The control script resolves its Runtime and bundled Node from its own physical script location; commands work from any current directory. The config and data roots remain `/etc/team-skill-hub-worker` and `/var/lib/team-skill-hub-worker` regardless of the Runtime install directory.
 
 Repeat independently for other instances. PID, process start time, logs, credentials, source, and repository roots are instance-local.
 
