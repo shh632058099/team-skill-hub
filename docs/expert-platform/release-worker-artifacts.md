@@ -137,3 +137,30 @@ worker-artifacts-0.1.0.release.txt
 ## Codex 执行镜像
 
 如部署方明确选择 Codex，发布管理员另外运行 `bash scripts/build-worker-image.sh codex 0.1.0`，交付 `artifacts/worker-runtime/expert-worker-image-0.1.0.tar` 与独立 SHA-256 校验信息。Worker 端须同时配置 `EXPERT_EXECUTOR_BACKEND=codex`、对应的 `EXPERT_DOCKER_IMAGE` 和 Codex 凭据。默认交付仍是 Claude Code 镜像。
+
+### Legacy 主机兼容构建（Docker Engine 18.09 / Linux 4.15）
+
+`scripts/build-worker-image.sh` 是唯一构建入口。默认 `BUILD_MODE=auto`，根据 Docker **Server** 版本选择构建路径：低于 `20.10` 使用 Bullseye Legacy 构建，`20.10` 及以上使用现有 Bookworm Dockerfile。该版本阈值是针对旧 Engine/seccomp 与 Bookworm glibc `clone3` 兼容问题的保守启发式；如果内核、seccomp 或发行版组合特殊，可手动覆盖：
+
+```bash
+# 自动检测（默认）
+scripts/build-worker-image.sh claude 0.1.0
+
+# 强制使用当前 Bookworm Dockerfile
+BUILD_MODE=standard scripts/build-worker-image.sh codex 0.1.0
+
+# 强制使用 Bullseye 兼容构建
+BUILD_MODE=legacy scripts/build-worker-image.sh claude 0.1.0
+
+# 默认基础镜像不可达时指定镜像站
+BUILD_MODE=legacy BASE_IMAGE=docker.1ms.run/library/node:24-bullseye-slim \
+  scripts/build-worker-image.sh codex 0.1.0
+
+# 调整 Debian snapshot 时间点（默认 20260824T000000Z）
+DEBIAN_SNAPSHOT=20260824T000000Z BUILD_MODE=legacy \
+  scripts/build-worker-image.sh claude 0.1.0
+```
+
+Legacy 模式从对应的仓库 Dockerfile 动态生成临时 Dockerfile，仅替换基础镜像及 Debian apt 源配置：Bullseye 使用 `snapshot.debian.org` HTTP 快照和 `Acquire::Check-Valid-Until=false`。CLI 版本、安装命令、用户、工作目录、入口和默认命令继续来自仓库 Dockerfile，避免维护两份完整定义。默认基础镜像为 `node:24-bullseye-slim`；基础镜像已在本地时不强制拉取，不存在时才执行 `docker pull`。构建后运行 `docker run --rm <image>` 冒烟测试，再按正常规则 `docker save` 到相同 tar 路径。
+
+自动模式必须能读取 Docker Server 版本；若 daemon 不可达或版本无法解析，脚本会停止并提示通过 `BUILD_MODE` 明确选择，不会擅自按新版本处理。`BUILD_MODE` 仅接受 `auto`、`standard`、`legacy`。`BASE_IMAGE` 和 `DEBIAN_SNAPSHOT` 只影响 Legacy 模式。
