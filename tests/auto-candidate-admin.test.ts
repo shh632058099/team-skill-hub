@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -170,5 +170,40 @@ test("auto candidate quality report exposes v3 shadow score and policy projectio
     f.search.close();
     await rm(f.dataDir, { recursive: true, force: true });
     delete process.env.ADMIN_API_KEY;
+  }
+});
+
+test("corrupt auto candidate policy fails closed without breaking Stop ingestion", async () => {
+  const f = await fixture();
+  try {
+    const policyDir = path.join(f.dataDir, "config", "auto-candidate-policy");
+    await mkdir(policyDir, { recursive: true });
+    await writeFile(path.join(policyDir, "current.json"), "{broken-json", "utf8");
+
+    const principal = { id: "shadow-user", tenantId: "default", roles: ["developer", "internal"] };
+    const event = await f.service.recordClientEvent(principal, {
+      client: "codex",
+      event: "Stop",
+      sessionId: "corrupt-policy-session",
+      turnId: "turn-1",
+      metadata: {
+        assistant_result_excerpt: "根因已确认并完成验证。",
+      },
+    });
+
+    assert.equal(event.sessionId, "corrupt-policy-session");
+    const detections = await f.service.listCandidateDetections(50);
+    const detection = detections.find(
+      (item) => item.detector === "stop-evidence-v3" && item.sessionId === "corrupt-policy-session",
+    );
+    assert.ok(detection);
+    assert.equal(detection.outcome, "skipped");
+    assert.equal(detection.reason, "policy-load-failed");
+    assert.equal(detection.projectedAction, "skip");
+    assert.equal((await f.service.listKnowledgeCandidates(50)).length, 0);
+  } finally {
+    await f.app.close();
+    f.search.close();
+    await rm(f.dataDir, { recursive: true, force: true });
   }
 });

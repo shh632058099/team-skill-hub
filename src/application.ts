@@ -186,7 +186,24 @@ export class SkillHubApplicationService {
 
   private async detectStopKnowledgeCandidateV3(event: ClientEventRecord): Promise<void> {
     const detector = "stop-evidence-v3";
-    const policy = await this.autoCandidatePolicyStore.loadCurrent();
+    let policy: Awaited<ReturnType<AutoCandidatePolicyStore["loadCurrent"]>>;
+    try {
+      policy = await this.autoCandidatePolicyStore.loadCurrent();
+    } catch {
+      await this.observability.recordCandidateDetection({
+        detector,
+        actorId: event.actorId,
+        tenantId: event.tenantId,
+        sessionId: event.sessionId,
+        turnId: event.turnId,
+        outcome: "skipped",
+        reason: "policy-load-failed",
+        evidenceCount: 0,
+        mode: "shadow",
+        projectedAction: "skip",
+      });
+      return;
+    }
 
     const record = async (input: {
       outcome: "shadow" | "skipped";
