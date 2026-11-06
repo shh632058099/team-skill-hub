@@ -105,3 +105,174 @@ test("collector accepts missing repository and recognizes build/test verificatio
   assert.equal(evidence.resultSignals.rootCause, true);
   assert.equal(evidence.resultSignals.verifiedFix, true);
 });
+
+import { evaluateCandidateEligibility } from "../src/auto-candidate/eligibility.js";
+import { defaultAutoCandidatePolicy } from "../src/auto-candidate/policy-store.js";
+import type { CandidateEvidence } from "../src/auto-candidate/types.js";
+
+function baseEvidence(overrides: Partial<CandidateEvidence> = {}): CandidateEvidence {
+  return {
+    sessionId: "s-score",
+    actorId: "u-score",
+    tenantId: "t-score",
+    assistantResult: "根因已确认，已修复并完成验证，适用范围明确。",
+    engineeringActions: { editCount: 1, writeCount: 0, patchCount: 0, meaningfulBashCount: 1 },
+    verification: { strongTest: true, deviceTest: false, buildOrPackage: false, any: true },
+    resultSignals: {
+      rootCause: true,
+      verifiedFix: true,
+      workaround: false,
+      reusableConstraint: true,
+      lowValueOnly: false,
+      analysisOnly: false,
+    },
+    evidence: [],
+    ...overrides,
+  };
+}
+
+test("eligibility scoring uses deterministic starting weights and clamps to 100", () => {
+  const result = evaluateCandidateEligibility(baseEvidence(), defaultAutoCandidatePolicy());
+  assert.equal(result.score, 90);
+  assert.deepEqual(
+    result.scoreSignals.map((item) => [item.id, item.delta]),
+    [
+      ["root-cause", 25],
+      ["verified-fix", 25],
+      ["passing-test", 20],
+      ["engineering-change", 10],
+      ["reusable-constraint", 10],
+    ],
+  );
+  assert.equal(result.eligibleForShadow, true);
+  assert.equal(result.eligibleForCreateProjection, true);
+
+  const maxed = evaluateCandidateEligibility(
+    baseEvidence({
+      verification: { strongTest: true, deviceTest: true, buildOrPackage: true, any: true },
+      resultSignals: {
+        rootCause: true,
+        verifiedFix: true,
+        workaround: true,
+        reusableConstraint: true,
+        lowValueOnly: false,
+        analysisOnly: false,
+      },
+    }),
+    defaultAutoCandidatePolicy(),
+  );
+  assert.equal(maxed.score, 100);
+});
+
+test("eligibility hard gates reject missing result, activity, verification, and low-value-only work", () => {
+  const policy = defaultAutoCandidatePolicy();
+
+  assert.equal(
+    evaluateCandidateEligibility(baseEvidence({ assistantResult: "   " }), policy).reason,
+    "missing-assistant-result",
+  );
+
+  assert.equal(
+    evaluateCandidateEligibility(
+      baseEvidence({
+        engineeringActions: { editCount: 0, writeCount: 0, patchCount: 0, meaningfulBashCount: 0 },
+        resultSignals: {
+          rootCause: true,
+          verifiedFix: false,
+          workaround: false,
+          reusableConstraint: false,
+          lowValueOnly: false,
+          analysisOnly: true,
+        },
+      }),
+      policy,
+    ).reason,
+    "no-meaningful-activity",
+  );
+
+  assert.equal(
+    evaluateCandidateEligibility(
+      baseEvidence({ verification: { strongTest: false, deviceTest: false, buildOrPackage: false, any: false } }),
+      policy,
+    ).reason,
+    "verification-required",
+  );
+
+  assert.equal(
+    evaluateCandidateEligibility(
+      baseEvidence({
+        resultSignals: {
+          rootCause: false,
+          verifiedFix: false,
+          workaround: false,
+          reusableConstraint: false,
+          lowValueOnly: true,
+          analysisOnly: false,
+        },
+      }),
+      policy,
+    ).reason,
+    "low-value-only",
+  );
+});
+
+test("missing reusable-result keyword is not a hard gate", () => {
+  const evidence = baseEvidence({
+    resultSignals: {
+      rootCause: false,
+      verifiedFix: false,
+      workaround: false,
+      reusableConstraint: false,
+      lowValueOnly: false,
+      analysisOnly: false,
+    },
+  });
+  const result = evaluateCandidateEligibility(evidence, defaultAutoCandidatePolicy());
+  assert.equal(result.hardGates.reusableResult, true);
+  assert.notEqual(result.reason, "missing-reusable-result");
+});
+
+test("eligibility respects shadow and create thresholds", () => {
+  const base = defaultAutoCandidatePolicy();
+  const score70Policy = {
+    ...base,
+    thresholds: { ...base.thresholds, shadowScore: 60, createScore: 80 },
+  };
+  const result = evaluateCandidateEligibility(
+    baseEvidence({
+      resultSignals: {
+        rootCause: true,
+        verifiedFix: false,
+        workaround: false,
+        reusableConstraint: true,
+        lowValueOnly: false,
+        analysisOnly: false,
+      },
+      engineeringActions: { editCount: 1, writeCount: 0, patchCount: 0, meaningfulBashCount: 1 },
+      verification: { strongTest: true, deviceTest: false, buildOrPackage: false, any: true },
+    }),
+    score70Policy,
+  );
+  assert.equal(result.score, 65);
+  assert.equal(result.eligibleForShadow, true);
+  assert.equal(result.eligibleForCreateProjection, false);
+
+  const below = evaluateCandidateEligibility(
+    baseEvidence({
+      resultSignals: {
+        rootCause: false,
+        verifiedFix: false,
+        workaround: false,
+        reusableConstraint: true,
+        lowValueOnly: false,
+        analysisOnly: false,
+      },
+      engineeringActions: { editCount: 1, writeCount: 0, patchCount: 0, meaningfulBashCount: 0 },
+      verification: { strongTest: true, deviceTest: false, buildOrPackage: false, any: true },
+    }),
+    score70Policy,
+  );
+  assert.equal(below.score, 40);
+  assert.equal(below.eligibleForShadow, false);
+  assert.equal(below.reason, "score-below-shadow-threshold");
+});
