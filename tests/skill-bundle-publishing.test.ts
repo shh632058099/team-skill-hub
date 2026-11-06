@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   SkillBundleReviewStaleError,
   SkillBundlePublisher,
@@ -668,6 +669,14 @@ test("GitLab merged reconciliation verifies the final tree through repository AP
     );
     assert.equal(result.publication.mergeRequestState, "merged");
     assert.equal(result.finalTreeMatches, true);
+    assert.equal(
+      result.publication.expectedTreeSha256,
+      canonicalTreeHash(
+        snapshot.files.map((file) =>
+          file.content !== undefined ? { ...file, content: file.content.replace(/\r\n/g, "\n") } : file,
+        ),
+      ),
+    );
     assert.equal(result.publication.finalTreeSha256, snapshot.sha256);
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
@@ -716,6 +725,184 @@ test("merged reconciliation verifies the final replacementRoot tree", async () =
     assert.equal(result.finalTreeMatches, false);
     assert.notEqual(result.publication.finalTreeSha256, snapshot.sha256);
     assert.ok(result.finalDiff?.modified.includes("SKILL.md"));
+  } finally {
+    delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
+test("GitLab reconciliation treats CRLF text snapshot and LF repository tree as equivalent", async () => {
+  process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
+  const gitlabRepository: RepositoryConfig = {
+    ...repository,
+    gitUrl: "https://gitlab.example.com/example/rd-skills.git",
+    gitAuth: { type: "https-token", tokenEnv: "IGNORED_GIT_TOKEN" },
+    skillPublishing: {
+      ...repository.skillPublishing!,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.com",
+      projectPath: "example/rd-skills",
+    },
+  };
+  const { snapshot: rawSnapshot, record } = bundle();
+  const snapshot = {
+    ...rawSnapshot,
+    files: rawSnapshot.files.map((file) =>
+      file.path === "SKILL.md"
+        ? {
+            ...file,
+            content: "new skill\r\n",
+            sha256: createHash("sha256").update("new skill\r\n").digest("hex"),
+            sizeBytes: Buffer.byteLength("new skill\r\n"),
+          }
+        : file,
+    ),
+  };
+  snapshot.sha256 = canonicalTreeHash(snapshot.files);
+
+  const fetchMock: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/merge_requests/9")) {
+      return Response.json({
+        state: "merged",
+        merged_at: "2026-11-06T00:00:00.000Z",
+        merge_commit_sha: "merge-sha",
+      });
+    }
+    if (url.includes("/repository/tree?")) {
+      return Response.json([
+        { type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" },
+        { type: "blob", path: "skills/ota/design/scripts/run.sh", mode: "100755" },
+      ]);
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2FSKILL.md?")) {
+      return Response.json({ content: Buffer.from("new skill\n").toString("base64"), encoding: "base64" });
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2Fscripts%2Frun.sh?")) {
+      return Response.json({
+        content: Buffer.from("#!/bin/sh\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: true,
+      });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const result = await new SkillBundlePublisher(fetchMock, async () => {
+      throw new Error("git should not be called for GitLab reconciliation");
+    }).reconcile(
+      {
+        kind: "pull-request",
+        provider: "gitlab",
+        projectPath: "example/rd-skills",
+        branch: "skill-hub-skill-1234567890ab",
+        targetBranch: "master",
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: 9,
+        mergeRequestUrl: "https://gitlab.example.com/example/rd-skills/-/merge_requests/9",
+        mergeRequestState: "opened",
+        added: 1,
+        modified: 1,
+        deleted: 0,
+        expectedTreeSha256: canonicalTreeHash(snapshot.files),
+        pullRequestCreatedAt: "2026-11-06T00:00:00.000Z",
+        lastCheckedAt: "2026-11-06T00:00:00.000Z",
+      },
+      snapshot,
+      gitlabRepository,
+    );
+    assert.equal(result.finalTreeMatches, true);
+  } finally {
+    delete process.env.TEST_SKILL_BUNDLE_TOKEN;
+  }
+});
+
+test("GitLab reconciliation keeps contentBase64 files byte-strict even when bytes are valid UTF-8", async () => {
+  process.env.TEST_SKILL_BUNDLE_TOKEN = "gitlab-write-token";
+  const gitlabRepository: RepositoryConfig = {
+    ...repository,
+    gitUrl: "https://gitlab.example.com/example/rd-skills.git",
+    gitAuth: { type: "https-token", tokenEnv: "IGNORED_GIT_TOKEN" },
+    skillPublishing: {
+      ...repository.skillPublishing!,
+      provider: "gitlab",
+      baseUrl: "https://gitlab.example.com",
+      projectPath: "example/rd-skills",
+    },
+  };
+  const { snapshot: rawSnapshot, record } = bundle();
+  const binaryBytes = Buffer.from("binary\r\nbytes", "utf8");
+  const binaryFile = {
+    path: "assets/blob.bin",
+    contentBase64: binaryBytes.toString("base64"),
+    sha256: createHash("sha256").update(binaryBytes).digest("hex"),
+    sizeBytes: binaryBytes.byteLength,
+    mode: "0644" as const,
+  };
+  const snapshot = {
+    ...rawSnapshot,
+    files: [...rawSnapshot.files, binaryFile],
+  };
+  snapshot.sha256 = canonicalTreeHash(snapshot.files);
+
+  const fetchMock: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/merge_requests/9")) {
+      return Response.json({
+        state: "merged",
+        merged_at: "2026-11-06T00:00:00.000Z",
+        merge_commit_sha: "merge-sha",
+      });
+    }
+    if (url.includes("/repository/tree?")) {
+      return Response.json([
+        { type: "blob", path: "skills/ota/design/SKILL.md", mode: "100644" },
+        { type: "blob", path: "skills/ota/design/scripts/run.sh", mode: "100755" },
+        { type: "blob", path: "skills/ota/design/assets/blob.bin", mode: "100644" },
+      ]);
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2FSKILL.md?")) {
+      return Response.json({ content: Buffer.from("new skill\n").toString("base64"), encoding: "base64" });
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2Fscripts%2Frun.sh?")) {
+      return Response.json({
+        content: Buffer.from("#!/bin/sh\n").toString("base64"),
+        encoding: "base64",
+        execute_filemode: true,
+      });
+    }
+    if (url.includes("/repository/files/skills%2Fota%2Fdesign%2Fassets%2Fblob.bin?")) {
+      return Response.json({ content: Buffer.from("binary\nbytes").toString("base64"), encoding: "base64" });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const result = await new SkillBundlePublisher(fetchMock, async () => {
+      throw new Error("git should not be called for GitLab reconciliation");
+    }).reconcile(
+      {
+        kind: "pull-request",
+        provider: "gitlab",
+        projectPath: "example/rd-skills",
+        branch: "skill-hub-skill-1234567890ab",
+        targetBranch: "master",
+        targetRoot: record.replacementRoot,
+        mergeRequestIid: 9,
+        mergeRequestUrl: "https://gitlab.example.com/example/rd-skills/-/merge_requests/9",
+        mergeRequestState: "opened",
+        added: 1,
+        modified: 1,
+        deleted: 0,
+        expectedTreeSha256: canonicalTreeHash(snapshot.files),
+        pullRequestCreatedAt: "2026-11-06T00:00:00.000Z",
+        lastCheckedAt: "2026-11-06T00:00:00.000Z",
+      },
+      snapshot,
+      gitlabRepository,
+    );
+    assert.equal(result.finalTreeMatches, false);
+    assert.ok(result.finalDiff?.modified.includes("assets/blob.bin"));
   } finally {
     delete process.env.TEST_SKILL_BUNDLE_TOKEN;
   }

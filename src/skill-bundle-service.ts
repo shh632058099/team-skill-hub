@@ -567,11 +567,14 @@ export class SkillBundleService {
     const currentRoot = path.join(materialized.sourceRoot, ...target.replacementRoot.split("/"));
     const before = await readTextTree(currentRoot);
     const submissionMode = input.submissionMode ?? "merge";
+    const submitted = input.files.map((file) =>
+      file.content !== undefined ? { ...file, content: file.content.replace(/\r\n/g, "\n") } : file,
+    );
     const finalFiles = planArtifactFinalTree({
       targetKind: "directory",
       mode: submissionMode,
       before,
-      submitted: input.files,
+      submitted,
     });
     const normalized = normalizeSkillBundleInput({
       namespace: target.namespace,
@@ -995,6 +998,7 @@ export class SkillBundleService {
         { ...current, status: "published", publication: verifiedPublication },
         verifiedPublication,
         repository,
+        snapshot,
       );
       return this.options.storage.updateImport({
         ...deleting,

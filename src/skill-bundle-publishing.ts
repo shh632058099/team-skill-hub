@@ -20,6 +20,45 @@ const execFileAsync = promisify(execFile);
 export type SkillBundleGitRun = (args: string[], cwd?: string) => Promise<string>;
 type FetchLike = typeof fetch;
 
+type ComparableSkillBundleFile = Pick<SkillBundleFile, "path" | "content" | "contentBase64" | "mode">;
+
+function normalizeGitLabTreeForCompare(
+  files: ComparableSkillBundleFile[],
+  reference: ComparableSkillBundleFile[],
+): ComparableSkillBundleFile[] {
+  const textPaths = new Set(reference.filter((file) => file.content !== undefined).map((file) => file.path));
+  return files.map((file) => {
+    if (!textPaths.has(file.path)) return file;
+    let content = file.content;
+    if (content === undefined && file.contentBase64 !== undefined) {
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(file.contentBase64, "base64"));
+        if (!decoded.includes("\0")) content = decoded;
+      } catch {}
+    }
+    if (content === undefined) return file;
+    return {
+      path: file.path,
+      content: content.replace(/\r\n/g, "\n"),
+      mode: file.mode,
+    };
+  });
+}
+
+function canonicalGitLabTreeHash(files: ComparableSkillBundleFile[], reference: ComparableSkillBundleFile[]): string {
+  return canonicalTreeHash(normalizeGitLabTreeForCompare(files, reference));
+}
+
+function diffGitLabTrees(
+  expected: ComparableSkillBundleFile[],
+  actual: ComparableSkillBundleFile[],
+): ReturnType<typeof diffSkillBundleTrees> {
+  return diffSkillBundleTrees(
+    normalizeGitLabTreeForCompare(expected, expected),
+    normalizeGitLabTreeForCompare(actual, expected),
+  );
+}
+
 export class SkillBundleReviewStaleError extends Error {
   constructor(message = "Skill Bundle review baseline changed before publication") {
     super(message);
@@ -322,8 +361,8 @@ export class SkillBundlePublisher {
     );
     if (canonicalTreeHash(before) !== record.review?.targetTreeSha256) throw new SkillBundleReviewStaleError();
 
-    const expectedTreeSha256 = canonicalTreeHash(snapshot.files);
-    if (canonicalTreeHash(before) === expectedTreeSha256) {
+    const expectedTreeSha256 = canonicalGitLabTreeHash(snapshot.files, snapshot.files);
+    if (canonicalGitLabTreeHash(before, snapshot.files) === expectedTreeSha256) {
       return {
         kind: "no-op",
         targetRevision,
@@ -333,7 +372,7 @@ export class SkillBundlePublisher {
       };
     }
 
-    const diff = diffSkillBundleTrees(before, snapshot.files);
+    const diff = diffGitLabTrees(snapshot.files, before);
     const actions = buildArtifactFileActions(before, snapshot.files).map((action) => {
       const filePath = `${record.replacementRoot}/${action.path}`;
       if (action.action === "delete") return { action: "delete" as const, file_path: filePath };
@@ -564,6 +603,7 @@ export class SkillBundlePublisher {
     record: SkillBundleImport,
     publication: SkillBundlePullRequestPublication,
     repository: RepositoryConfig,
+    snapshot?: SkillBundleSnapshot,
   ): Promise<SkillBundlePullRequestPublication> {
     const { config, baseUrl, projectPath, token, remoteUrl, targetBranch } = this.resolve(repository);
     if (publication.projectPath !== projectPath) {
@@ -587,7 +627,10 @@ export class SkillBundlePublisher {
         record.replacementRoot,
         targetRevision,
       );
-      if (canonicalTreeHash(current) !== expectedPublishedTreeSha256) {
+      if (
+        (snapshot ? canonicalGitLabTreeHash(current, snapshot.files) : canonicalTreeHash(current)) !==
+        expectedPublishedTreeSha256
+      ) {
         throw new Error("Published Skill Bundle has drifted; refresh/review before deletion");
       }
       const project = encodeURIComponent(projectPath);
@@ -853,13 +896,19 @@ export class SkillBundlePublisher {
         next.targetRoot,
         next.mergeCommitSha ?? targetBranch,
       );
-      const finalTreeSha256 = canonicalTreeHash(tree);
-      next = { ...next, finalTreeSha256, finalTreeVerifiedAt: new Date().toISOString() };
-      const finalTreeMatches = finalTreeSha256 === next.expectedTreeSha256;
+      const expectedTreeSha256 = canonicalGitLabTreeHash(snapshot.files, snapshot.files);
+      const finalTreeSha256 = canonicalGitLabTreeHash(tree, snapshot.files);
+      next = {
+        ...next,
+        expectedTreeSha256,
+        finalTreeSha256,
+        finalTreeVerifiedAt: new Date().toISOString(),
+      };
+      const finalTreeMatches = finalTreeSha256 === expectedTreeSha256;
       return {
         publication: next,
         finalTreeMatches,
-        ...(finalTreeMatches ? {} : { finalDiff: diffSkillBundleTrees(snapshot.files, tree) }),
+        ...(finalTreeMatches ? {} : { finalDiff: diffGitLabTrees(snapshot.files, tree) }),
       };
     }
     const parent = await mkdtemp(path.join(os.tmpdir(), "skill-bundle-reconcile-"));

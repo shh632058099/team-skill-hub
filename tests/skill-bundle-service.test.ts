@@ -702,3 +702,39 @@ test("reconcile transport failure does not downgrade an already published import
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("prepareSubmission normalizes CRLF text to LF but preserves lone CR and contentBase64 bytes", async () => {
+  const { dir, db, service } = await fixture();
+  try {
+    const binary = Buffer.from("binary\r\nbytes", "utf8");
+    const created = await service.submit(principal, repository, {
+      namespace: "ota",
+      importType: "skill",
+      skillPath: "line-endings",
+      files: [
+        {
+          path: "SKILL.md",
+          content: skill("ota-line-endings").replace(/\n/g, "\r\n") + "lone\rmarker\r\n",
+        },
+        {
+          path: "assets/blob.bin",
+          contentBase64: binary.toString("base64"),
+        },
+      ],
+      sourceType: "mcp",
+      submissionMode: "replace",
+    });
+    const snapshot = service.getSnapshot(created.snapshotId);
+    assert.ok(snapshot);
+    const skillFile = snapshot.files.find((file) => file.path === "SKILL.md");
+    const binaryFile = snapshot.files.find((file) => file.path === "assets/blob.bin");
+    assert.ok(skillFile?.content);
+    assert.equal(skillFile.content.includes("\r\n"), false);
+    assert.equal(skillFile.content.includes("lone\rmarker\n"), true);
+    assert.equal(binaryFile?.content, undefined);
+    assert.equal(binaryFile?.contentBase64, binary.toString("base64"));
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
