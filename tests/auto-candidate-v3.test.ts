@@ -541,6 +541,17 @@ test("shadow admission applies same-repository cooldown before quotas", () => {
   assert.equal(result.allowed, false);
   assert.equal(result.reason, "repository-cooldown");
 });
+test("collector recognizes common Chinese verified-fix wording from ordinary final response", () => {
+  const evidence = collectCandidateEvidence({
+    assistantResult:
+      "根因已确认：恢复流程遗漏完整性检查。问题已经修复并完成回归测试，该约束必须用于后续 OTA 恢复流程。",
+    timeline: [],
+  });
+  assert.equal(evidence.resultSignals.rootCause, true);
+  assert.equal(evidence.resultSignals.verifiedFix, true);
+  assert.equal(evidence.resultSignals.reusableConstraint, true);
+});
+
 test("collector marks explicit formatting-only result low value even when headings mention root cause and solution", () => {
   const evidence = collectCandidateEvidence({
     assistantResult: "# 仅格式化代码\n## 根因\n格式规则不一致。\n## 解决方案\n统一排版。\n## 验证\n测试通过。",
