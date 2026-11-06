@@ -105,6 +105,18 @@ try {
     }
     if ([string]$x.hook_event_name -eq "PostToolUse") {
         Add-Evidence -Value $x.tool_response
+        if ([string]$x.tool_name -eq "Bash" -and $x.tool_input -and $x.tool_input.command) {
+            $command = ([string]$x.tool_input.command).ToLowerInvariant()
+            $category = if ($command -match '\b(pytest|ctest|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|cargo\s+test|go\s+test|node\s+--test)\b') { "test" }
+                elseif ($command -match '\b(cmake\s+--build|make|ninja|cargo\s+build|npm\s+run\s+build|pnpm\s+build|yarn\s+build|tsc)\b') { "build" }
+                elseif ($command -match '\b(bitbake|dpkg-buildpackage|rpmbuild)\b') { "package" }
+                elseif ($command -match '\b(eslint|ruff|flake8|shellcheck)\b') { "lint" }
+                elseif ($command -match '\b(sonar|clang-tidy|cppcheck)\b') { "static-analysis" }
+                elseif ($command -match '\b(slt|device[-_ ]?test|hardware[-_ ]?test)\b') { "device-test" }
+                elseif ($command -match '\b(git\s+(?:apply|commit)|apply_patch)\b') { "git-change" }
+                else { "other" }
+            $evidence["command_category"] = $category
+        }
         $responseText = ""
         if ($x.tool_response -is [string]) {
             $responseText = [string]$x.tool_response

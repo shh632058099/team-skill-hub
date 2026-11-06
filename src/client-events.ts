@@ -60,6 +60,7 @@ export interface EngineeringEvidence {
   schemaVersion: 1;
   type: EngineeringEvidenceType;
   sourceTool: string;
+  commandCategory?: string;
   success?: boolean;
   exitCode?: number;
   counts?: {
@@ -87,9 +88,20 @@ export function normalizeEngineeringEvidence(toolName: string, raw: unknown): En
   const success =
     typeof record.success === "boolean" ? record.success : exitCode !== undefined ? exitCode === 0 : undefined;
   const status = typeof record.status === "string" ? record.status.slice(0, 80) : undefined;
+  const commandCategory =
+    typeof record.command_category === "string" && record.command_category.length <= 40
+      ? record.command_category
+      : undefined;
 
   let type: EngineeringEvidenceType = "tool";
   if (run !== undefined || passed !== undefined || failed !== undefined) type = "test";
+  else if (commandCategory === "test") type = "test";
+  else if (commandCategory === "build") type = "build";
+  else if (commandCategory === "package") type = "package_validation";
+  else if (commandCategory === "lint") type = "lint";
+  else if (commandCategory === "static-analysis") type = "static_analysis";
+  else if (commandCategory === "device-test") type = "device_test";
+  else if (commandCategory === "git-change") type = "git_change";
   else if (/test|pytest|ctest/i.test(toolName)) type = "test";
   else if (/build|cmake|make|ninja|bitbake|cargo/i.test(toolName)) type = "build";
   else if (/lint/i.test(toolName)) type = "lint";
@@ -114,6 +126,7 @@ export function normalizeEngineeringEvidence(toolName: string, raw: unknown): En
     schemaVersion: 1,
     type,
     sourceTool: toolName || "unknown",
+    ...(commandCategory ? { commandCategory } : {}),
     ...(success !== undefined ? { success } : {}),
     ...(exitCode !== undefined ? { exitCode } : {}),
     ...(run !== undefined || passed !== undefined || failed !== undefined

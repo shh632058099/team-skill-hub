@@ -88,3 +88,71 @@ test("Codex shell hook posts structured unittest evidence", async () => {
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test("Codex shell hook classifies Bash command without persisting raw command text", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "team-skill-hub-hook-category-"));
+  const config = path.join(temp, "team-skill-hub.conf");
+  let received: Record<string, any> | undefined;
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => {
+      received = JSON.parse(body);
+      response.writeHead(202, { "content-type": "application/json" });
+      response.end('{"accepted":true}');
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    await writeFile(
+      config,
+      [
+        `event_url=http://127.0.0.1:${address.port}/client-events`,
+        "server_name=teamSkillHub",
+        "api_key_env=TEST_HOOK_MARKER",
+        "capture_stop_message=true",
+        "runtime_version=1.4.0",
+        "hook_schema_version=1",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const secretCommand = "npm test -- --token super-secret-value";
+    const payload = JSON.stringify({
+      hook_event_name: "PostToolUse",
+      session_id: "sess-hook-category",
+      turn_id: "turn-hook-category",
+      cwd: temp,
+      tool_name: "Bash",
+      tool_use_id: "tool-hook-category",
+      tool_input: { command: secretCommand },
+      tool_response: { aggregated_output: "tests completed successfully", exit_code: 0 },
+    });
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("bash", ["scripts/team-skill-hub-hook.sh"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TEAM_SKILL_HUB_HOOK_CONFIG: config,
+          TEST_HOOK_MARKER: "test-marker",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.on("error", reject);
+      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`hook exited ${code}`))));
+      child.stdin.end(payload);
+    });
+    assert.ok(received);
+    assert.equal(received.metadata.evidence.command_category, "test");
+    assert.equal(received.metadata.evidence.exit_code, 0);
+    assert.equal(received.metadata.evidence.success, true);
+    assert.equal(JSON.stringify(received).includes("super-secret-value"), false);
+    assert.equal(received.metadata.tool_input, undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(temp, { recursive: true, force: true });
+  }
+});

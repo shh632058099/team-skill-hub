@@ -51,6 +51,7 @@ test("Claude Code PostToolUse extracts test evidence without persisting tool pay
   assert.deepEqual(event.metadata.evidence, {
     success: true,
     exit_code: 0,
+    command_category: "test",
     tests_run: 12,
     tests_passed: 12,
     tests_failed: 0,
@@ -83,4 +84,18 @@ test("Claude Code adapter rejects unsupported lifecycle events", () => {
       }),
     /Unsupported Claude Code hook event/,
   );
+});
+
+test("Claude Code PostToolUse classifies Bash command without retaining raw tool input", () => {
+  const event = translateClaudeCodeHook({
+    session_id: "claude-session-category",
+    prompt_id: "prompt-category",
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "cmake --build build --token private-value" },
+    tool_response: { exit_code: 0, stdout: "build complete" },
+  });
+  assert.equal((event.metadata.evidence as Record<string, unknown>).command_category, "build");
+  assert.equal(event.metadata.tool_input, undefined);
+  assert.equal(JSON.stringify(event).includes("private-value"), false);
 });

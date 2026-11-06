@@ -2,6 +2,29 @@ import { CURRENT_HOOK_RUNTIME_VERSION, CURRENT_HOOK_SCHEMA_VERSION } from "./cli
 
 export const CLAUDE_CODE_ADAPTER_VERSION = "1.0.0";
 
+function commandCategory(input: Record<string, unknown>): string | undefined {
+  if (input.tool_name !== "Bash") return undefined;
+  const toolInput = input.tool_input;
+  if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) return undefined;
+  const command = (toolInput as Record<string, unknown>).command;
+  if (typeof command !== "string") return undefined;
+  const value = command.toLowerCase();
+  if (
+    /\b(pytest|ctest|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|cargo\s+test|go\s+test|node\s+--test)\b/.test(
+      value,
+    )
+  )
+    return "test";
+  if (/\b(cmake\s+--build|make|ninja|cargo\s+build|npm\s+run\s+build|pnpm\s+build|yarn\s+build|tsc)\b/.test(value))
+    return "build";
+  if (/\b(bitbake|dpkg-buildpackage|rpmbuild)\b/.test(value)) return "package";
+  if (/\b(eslint|ruff|flake8|shellcheck)\b/.test(value)) return "lint";
+  if (/\b(sonar|clang-tidy|cppcheck)\b/.test(value)) return "static-analysis";
+  if (/\b(slt|device[-_ ]?test|hardware[-_ ]?test)\b/.test(value)) return "device-test";
+  if (/\b(git\s+(?:apply|commit)|apply_patch)\b/.test(value)) return "git-change";
+  return "other";
+}
+
 export interface ClaudeCodeClientEvent {
   schemaVersion: number;
   client: "claude_code";
@@ -69,9 +92,20 @@ function testCounts(text: string): { run?: number; passed?: number; failed?: num
 
 function postToolEvidence(input: Record<string, unknown>): Record<string, unknown> {
   const counts = testCounts(boundedText(input.tool_response));
+  const category = commandCategory(input);
+  const response = input.tool_response;
+  let exitCode = 0;
+  let success = true;
+  if (response && typeof response === "object" && !Array.isArray(response)) {
+    const record = response as Record<string, unknown>;
+    if (typeof record.exit_code === "number") exitCode = record.exit_code;
+    if (typeof record.success === "boolean") success = record.success;
+    else success = exitCode === 0;
+  }
   return {
-    success: true,
-    exit_code: 0,
+    success,
+    exit_code: exitCode,
+    ...(category ? { command_category: category } : {}),
     ...(counts.run !== undefined ? { tests_run: counts.run } : {}),
     ...(counts.passed !== undefined ? { tests_passed: counts.passed } : {}),
     ...(counts.failed !== undefined ? { tests_failed: counts.failed } : {}),
