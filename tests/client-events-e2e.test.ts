@@ -611,6 +611,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.deepEqual(claudeEvent?.metadata.evidence, {
       success: true,
       exit_code: 0,
+      command_category: "test",
       tests_run: 7,
       tests_passed: 7,
       tests_failed: 0,

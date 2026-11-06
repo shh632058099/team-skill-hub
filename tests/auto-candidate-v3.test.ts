@@ -276,3 +276,179 @@ test("eligibility respects shadow and create thresholds", () => {
   assert.equal(below.eligibleForShadow, false);
   assert.equal(below.reason, "score-below-shadow-threshold");
 });
+
+import { evaluateShadowAdmission } from "../src/auto-candidate/admission.js";
+import type { CandidateDetectionRecord } from "../src/observability.js";
+
+function projectedDetection(input: {
+  ts: string;
+  actorId?: string;
+  sessionId?: string;
+  turnId?: string;
+  repositoryId?: string;
+  policyVersion?: number;
+}): CandidateDetectionRecord {
+  return {
+    id: "det-" + Math.random(),
+    ts: input.ts,
+    detector: "stop-evidence-v3",
+    actorId: input.actorId ?? "u-admit",
+    tenantId: "t-admit",
+    sessionId: input.sessionId ?? "s-prior",
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    outcome: "shadow",
+    reason: "shadow-create",
+    evidenceCount: 1,
+    policyVersion: input.policyVersion ?? 1,
+    mode: "shadow",
+    score: 90,
+    repositoryId: input.repositoryId,
+    projectedAction: "create",
+  };
+}
+
+const createEligible = {
+  score: 90,
+  hardGates: {
+    assistantResult: true,
+    meaningfulActivity: true,
+    verification: true,
+    lowValue: true,
+    reusableResult: true,
+  },
+  scoreSignals: [],
+  eligibleForShadow: true,
+  eligibleForCreateProjection: true,
+  reason: "score-meets-create-threshold",
+};
+
+test("shadow admission enforces per-session and user quotas from prior v3 projected creates", () => {
+  const policy = defaultAutoCandidatePolicy();
+  const now = "2026-11-06T08:00:00.000Z";
+
+  const sameSession = evaluateShadowAdmission({
+    actorId: "u-admit",
+    tenantId: "t-admit",
+    sessionId: "s-current",
+    turnId: "turn-2",
+    repositoryId: "repo-a",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: [
+      projectedDetection({
+        ts: "2026-11-06T07:59:00.000Z",
+        sessionId: "s-current",
+        turnId: "turn-1",
+        repositoryId: "repo-a",
+      }),
+    ],
+  });
+  assert.equal(sameSession.allowed, false);
+  assert.equal(sameSession.reason, "session-limit");
+
+  const userHour = evaluateShadowAdmission({
+    actorId: "u-admit",
+    tenantId: "t-admit",
+    sessionId: "s-new",
+    turnId: "turn-new",
+    repositoryId: "repo-a",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: [
+      projectedDetection({ ts: "2026-11-06T07:20:00.000Z", sessionId: "s1", repositoryId: "repo-b" }),
+      projectedDetection({ ts: "2026-11-06T07:40:00.000Z", sessionId: "s2", repositoryId: "repo-c" }),
+    ],
+  });
+  assert.equal(userHour.allowed, false);
+  assert.equal(userHour.reason, "user-hour-limit");
+});
+
+test("shadow admission enforces repository and global safety ceilings", () => {
+  const policy = defaultAutoCandidatePolicy();
+  const now = "2026-11-06T08:00:00.000Z";
+  const repoRows = Array.from({ length: 5 }, (_, index) =>
+    projectedDetection({
+      ts: `2026-11-06T07:${10 + index}:00.000Z`,
+      actorId: `user-${index}`,
+      sessionId: `repo-session-${index}`,
+      repositoryId: "repo-hot",
+    }),
+  );
+  const repo = evaluateShadowAdmission({
+    actorId: "new-user",
+    tenantId: "t-admit",
+    sessionId: "new-session",
+    turnId: "new-turn",
+    repositoryId: "repo-hot",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: repoRows,
+  });
+  assert.equal(repo.reason, "repository-hour-limit");
+
+  const globalRows = Array.from({ length: 10 }, (_, index) =>
+    projectedDetection({
+      ts: `2026-11-06T07:${10 + index}:00.000Z`,
+      actorId: `global-user-${index}`,
+      sessionId: `global-session-${index}`,
+      repositoryId: `repo-${index}`,
+    }),
+  );
+  const global = evaluateShadowAdmission({
+    actorId: "fresh-user",
+    tenantId: "t-admit",
+    sessionId: "fresh-session",
+    turnId: "fresh-turn",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: globalRows,
+  });
+  assert.equal(global.reason, "global-hour-limit");
+});
+
+test("shadow ledger ignores non-v3/non-create rows and does not double-count repeated session turn", () => {
+  const policy = defaultAutoCandidatePolicy();
+  const now = "2026-11-06T08:00:00.000Z";
+  const repeated = projectedDetection({
+    ts: "2026-11-06T07:30:00.000Z",
+    sessionId: "same",
+    turnId: "turn-1",
+    repositoryId: "repo-a",
+  });
+  const ignored = { ...repeated, id: "legacy", detector: "stop-evidence-v2", projectedAction: undefined };
+  const duplicate = { ...repeated, id: "dup", ts: "2026-11-06T07:31:00.000Z" };
+
+  const result = evaluateShadowAdmission({
+    actorId: "u-admit",
+    tenantId: "t-admit",
+    sessionId: "new-session",
+    turnId: "new-turn",
+    repositoryId: undefined,
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: [repeated, duplicate, ignored],
+  });
+  assert.equal(result.allowed, true);
+  assert.equal(result.projectedAction, "create");
+});
+
+test("shadow admission skips when eligibility did not reach create projection", () => {
+  const result = evaluateShadowAdmission({
+    actorId: "u",
+    tenantId: "t",
+    sessionId: "s",
+    turnId: "turn",
+    eligibility: { ...createEligible, score: 65, eligibleForCreateProjection: false },
+    policy: defaultAutoCandidatePolicy(),
+    now: "2026-11-06T08:00:00.000Z",
+    recentDetections: [],
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "below-create-threshold");
+  assert.equal(result.projectedAction, "skip");
+});

@@ -63,10 +63,25 @@ export interface CandidateDetectionRecord {
   tenantId: string;
   sessionId: string;
   turnId?: string;
-  outcome: "created" | "skipped";
+  outcome: "created" | "skipped" | "shadow";
   reason: string;
   evidenceCount: number;
   candidateId?: string;
+  policyVersion?: number;
+  mode?: "shadow" | "active";
+  score?: number;
+  thresholds?: {
+    shadowScore: number;
+    createScore: number;
+  };
+  hardGates?: Record<string, boolean>;
+  scoreSignals?: Array<{ id: string; delta: number; reason: string }>;
+  repositoryId?: string;
+  admission?: {
+    allowed: boolean;
+    reason: string;
+  };
+  projectedAction?: "skip" | "create" | "aggregate";
 }
 
 export interface McpCallRecord {
