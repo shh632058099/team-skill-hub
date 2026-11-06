@@ -46,6 +46,16 @@ export function evaluateShadowAdmission(input: {
     return { allowed: false, reason: "session-limit", projectedAction: "skip" };
   }
 
+  if (input.repositoryId) {
+    const cooldownMs = input.policy.cooldown.sameRepositoryMinutes * 60 * 1000;
+    const cooling = rows.some(
+      (row) => row.repositoryId === input.repositoryId && millis(row.ts) <= now && millis(row.ts) >= now - cooldownMs,
+    );
+    if (cooling) {
+      return { allowed: false, reason: "repository-cooldown", projectedAction: "skip" };
+    }
+  }
+
   const userRows = rows.filter((row) => row.actorId === input.actorId && row.tenantId === input.tenantId);
   if (userRows.filter((row) => millis(row.ts) >= hourAgo).length >= input.policy.limits.perUserPerHour) {
     return { allowed: false, reason: "user-hour-limit", projectedAction: "skip" };

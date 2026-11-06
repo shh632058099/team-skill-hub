@@ -369,3 +369,26 @@ test("knowledge submission spec inline script is valid browser JavaScript", asyn
     assert.doesNotThrow(() => new Function(script), "generated spec page inline script should parse");
   }
 });
+
+test("auto candidate policy admin page exposes shadow thresholds quotas and history", async () => {
+  const { ADMIN_AUTO_CANDIDATE_POLICY_HTML } = await import("../src/admin-ui.js");
+  assertContainsAll(ADMIN_AUTO_CANDIDATE_POLICY_HTML, [
+    "Auto Candidate v3",
+    "Shadow 阈值",
+    "创建阈值",
+    "每用户/小时",
+    "每用户/天",
+    "每仓库/小时",
+    "每仓库/天",
+    "全局/小时",
+    "全局/天",
+    "保存为新版本",
+    "版本历史",
+    "/admin/api/auto-candidate-policy",
+  ]);
+  const scripts = [...ADMIN_AUTO_CANDIDATE_POLICY_HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1]!,
+  );
+  assert.ok(scripts.length > 0);
+  for (const script of scripts) assert.doesNotThrow(() => new Function(script));
+});

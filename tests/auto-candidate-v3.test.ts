@@ -453,6 +453,94 @@ test("shadow admission skips when eligibility did not reach create projection", 
   assert.equal(result.projectedAction, "skip");
 });
 
+test("shadow admission enforces daily user repository and global ceilings", () => {
+  const policy = defaultAutoCandidatePolicy();
+  const now = "2026-11-06T08:00:00.000Z";
+
+  const userDayRows = Array.from({ length: 5 }, (_, index) =>
+    projectedDetection({
+      ts: `2026-11-05T${20 + Math.floor(index / 2)}:${String(index * 7).padStart(2, "0")}:00.000Z`,
+      sessionId: `user-day-${index}`,
+      repositoryId: `repo-user-day-${index}`,
+    }),
+  );
+  const userDay = evaluateShadowAdmission({
+    actorId: "u-admit",
+    tenantId: "t-admit",
+    sessionId: "user-day-new",
+    turnId: "turn-user-day",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: userDayRows,
+  });
+  assert.equal(userDay.reason, "user-day-limit");
+
+  const repositoryDayRows = Array.from({ length: 20 }, (_, index) =>
+    projectedDetection({
+      ts: `2026-11-05T${String(9 + Math.floor(index / 2)).padStart(2, "0")}:${String((index * 3) % 60).padStart(2, "0")}:00.000Z`,
+      actorId: `repo-day-user-${index}`,
+      sessionId: `repo-day-session-${index}`,
+      repositoryId: "repo-day-hot",
+    }),
+  );
+  const repositoryDay = evaluateShadowAdmission({
+    actorId: "repo-day-new-user",
+    tenantId: "t-admit",
+    sessionId: "repo-day-new-session",
+    turnId: "repo-day-new-turn",
+    repositoryId: "repo-day-hot",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: repositoryDayRows,
+  });
+  assert.equal(repositoryDay.reason, "repository-day-limit");
+
+  const globalDayRows = Array.from({ length: 50 }, (_, index) =>
+    projectedDetection({
+      ts: `2026-11-05T${String(9 + Math.floor(index / 5)).padStart(2, "0")}:${String(index % 5).padStart(2, "0")}:00.000Z`,
+      actorId: `global-day-user-${index}`,
+      sessionId: `global-day-session-${index}`,
+      repositoryId: `global-day-repo-${index}`,
+    }),
+  );
+  const globalDay = evaluateShadowAdmission({
+    actorId: "global-day-new-user",
+    tenantId: "t-admit",
+    sessionId: "global-day-new-session",
+    turnId: "global-day-new-turn",
+    eligibility: createEligible,
+    policy,
+    now,
+    recentDetections: globalDayRows,
+  });
+  assert.equal(globalDay.reason, "global-day-limit");
+});
+
+test("shadow admission applies same-repository cooldown before quotas", () => {
+  const policy = defaultAutoCandidatePolicy();
+  const result = evaluateShadowAdmission({
+    actorId: "cooldown-user-new",
+    tenantId: "t-admit",
+    sessionId: "cooldown-new-session",
+    turnId: "cooldown-new-turn",
+    repositoryId: "repo-cooldown",
+    eligibility: createEligible,
+    policy,
+    now: "2026-11-06T08:00:00.000Z",
+    recentDetections: [
+      projectedDetection({
+        ts: "2026-11-06T07:58:00.000Z",
+        actorId: "cooldown-other-user",
+        sessionId: "cooldown-prior-session",
+        repositoryId: "repo-cooldown",
+      }),
+    ],
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "repository-cooldown");
+});
 test("collector marks explicit formatting-only result low value even when headings mention root cause and solution", () => {
   const evidence = collectCandidateEvidence({
     assistantResult: "# 仅格式化代码\n## 根因\n格式规则不一致。\n## 解决方案\n统一排版。\n## 验证\n测试通过。",

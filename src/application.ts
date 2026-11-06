@@ -3237,10 +3237,28 @@ export class SkillHubApplicationService {
       const labeled = reviewed.filter((item) => Boolean(item.reviewReason));
       const useful = labeled.filter((item) => item.reviewReason === "useful").length;
       const falsePositive = labeled.filter((item) => item.reviewReason === "false_positive").length;
+      const shadowDetections = scopedDetections.filter((item) => item.outcome === "shadow");
+      const scoreBuckets = { belowShadow: 0, betweenShadowAndCreate: 0, gteCreate: 0 };
+      for (const item of scopedDetections) {
+        if (typeof item.score !== "number" || !item.thresholds) continue;
+        if (item.score < item.thresholds.shadowScore) scoreBuckets.belowShadow += 1;
+        else if (item.score < item.thresholds.createScore) scoreBuckets.betweenShadowAndCreate += 1;
+        else scoreBuckets.gteCreate += 1;
+      }
       return {
         candidates: scopedCandidates.length,
         created: scopedDetections.filter((item) => item.outcome === "created").length,
         skipped: scopedDetections.filter((item) => item.outcome === "skipped").length,
+        shadow: shadowDetections.length,
+        projectedCreates: shadowDetections.filter((item) => item.projectedAction === "create").length,
+        quotaRejected: shadowDetections.filter(
+          (item) =>
+            item.admission?.allowed === false &&
+            item.score !== undefined &&
+            item.thresholds &&
+            item.score >= item.thresholds.createScore,
+        ).length,
+        scoreBuckets,
         reviewed: reviewed.length,
         labeled: labeled.length,
         labelCoverage: reviewed.length ? labeled.length / reviewed.length : 0,
@@ -3263,6 +3281,33 @@ export class SkillHubApplicationService {
       current: summarize(currentStart, now, detectorName),
       baseline: summarize(baselineStart, currentStart, detectorName),
     }));
+    const v3CurrentDetections = detections.filter(
+      (item) =>
+        item.detector === "stop-evidence-v3" &&
+        timestamp(item.ts) >= currentStart &&
+        timestamp(item.ts) < now &&
+        item.policyVersion !== undefined,
+    );
+    const policyVersions = [...new Set(v3CurrentDetections.map((item) => item.policyVersion!))]
+      .sort((a, b) => b - a)
+      .map((policyVersion) => {
+        const rows = v3CurrentDetections.filter((item) => item.policyVersion === policyVersion);
+        return {
+          policyVersion,
+          detections: rows.length,
+          shadow: rows.filter((item) => item.outcome === "shadow").length,
+          projectedCreates: rows.filter((item) => item.outcome === "shadow" && item.projectedAction === "create")
+            .length,
+          quotaRejected: rows.filter(
+            (item) =>
+              item.outcome === "shadow" &&
+              item.admission?.allowed === false &&
+              item.score !== undefined &&
+              item.thresholds &&
+              item.score >= item.thresholds.createScore,
+          ).length,
+        };
+      });
     const timeSeries = Array.from({ length: days * 2 }, (_, index) => {
       const from = baselineStart + index * dayMs;
       const to = from + dayMs;
@@ -3283,6 +3328,9 @@ export class SkillHubApplicationService {
         skipped: current.skipped - baseline.skipped,
       },
       byDetector,
+      byPolicyVersion: policyVersions,
+      projectionSemantics:
+        "Phase 1 projected create volume is an upper bound because shadow-vs-shadow near-duplicate clustering is not yet enforced.",
       timeSeries,
     };
   }
@@ -3429,6 +3477,43 @@ export class SkillHubApplicationService {
 
   async listFeedback(limit = 200) {
     return await this.observability.listFeedback(limit);
+  }
+
+  async getAutoCandidatePolicy() {
+    return await this.autoCandidatePolicyStore.loadCurrent();
+  }
+
+  async getAutoCandidatePolicyHistory() {
+    return await this.autoCandidatePolicyStore.history();
+  }
+
+  async saveAutoCandidatePolicy(input: import("./auto-candidate/types.js").AutoCandidatePolicy) {
+    if (input.mode !== "shadow") {
+      throw new Error("Phase 1 Auto Candidate policy only supports shadow mode");
+    }
+    const previous = await this.autoCandidatePolicyStore.loadCurrent();
+    const saved = await this.autoCandidatePolicyStore.saveNext(input);
+    this.events.emit("auto_candidate_policy.updated", {
+      previousPolicyVersion: previous.policyVersion,
+      policyVersion: saved.policyVersion,
+      mode: saved.mode,
+    });
+    return saved;
+  }
+
+  async rollbackAutoCandidatePolicy(version: number) {
+    const previous = await this.autoCandidatePolicyStore.loadCurrent();
+    const saved = await this.autoCandidatePolicyStore.rollbackTo(version);
+    if (saved.mode !== "shadow") {
+      throw new Error("Phase 1 Auto Candidate policy rollback must resolve to shadow mode");
+    }
+    this.events.emit("auto_candidate_policy.rolled_back", {
+      previousPolicyVersion: previous.policyVersion,
+      sourcePolicyVersion: version,
+      policyVersion: saved.policyVersion,
+      mode: saved.mode,
+    });
+    return saved;
   }
 
   async getKnowledgeSubmissionSpec() {

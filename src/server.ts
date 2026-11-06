@@ -6,10 +6,12 @@ import path from "node:path";
 import * as z from "zod/v4";
 import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from "./types.js";
 import type { KnowledgeSubmissionSpec } from "./knowledge-submission-spec.js";
+import type { AutoCandidatePolicy } from "./auto-candidate/types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler, listSkillHubMcpTools } from "./mcp.js";
 import {
   ADMIN_GOVERNANCE_HTML,
+  ADMIN_AUTO_CANDIDATE_POLICY_HTML,
   ADMIN_HTML,
   ADMIN_KNOWLEDGE_SUBMISSION_SPEC_HTML,
   ADMIN_LOGIN_HTML,
@@ -740,6 +742,64 @@ export async function startServer(
     }
     try {
       return { spec: await service.rollbackKnowledgeSubmissionSpec(version) };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400;
+      reply.code(code);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get("/admin/auto-candidate-policy", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
+    return ADMIN_AUTO_CANDIDATE_POLICY_HTML;
+  });
+
+  app.get("/admin/api/auto-candidate-policy", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    return { policy: await service.getAutoCandidatePolicy() };
+  });
+
+  app.put<{ Body: AutoCandidatePolicy }>("/admin/api/auto-candidate-policy", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    try {
+      return { policy: await service.saveAutoCandidatePolicy(request.body) };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  app.get("/admin/api/auto-candidate-policy/history", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    return { policies: await service.getAutoCandidatePolicyHistory() };
+  });
+
+  app.post<{ Body: { version?: number } }>("/admin/api/auto-candidate-policy/rollback", async (request, reply) => {
+    if (!hasAdminAccess(request)) {
+      reply.code(403);
+      return { error: "admin API access denied" };
+    }
+    const version = Number(request.body?.version);
+    if (!Number.isInteger(version) || version < 1) {
+      reply.code(400);
+      return { error: "version must be a positive integer" };
+    }
+    try {
+      return { policy: await service.rollbackAutoCandidatePolicy(version) };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 400;
       reply.code(code);
