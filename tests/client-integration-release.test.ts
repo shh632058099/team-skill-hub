@@ -14,6 +14,12 @@ test("loads canonical client integration release metadata", async () => {
   assert.ok(release.hookSchemaVersion > 0);
 });
 
+test("auto candidate evidence hook ships as client integration v14 runtime 1.5.0", async () => {
+  const release = await loadClientIntegrationRelease();
+  assert.equal(release.version, 14);
+  assert.equal(release.hookRuntimeVersion, "1.5.0");
+});
+
 test("rejects invalid version ordering", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "skill-hub-release-"));
   await mkdir(path.join(root, "client-integration"), { recursive: true });

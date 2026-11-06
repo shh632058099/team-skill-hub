@@ -215,7 +215,7 @@ test("published Knowledge is automatically related and updated through review an
   }
 });
 
-test("automatic candidate can publish through MR, merge, sync and become searchable Knowledge", async () => {
+test("shadow auto-candidate detection preserves manual publish through MR merge sync and search", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "skill-hub-knowledge-workflow-"));
   const upstream = path.join(tempRoot, "rd-skills");
   const dataDir = path.join(tempRoot, "data");
@@ -344,10 +344,25 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       },
     });
 
-    const generated = (await service.listKnowledgeCandidates(100)).find(
+    const automatic = (await service.listKnowledgeCandidates(100)).find(
       (item) => item.sourceType === "codex-summary" && item.sourceSessionId === "workflow-session",
     );
-    assert.ok(generated, "automatic Candidate should be generated");
+    assert.equal(automatic, undefined, "Phase 1 shadow detector must not create an automatic Candidate");
+
+    const shadowDetection = (await service.listCandidateDetections(100)).find(
+      (item) => item.detector === "stop-evidence-v3" && item.sessionId === "workflow-session",
+    );
+    assert.ok(shadowDetection);
+    assert.equal(shadowDetection.outcome, "shadow");
+    assert.equal(shadowDetection.projectedAction, "create");
+
+    const generated = await service.submitKnowledgeCandidate(principal, {
+      title: "OTA 断电恢复修复",
+      content: assistantResult,
+      sourceType: "manual",
+      suggestedType: "knowledge",
+      repository: "rd-skills",
+    });
     assert.equal(generated.repository, "rd-skills");
     assert.equal(generated.status, "pending");
     assert.match(generated.suggestedPath ?? "", /^knowledge\/ota-[a-z0-9]+\.md$/);
@@ -367,7 +382,6 @@ test("automatic candidate can publish through MR, merge, sync and become searcha
       "useful",
     );
     assert.equal(approved.status, "approved");
-
     process.env.TEST_GITLAB_WRITE_TOKEN = "write-token";
     globalThis.fetch = async (input, init) => {
       const url = String(input);

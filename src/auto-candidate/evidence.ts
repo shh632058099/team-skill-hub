@@ -79,7 +79,7 @@ export function collectCandidateEvidence(input: {
     actions.editCount + actions.writeCount + actions.patchCount + actions.meaningfulBashCount > 0;
 
   const rootCause = /root cause|根因|原因是|由于.*导致/i.test(text);
-  const verifiedFix = /verified fix|修复完成|已修复|fixed|resolved|解决方案/i.test(text);
+  const verifiedFix = /verified fix|修复完成|已修复|已经修复|fixed|resolved|解决方案/i.test(text);
   const workaround = /workaround|临时方案|绕过/i.test(text);
   const reusableConstraint = /constraint|约束|必须|不得|兼容性/i.test(text);
   const explicitLowValue =
