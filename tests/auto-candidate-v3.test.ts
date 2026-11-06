@@ -587,3 +587,51 @@ test("command-category-only evidence survives normalization for Codex PostToolUs
   assert.equal(evidence?.type, "test");
   assert.equal(evidence?.commandCategory, "test");
 });
+
+import { inferCandidateProjectRepository } from "../src/auto-candidate/evidence.js";
+
+test("repository inference ignores knowledge lookup MCP repositories", () => {
+  const timeline = [
+    {
+      kind: "event" as const,
+      event: {
+        event: "SessionStart",
+        actorId: "u",
+        tenantId: "t",
+        sessionId: "s",
+        metadata: {},
+      },
+    },
+    {
+      kind: "mcp-call" as const,
+      call: {
+        success: true,
+        args: { repository: "rd-skills" },
+      },
+    },
+  ];
+  assert.equal(inferCandidateProjectRepository(timeline, new Set(["rd-skills"])), undefined);
+});
+
+test("repository inference trusts configured SessionStart project context", () => {
+  const timeline = [
+    {
+      kind: "event" as const,
+      event: {
+        event: "SessionStart",
+        actorId: "u",
+        tenantId: "t",
+        sessionId: "s",
+        metadata: { project_context: { repositoryId: "rd-skills" } },
+      },
+    },
+    {
+      kind: "mcp-call" as const,
+      call: {
+        success: true,
+        args: { repository: "other-repo" },
+      },
+    },
+  ];
+  assert.equal(inferCandidateProjectRepository(timeline, new Set(["rd-skills", "other-repo"])), "rd-skills");
+});

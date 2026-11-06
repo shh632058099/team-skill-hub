@@ -29,6 +29,23 @@ function categoryForType(type: string): EvidenceCategory {
   return "other";
 }
 
+export function inferCandidateProjectRepository(
+  timeline: CandidateTimelineItem[],
+  validRepositoryIds: ReadonlySet<string>,
+): string | undefined {
+  const counts = new Map<string, number>();
+  for (const item of timeline) {
+    if (item.kind !== "event") continue;
+    const context = item.event.metadata.project_context;
+    if (!context || typeof context !== "object") continue;
+    const repositoryId = (context as Record<string, unknown>).repositoryId;
+    if (typeof repositoryId !== "string" || !validRepositoryIds.has(repositoryId)) continue;
+    const weight = item.event.event === "SessionStart" ? 3 : 1;
+    counts.set(repositoryId, (counts.get(repositoryId) ?? 0) + weight);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+}
+
 export function collectCandidateEvidence(input: {
   timeline: CandidateTimelineItem[];
   assistantResult: string;
