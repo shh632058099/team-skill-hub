@@ -452,3 +452,31 @@ test("shadow admission skips when eligibility did not reach create projection", 
   assert.equal(result.reason, "below-create-threshold");
   assert.equal(result.projectedAction, "skip");
 });
+
+test("collector marks explicit formatting-only result low value even when headings mention root cause and solution", () => {
+  const evidence = collectCandidateEvidence({
+    assistantResult: "# 仅格式化代码\n## 根因\n格式规则不一致。\n## 解决方案\n统一排版。\n## 验证\n测试通过。",
+    timeline: [
+      {
+        kind: "event",
+        event: {
+          event: "PostToolUse",
+          actorId: "u-low",
+          tenantId: "t-low",
+          sessionId: "s-low",
+          metadata: {
+            tool_name: "Bash",
+            engineering_evidence: {
+              type: "test",
+              sourceTool: "Bash",
+              success: true,
+              exitCode: 0,
+              counts: { passed: 12, failed: 0 },
+            },
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(evidence.resultSignals.lowValueOnly, true);
+});

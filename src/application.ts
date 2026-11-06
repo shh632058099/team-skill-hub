@@ -79,6 +79,10 @@ import { listDataGovernanceRules } from "./data-governance.js";
 import { parseKnowledgeSummary } from "./knowledge-summary.js";
 import { KnowledgeSubmissionSpecStore } from "./knowledge-submission-spec.js";
 import { KnowledgeSubmissionService } from "./knowledge-submission.js";
+import { AutoCandidatePolicyStore } from "./auto-candidate/policy-store.js";
+import { collectCandidateEvidence } from "./auto-candidate/evidence.js";
+import { evaluateCandidateEligibility } from "./auto-candidate/eligibility.js";
+import { evaluateShadowAdmission } from "./auto-candidate/admission.js";
 import { openSkillHubDatabase, type SkillHubDatabase } from "./storage/database.js";
 import { SqliteSkillBundleRepository } from "./storage/skill-bundle-repository.js";
 import { SkillBundleService, type SubmitSkillBundleServiceInput } from "./skill-bundle-service.js";
@@ -128,6 +132,7 @@ export class SkillHubApplicationService {
   private readonly skillBundles: SkillBundleService;
   private readonly knowledgeSubmissionSpecStore: KnowledgeSubmissionSpecStore;
   private readonly knowledgeSubmission: KnowledgeSubmissionService;
+  private readonly autoCandidatePolicyStore: AutoCandidatePolicyStore;
   private readonly clientEventPipeline = new ClientEventPipeline();
 
   constructor(
@@ -146,11 +151,12 @@ export class SkillHubApplicationService {
     this.observability = new McpObservabilityStore(config.dataDir);
     this.knowledgeSubmissionSpecStore = new KnowledgeSubmissionSpecStore(config.dataDir);
     this.knowledgeSubmission = new KnowledgeSubmissionService(this.knowledgeSubmissionSpecStore);
+    this.autoCandidatePolicyStore = new AutoCandidatePolicyStore(config.dataDir);
     this.clientEventPipeline.register({
-      id: "stop-knowledge-candidate-detector-v2",
+      id: "stop-knowledge-candidate-detector-v3",
       events: ["Stop"],
       run: async ({ event }) => {
-        await this.detectStopKnowledgeCandidate(event);
+        await this.detectStopKnowledgeCandidateV3(event);
       },
     });
     for (const provider of providers) this.providers.set(provider.type, provider);
@@ -176,6 +182,149 @@ export class SkillHubApplicationService {
         failureCount: 0,
       });
     }
+  }
+
+  private async detectStopKnowledgeCandidateV3(event: ClientEventRecord): Promise<void> {
+    const detector = "stop-evidence-v3";
+    const policy = await this.autoCandidatePolicyStore.loadCurrent();
+
+    const record = async (input: {
+      outcome: "shadow" | "skipped";
+      reason: string;
+      evidenceCount?: number;
+      score?: number;
+      hardGates?: Record<string, boolean>;
+      scoreSignals?: Array<{ id: string; delta: number; reason: string }>;
+      repositoryId?: string;
+      admission?: { allowed: boolean; reason: string };
+      projectedAction?: "skip" | "create" | "aggregate";
+    }) => {
+      await this.observability.recordCandidateDetection({
+        detector,
+        actorId: event.actorId,
+        tenantId: event.tenantId,
+        sessionId: event.sessionId,
+        turnId: event.turnId,
+        outcome: input.outcome,
+        reason: input.reason,
+        evidenceCount: input.evidenceCount ?? 0,
+        policyVersion: policy.policyVersion,
+        mode: "shadow",
+        ...(input.score !== undefined ? { score: input.score } : {}),
+        thresholds: {
+          shadowScore: policy.thresholds.shadowScore,
+          createScore: policy.thresholds.createScore,
+        },
+        ...(input.hardGates ? { hardGates: input.hardGates } : {}),
+        ...(input.scoreSignals ? { scoreSignals: input.scoreSignals } : {}),
+        ...(input.repositoryId ? { repositoryId: input.repositoryId } : {}),
+        ...(input.admission ? { admission: input.admission } : {}),
+        projectedAction: input.projectedAction ?? "skip",
+      });
+    };
+
+    if (!policy.enabled) {
+      await record({ outcome: "skipped", reason: "policy-disabled" });
+      return;
+    }
+    if (event.metadata.stop_hook_active === true) {
+      await record({ outcome: "skipped", reason: "stop-hook-recursion" });
+      return;
+    }
+
+    const rawExcerpt = event.metadata.assistant_result_excerpt;
+    if (typeof rawExcerpt !== "string" || !rawExcerpt.trim()) {
+      await record({ outcome: "skipped", reason: "missing-assistant-result" });
+      return;
+    }
+
+    const timeline = await this.observability.getClientSessionTimeline(event.actorId, event.tenantId, event.sessionId);
+    const repositoryCounts = new Map<string, number>();
+    for (const item of timeline) {
+      if (item.kind === "event") {
+        const context = item.event.metadata.project_context;
+        if (context && typeof context === "object") {
+          const repositoryId = (context as Record<string, unknown>).repositoryId;
+          if (
+            typeof repositoryId === "string" &&
+            this.config.repositories.some((repository) => repository.id === repositoryId)
+          ) {
+            const weight = item.event.event === "SessionStart" ? 3 : 1;
+            repositoryCounts.set(repositoryId, (repositoryCounts.get(repositoryId) ?? 0) + weight);
+          }
+        }
+      } else if (item.call.success) {
+        const args = item.call.args ?? {};
+        const direct = typeof args.repository === "string" ? args.repository : undefined;
+        const repositories = Array.isArray(args.repositories)
+          ? args.repositories.filter((candidate): candidate is string => typeof candidate === "string")
+          : [];
+        const inferred = direct ?? (repositories.length === 1 ? repositories[0] : undefined);
+        if (inferred && this.config.repositories.some((repository) => repository.id === inferred)) {
+          repositoryCounts.set(inferred, (repositoryCounts.get(inferred) ?? 0) + 1);
+        }
+      }
+    }
+    const repositoryId = [...repositoryCounts.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    )[0]?.[0];
+
+    const evidence = collectCandidateEvidence({
+      timeline: timeline as Parameters<typeof collectCandidateEvidence>[0]["timeline"],
+      assistantResult: rawExcerpt,
+      ...(repositoryId ? { repositoryId } : {}),
+    });
+    const eligibility = evaluateCandidateEligibility(evidence, policy);
+
+    if (!eligibility.eligibleForShadow) {
+      await record({
+        outcome: "skipped",
+        reason: eligibility.reason,
+        evidenceCount: evidence.evidence.length,
+        score: eligibility.score,
+        hardGates: eligibility.hardGates,
+        scoreSignals: eligibility.scoreSignals,
+        repositoryId,
+        projectedAction: "skip",
+      });
+      return;
+    }
+
+    let admission: import("./auto-candidate/types.js").AdmissionResult = {
+      allowed: false,
+      reason: "below-create-threshold",
+      projectedAction: "skip",
+    };
+    if (eligibility.eligibleForCreateProjection) {
+      const recentDetections = await this.observability.listCandidateDetections(5000);
+      admission = evaluateShadowAdmission({
+        actorId: event.actorId,
+        tenantId: event.tenantId,
+        sessionId: event.sessionId,
+        turnId: event.turnId,
+        ...(repositoryId ? { repositoryId } : {}),
+        eligibility,
+        policy,
+        now: new Date().toISOString(),
+        recentDetections,
+      });
+    }
+
+    await record({
+      outcome: "shadow",
+      reason: admission.allowed
+        ? "shadow-create"
+        : eligibility.eligibleForCreateProjection
+          ? "shadow-" + admission.reason
+          : "shadow-score",
+      evidenceCount: evidence.evidence.length,
+      score: eligibility.score,
+      hardGates: eligibility.hardGates,
+      scoreSignals: eligibility.scoreSignals,
+      repositoryId,
+      admission: { allowed: admission.allowed, reason: admission.reason },
+      projectedAction: admission.allowed ? "create" : "skip",
+    });
   }
 
   private async detectStopKnowledgeCandidate(event: ClientEventRecord): Promise<void> {

@@ -934,58 +934,13 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     });
     assert.equal(candidatesResponse.status, 200);
     const candidatesBody = (await candidatesResponse.json()) as {
-      candidates: Array<{
-        sourceType: string;
-        sourceSessionId?: string;
-        sourceTurnId?: string;
-        automation?: {
-          detector: string;
-          classification: string;
-          generationReason: string;
-          evidenceCount: number;
-          evidence: Array<{
-            type: string;
-            sourceTool: string;
-            success?: boolean;
-            counts?: { passed?: number; failed?: number };
-          }>;
-        };
-        repository?: string;
-        submissionSpecVersion?: number;
-        validationSpecVersion?: number;
-        submissionSpecSchemaVersion?: number;
-        submissionMode?: string;
-      }>;
+      candidates: Array<{ sourceSessionId?: string; sourceTurnId?: string; automation?: { detector: string } }>;
     };
-    const automatic = candidatesBody.candidates.find((item) => item.sourceTurnId === "turn-auto-knowledge");
-    assert.equal(automatic?.sourceType, "codex-summary");
-    assert.equal(automatic?.sourceSessionId, "session-e2e");
-    assert.equal(automatic?.repository, "rd-skills");
-    assert.equal(automatic?.automation?.detector, "stop-evidence-v2");
-    assert.equal(automatic?.automation?.evidenceCount, 1);
-    assert.equal(automatic?.automation?.classification, "verified-fix");
-    assert.match(automatic?.automation?.generationReason ?? "", /passing test evidence/);
-    assert.equal(automatic?.automation?.evidence[0]?.type, "test");
-    assert.equal(automatic?.automation?.evidence[0]?.sourceTool, "Bash");
-    assert.equal(automatic?.automation?.evidence[0]?.counts?.passed, 12);
-    assert.equal(automatic?.automation?.evidence[0]?.counts?.failed, 0);
-    assert.equal(automatic?.submissionMode, "automatic");
-    assert.equal(automatic?.submissionSpecVersion, 1);
-    assert.equal(automatic?.validationSpecVersion, 1);
-    assert.equal(automatic?.submissionSpecSchemaVersion, 1);
-    assert.ok((automatic as any)?.artifactBundleId);
-    const editable = await service.updateKnowledgeCandidate((automatic as any).id, {
-      content: assistantResult.replace(
-        "仍需在目标硬件上验证掉电时序。",
-        "仍需在目标硬件上验证掉电时序，并保留 Bundle 草稿。",
-      ),
-    });
-    assert.equal(editable.status, "pending");
-    const editableBundle = service.getSkillBundleImport((automatic as any).artifactBundleId);
-    assert.equal(editableBundle?.status, "pending");
-    assert.match(service.getSkillBundleSnapshot(editableBundle!.snapshotId)?.files[0]?.content ?? "", /Bundle 草稿/);
-    const restored = await service.updateKnowledgeCandidate((automatic as any).id, { content: assistantResult });
-    assert.equal(restored.content, assistantResult);
+    assert.equal(
+      candidatesBody.candidates.some((item) => item.sourceTurnId === "turn-auto-knowledge"),
+      false,
+      "phase 1 shadow mode must not create automatic candidates",
+    );
 
     const eventsAfterEvidence = await fetch(base + "/admin/api/client-events", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" },
@@ -1006,74 +961,37 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     });
     assert.equal(detectionsResponse.status, 200);
     const detectionsBody = (await detectionsResponse.json()) as {
-      detections: Array<{ id: string; outcome: string; reason: string; candidateId?: string }>;
+      detections: Array<{
+        id: string;
+        detector?: string;
+        outcome: string;
+        reason: string;
+        turnId?: string;
+        score?: number;
+        policyVersion?: number;
+        repositoryId?: string;
+        projectedAction?: string;
+        thresholds?: { shadowScore: number; createScore: number };
+        admission?: { allowed: boolean; reason: string };
+      }>;
     };
-    assert.ok(
-      detectionsBody.detections.some(
-        (item) =>
-          item.outcome === "created" && item.reason === "verified-engineering-result" && Boolean(item.candidateId),
-      ),
-    );
-    const detection = detectionsBody.detections.find((item) => item.outcome === "created")!;
-    assert.equal(
-      (
-        await fetch(base + "/admin/api/candidate-detections/" + encodeURIComponent(detection.id), {
-          headers: { "x-skill-hub-admin-key": "client-events-admin" },
-        })
-      ).status,
-      200,
-    );
+    const shadow = detectionsBody.detections.find((item) => item.turnId === "turn-auto-knowledge");
+    assert.equal(shadow?.detector, "stop-evidence-v3");
+    assert.equal(shadow?.outcome, "shadow");
+    assert.equal(shadow?.reason, "shadow-create");
+    assert.equal(shadow?.score, 80);
+    assert.equal(shadow?.policyVersion, 1);
+    assert.equal(shadow?.repositoryId, "rd-skills");
+    assert.equal(shadow?.projectedAction, "create");
+    assert.deepEqual(shadow?.thresholds, { shadowScore: 60, createScore: 80 });
+    assert.deepEqual(shadow?.admission, { allowed: true, reason: "admitted" });
+
     const filteredDetections = await fetch(
-      base + "/admin/api/candidate-detections?q=verified&outcome=created&from=2000-01-01T00:00:00.000Z",
+      base + "/admin/api/candidate-detections?q=shadow-create&outcome=shadow&from=2000-01-01T00:00:00.000Z",
       { headers: { "x-skill-hub-admin-key": "client-events-admin" } },
     );
     assert.equal(filteredDetections.status, 200);
     assert.ok(((await filteredDetections.json()) as { detections: unknown[] }).detections.length >= 1);
-    assert.equal(
-      (
-        await fetch(base + "/admin/api/candidate-detections/missing-detection", {
-          headers: { "x-skill-hub-admin-key": "client-events-admin" },
-        })
-      ).status,
-      404,
-    );
-
-    const missingRequiredStop = await fetch(base + "/client-events", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...stopPayload,
-        turn_id: "turn-auto-missing-required",
-        metadata: {
-          stop_hook_active: false,
-          assistant_result_excerpt: assistantResult.replace(/\n\n## 约束\/限制[\s\S]*$/, ""),
-        },
-      }),
-    });
-    assert.equal(missingRequiredStop.status, 202);
-    const detectionsAfterMissing = await fetch(base + "/admin/api/candidate-detections", {
-      headers: { "x-skill-hub-admin-key": "client-events-admin" },
-    });
-    const detectionsAfterMissingBody = (await detectionsAfterMissing.json()) as {
-      detections: Array<{ turnId?: string; outcome: string; reason: string }>;
-    };
-    assert.ok(
-      detectionsAfterMissingBody.detections.some(
-        (item) =>
-          item.turnId === "turn-auto-missing-required" &&
-          item.outcome === "skipped" &&
-          item.reason === "missing-required-knowledge-field",
-      ),
-    );
-    const candidatesAfterMissing = await fetch(base + "/admin/api/knowledge-candidates", {
-      headers: { "x-skill-hub-admin-key": "client-events-admin" },
-    });
-    assert.equal(
-      ((await candidatesAfterMissing.json()) as { candidates: Array<{ sourceTurnId?: string }> }).candidates.some(
-        (item) => item.sourceTurnId === "turn-auto-missing-required",
-      ),
-      false,
-    );
 
     const sessionDetailResponse = await fetch(
       base +
@@ -1088,20 +1006,18 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
       evidence: Array<{ evidence: { type?: string; counts?: { passed?: number } } }>;
       assetUsage: Array<{ tool: string }>;
       candidates: Array<{ sourceSessionId?: string; sourceTurnId?: string }>;
-      detections: Array<{ outcome: string; reason: string }>;
-      timeline: Array<{ kind: string }>;
+      detections: Array<{ detector?: string; outcome: string; reason: string }>;
     };
     assert.ok(sessionDetail.evidence.some((item) => item.evidence.type === "test"));
     assert.ok(sessionDetail.evidence.some((item) => item.evidence.counts?.passed === 12));
     assert.ok(sessionDetail.assetUsage.some((item) => item.tool === "search_knowledge"));
-    assert.ok(
-      sessionDetail.candidates.some(
-        (item) => item.sourceSessionId === "session-e2e" && item.sourceTurnId === "turn-auto-knowledge",
-      ),
+    assert.equal(
+      sessionDetail.candidates.some((item) => item.sourceTurnId === "turn-auto-knowledge"),
+      false,
     );
     assert.ok(
       sessionDetail.detections.some(
-        (item) => item.outcome === "created" && item.reason === "verified-engineering-result",
+        (item) => item.detector === "stop-evidence-v3" && item.outcome === "shadow" && item.reason === "shadow-create",
       ),
     );
 
@@ -1113,50 +1029,36 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(repeated.status, 202);
     const repeatedBody = (await repeated.json()) as { accepted: boolean; event_id: string };
     assert.equal(repeatedBody.event_id, stoppedBody.event_id);
-    const afterRepeat = await fetch(base + "/admin/api/knowledge-candidates", {
-      headers: { "x-skill-hub-admin-key": "client-events-admin" },
-    });
-    const afterRepeatBody = (await afterRepeat.json()) as {
-      candidates: Array<{ sourceTurnId?: string }>;
-    };
-    assert.equal(afterRepeatBody.candidates.filter((item) => item.sourceTurnId === "turn-auto-knowledge").length, 1);
     const detectionsAfterRepeatResponse = await fetch(base + "/admin/api/candidate-detections", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" },
     });
     const detectionsAfterRepeat = (await detectionsAfterRepeatResponse.json()) as {
-      detections: Array<{ outcome: string; turnId?: string }>;
+      detections: Array<{ detector?: string; outcome: string; turnId?: string }>;
     };
     assert.equal(
       detectionsAfterRepeat.detections.filter(
-        (item) => item.turnId === "turn-auto-knowledge" && item.outcome === "created",
+        (item) => item.turnId === "turn-auto-knowledge" && item.detector === "stop-evidence-v3",
       ).length,
       1,
     );
 
-    const duplicateStop = await fetch(base + "/client-events", {
+    const secondTurn = await fetch(base + "/client-events", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...stopPayload,
-        turn_id: "turn-auto-knowledge-duplicate",
-      }),
+      body: JSON.stringify({ ...stopPayload, turn_id: "turn-auto-second" }),
     });
-    assert.equal(duplicateStop.status, 202);
-    const afterDuplicate = await fetch(base + "/admin/api/knowledge-candidates", {
+    assert.equal(secondTurn.status, 202);
+    const detectionsAfterSecond = await fetch(base + "/admin/api/candidate-detections", {
       headers: { "x-skill-hub-admin-key": "client-events-admin" },
     });
-    const afterDuplicateBody = (await afterDuplicate.json()) as {
-      candidates: Array<{ id: string; sourceType: string }>;
+    const secondBody = (await detectionsAfterSecond.json()) as {
+      detections: Array<{ turnId?: string; outcome: string; reason: string; projectedAction?: string }>;
     };
-    const summaryCandidates = afterDuplicateBody.candidates.filter((item) => item.sourceType === "codex-summary");
-    assert.equal(summaryCandidates.length, 1);
-    const duplicateDetailResponse = await fetch(
-      base + "/admin/api/knowledge-candidates/" + encodeURIComponent(summaryCandidates[0]!.id),
-      { headers: { "x-skill-hub-admin-key": "client-events-admin" } },
-    );
-    assert.equal(duplicateDetailResponse.status, 200);
-    const duplicateDetail = (await duplicateDetailResponse.json()) as { candidate: { content: string } };
-    assert.equal(duplicateDetail.candidate.content, assistantResult);
+    const secondDecision = secondBody.detections.find((item) => item.turnId === "turn-auto-second");
+    assert.equal(secondDecision?.outcome, "shadow");
+    assert.equal(secondDecision?.reason, "shadow-session-limit");
+    assert.equal(secondDecision?.projectedAction, "skip");
+
     const lowValueStop = await fetch(base + "/client-events", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1165,27 +1067,8 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
         turn_id: "turn-format-only",
         metadata: {
           stop_hook_active: false,
-          assistant_result_excerpt: [
-            "# 仅格式化代码",
-            "",
-            "## 问题",
-            "代码排版不一致。",
-            "",
-            "## 根因",
-            "格式化规则未统一。",
-            "",
-            "## 解决方案",
-            "统一缩进、空格、换行和 import 顺序。",
-            "",
-            "## 验证结果",
-            "十二项测试通过，但没有行为变化或可复用的工程结论。",
-            "",
-            "## 适用范围",
-            "本次代码格式化。",
-            "",
-            "## 约束/限制",
-            "不应沉淀为团队知识。",
-          ].join("\n"),
+          assistant_result_excerpt:
+            "# 仅格式化代码\n## 根因\n格式化规则未统一。\n## 解决方案\n仅格式化和排版。\n## 验证\n测试通过。",
         },
       }),
     });
@@ -1198,8 +1081,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     };
     assert.ok(
       lowValueBody.detections.some(
-        (item) =>
-          item.turnId === "turn-format-only" && item.outcome === "skipped" && item.reason === "low-reuse-value-summary",
+        (item) => item.turnId === "turn-format-only" && item.outcome === "skipped" && item.reason === "low-value-only",
       ),
     );
   } finally {

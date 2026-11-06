@@ -82,10 +82,9 @@ export function collectCandidateEvidence(input: {
   const verifiedFix = /verified fix|修复完成|已修复|fixed|resolved|解决方案/i.test(text);
   const workaround = /workaround|临时方案|绕过/i.test(text);
   const reusableConstraint = /constraint|约束|必须|不得|兼容性/i.test(text);
-  const lowValueOnly =
-    /format(?:ting)? only|prettier only|lint only|rename only|typo|仅格式化|仅排版|仅重命名|拼写修复/i.test(lower) &&
-    !rootCause &&
-    !verifiedFix;
+  const explicitLowValue =
+    /format(?:ting)? only|prettier only|lint only|rename only|typo|仅格式化|仅排版|仅重命名|拼写修复/i.test(lower);
+  const lowValueOnly = explicitLowValue;
   const analysisOnly = !meaningfulAction && /analysis|分析|只读|read-only|investigat/i.test(lower);
 
   return {
