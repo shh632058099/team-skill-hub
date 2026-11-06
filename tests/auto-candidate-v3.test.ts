@@ -579,3 +579,11 @@ test("collector marks explicit formatting-only result low value even when headin
   });
   assert.equal(evidence.resultSignals.lowValueOnly, true);
 });
+
+test("command-category-only evidence survives normalization for Codex PostToolUse", () => {
+  const evidence = normalizeEngineeringEvidence("Bash", {
+    command_category: "test",
+  });
+  assert.equal(evidence?.type, "test");
+  assert.equal(evidence?.commandCategory, "test");
+});

@@ -1,6 +1,6 @@
 import type { ClientEventRecord, ClientHookEventName } from "./observability.js";
 
-export const CURRENT_HOOK_RUNTIME_VERSION = "1.5.0";
+export const CURRENT_HOOK_RUNTIME_VERSION = "1.5.1";
 export const CURRENT_HOOK_SCHEMA_VERSION = 1;
 export const MIN_SUPPORTED_HOOK_SCHEMA_VERSION = 1;
 export const AGENT_ADAPTER_CONTRACT_VERSION = 1;
@@ -117,7 +117,8 @@ export function normalizeEngineeringEvidence(toolName: string, raw: unknown): En
     passed === undefined &&
     failed === undefined &&
     durationMs === undefined &&
-    status === undefined
+    status === undefined &&
+    commandCategory === undefined
   ) {
     return undefined;
   }

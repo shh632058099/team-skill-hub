@@ -14,10 +14,10 @@ test("loads canonical client integration release metadata", async () => {
   assert.ok(release.hookSchemaVersion > 0);
 });
 
-test("auto candidate evidence hook ships as client integration v14 runtime 1.5.0", async () => {
+test("auto candidate evidence hook ships as client integration v15 runtime 1.5.1", async () => {
   const release = await loadClientIntegrationRelease();
-  assert.equal(release.version, 14);
-  assert.equal(release.hookRuntimeVersion, "1.5.0");
+  assert.equal(release.version, 15);
+  assert.equal(release.hookRuntimeVersion, "1.5.1");
 });
 
 test("rejects invalid version ordering", async () => {

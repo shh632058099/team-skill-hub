@@ -135,9 +135,11 @@ try {
             }
             $passed = [regex]::Match($responseText, '(?i)\b(\d+)\s+passed\b')
             $failed = [regex]::Match($responseText, '(?i)\b(\d+)\s+failed\b')
-            if ($passed.Success) {
-                $passedCount = [int]$passed.Groups[1].Value
-                $failedCount = if ($failed.Success) { [int]$failed.Groups[1].Value } else { 0 }
+            $nodePass = [regex]::Match($responseText, '(?im)^.*?\bpass\s+(\d+)\s*$')
+            $nodeFail = [regex]::Match($responseText, '(?im)^.*?\bfail\s+(\d+)\s*$')
+            if ($passed.Success -or $nodePass.Success) {
+                $passedCount = if ($passed.Success) { [int]$passed.Groups[1].Value } else { [int]$nodePass.Groups[1].Value }
+                $failedCount = if ($failed.Success) { [int]$failed.Groups[1].Value } elseif ($nodeFail.Success) { [int]$nodeFail.Groups[1].Value } else { 0 }
                 if (-not $evidence.ContainsKey("tests_passed")) { $evidence["tests_passed"] = $passedCount }
                 if (-not $evidence.ContainsKey("tests_failed")) { $evidence["tests_failed"] = $failedCount }
                 if (-not $evidence.ContainsKey("tests_run")) { $evidence["tests_run"] = $passedCount + $failedCount }

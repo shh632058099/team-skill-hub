@@ -828,7 +828,7 @@ test("client-events endpoint authenticates and persists lifecycle metadata", asy
     assert.equal(session?.runtimeVersion, "0.9.0");
     assert.equal(session?.hookSchemaVersion, 1);
     assert.equal(session?.runtimeStatus, "outdated");
-    assert.equal(session?.expectedRuntimeVersion, "1.5.0");
+    assert.equal(session?.expectedRuntimeVersion, "1.5.1");
 
     const filteredSessions = await fetch(
       base + "/admin/api/sessions?q=session-e2e&status=active&hasMcp=true&runtimeStatus=outdated",
