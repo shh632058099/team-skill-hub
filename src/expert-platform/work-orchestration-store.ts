@@ -9,6 +9,12 @@ export type WorkStatus =
 export type WorkAttemptReason = "initial" | "human_rework" | "review_rework" | "policy_replan";
 export type WorkAttemptStatus = "active" | "succeeded" | "failed" | "cancelled";
 
+export type WorkEvidenceStatus = "pending" | "passed" | "failed" | "unknown";
+export type WorkEvidenceSource =
+  "agent_reported" | "worker_verified" | "ci_verified" | "human_verified" | "external_verified";
+export type ReviewDecision = "accepted" | "rework" | "rejected";
+export type ApprovalDecision = "approved" | "rejected";
+
 export interface WorkflowDefinition {
   lifecycle: {
     attempt: { maxWorkAttempts: number; maxReworks: number };
@@ -84,6 +90,7 @@ export interface WorkItemRecord {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  currentSubjectRevision: string | null;
   reusedExistingWork?: boolean;
   deduplicationReason?: "idempotency_key" | "source_identity";
 }
@@ -113,6 +120,71 @@ export interface WorkAttemptRecord {
   parentWorkAttemptId: string | null;
   startedAt: number;
   finishedAt: number | null;
+}
+
+export interface WorkspaceRecord {
+  workspaceId: string;
+  workspaceKey: string;
+  workItemId: string;
+  workAttemptId: string;
+  ownerWorkerId: string | null;
+  path: string | null;
+  repositoryUrl: string | null;
+  branch: string | null;
+  baseCommit: string | null;
+  state: "ready" | "in_use" | "retained" | "removed" | "failed";
+  cleanupPolicy: "on_terminal";
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+export interface WorkEvidenceRecord {
+  evidenceId: string;
+  workItemId: string;
+  workAttemptId: string;
+  taskId: string | null;
+  runId: string | null;
+  type: string;
+  status: WorkEvidenceStatus;
+  source: WorkEvidenceSource;
+  summary: string | null;
+  artifactRef: string | null;
+  subjectRevision: string;
+  environmentIdentity: string | null;
+  verifierIdentity: string | null;
+  stale: boolean;
+  createdAt: number;
+}
+
+export interface ReviewDecisionRecord {
+  reviewDecisionId: string;
+  workItemId: string;
+  subjectRevision: string;
+  decision: ReviewDecision;
+  reason: string | null;
+  actorPrincipalId: string;
+  createdAt: number;
+}
+
+export interface WorkApprovalRecord {
+  approvalId: string;
+  workItemId: string;
+  actor: string;
+  role: string;
+  approvalScope: string;
+  subjectType: string;
+  subjectRevision: string;
+  decision: ApprovalDecision;
+  stale: boolean;
+  createdAt: number;
+}
+
+export interface CompletionGateResult {
+  ready: boolean;
+  missing: string[];
+  workflowId: string;
+  workflowVersion: number;
+  subjectRevision: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -231,6 +303,7 @@ export class WorkOrchestrationStore {
         "  created_at INTEGER NOT NULL,",
         "  updated_at INTEGER NOT NULL,",
         "  completed_at INTEGER,",
+        "  current_subject_revision TEXT,",
         "  UNIQUE(principal_id,scope,idempotency_key)",
         ");",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_source_identity",
@@ -268,6 +341,63 @@ export class WorkOrchestrationStore {
         "  details TEXT,",
         "  created_at INTEGER NOT NULL",
         ");",
+
+        "CREATE TABLE IF NOT EXISTS work_workspaces (",
+        "  workspace_id TEXT PRIMARY KEY,",
+        "  workspace_key TEXT NOT NULL UNIQUE,",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+        "  owner_worker_id TEXT,",
+        "  path TEXT,",
+        "  repository_url TEXT,",
+        "  branch TEXT,",
+        "  base_commit TEXT,",
+        "  state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','removed','failed')),",
+        "  cleanup_policy TEXT NOT NULL CHECK(cleanup_policy='on_terminal'),",
+        "  created_at INTEGER NOT NULL,",
+        "  last_used_at INTEGER NOT NULL",
+        ");",
+        "CREATE TABLE IF NOT EXISTS work_evidence (",
+        "  evidence_id TEXT PRIMARY KEY,",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+        "  task_id TEXT,",
+        "  run_id TEXT,",
+        "  type TEXT NOT NULL,",
+        "  status TEXT NOT NULL CHECK(status IN ('pending','passed','failed','unknown')),",
+        "  source TEXT NOT NULL CHECK(source IN ('agent_reported','worker_verified','ci_verified','human_verified','external_verified')),",
+        "  summary TEXT,",
+        "  artifact_ref TEXT,",
+        "  subject_revision TEXT NOT NULL,",
+        "  environment_identity TEXT,",
+        "  verifier_identity TEXT,",
+        "  stale INTEGER NOT NULL DEFAULT 0 CHECK(stale IN (0,1)),",
+        "  created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_evidence_item ON work_evidence(work_item_id,type,stale);",
+        "CREATE TABLE IF NOT EXISTS work_review_decisions (",
+        "  review_decision_id TEXT PRIMARY KEY,",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  subject_revision TEXT NOT NULL,",
+        "  decision TEXT NOT NULL CHECK(decision IN ('accepted','rework','rejected')),",
+        "  reason TEXT,",
+        "  actor_principal_id TEXT NOT NULL,",
+        "  created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_review_item ON work_review_decisions(work_item_id,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_approvals (",
+        "  approval_id TEXT PRIMARY KEY,",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  actor TEXT NOT NULL,",
+        "  role TEXT NOT NULL,",
+        "  approval_scope TEXT NOT NULL,",
+        "  subject_type TEXT NOT NULL,",
+        "  subject_revision TEXT NOT NULL,",
+        "  decision TEXT NOT NULL CHECK(decision IN ('approved','rejected')),",
+        "  stale INTEGER NOT NULL DEFAULT 0 CHECK(stale IN (0,1)),",
+        "  created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_approval_item ON work_approvals(work_item_id,stale);",
         "CREATE INDEX IF NOT EXISTS idx_work_event_item ON work_events(work_item_id,event_id);",
       ].join("\n"),
     );
@@ -555,6 +685,409 @@ export class WorkOrchestrationStore {
     }
   }
 
+  ensureWorkspace(
+    workItemId: string,
+    workAttemptId: string,
+    input: { repositoryUrl?: string; branch?: string; baseCommit?: string },
+    now = Date.now(),
+  ): WorkspaceRecord {
+    const attempt = this.getWorkAttempt(workAttemptId);
+    if (attempt.workItemId !== workItemId) throw new Error("WORKSPACE_ATTEMPT_MISMATCH");
+    const existing = this.db.prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=?").get(workAttemptId) as
+      Row | undefined;
+    if (existing) {
+      if (
+        (existing.repository_url ?? null) !== (input.repositoryUrl?.trim() || null) ||
+        (existing.branch ?? null) !== (input.branch?.trim() || null) ||
+        (existing.base_commit ?? null) !== (input.baseCommit?.trim() || null)
+      ) {
+        throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+      }
+      return this.fromWorkspaceRow(existing);
+    }
+
+    const workspaceId = randomUUID();
+    const workspaceKey = "work-" + workItemId.toLowerCase() + "-a" + String(attempt.sequence);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,'ready','on_terminal',?,?)",
+        )
+        .run(
+          workspaceId,
+          workspaceKey,
+          workItemId,
+          workAttemptId,
+          input.repositoryUrl?.trim() || null,
+          input.branch?.trim() || null,
+          input.baseCommit?.trim() || null,
+          now,
+          now,
+        );
+      this.db
+        .prepare("UPDATE work_attempts SET workspace_id=? WHERE work_attempt_id=? AND work_item_id=?")
+        .run(workspaceId, workAttemptId, workItemId);
+      const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkspaceRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  assignWorkspaceOwner(
+    workspaceId: string,
+    workerId: string,
+    workspacePath: string,
+    now = Date.now(),
+  ): WorkspaceRecord {
+    const normalizedWorker = requiredText(workerId, 200);
+    if (!normalizedWorker || !path.isAbsolute(workspacePath) || workspacePath === path.parse(workspacePath).root) {
+      throw new Error("INVALID_WORKSPACE_OWNER");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as
+        Row | undefined;
+      if (!current) throw new Error("WORKSPACE_NOT_FOUND");
+      if (current.owner_worker_id && String(current.owner_worker_id) !== normalizedWorker) {
+        throw new Error("WORKSPACE_OWNER_CONFLICT");
+      }
+      this.db
+        .prepare(
+          "UPDATE work_workspaces SET owner_worker_id=?,path=?,state='ready',last_used_at=? WHERE workspace_id=?",
+        )
+        .run(normalizedWorker, workspacePath, now, workspaceId);
+      const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkspaceRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getWorkspace(workspaceId: string): WorkspaceRecord {
+    const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as
+      Row | undefined;
+    if (!row) throw new Error("WORKSPACE_NOT_FOUND");
+    return this.fromWorkspaceRow(row);
+  }
+
+  setCurrentSubjectRevision(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedRevision: number,
+    subjectRevision: string,
+    now = Date.now(),
+  ): WorkItemRecord {
+    const revision = requiredText(subjectRevision, 500);
+    if (!revision) throw new Error("INVALID_WORK_SUBJECT");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET current_subject_revision=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(revision, now, workItemId, expectedRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.db
+        .prepare("UPDATE work_evidence SET stale=1 WHERE work_item_id=? AND subject_revision<>? AND stale=0")
+        .run(workItemId, revision);
+      this.db
+        .prepare("UPDATE work_approvals SET stale=1 WHERE work_item_id=? AND subject_revision<>? AND stale=0")
+        .run(workItemId, revision);
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "work.subject_changed",
+        JSON.stringify({ subjectRevision: revision }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  recordEvidence(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    input: {
+      workAttemptId: string;
+      taskId?: string;
+      runId?: string;
+      type: string;
+      status: WorkEvidenceStatus;
+      source: WorkEvidenceSource;
+      summary?: string;
+      artifactRef?: string;
+      subjectRevision: string;
+      environmentIdentity?: string;
+      verifierIdentity?: string;
+    },
+    now = Date.now(),
+  ): WorkEvidenceRecord {
+    const work = this.getWork(workItemId, principalId, scope);
+    const attempt = this.getWorkAttempt(input.workAttemptId);
+    if (attempt.workItemId !== workItemId) throw new Error("EVIDENCE_ATTEMPT_MISMATCH");
+    const type = requiredText(input.type, 200);
+    const subjectRevision = requiredText(input.subjectRevision, 500);
+    if (
+      !type ||
+      !subjectRevision ||
+      !["pending", "passed", "failed", "unknown"].includes(input.status) ||
+      !["agent_reported", "worker_verified", "ci_verified", "human_verified", "external_verified"].includes(
+        input.source,
+      )
+    ) {
+      throw new Error("INVALID_WORK_EVIDENCE");
+    }
+    if (!work.currentSubjectRevision || work.currentSubjectRevision !== subjectRevision) {
+      throw new Error("STALE_WORK_SUBJECT");
+    }
+    const evidenceId = randomUUID();
+    this.db
+      .prepare(
+        "INSERT INTO work_evidence(evidence_id,work_item_id,work_attempt_id,task_id,run_id,type,status,source,summary,artifact_ref,subject_revision,environment_identity,verifier_identity,stale,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+      )
+      .run(
+        evidenceId,
+        workItemId,
+        input.workAttemptId,
+        input.taskId?.trim() || null,
+        input.runId?.trim() || null,
+        type,
+        input.status,
+        input.source,
+        input.summary?.trim() || null,
+        input.artifactRef?.trim() || null,
+        subjectRevision,
+        input.environmentIdentity?.trim() || null,
+        input.verifierIdentity?.trim() || null,
+        now,
+      );
+    this.event(workItemId, input.workAttemptId, "evidence.recorded", JSON.stringify({ evidenceId, type }), now);
+    const row = this.db.prepare("SELECT * FROM work_evidence WHERE evidence_id=?").get(evidenceId) as Row;
+    return this.fromEvidenceRow(row);
+  }
+
+  listEvidence(workItemId: string): WorkEvidenceRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_evidence WHERE work_item_id=? ORDER BY created_at,evidence_id")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromEvidenceRow(row));
+  }
+
+  submitReviewDecision(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    input: { expectedRevision: number; subjectRevision: string; decision: ReviewDecision; reason?: string },
+    now = Date.now(),
+  ): ReviewDecisionRecord {
+    const subjectRevision = requiredText(input.subjectRevision, 500);
+    if (!subjectRevision || !["accepted", "rework", "rejected"].includes(input.decision)) {
+      throw new Error("INVALID_REVIEW_DECISION");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== input.expectedRevision) throw new Error("STALE_WORK_REVISION");
+      if (work.currentSubjectRevision !== subjectRevision) throw new Error("STALE_WORK_SUBJECT");
+      const reviewDecisionId = randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO work_review_decisions(review_decision_id,work_item_id,subject_revision,decision,reason,actor_principal_id,created_at) VALUES(?,?,?,?,?,?,?)",
+        )
+        .run(
+          reviewDecisionId,
+          workItemId,
+          subjectRevision,
+          input.decision,
+          input.reason?.trim() || null,
+          principalId,
+          now,
+        );
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, workItemId, input.expectedRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "review.decided",
+        JSON.stringify({ reviewDecisionId, decision: input.decision }),
+        now,
+      );
+      const row = this.db
+        .prepare("SELECT * FROM work_review_decisions WHERE review_decision_id=?")
+        .get(reviewDecisionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromReviewRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  recordApproval(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    input: {
+      expectedRevision: number;
+      actor: string;
+      role: string;
+      approvalScope: string;
+      subjectType: string;
+      subjectRevision: string;
+      decision: ApprovalDecision;
+    },
+    now = Date.now(),
+  ): WorkApprovalRecord {
+    const actor = requiredText(input.actor, 200);
+    const role = requiredText(input.role, 200);
+    const approvalScope = requiredText(input.approvalScope, 200);
+    const subjectType = requiredText(input.subjectType, 200);
+    const subjectRevision = requiredText(input.subjectRevision, 500);
+    if (
+      !actor ||
+      !role ||
+      !approvalScope ||
+      !subjectType ||
+      !subjectRevision ||
+      !["approved", "rejected"].includes(input.decision)
+    ) {
+      throw new Error("INVALID_WORK_APPROVAL");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== input.expectedRevision) throw new Error("STALE_WORK_REVISION");
+      if (work.currentSubjectRevision !== subjectRevision) throw new Error("STALE_WORK_SUBJECT");
+      const approvalId = randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO work_approvals(approval_id,work_item_id,actor,role,approval_scope,subject_type,subject_revision,decision,stale,created_at) VALUES(?,?,?,?,?,?,?,?,0,?)",
+        )
+        .run(approvalId, workItemId, actor, role, approvalScope, subjectType, subjectRevision, input.decision, now);
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, workItemId, input.expectedRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      const row = this.db.prepare("SELECT * FROM work_approvals WHERE approval_id=?").get(approvalId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromApprovalRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  finishWorkAttempt(
+    workItemId: string,
+    workAttemptId: string,
+    principalId: string,
+    scope: string,
+    expectedRevision: number,
+    attemptStatus: Exclude<WorkAttemptStatus, "active">,
+    nextWorkStatus: WorkStatus,
+    now = Date.now(),
+  ): WorkItemRecord {
+    if (!["succeeded", "failed", "cancelled"].includes(attemptStatus) || !WORK_STATUSES.has(nextWorkStatus)) {
+      throw new Error("INVALID_WORK_ATTEMPT_FINISH");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      if (work.activeWorkAttemptId !== workAttemptId) throw new Error("STALE_WORK_ATTEMPT");
+      const changedAttempt = this.db
+        .prepare(
+          "UPDATE work_attempts SET status=?,finished_at=? WHERE work_attempt_id=? AND work_item_id=? AND status='active'",
+        )
+        .run(attemptStatus, now, workAttemptId, workItemId);
+      if (changedAttempt.changes !== 1) throw new Error("STALE_WORK_ATTEMPT");
+      const changedWork = this.db
+        .prepare(
+          "UPDATE work_items SET status=?,active_work_attempt_id=NULL,state_revision=state_revision+1,updated_at=?,completed_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(
+          nextWorkStatus,
+          now,
+          TERMINAL_WORK_STATUSES.has(nextWorkStatus) ? now : null,
+          workItemId,
+          expectedRevision,
+        );
+      if (changedWork.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.event(workItemId, workAttemptId, "work_attempt." + attemptStatus, null, now);
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  evaluateCompletionGate(workItemId: string, principalId: string, scope: string): CompletionGateResult {
+    const work = this.getWork(workItemId, principalId, scope);
+    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+    const latestAttempt = this.db
+      .prepare("SELECT * FROM work_attempts WHERE work_item_id=? ORDER BY sequence DESC LIMIT 1")
+      .get(workItemId) as Row | undefined;
+    const missing: string[] = [];
+    if (workflow.definition.completion.require.includes("latest_work_attempt_succeeded")) {
+      if (!latestAttempt || latestAttempt.status !== "succeeded") missing.push("latest_work_attempt_succeeded");
+    }
+    if (workflow.definition.completion.require.includes("required_evidence_passed")) {
+      for (const requiredType of workflow.definition.validation.requiredEvidence) {
+        const evidence = work.currentSubjectRevision
+          ? (this.db
+              .prepare(
+                "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type=? AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC LIMIT 1",
+              )
+              .get(workItemId, requiredType, work.currentSubjectRevision) as Row | undefined)
+          : undefined;
+        if (!evidence) missing.push("required_evidence:" + requiredType);
+      }
+    }
+    if (workflow.definition.completion.require.includes("no_unresolved_blocker") && work.status === "blocked") {
+      missing.push("no_unresolved_blocker");
+    }
+    if (workflow.definition.completion.require.includes("review_accepted")) {
+      const review = work.currentSubjectRevision
+        ? (this.db
+            .prepare(
+              "SELECT decision FROM work_review_decisions WHERE work_item_id=? AND subject_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
+        : undefined;
+      if (!review || review.decision !== "accepted") missing.push("review_accepted");
+    }
+    return {
+      ready: missing.length === 0,
+      missing,
+      workflowId: workflow.workflowId,
+      workflowVersion: workflow.version,
+      subjectRevision: work.currentSubjectRevision,
+    };
+  }
   scheduleNextAction(
     workItemId: string,
     expectedRevision: number,
@@ -600,6 +1133,70 @@ export class WorkOrchestrationStore {
       .run(workItemId, workAttemptId, eventType, details, now);
   }
 
+  private fromWorkspaceRow(row: Row): WorkspaceRecord {
+    return {
+      workspaceId: String(row.workspace_id),
+      workspaceKey: String(row.workspace_key),
+      workItemId: String(row.work_item_id),
+      workAttemptId: String(row.work_attempt_id),
+      ownerWorkerId: row.owner_worker_id == null ? null : String(row.owner_worker_id),
+      path: row.path == null ? null : String(row.path),
+      repositoryUrl: row.repository_url == null ? null : String(row.repository_url),
+      branch: row.branch == null ? null : String(row.branch),
+      baseCommit: row.base_commit == null ? null : String(row.base_commit),
+      state: String(row.state) as WorkspaceRecord["state"],
+      cleanupPolicy: "on_terminal",
+      createdAt: Number(row.created_at),
+      lastUsedAt: Number(row.last_used_at),
+    };
+  }
+
+  private fromEvidenceRow(row: Row): WorkEvidenceRecord {
+    return {
+      evidenceId: String(row.evidence_id),
+      workItemId: String(row.work_item_id),
+      workAttemptId: String(row.work_attempt_id),
+      taskId: row.task_id == null ? null : String(row.task_id),
+      runId: row.run_id == null ? null : String(row.run_id),
+      type: String(row.type),
+      status: String(row.status) as WorkEvidenceStatus,
+      source: String(row.source) as WorkEvidenceSource,
+      summary: row.summary == null ? null : String(row.summary),
+      artifactRef: row.artifact_ref == null ? null : String(row.artifact_ref),
+      subjectRevision: String(row.subject_revision),
+      environmentIdentity: row.environment_identity == null ? null : String(row.environment_identity),
+      verifierIdentity: row.verifier_identity == null ? null : String(row.verifier_identity),
+      stale: Number(row.stale) === 1,
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private fromReviewRow(row: Row): ReviewDecisionRecord {
+    return {
+      reviewDecisionId: String(row.review_decision_id),
+      workItemId: String(row.work_item_id),
+      subjectRevision: String(row.subject_revision),
+      decision: String(row.decision) as ReviewDecision,
+      reason: row.reason == null ? null : String(row.reason),
+      actorPrincipalId: String(row.actor_principal_id),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private fromApprovalRow(row: Row): WorkApprovalRecord {
+    return {
+      approvalId: String(row.approval_id),
+      workItemId: String(row.work_item_id),
+      actor: String(row.actor),
+      role: String(row.role),
+      approvalScope: String(row.approval_scope),
+      subjectType: String(row.subject_type),
+      subjectRevision: String(row.subject_revision),
+      decision: String(row.decision) as ApprovalDecision,
+      stale: Number(row.stale) === 1,
+      createdAt: Number(row.created_at),
+    };
+  }
   private fromWorkRow(row: Row): WorkItemRecord {
     return {
       workItemId: String(row.work_item_id),
@@ -624,6 +1221,7 @@ export class WorkOrchestrationStore {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       completedAt: row.completed_at == null ? null : Number(row.completed_at),
+      currentSubjectRevision: row.current_subject_revision == null ? null : String(row.current_subject_revision),
     };
   }
 

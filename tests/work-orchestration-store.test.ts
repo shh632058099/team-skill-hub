@@ -55,6 +55,168 @@ test("work submission is idempotent and conflicting reuse fails closed", () => {
   });
 });
 
+test("workspace identity is deterministic and records owner affinity", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-1",
+      sourceType: "mcp",
+      title: "Workspace",
+      description: "keep one workspace per attempt",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 2,
+    });
+    const first = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+      baseCommit: "abc123",
+    });
+    const again = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+      baseCommit: "abc123",
+    });
+    assert.equal(again.workspaceId, first.workspaceId);
+    assert.equal(again.workspaceKey, first.workspaceKey);
+    assert.match(first.workspaceKey, /^work-[a-f0-9-]+-a1$/);
+
+    const assigned = store.assignWorkspaceOwner(first.workspaceId, "worker-a", "/srv/work/a");
+    assert.equal(assigned.ownerWorkerId, "worker-a");
+    assert.equal(assigned.path, "/srv/work/a");
+    assert.equal(store.getWorkAttempt(attempt.workAttemptId).workspaceId, first.workspaceId);
+  });
+});
+
+test("evidence is revision-bound and becomes stale after the work subject changes", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "evidence-1",
+      sourceType: "mcp",
+      title: "Evidence",
+      description: "bind proof to a revision",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 2,
+    });
+    let current = store.getWork(work.workItemId, "alice", "team-a");
+    current = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", current.stateRevision, "abc123");
+    const evidence = store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      type: "expert_result",
+      status: "passed",
+      source: "worker_verified",
+      subjectRevision: "abc123",
+      environmentIdentity: "worker-a/runtime-v1",
+      verifierIdentity: "team-skill-hub@1",
+      summary: "expert result captured",
+    });
+    assert.equal(evidence.stale, false);
+    assert.equal(evidence.subjectRevision, "abc123");
+
+    current = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", current.stateRevision, "def456");
+    const stale = store.listEvidence(work.workItemId);
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0]!.stale, true);
+    assert.equal(current.currentSubjectRevision, "def456");
+  });
+});
+
+test("review and approval reject stale subject revisions", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "review-1",
+      sourceType: "mcp",
+      title: "Review",
+      description: "review current revision only",
+    });
+    let current = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, "abc123");
+    const review = store.submitReviewDecision(work.workItemId, "alice", "team-a", {
+      expectedRevision: current.stateRevision,
+      subjectRevision: "abc123",
+      decision: "accepted",
+      reason: "looks good",
+    });
+    assert.equal(review.decision, "accepted");
+    current = store.getWork(work.workItemId, "alice", "team-a");
+    assert.throws(
+      () =>
+        store.recordApproval(work.workItemId, "alice", "team-a", {
+          expectedRevision: current.stateRevision,
+          actor: "owner",
+          role: "maintainer",
+          approvalScope: "merge",
+          subjectType: "source_revision",
+          subjectRevision: "old-revision",
+          decision: "approved",
+        }),
+      /STALE_WORK_SUBJECT/,
+    );
+  });
+});
+
+test("completion gate requires current evidence and accepted review", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "gate-1",
+      sourceType: "mcp",
+      title: "Gate",
+      description: "complete only with proof and review",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 2,
+    });
+    let current = store.getWork(work.workItemId, "alice", "team-a");
+    current = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", current.stateRevision, "abc123");
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      type: "expert_result",
+      status: "passed",
+      source: "worker_verified",
+      subjectRevision: "abc123",
+      environmentIdentity: "worker-a/runtime-v1",
+      verifierIdentity: "team-skill-hub@1",
+    });
+    current = store.finishWorkAttempt(
+      work.workItemId,
+      attempt.workAttemptId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    const beforeReview = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.equal(beforeReview.ready, false);
+    assert.ok(beforeReview.missing.includes("review_accepted"));
+
+    store.submitReviewDecision(work.workItemId, "alice", "team-a", {
+      expectedRevision: current.stateRevision,
+      subjectRevision: "abc123",
+      decision: "accepted",
+    });
+    const afterReview = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.equal(afterReview.ready, true);
+    assert.deepEqual(afterReview.missing, []);
+  });
+});
+
 test("stable source identity reuses one work item across delivery retries", () => {
   withStore((store) => {
     const first = store.createOrReuseWork({
