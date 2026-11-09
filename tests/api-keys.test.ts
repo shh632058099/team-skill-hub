@@ -146,3 +146,53 @@ test("bootstrap API keys remain compatible with managed keys", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("managed API key query filters, sorts and paginates with a default page size of 10", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-api-keys-query-"));
+  try {
+    const store = new ManagedApiKeyStore(dir);
+    await store.load();
+    for (let index = 0; index < 13; index += 1) {
+      await store.create({
+        label: index % 2 === 0 ? `codex-${String(index).padStart(2, "0")}` : `claude-${String(index).padStart(2, "0")}`,
+        principal: {
+          id: index % 3 === 0 ? "biao" : `user-${index}`,
+          tenantId: index < 8 ? "default" : "customer",
+          roles: index % 2 === 0 ? ["developer", "internal"] : ["customer"],
+        },
+      });
+    }
+    const disabled = store.list()[2]!;
+    await store.update(disabled.id, { enabled: false });
+
+    const first = store.query({});
+    assert.equal(first.page.limit, 10);
+    assert.equal(first.page.total, 13);
+    assert.equal(first.items.length, 10);
+    assert.equal(first.page.cursor, "0");
+    assert.equal(first.page.nextCursor, "10");
+
+    const filtered = store.query({ q: "biao", status: "enabled", tenant: "default", role: "developer" });
+    assert.ok(filtered.items.length > 0);
+    assert.ok(filtered.items.every((item) => item.principal.id === "biao"));
+    assert.ok(filtered.items.every((item) => item.enabled));
+    assert.ok(filtered.items.every((item) => item.principal.tenantId === "default"));
+    assert.ok(filtered.items.every((item) => item.principal.roles.includes("developer")));
+
+    const disabledOnly = store.query({ status: "disabled" });
+    assert.equal(disabledOnly.page.total, 1);
+    assert.equal(disabledOnly.items[0]?.id, disabled.id);
+    const invalidStatus = store.query({ status: "bogus" as any });
+    assert.equal(invalidStatus.page.total, 13);
+
+    assert.equal(first.summary.total, 13);
+    assert.equal(first.summary.enabled, 12);
+    assert.equal(first.summary.disabled, 1);
+    assert.ok(first.facets.tenants.includes("default"));
+    assert.ok(first.facets.tenants.includes("customer"));
+    assert.ok(first.facets.roles.includes("developer"));
+    assert.ok(first.facets.userIds.includes("biao"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

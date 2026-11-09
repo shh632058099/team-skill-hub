@@ -10,6 +10,7 @@ import type { AutoCandidatePolicy } from "./auto-candidate/types.js";
 import type { SkillHubApplicationService } from "./application.js";
 import { createSkillHubMcpHandler, listSkillHubMcpTools } from "./mcp.js";
 import {
+  ADMIN_API_KEYS_HTML,
   ADMIN_GOVERNANCE_HTML,
   ADMIN_AUTO_CANDIDATE_POLICY_HTML,
   ADMIN_HTML,
@@ -617,6 +618,16 @@ export async function startServer(
       .header("expires", "0")
       .type("text/html; charset=utf-8");
     return ADMIN_HTML;
+  });
+
+  app.get("/admin/access/api-keys", async (request, reply) => {
+    if (!requireAdminPage(request, reply)) return "";
+    reply
+      .header("cache-control", "no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("expires", "0")
+      .type("text/html; charset=utf-8");
+    return ADMIN_API_KEYS_HTML;
   });
 
   app.get("/admin/observability", async (request, reply) => {
@@ -3096,7 +3107,17 @@ export async function startServer(
     }
   };
 
-  app.get("/admin/api/api-keys", async (request, reply) => {
+  app.get<{
+    Querystring: {
+      q?: string;
+      status?: "enabled" | "disabled";
+      tenant?: string;
+      role?: string;
+      sort?: "updated-desc" | "updated-asc" | "created-desc" | "created-asc" | "label-asc";
+      limit?: string;
+      cursor?: string;
+    };
+  }>("/admin/api/api-keys", async (request, reply) => {
     if (!hasAdminAccess(request)) {
       reply.code(403);
       return { error: "admin API access denied" };
@@ -3105,7 +3126,8 @@ export async function startServer(
       reply.code(503);
       return { error: "API key management is unavailable unless AUTH_MODE=api-key" };
     }
-    return { keys: apiKeyStore.list() };
+    const result = apiKeyStore.query(request.query);
+    return { keys: result.items, page: result.page, summary: result.summary, facets: result.facets };
   });
 
   app.post<{ Body: ManagedApiKeyCreateInput }>("/admin/api/api-keys", async (request, reply) => {

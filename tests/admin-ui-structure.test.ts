@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ADMIN_API_KEYS_HTML,
   ADMIN_GOVERNANCE_HTML,
   ADMIN_HTML,
   ADMIN_LOGIN_HTML,
@@ -391,4 +392,34 @@ test("auto candidate policy admin page exposes shadow thresholds quotas and hist
   );
   assert.ok(scripts.length > 0);
   for (const script of scripts) assert.doesNotThrow(() => new Function(script));
+});
+
+test("access control landing page shows API key summary instead of an unbounded key list", () => {
+  assertContainsAll(ADMIN_HTML, [
+    "API Key 概览",
+    "apiKeySummaryTotal",
+    "apiKeySummaryEnabled",
+    "apiKeySummaryDisabled",
+    "/admin/access/api-keys",
+    "管理全部 API Keys",
+    "apiKeyCreatePanel",
+  ]);
+  assert.ok(!ADMIN_HTML.includes('id="apiKeys" class="key-list"'));
+});
+
+test("dedicated API key management page exposes filters and defaults to 10 rows", () => {
+  assertContainsAll(ADMIN_API_KEYS_HTML, [
+    "访问控制 / API Keys",
+    'id="apiKeySearch"',
+    'id="apiKeyStatusFilter"',
+    'id="apiKeyTenantFilter"',
+    'id="apiKeyRoleFilter"',
+    'id="apiKeySort"',
+    'id="apiKeysTable"',
+    'limit:"10"',
+    "上一页",
+    "下一页",
+    "创建 API Key",
+    "if(!(d.keys||[]).length&&Number(page.cursor||0)>0&&page.previousCursor!==undefined)",
+  ]);
 });

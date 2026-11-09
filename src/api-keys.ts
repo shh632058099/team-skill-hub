@@ -26,6 +26,37 @@ export interface ManagedApiKeyView {
   updatedAt: string;
 }
 
+export interface ManagedApiKeyQuery {
+  q?: string;
+  status?: "enabled" | "disabled";
+  tenant?: string;
+  role?: string;
+  sort?: "updated-desc" | "updated-asc" | "created-desc" | "created-asc" | "label-asc";
+  limit?: string | number;
+  cursor?: string | number;
+}
+
+export interface ManagedApiKeyQueryResult {
+  items: ManagedApiKeyView[];
+  page: {
+    total: number;
+    limit: number;
+    cursor: string;
+    nextCursor?: string;
+    previousCursor?: string;
+  };
+  summary: {
+    total: number;
+    enabled: number;
+    disabled: number;
+  };
+  facets: {
+    tenants: string[];
+    roles: string[];
+    userIds: string[];
+  };
+}
+
 export interface ManagedApiKeyCreateInput {
   label: string;
   principal: Principal;
@@ -93,6 +124,50 @@ export class ManagedApiKeyStore {
 
   list(): ManagedApiKeyView[] {
     return this.records.map(toView);
+  }
+
+  query(query: ManagedApiKeyQuery): ManagedApiKeyQueryResult {
+    const all = this.records.map(toView);
+    const summary = {
+      total: all.length,
+      enabled: all.filter((item) => item.enabled).length,
+      disabled: all.filter((item) => !item.enabled).length,
+    };
+    const facets = {
+      tenants: [...new Set(all.map((item) => item.principal.tenantId))].sort(),
+      roles: [...new Set(all.flatMap((item) => item.principal.roles))].sort(),
+      userIds: [...new Set(all.map((item) => item.principal.id))].sort(),
+    };
+    const q = query.q?.trim().toLowerCase();
+    const status = query.status === "enabled" || query.status === "disabled" ? query.status : undefined;
+    let filtered = all
+      .filter((item) => !q || [item.label, item.principal.id].some((value) => value.toLowerCase().includes(q)))
+      .filter((item) => !status || (status === "enabled" ? item.enabled : !item.enabled))
+      .filter((item) => !query.tenant || item.principal.tenantId === query.tenant)
+      .filter((item) => !query.role || item.principal.roles.includes(query.role));
+    const sort = query.sort ?? "updated-desc";
+    filtered = [...filtered].sort((a, b) => {
+      if (sort === "label-asc") return a.label.localeCompare(b.label);
+      const field = sort.startsWith("created") ? "createdAt" : "updatedAt";
+      const direction = sort.endsWith("-asc") ? 1 : -1;
+      return a[field].localeCompare(b[field]) * direction || a.label.localeCompare(b.label);
+    });
+    const rawLimit = Number(query.limit ?? 10);
+    const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 10, 100));
+    const rawCursor = Number(query.cursor ?? 0);
+    const offset = Number.isFinite(rawCursor) && rawCursor > 0 ? Math.floor(rawCursor) : 0;
+    return {
+      items: filtered.slice(offset, offset + limit),
+      page: {
+        total: filtered.length,
+        limit,
+        cursor: String(offset),
+        ...(offset + limit < filtered.length ? { nextCursor: String(offset + limit) } : {}),
+        ...(offset > 0 ? { previousCursor: String(Math.max(0, offset - limit)) } : {}),
+      },
+      summary,
+      facets,
+    };
   }
 
   snapshot(): ManagedApiKeyRecord[] {

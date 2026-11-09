@@ -11,7 +11,7 @@ export const ADMIN_HTML = `<!doctype html>
 body{margin:0}.wrap{max-width:1180px;margin:0 auto;padding:28px}.card{background:#fff;border:1px solid #e4e8f0;border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 4px 18px rgba(25,40,70,.05)}
 h1{margin:0 0 6px}h2{font-size:18px}label{display:block;font-size:13px;font-weight:600;margin:12px 0 6px}
 input,textarea{box-sizing:border-box;width:100%;border:1px solid #ccd3df;border-radius:8px;padding:10px;font:inherit}textarea{min-height:380px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.actions{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.actions{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}.button-link{display:inline-block;border-radius:8px;padding:10px 16px;background:#edf1f8;color:#23324d;font-weight:700;text-decoration:none}
 button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#fff;font-weight:700;cursor:pointer}.secondary{background:#edf1f8;color:#23324d}.danger{background:#b42318}.small{padding:6px 10px;font-size:12px}
 .ok{color:#117a45}.error{color:#b42318}.muted{color:#667085;font-size:13px}code{background:#eef2f7;padding:2px 5px;border-radius:4px}.role-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px}.role-option,.deployment-auth-item{border:1px solid #e4e8f0;border-radius:9px;padding:10px;background:#f8fafc}.role-option label,.deployment-auth-item label{display:flex;gap:8px;align-items:flex-start;margin:0}.role-option input,.deployment-auth-item input{width:auto;margin:2px 0 0}.role-option b,.deployment-auth-item b{display:block}.deployment-auth-list{display:grid;gap:8px;margin-top:10px}.key-list{display:grid;gap:10px;margin-top:14px}.key-row{border:1px solid #e4e8f0;border-radius:10px;padding:12px}.key-row-top{display:flex;justify-content:space-between;gap:12px;align-items:center}.key-meta{font-size:13px;color:#667085;margin-top:6px}.one-time{display:none;margin-top:14px;padding:14px;border:1px solid #a6c8ff;background:#f1f7ff;border-radius:10px}.one-time input{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.knowledge-sources{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}.knowledge-source,.knowledge-result{border:1px solid #e4e8f0;border-radius:10px;padding:12px}.knowledge-result{margin-top:10px}.knowledge-content{white-space:pre-wrap;max-height:180px;overflow:auto;margin-top:8px;font-size:13px;background:#f8fafc;padding:10px;border-radius:8px}.knowledge-config-grid{display:grid;grid-template-columns:2fr 2fr 1fr 1fr 1fr;gap:10px;align-items:end;margin-top:10px}.inline-check{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}.inline-check input{width:auto}
 .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.tab{background:#fff;color:#334155;border:1px solid #d9e0ea;padding:8px 12px}.tab.active{background:#172033;color:#fff;border-color:#172033}.view{display:none}.view.active{display:block}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.stat{background:#fff;border:1px solid #e4e8f0;border-radius:12px;padding:16px}.stat-value{font-size:26px;font-weight:800;margin-top:4px}.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse;font-size:13px}.table th,.table td{text-align:left;padding:10px;border-bottom:1px solid #edf0f5;vertical-align:top}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2f7;font-size:12px}.badge.ok{background:#e7f7ef}.badge.error{background:#fff0ee}.review-card{border:1px solid #e4e8f0;border-radius:12px;padding:14px;margin:10px 0}.candidate-compact{padding:12px 14px}.candidate-main{display:flex;align-items:center;gap:10px;min-width:0}.candidate-main input[type=checkbox]{width:auto;margin:0;flex:0 0 auto}.candidate-title{border:0;background:transparent;color:#172033;padding:0;font-size:14px;font-weight:700;text-align:left;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.candidate-title:hover{color:#2457d6;text-decoration:underline}.candidate-spacer{flex:1}.candidate-meta{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;color:#667085;font-size:12px;margin-top:8px}.candidate-meta .meta-separator{color:#c2c8d0}.candidate-actions{display:flex;align-items:center;gap:8px;margin-left:auto}.candidate-actions button{margin:0}.badge.type{background:#eef4ff;color:#2d55a6}.badge.collection{background:#f2f4f7;color:#475467}.review-content{white-space:pre-wrap;max-height:220px;overflow:auto;background:#f8fafc;padding:10px;border-radius:8px;margin-top:8px}.candidate-editor{display:grid;grid-template-columns:2fr 1fr 2fr;gap:10px;margin-top:10px}.candidate-editor textarea{grid-column:1/-1;min-height:140px}.trace-detail{margin-top:12px;padding:12px;background:#f8fafc;border-radius:10px;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;max-height:320px;overflow:auto}.link{color:#2457d6;text-decoration:none;font-weight:600}@media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}.knowledge-config-grid{grid-template-columns:1fr 1fr}}@media(max-width:760px){.grid,.stats{grid-template-columns:1fr}.wrap{padding:14px}.knowledge-config-grid{grid-template-columns:1fr}.candidate-main{align-items:flex-start;flex-wrap:wrap}.candidate-spacer{display:none}.candidate-actions{width:100%;margin-left:28px}.candidate-title{max-width:calc(100vw - 150px)}}
@@ -49,9 +49,17 @@ button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#ff
 </div>
 <div class="view" data-view="access">
 <div class="card">
-<h2>用户 API Keys</h2>
-<div class="muted">用于 Codex / Claude Code 等客户端连接 MCP。新 Key 明文只显示一次，服务端仅保存哈希。</div>
-<div class="grid">
+<h2>API Key 概览</h2>
+<div class="muted">用于 Codex / Claude Code 等客户端连接 MCP。Key 较多时请进入独立管理页搜索、筛选和分页查看。</div>
+<div class="stats" style="margin-top:14px">
+<div class="stat"><span>总数</span><b id="apiKeySummaryTotal">-</b></div>
+<div class="stat"><span>启用</span><b id="apiKeySummaryEnabled">-</b></div>
+<div class="stat"><span>禁用</span><b id="apiKeySummaryDisabled">-</b></div>
+</div>
+<div class="actions"><a class="button-link" href="/admin/access/api-keys">管理全部 API Keys</a><span id="apiKeyStatus"></span></div>
+<details id="apiKeyCreatePanel" style="margin-top:16px">
+<summary><b>创建 API Key</b></summary>
+<div class="grid" style="margin-top:12px">
 <div><label>名称</label><input id="apiLabel" placeholder="例如：biao-codex"></div>
 <div><label>用户 ID</label><input id="apiUserId" placeholder="例如：biao"></div>
 <div><label>租户（Tenant）</label><input id="apiTenant" value="default"></div>
@@ -60,12 +68,12 @@ button{border:0;border-radius:8px;padding:10px 16px;background:#2457d6;color:#ff
 <div class="muted">角色控制平台通用权限；专家调用权限在下方单独配置。普通研发用户通常选择 developer + internal。</div>
 <div class="role-grid" id="apiRolePresets"><div class="role-option"><label><input type="checkbox" value="developer" checked><span><b>developer</b><span class="muted">研发用户；可使用内部研发能力。</span></span></label></div><div class="role-option"><label><input type="checkbox" value="internal" checked><span><b>internal</b><span class="muted">允许访问 internal 可见资产。</span></span></label></div><div class="role-option"><label><input type="checkbox" value="customer"><span><b>customer</b><span class="muted">允许访问 customer 可见资产。</span></span></label></div><div class="role-option"><label><input type="checkbox" value="customer-write"><span><b>customer-write</b><span class="muted">允许客户仓库写操作。</span></span></label></div><div class="role-option"><label><input type="checkbox" value="restricted-env"><span><b>restricted-env</b><span class="muted">允许受限环境写操作。</span></span></label></div><div class="role-option"><label><input type="checkbox" value="admin"><span><b>admin</b><span class="muted">管理员权限；仅管理员账号使用。</span></span></label></div></div>
 <details style="margin-top:10px"><summary>高级：自定义角色</summary><label>其他角色（逗号分隔）</label><input id="apiRoles" placeholder="例如：custom-role"></details>
-<div class="actions"><button id="createApiKey">创建 API Key</button><span id="apiKeyStatus"></span></div>
+<div class="actions"><button id="createApiKey">创建 API Key</button></div>
+</details>
 <div id="oneTimeKey" class="one-time">
 <div><b>API Key 明文（管理员之后也可以再次查看）：</b></div>
 <div class="actions"><input id="newApiKey" readonly><button id="copyApiKey" class="secondary">复制</button></div>
 </div>
-<div id="apiKeys" class="key-list"></div>
 </div>
 <div class="card">
 <h2>专家部署访问权限</h2>
@@ -432,9 +440,12 @@ function renderApiKeys(keys){
  }
 }
 async function loadApiKeys(){
- const r=await fetch("/admin/api/api-keys",{headers:headers()}); const data=await r.json();
+ const r=await fetch("/admin/api/api-keys?limit=1",{headers:headers()}); const data=await r.json();
  if(!r.ok){apiKeyStatus.textContent=data.error||"加载失败";apiKeyStatus.className="error";return}
- renderApiKeys(data.keys);const users=document.getElementById("expertAuthUsers");users.replaceChildren();for(const userId of [...new Set(data.keys.map(x=>x.principal.id))].sort()){const option=document.createElement("option");option.value=userId;users.appendChild(option)}apiKeyStatus.textContent="";
+ document.getElementById("apiKeySummaryTotal").textContent=String(data.summary?.total??0);
+ document.getElementById("apiKeySummaryEnabled").textContent=String(data.summary?.enabled??0);
+ document.getElementById("apiKeySummaryDisabled").textContent=String(data.summary?.disabled??0);
+ const users=document.getElementById("expertAuthUsers");users.replaceChildren();for(const userId of data.facets?.userIds||[]){const option=document.createElement("option");option.value=userId;users.appendChild(option)}apiKeyStatus.textContent="";
 }
 async function openExpertAuth(userId){document.getElementById("expertAuthUserId").value=userId;expertAuthDeployments=[];await loadExpertAuth();document.getElementById("expertAuthUserId").scrollIntoView({behavior:"smooth",block:"center"})}
 async function createApiKey(){
@@ -443,7 +454,7 @@ async function createApiKey(){
   const r=await fetch("/admin/api/api-keys",{method:"POST",headers:headers(),body:JSON.stringify(body)});const data=await r.json();
   if(!r.ok)throw new Error(data.error||"创建失败");
   document.getElementById("newApiKey").value=data.apiKey;document.getElementById("oneTimeKey").style.display="block";
-  apiKeyStatus.textContent="创建成功";apiKeyStatus.className="ok";await loadApiKeys();
+  apiKeyStatus.textContent="创建成功";apiKeyStatus.className="ok";document.getElementById("apiKeyCreatePanel").open=false;await loadApiKeys();
  }catch(e){apiKeyStatus.textContent=e.message||String(e);apiKeyStatus.className="error"}
 }
 async function updateApiKey(id,body){
@@ -601,6 +612,59 @@ load();
 </body></html>`;
 
 const ADMIN_OBSERVABILITY_CSS = `body{margin:0;background:#f5f7fb;color:#172033;font:14px system-ui,sans-serif}.wrap{max-width:1180px;margin:auto;padding:28px}.card{background:#fff;border:1px solid #e4e8f0;border-radius:12px;padding:18px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}label{font-size:12px;font-weight:700}.field-help{display:block;margin-top:2px;color:#667085;font-size:11px;font-weight:400;line-height:1.35}input,select,button{box-sizing:border-box;padding:9px;border:1px solid #ccd3df;border-radius:7px;font:inherit}input,select{width:100%;margin-top:4px}button{background:#2457d6;color:#fff;border:0;font-weight:700;cursor:pointer}.secondary{background:#edf1f8;color:#23324d}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse;font-size:13px}.table th,.table td{text-align:left;padding:10px;border-bottom:1px solid #edf0f5;white-space:nowrap}.table tbody tr{cursor:pointer}.table tbody tr:hover{background:#f8fbff}.muted{color:#667085}.error{color:#b42318}.empty{padding:28px;text-align:center;color:#667085}.module-index{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}.module-entry{display:block;color:inherit;text-decoration:none;background:#fff;border:1px solid #e4e8f0;border-radius:12px;padding:16px;min-height:100px}.module-entry:hover{border-color:#2457d6}.module-entry h2{margin:0 0 8px;font-size:16px}.detail{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.detail div{background:#f8fafc;padding:10px;border-radius:7px}.raw{white-space:pre-wrap;overflow:auto;background:#f8fafc;padding:12px;max-height:520px;font:12px monospace}@media(max-width:800px){.grid,.detail,.module-index{grid-template-columns:1fr 1fr}}@media(max-width:520px){.grid,.detail,.module-index{grid-template-columns:1fr}}`;
+
+export const ADMIN_API_KEYS_HTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>API Keys</title><style>${ADMIN_OBSERVABILITY_CSS}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}.stat{background:#f8fafc;border:1px solid #e4e8f0;border-radius:9px;padding:12px}.stat b{display:block;font-size:22px;margin-top:4px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:10px;align-items:end}.row-menu{position:relative}.row-menu summary{cursor:pointer;list-style:none;font-size:20px}.row-menu .menu{position:absolute;right:0;z-index:5;min-width:120px;background:#fff;border:1px solid #d9dfeb;border-radius:8px;padding:6px;box-shadow:0 8px 28px rgba(15,23,42,.12)}.row-menu .menu button{display:block;width:100%;margin:4px 0}.create-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.one-time{display:none;margin:14px 0;padding:14px;border:1px solid #a6c8ff;background:#f1f7ff;border-radius:10px}@media(max-width:900px){.toolbar,.create-grid,.stats{grid-template-columns:1fr 1fr}}@media(max-width:600px){.toolbar,.create-grid,.stats{grid-template-columns:1fr}}</style></head><body><main class="wrap"><p><a href="/admin#access">← 访问控制</a></p><h1>访问控制 / API Keys</h1><p class="muted">完整 Key 管理页。默认每页 10 条；搜索和筛选在服务端执行。</p>
+<div class="stats"><div class="stat"><span>总数</span><b id="summaryTotal">-</b></div><div class="stat"><span>启用</span><b id="summaryEnabled">-</b></div><div class="stat"><span>禁用</span><b id="summaryDisabled">-</b></div></div>
+<div id="oneTimeKey" class="one-time"><b>API Key 明文：</b><div class="actions"><input id="revealedKey" readonly><button id="copyKey" class="secondary">复制</button></div></div>
+<div class="card"><details id="createPanel"><summary><b>创建 API Key</b></summary><div class="create-grid" style="margin-top:12px"><label>名称<input id="createLabel" placeholder="例如：biao-codex"></label><label>用户 ID<input id="createUser" placeholder="例如：biao"></label><label>Tenant<input id="createTenant" value="default"></label><label>角色（逗号分隔）<input id="createRoles" value="developer, internal"></label></div><div class="actions"><button id="createKey">创建 API Key</button><span id="createStatus"></span></div></details></div>
+<div class="card"><div class="toolbar"><label>搜索<input id="apiKeySearch" placeholder="名称 / User ID"></label><label>状态<select id="apiKeyStatusFilter"><option value="">全部</option><option value="enabled">启用</option><option value="disabled">禁用</option></select></label><label>Tenant<select id="apiKeyTenantFilter"><option value="">全部</option></select></label><label>角色<select id="apiKeyRoleFilter"><option value="">全部</option></select></label><label>排序<select id="apiKeySort"><option value="updated-desc">最近更新</option><option value="created-desc">创建时间（新→旧）</option><option value="created-asc">创建时间（旧→新）</option><option value="label-asc">名称</option></select></label></div><div class="actions"><button id="applyFilters">筛选</button><button id="clearFilters" class="secondary">清除</button><span id="listStatus" class="muted"></span></div><div class="table-wrap"><table class="table"><thead><tr><th>名称</th><th>User</th><th>Tenant</th><th>角色</th><th>状态</th><th>最近使用</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="apiKeysTable"></tbody></table></div><div class="actions"><button id="apiKeysPrev" class="secondary">上一页</button><button id="apiKeysNext" class="secondary">下一页</button><span id="apiKeysPage" class="muted"></span></div></div></main><script>const keyName="skillHubAdminKey";
+const headers=(json=true)=>{const h={};const k=sessionStorage.getItem(keyName);if(k)h["x-skill-hub-admin-key"]=k;if(json)h["content-type"]="application/json";return h};
+let page={};let cursor="";
+const fmt=v=>v?new Date(v).toLocaleString():"—";
+async function request(url,options={}){const method=options.method||"GET";const r=await fetch(url,{...options,headers:{...headers(method!=="GET"),...(options.headers||{})}});const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));return d}
+function setOptions(select,values){const current=select.value;select.replaceChildren();const all=document.createElement("option");all.value="";all.textContent="全部";select.appendChild(all);for(const v of values||[]){const o=document.createElement("option");o.value=v;o.textContent=v;select.appendChild(o)}select.value=[...select.options].some(x=>x.value===current)?current:""}
+function showKey(value){document.getElementById("revealedKey").value=value;document.getElementById("oneTimeKey").style.display="block"}
+async function mutate(url,options){try{await request(url,options);await load()}catch(e){alert(e.message||String(e))}}
+function actionButton(text,handler,danger=false){const b=document.createElement("button");b.textContent=text;b.className=danger?"danger small":"secondary small";b.onclick=handler;return b}
+function renderRows(items){
+ const body=document.getElementById("apiKeysTable");body.replaceChildren();
+ for(const item of items){
+  const tr=document.createElement("tr");
+  const values=[item.label,item.principal.id,item.principal.tenantId,(item.principal.roles||[]).join(", "),item.enabled?"启用":"禁用","未记录",fmt(item.createdAt)];
+  for(const value of values){const td=document.createElement("td");td.textContent=String(value||"—");tr.appendChild(td)}
+  const td=document.createElement("td"),menu=document.createElement("details"),summary=document.createElement("summary"),box=document.createElement("div");
+  menu.className="row-menu";summary.textContent="⋯";box.className="menu";
+  box.append(actionButton(item.enabled?"禁用":"启用",()=>mutate("/admin/api/api-keys/"+encodeURIComponent(item.id),{method:"PUT",body:JSON.stringify({enabled:!item.enabled})})));
+  box.append(actionButton("查看",async()=>{try{const d=await request("/admin/api/api-keys/"+encodeURIComponent(item.id)+"/reveal",{method:"GET"});showKey(d.apiKey)}catch(e){alert(e.message||String(e))}}));
+  box.append(actionButton("重新生成",async()=>{if(!confirm("重新生成后旧 Key 将立即失效，是否继续？"))return;try{const d=await request("/admin/api/api-keys/"+encodeURIComponent(item.id)+"/rotate",{method:"POST"});showKey(d.apiKey);await load()}catch(e){alert(e.message||String(e))}}));
+  box.append(actionButton("删除",async()=>{if(confirm("删除后客户端会立即失效，是否继续？"))await mutate("/admin/api/api-keys/"+encodeURIComponent(item.id),{method:"DELETE"})},true));
+  menu.append(summary,box);td.appendChild(menu);tr.appendChild(td);body.appendChild(tr)
+ }
+ if(!items.length){const tr=document.createElement("tr"),td=document.createElement("td");td.colSpan=8;td.className="empty";td.textContent="没有符合条件的 API Key";tr.appendChild(td);body.appendChild(tr)}
+}
+async function load(){
+ const params=new URLSearchParams({limit:"10"});
+ const q=document.getElementById("apiKeySearch").value.trim(),status=document.getElementById("apiKeyStatusFilter").value,tenant=document.getElementById("apiKeyTenantFilter").value,role=document.getElementById("apiKeyRoleFilter").value,sort=document.getElementById("apiKeySort").value;
+ if(q)params.set("q",q);if(status)params.set("status",status);if(tenant)params.set("tenant",tenant);if(role)params.set("role",role);if(sort)params.set("sort",sort);if(cursor)params.set("cursor",cursor);
+ document.getElementById("listStatus").textContent="加载中...";
+ try{
+  const d=await request("/admin/api/api-keys?"+params.toString(),{method:"GET"});page=d.page||{};
+  if(!(d.keys||[]).length&&Number(page.cursor||0)>0&&page.previousCursor!==undefined){cursor=page.previousCursor;return load()}
+  document.getElementById("summaryTotal").textContent=String(d.summary?.total??0);document.getElementById("summaryEnabled").textContent=String(d.summary?.enabled??0);document.getElementById("summaryDisabled").textContent=String(d.summary?.disabled??0);
+  setOptions(document.getElementById("apiKeyTenantFilter"),d.facets?.tenants);setOptions(document.getElementById("apiKeyRoleFilter"),d.facets?.roles);renderRows(d.keys||[]);
+  const start=page.total?Number(page.cursor||0)+1:0,end=Math.min(Number(page.cursor||0)+Number(page.limit||10),Number(page.total||0));
+  document.getElementById("apiKeysPage").textContent="共 "+(page.total||0)+" 条 · "+start+"-"+end;document.getElementById("apiKeysPrev").disabled=!page.previousCursor;document.getElementById("apiKeysNext").disabled=!page.nextCursor;document.getElementById("listStatus").textContent=""
+ }catch(e){document.getElementById("listStatus").textContent=e.message||String(e)}
+}
+document.getElementById("applyFilters").onclick=()=>{cursor="";load()};
+document.getElementById("clearFilters").onclick=()=>{document.getElementById("apiKeySearch").value="";document.getElementById("apiKeyStatusFilter").value="";document.getElementById("apiKeyTenantFilter").value="";document.getElementById("apiKeyRoleFilter").value="";document.getElementById("apiKeySort").value="updated-desc";cursor="";load()};
+document.getElementById("apiKeysPrev").onclick=()=>{cursor=page.previousCursor||"";load()};
+document.getElementById("apiKeysNext").onclick=()=>{cursor=page.nextCursor||"";load()};
+document.getElementById("createKey").onclick=async()=>{const roles=document.getElementById("createRoles").value.split(",").map(x=>x.trim()).filter(Boolean);try{const d=await request("/admin/api/api-keys",{method:"POST",body:JSON.stringify({label:document.getElementById("createLabel").value,principal:{id:document.getElementById("createUser").value,tenantId:document.getElementById("createTenant").value,roles}})});showKey(d.apiKey);document.getElementById("createPanel").open=false;document.getElementById("createStatus").textContent="创建成功";cursor="";await load()}catch(e){document.getElementById("createStatus").textContent=e.message||String(e)}};
+document.getElementById("copyKey").onclick=()=>navigator.clipboard.writeText(document.getElementById("revealedKey").value);
+load();
+</script></body></html>
+`;
 
 export const ADMIN_OBSERVABILITY_INDEX_HTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>运行观测</title><style>${ADMIN_OBSERVABILITY_CSS}</style></head><body><main class="wrap"><p><a href="/admin">← Admin</a></p><h1>运行观测</h1><p class="muted">模块摘要与入口。列表数据仅在二级页面按需加载。</p><div class="module-index" data-admin-module-index="observability"><a class="module-entry" href="/admin/observability/sessions"><h2>Codex 会话</h2><p>服务端筛选、分页和时间线详情</p></a><a class="module-entry" href="/admin/observability/hooks"><h2>Hook / 客户端事件</h2><p>生命周期事件和详情</p></a><a class="module-entry" href="/admin/observability/candidate-detections"><h2>自动候选判定</h2><p>检测结果、原因和证据</p></a><a class="module-entry" href="/admin/observability/mcp-calls"><h2>MCP 调用</h2><p>工具调用、状态和延迟</p></a><a class="module-entry" href="/admin/observability/reuse"><h2>Knowledge / Skill Reuse</h2><p>由 MCP 调用派生的复用链路</p></a><a class="module-entry" href="/admin/observability/failures"><h2>错误与失败</h2><p>失败 MCP 调用（当前范围）</p></a></div></main><script>sessionStorage.getItem("skillHubAdminKey")</script></body></html>`;
 
