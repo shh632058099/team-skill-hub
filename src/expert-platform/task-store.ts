@@ -652,6 +652,11 @@ export class ExpertTaskStore {
     }
   }
 
+  runCount(taskId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM expert_runs WHERE task_id=?").get(taskId) as { n: number };
+    return Number(row.n);
+  }
+
   get(taskId: string, principalId: string, scope: string): TaskRecord {
     const row = this.db
       .prepare("SELECT * FROM expert_tasks WHERE task_id=? AND principal_id=? AND scope=?")

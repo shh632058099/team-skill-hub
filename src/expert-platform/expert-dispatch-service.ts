@@ -28,6 +28,15 @@ export interface AvailableExpert {
   repositoryIds: string[];
 }
 
+export interface ResolvedDispatch {
+  expertId: string;
+  selectionMode: "explicit" | "auto";
+  repositoryId?: string;
+  deploymentId: string;
+  deploymentConfigVersion: number;
+  deploymentSnapshot?: DeploymentTaskSnapshot;
+}
+
 export class ExpertDispatchService {
   constructor(
     private readonly experts: ExpertStore,
@@ -57,21 +66,12 @@ export class ExpertDispatchService {
     return [...available.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
-  submit(input: DispatchInput): TaskRecord {
-    // Resolve an already-active auto delegation before attempting to route a
-    // rephrased problem. Router availability/scoring must not defeat idempotency.
-    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
-    if ((input.selectionMode ?? "auto") === "auto" && input.sourceRequestId) {
-      const existing = this.tasks.findActiveSourceRequest({ ...input, sourceRequestSlot: autoSourceRequestSlot });
-      if (existing) return existing;
-    }
+  resolve(input: Omit<DispatchInput, "idempotencyKey"> & { idempotencyKey?: string }): ResolvedDispatch {
     const deployments = this.experts.listDeployments();
     const candidates = deployments.flatMap((deployment) => {
       if (!deployment.active) return [];
       const definition = this.experts.getDefinition(deployment.expertId);
       if (!definition.active) return [];
-      // Keep each Deployment as its own authorization tuple. Do not merge principals
-      // and repositories independently, which would grant their cross product.
       return [
         {
           id: definition.id,
@@ -91,7 +91,6 @@ export class ExpertDispatchService {
       selectionMode: input.selectionMode,
       repositoryId: input.repositoryId,
     });
-
     const availableRepositoryIds = [
       ...new Set(
         deployments
@@ -107,11 +106,8 @@ export class ExpertDispatchService {
           .map((repository) => repository.id),
       ),
     ].sort();
-    if (!input.repositoryId && availableRepositoryIds.length > 1) {
-      throw new Error("REPOSITORY_REQUIRED");
-    }
+    if (!input.repositoryId && availableRepositoryIds.length > 1) throw new Error("REPOSITORY_REQUIRED");
     const configuredRepositoryId = input.repositoryId ?? availableRepositoryIds[0];
-
     const eligible = deployments.filter(
       (deployment) =>
         deployment.active &&
@@ -141,8 +137,9 @@ export class ExpertDispatchService {
       if (
         configuredMcp?.allowedTools &&
         configuredMcp.allowedTools.some((tool) => !profile!.allowedTools.includes(tool))
-      )
+      ) {
         throw new Error("MCP_PROFILE_TOOL_NOT_ALLOWED");
+      }
       effectiveMcp = {
         profileRef: profile.id,
         urlOverride: configuredMcp?.urlOverride ?? profile.url,
@@ -151,7 +148,6 @@ export class ExpertDispatchService {
         required: configuredMcp?.required ?? profile.required,
       };
     } else if (configuredMcp?.credentialRef && configuredMcp.allowedTools) {
-      // Compatibility for legacy full-field MCP records created before Profiles existed.
       effectiveMcp = {
         ...configuredMcp,
         credentialRef: configuredMcp.credentialRef,
@@ -170,7 +166,29 @@ export class ExpertDispatchService {
             ...(effectiveMcp ? { mcp: effectiveMcp } : {}),
           }
         : undefined;
+    return {
+      expertId: route.expertId,
+      selectionMode: route.selectionMode,
+      ...(configuredRepositoryId ? { repositoryId: configuredRepositoryId } : {}),
+      deploymentId: selected.id,
+      deploymentConfigVersion: selected.configVersion ?? 1,
+      ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
+    };
+  }
+  submit(input: DispatchInput): TaskRecord {
+    // Resolve an already-active auto delegation before attempting to route a
+    // rephrased problem. Router availability/scoring must not defeat idempotency.
+    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
+    if ((input.selectionMode ?? "auto") === "auto" && input.sourceRequestId) {
+      const existing = this.tasks.findActiveSourceRequest({ ...input, sourceRequestSlot: autoSourceRequestSlot });
+      if (existing) return existing;
+    }
+    const resolved = this.resolve(input);
+    return this.submitResolved(input, resolved);
+  }
 
+  submitResolved(input: DispatchInput, resolved: ResolvedDispatch): TaskRecord {
+    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
     return this.tasks.submit({
       principalId: input.principalId,
       scope: input.scope,
@@ -183,16 +201,16 @@ export class ExpertDispatchService {
       workflowId: input.workflowId,
       workflowVersion: input.workflowVersion,
       problem: input.problem,
-      expertId: route.expertId,
-      repositoryId: configuredRepositoryId,
-      selectionMode: route.selectionMode,
-      deploymentId: selected.id,
+      expertId: resolved.expertId,
+      repositoryId: resolved.repositoryId,
+      selectionMode: resolved.selectionMode,
+      deploymentId: resolved.deploymentId,
       sourceRequestSlot:
-        route.selectionMode === "auto"
+        resolved.selectionMode === "auto"
           ? autoSourceRequestSlot
-          : JSON.stringify([route.expertId, configuredRepositoryId ?? null, selected.id]),
-      schemaVersion: deploymentSnapshot ? 2 : 1,
-      ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
+          : JSON.stringify([resolved.expertId, resolved.repositoryId ?? null, resolved.deploymentId]),
+      schemaVersion: resolved.deploymentSnapshot ? 2 : 1,
+      ...(resolved.deploymentSnapshot ? { deploymentSnapshot: resolved.deploymentSnapshot } : {}),
     });
   }
 

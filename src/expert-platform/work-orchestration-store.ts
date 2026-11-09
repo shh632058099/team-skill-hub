@@ -65,6 +65,9 @@ export interface WorkSubmission {
   description: string;
   workflowId?: string;
   priority?: number;
+  expertId?: string;
+  deploymentId?: string;
+  repositoryId?: string;
 }
 
 export interface WorkItemRecord {
@@ -91,6 +94,11 @@ export interface WorkItemRecord {
   updatedAt: number;
   completedAt: number | null;
   currentSubjectRevision: string | null;
+  requestedExpertId: string | null;
+  requestedDeploymentId: string | null;
+  repositoryId: string | null;
+  blockedReason: string | null;
+  blockedContext: string | null;
   reusedExistingWork?: boolean;
   deduplicationReason?: "idempotency_key" | "source_identity";
 }
@@ -101,6 +109,7 @@ export interface CreateWorkAttemptInput {
   deploymentId: string;
   deploymentConfigVersion: number;
   parentWorkAttemptId?: string;
+  dispatchBinding?: Record<string, unknown>;
 }
 
 export interface WorkAttemptRecord {
@@ -120,6 +129,7 @@ export interface WorkAttemptRecord {
   parentWorkAttemptId: string | null;
   startedAt: number;
   finishedAt: number | null;
+  dispatchBinding: Record<string, unknown> | null;
 }
 
 export interface WorkspaceRecord {
@@ -257,6 +267,9 @@ function requestDigest(input: WorkSubmission, workflowId: string): string {
         description: input.description.trim(),
         workflowId,
         priority: input.priority ?? null,
+        expertId: input.expertId?.trim() || null,
+        deploymentId: input.deploymentId?.trim() || null,
+        repositoryId: input.repositoryId?.trim() || null,
       }),
     )
     .digest("hex");
@@ -304,6 +317,11 @@ export class WorkOrchestrationStore {
         "  updated_at INTEGER NOT NULL,",
         "  completed_at INTEGER,",
         "  current_subject_revision TEXT,",
+        "  requested_expert_id TEXT,",
+        "  requested_deployment_id TEXT,",
+        "  repository_id TEXT,",
+        "  blocked_reason TEXT,",
+        "  blocked_context TEXT,",
         "  UNIQUE(principal_id,scope,idempotency_key)",
         ");",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_source_identity",
@@ -327,6 +345,7 @@ export class WorkOrchestrationStore {
         "  parent_work_attempt_id TEXT,",
         "  started_at INTEGER NOT NULL,",
         "  finished_at INTEGER,",
+        "  dispatch_binding_json TEXT,",
         "  UNIQUE(work_item_id,sequence)",
         ");",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_active_attempt",
@@ -483,8 +502,8 @@ export class WorkOrchestrationStore {
           [
             "INSERT INTO work_items(",
             "work_item_id,principal_id,scope,idempotency_key,request_digest,source_type,source_scope,source_ref,source_url,",
-            "title,description,status,state_revision,workflow_id,workflow_version,orchestration_epoch,priority,created_at,updated_at",
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,1,?,?,?)",
+            "title,description,status,state_revision,workflow_id,workflow_version,orchestration_epoch,priority,requested_expert_id,requested_deployment_id,repository_id,created_at,updated_at",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,1,?,?,?,?,?,?)",
           ].join(" "),
         )
         .run(
@@ -502,6 +521,9 @@ export class WorkOrchestrationStore {
           workflow.workflowId,
           workflow.version,
           input.priority ?? null,
+          input.expertId?.trim() || null,
+          input.deploymentId?.trim() || null,
+          input.repositoryId?.trim() || null,
           now,
           now,
         );
@@ -607,8 +629,8 @@ export class WorkOrchestrationStore {
           [
             "INSERT INTO work_attempts(",
             "work_attempt_id,work_item_id,sequence,reason,status,expert_id,deployment_id,deployment_config_version,",
-            "workflow_id,workflow_version,parent_work_attempt_id,started_at",
-            ") VALUES(?,?,?,?,'active',?,?,?,?,?,?,?)",
+            "workflow_id,workflow_version,parent_work_attempt_id,started_at,dispatch_binding_json",
+            ") VALUES(?,?,?,?,'active',?,?,?,?,?,?,?,?)",
           ].join(" "),
         )
         .run(
@@ -623,6 +645,7 @@ export class WorkOrchestrationStore {
           workflow.version,
           input.parentWorkAttemptId?.trim() || null,
           now,
+          input.dispatchBinding ? JSON.stringify(input.dispatchBinding) : null,
         );
       const changed = this.db
         .prepare(
@@ -651,6 +674,27 @@ export class WorkOrchestrationStore {
       Row | undefined;
     if (!row) throw new Error("WORK_ATTEMPT_NOT_FOUND");
     return this.fromAttemptRow(row);
+  }
+
+  bindAttemptDispatch(
+    workAttemptId: string,
+    binding: Record<string, unknown>,
+    expectedConfigVersion: number,
+  ): WorkAttemptRecord {
+    const current = this.getWorkAttempt(workAttemptId);
+    if (current.deploymentConfigVersion !== expectedConfigVersion) throw new Error("STALE_DEPLOYMENT_CONFIG");
+    if (current.dispatchBinding) return current;
+    this.db
+      .prepare(
+        "UPDATE work_attempts SET dispatch_binding_json=? WHERE work_attempt_id=? AND dispatch_binding_json IS NULL",
+      )
+      .run(JSON.stringify(binding), workAttemptId);
+    return this.getWorkAttempt(workAttemptId);
+  }
+
+  getAttemptByTask(taskId: string): WorkAttemptRecord | null {
+    const row = this.db.prepare("SELECT * FROM work_attempts WHERE task_id=?").get(taskId) as Row | undefined;
+    return row ? this.fromAttemptRow(row) : null;
   }
 
   getActiveAttempt(workItemId: string): WorkAttemptRecord | null {
@@ -790,6 +834,10 @@ export class WorkOrchestrationStore {
     try {
       const work = this.getWork(workItemId, principalId, scope);
       if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      if (work.currentSubjectRevision === revision) {
+        this.db.exec("COMMIT");
+        return work;
+      }
       const changed = this.db
         .prepare(
           "UPDATE work_items SET current_subject_revision=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
@@ -855,6 +903,14 @@ export class WorkOrchestrationStore {
     if (!work.currentSubjectRevision || work.currentSubjectRevision !== subjectRevision) {
       throw new Error("STALE_WORK_SUBJECT");
     }
+
+    const existing = this.db
+      .prepare(
+        "SELECT * FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND source=? AND subject_revision=? AND task_id IS ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(workItemId, input.workAttemptId, type, input.source, subjectRevision, input.taskId?.trim() || null) as
+      Row | undefined;
+    if (existing) return this.fromEvidenceRow(existing);
     const evidenceId = randomUUID();
     this.db
       .prepare(
@@ -1088,6 +1144,37 @@ export class WorkOrchestrationStore {
       subjectRevision: work.currentSubjectRevision,
     };
   }
+
+  blockWork(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedRevision: number,
+    reason: string,
+    context: string | null,
+    now = Date.now(),
+  ): WorkItemRecord {
+    const blockedReason = requiredText(reason, 200);
+    if (!blockedReason) throw new Error("INVALID_BLOCK_REASON");
+    const changed = this.db
+      .prepare(
+        "UPDATE work_items SET status='blocked',blocked_reason=?,blocked_context=?,next_action_type=NULL,next_action_at=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
+      )
+      .run(blockedReason, context, now, workItemId, principalId, scope, expectedRevision);
+    if (changed.changes !== 1) {
+      this.getWork(workItemId, principalId, scope);
+      throw new Error("STALE_WORK_REVISION");
+    }
+    this.event(
+      workItemId,
+      this.getWorkInternal(workItemId).activeWorkAttemptId,
+      "work.blocked",
+      JSON.stringify({ reason: blockedReason }),
+      now,
+    );
+    return this.getWork(workItemId, principalId, scope);
+  }
+
   scheduleNextAction(
     workItemId: string,
     expectedRevision: number,
@@ -1222,6 +1309,11 @@ export class WorkOrchestrationStore {
       updatedAt: Number(row.updated_at),
       completedAt: row.completed_at == null ? null : Number(row.completed_at),
       currentSubjectRevision: row.current_subject_revision == null ? null : String(row.current_subject_revision),
+      requestedExpertId: row.requested_expert_id == null ? null : String(row.requested_expert_id),
+      requestedDeploymentId: row.requested_deployment_id == null ? null : String(row.requested_deployment_id),
+      repositoryId: row.repository_id == null ? null : String(row.repository_id),
+      blockedReason: row.blocked_reason == null ? null : String(row.blocked_reason),
+      blockedContext: row.blocked_context == null ? null : String(row.blocked_context),
     };
   }
 
@@ -1243,6 +1335,9 @@ export class WorkOrchestrationStore {
       parentWorkAttemptId: row.parent_work_attempt_id == null ? null : String(row.parent_work_attempt_id),
       startedAt: Number(row.started_at),
       finishedAt: row.finished_at == null ? null : Number(row.finished_at),
+      dispatchBinding: row.dispatch_binding_json
+        ? (JSON.parse(String(row.dispatch_binding_json)) as Record<string, unknown>)
+        : null,
     };
   }
 }
