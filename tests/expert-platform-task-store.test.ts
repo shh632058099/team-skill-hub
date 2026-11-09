@@ -608,6 +608,69 @@ test("source request dedup applies only to active tasks; terminal task can be re
   }
 });
 
+test("work-linked task metadata survives and failed tasks can create a new run without a new task", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-work-link-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "work-link-1",
+      problem: "inspect OTA",
+      expertId: "ota",
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workflowId: "code-fix-default",
+      workflowVersion: 1,
+    });
+    assert.equal(task.workItemId, "work-1");
+    assert.equal(task.workAttemptId, "attempt-1");
+    assert.equal(task.workflowId, "code-fix-default");
+    assert.equal(task.workflowVersion, 1);
+
+    const firstClaim = store.claim("worker-1", 1_000, 30_000, "ota")!;
+    store.fail(firstClaim, "EXECUTION_FAILED", 2_000);
+    assert.equal(store.get(task.taskId, "alice", "tenant-a").status, "failed");
+
+    assert.throws(
+      () => store.requeueForRetry(task.taskId, "other-attempt", "EXECUTION_FAILED", 3_000),
+      /STALE_WORK_ATTEMPT/,
+    );
+    const queued = store.requeueForRetry(task.taskId, "attempt-1", "EXECUTION_FAILED", 3_000);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.taskId, task.taskId);
+    assert.equal(queued.workAttemptId, "attempt-1");
+
+    const secondClaim = store.claim("worker-1", 4_000, 30_000, "ota")!;
+    assert.equal(secondClaim.taskId, task.taskId);
+    assert.notEqual(secondClaim.runId, firstClaim.runId);
+    assert.ok(secondClaim.fencing > firstClaim.fencing);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("standalone expert tasks keep null work linkage", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-standalone-link-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "standalone-1",
+      problem: "legacy standalone task",
+    });
+    assert.equal(task.workItemId, null);
+    assert.equal(task.workAttemptId, null);
+    assert.equal(task.workflowId, null);
+    assert.equal(task.workflowVersion, null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("expert task feedback is owner-scoped, success-only, replaceable, and nullable", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-feedback-"));
   const file = path.join(dir, "runtime.sqlite");

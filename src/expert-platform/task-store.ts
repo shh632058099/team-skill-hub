@@ -48,6 +48,10 @@ export type Submission = {
   sourceRequestSlot?: string;
   schemaVersion?: number;
   deploymentSnapshot?: DeploymentTaskSnapshot;
+  workItemId?: string;
+  workAttemptId?: string;
+  workflowId?: string;
+  workflowVersion?: number;
 };
 export type TaskRecord = {
   taskId: string;
@@ -67,6 +71,10 @@ export type TaskRecord = {
   repositoryBranch?: string | null;
   commitSha?: string | null;
   cancellationRequested?: boolean;
+  workItemId: string | null;
+  workAttemptId: string | null;
+  workflowId: string | null;
+  workflowVersion: number | null;
   /** True when this submission reused a task created by an earlier submission. */
   reusedExistingTask?: boolean;
   deduplicationReason?: "idempotency_key" | "same_source_request" | "same_active_session_task";
@@ -170,6 +178,10 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("deployment_config_version", "INTEGER");
     this.ensureTaskColumn("deployment_snapshot_json", "TEXT");
     this.ensureTaskColumn("created_at", "INTEGER");
+    this.ensureTaskColumn("work_item_id", "TEXT");
+    this.ensureTaskColumn("work_attempt_id", "TEXT");
+    this.ensureTaskColumn("workflow_id", "TEXT");
+    this.ensureTaskColumn("workflow_version", "INTEGER");
     // Older tasks already have a queued lifecycle event created at submission time.
     // Backfill from that event so the new history column remains useful after upgrade.
     this.db.exec(
@@ -276,6 +288,17 @@ export class ExpertTaskStore {
     ) {
       throw new Error("INVALID_REQUEST");
     }
+    const workLinkValues = [input.workItemId, input.workAttemptId, input.workflowId, input.workflowVersion];
+    if (
+      workLinkValues.some((value) => value !== undefined) &&
+      (!input.workItemId?.trim() ||
+        !input.workAttemptId?.trim() ||
+        !input.workflowId?.trim() ||
+        !Number.isSafeInteger(input.workflowVersion) ||
+        Number(input.workflowVersion) < 1)
+    ) {
+      throw new Error("INVALID_WORK_LINK");
+    }
     const digest = createHash("sha256")
       .update(
         JSON.stringify({
@@ -284,6 +307,10 @@ export class ExpertTaskStore {
           repositoryId,
           selectionMode,
           schemaVersion,
+          workItemId: input.workItemId?.trim() || null,
+          workAttemptId: input.workAttemptId?.trim() || null,
+          workflowId: input.workflowId?.trim() || null,
+          workflowVersion: input.workflowVersion ?? null,
           ...(snapshot
             ? {
                 deploymentId: snapshot.deploymentId,
@@ -378,7 +405,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -398,6 +425,10 @@ export class ExpertTaskStore {
           snapshot?.deploymentId ?? input.deploymentId ?? null,
           snapshot?.configVersion ?? null,
           snapshot ? JSON.stringify(snapshot) : null,
+          input.workItemId?.trim() || null,
+          input.workAttemptId?.trim() || null,
+          input.workflowId?.trim() || null,
+          input.workflowVersion ?? null,
           Date.now(),
         );
       this.event(taskId, null, "queued");
@@ -423,6 +454,10 @@ export class ExpertTaskStore {
         sourceSessionId,
         sourceClient,
         sourceRequestId,
+        workItemId: input.workItemId?.trim() || null,
+        workAttemptId: input.workAttemptId?.trim() || null,
+        workflowId: input.workflowId?.trim() || null,
+        workflowVersion: input.workflowVersion ?? null,
         reusedExistingTask: false,
         ...sessionTask,
       };
@@ -585,6 +620,32 @@ export class ExpertTaskStore {
       this.db.prepare("UPDATE expert_runs SET status=? WHERE run_id=?").run(terminalStatus, claim.runId);
       this.event(claim.taskId, claim.runId, terminalStatus);
       this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  requeueForRetry(taskId: string, expectedWorkAttemptId: string, reason: string, now = Date.now()): TaskRecord {
+    const workAttemptId = expectedWorkAttemptId.trim();
+    if (!workAttemptId || !reason.trim()) throw new Error("INVALID_REQUEST");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      if (row.work_attempt_id == null || String(row.work_attempt_id) !== workAttemptId) {
+        throw new Error("STALE_WORK_ATTEMPT");
+      }
+      if (row.status !== "failed") throw new Error("TASK_RETRY_NOT_ALLOWED");
+      this.db
+        .prepare(
+          "UPDATE expert_tasks SET status='queued',result=NULL,run_id=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0 WHERE task_id=? AND status='failed' AND work_attempt_id=?",
+        )
+        .run(taskId, workAttemptId);
+      this.event(taskId, null, "retry_queued");
+      const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromRow(updated);
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -1081,6 +1142,10 @@ export class ExpertTaskStore {
       repositoryBranch: row.repository_branch == null ? null : String(row.repository_branch),
       commitSha: row.commit_sha == null ? null : String(row.commit_sha),
       cancellationRequested: Number(row.cancellation_requested ?? 0) === 1,
+      workItemId: row.work_item_id == null ? null : String(row.work_item_id),
+      workAttemptId: row.work_attempt_id == null ? null : String(row.work_attempt_id),
+      workflowId: row.workflow_id == null ? null : String(row.workflow_id),
+      workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
     };
   }
 }

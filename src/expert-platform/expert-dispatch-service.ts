@@ -14,6 +14,10 @@ export interface DispatchInput {
   selectionMode?: "explicit" | "auto";
   repositoryId?: string;
   deploymentId?: string;
+  workItemId?: string;
+  workAttemptId?: string;
+  workflowId?: string;
+  workflowVersion?: number;
 }
 
 export interface AvailableExpert {
@@ -174,6 +178,10 @@ export class ExpertDispatchService {
       sourceSessionId: input.sourceSessionId,
       sourceClient: input.sourceClient,
       sourceRequestId: input.sourceRequestId,
+      workItemId: input.workItemId,
+      workAttemptId: input.workAttemptId,
+      workflowId: input.workflowId,
+      workflowVersion: input.workflowVersion,
       problem: input.problem,
       expertId: route.expertId,
       repositoryId: configuredRepositoryId,
