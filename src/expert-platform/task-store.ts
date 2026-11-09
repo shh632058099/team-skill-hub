@@ -5,6 +5,19 @@ import { DatabaseSync } from "node:sqlite";
 import type { ExpertModelConfig } from "./expert-store.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type ExpertTaskFeedbackDisposition = "adopted" | "partially_adopted" | "not_adopted";
+export type ExpertTaskFeedback = {
+  taskId: string;
+  disposition: ExpertTaskFeedbackDisposition;
+  reason: string | null;
+  needsRework: boolean | null;
+  updatedAt: number;
+};
+export type ExpertTaskFeedbackInput = {
+  disposition: ExpertTaskFeedbackDisposition;
+  reason?: string;
+  needsRework?: boolean;
+};
 export type DeploymentTaskSnapshot = {
   deploymentId: string;
   configVersion: number;
@@ -111,6 +124,13 @@ export class ExpertTaskStore {
         lease_until INTEGER,
         fencing INTEGER NOT NULL DEFAULT 0,
         UNIQUE(principal_id, scope, idempotency_key)
+      );
+      CREATE TABLE IF NOT EXISTS expert_task_feedback (
+        task_id TEXT PRIMARY KEY REFERENCES expert_tasks(task_id),
+        disposition TEXT NOT NULL CHECK (disposition IN ('adopted','partially_adopted','not_adopted')),
+        reason TEXT,
+        needs_rework INTEGER CHECK (needs_rework IN (0,1) OR needs_rework IS NULL),
+        updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS expert_runs (
         run_id TEXT PRIMARY KEY,
@@ -579,6 +599,58 @@ export class ExpertTaskStore {
     return this.fromRow(row);
   }
 
+  getFeedback(taskId: string, principalId: string, scope: string): ExpertTaskFeedback | null {
+    this.get(taskId, principalId, scope);
+    const row = this.db
+      .prepare("SELECT task_id,disposition,reason,needs_rework,updated_at FROM expert_task_feedback WHERE task_id=?")
+      .get(taskId) as Row | undefined;
+    return row ? this.feedbackFromRow(row) : null;
+  }
+
+  submitFeedback(
+    taskId: string,
+    principalId: string,
+    scope: string,
+    input: ExpertTaskFeedbackInput,
+    now = Date.now(),
+  ): ExpertTaskFeedback {
+    if (!["adopted", "partially_adopted", "not_adopted"].includes(input.disposition))
+      throw new Error("INVALID_FEEDBACK_DISPOSITION");
+    const reason = input.reason?.trim() || null;
+    if (reason && reason.length > 4000) throw new Error("INVALID_FEEDBACK_REASON");
+    if (input.needsRework !== undefined && typeof input.needsRework !== "boolean")
+      throw new Error("INVALID_FEEDBACK_REWORK");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = this.db
+        .prepare("SELECT status FROM expert_tasks WHERE task_id=? AND principal_id=? AND scope=?")
+        .get(taskId, principalId, scope) as { status: string } | undefined;
+      if (!task) throw new Error("TASK_NOT_FOUND_OR_FORBIDDEN");
+      if (task.status !== "succeeded") throw new Error("TASK_FEEDBACK_NOT_ALLOWED");
+      this.db
+        .prepare(
+          `INSERT INTO expert_task_feedback(task_id,disposition,reason,needs_rework,updated_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(task_id) DO UPDATE SET disposition=excluded.disposition,reason=excluded.reason,needs_rework=excluded.needs_rework,updated_at=excluded.updated_at`,
+        )
+        .run(
+          taskId,
+          input.disposition,
+          reason,
+          input.needsRework === undefined ? null : input.needsRework ? 1 : 0,
+          now,
+        );
+      const row = this.db
+        .prepare("SELECT task_id,disposition,reason,needs_rework,updated_at FROM expert_task_feedback WHERE task_id=?")
+        .get(taskId) as Row;
+      this.db.exec("COMMIT");
+      return this.feedbackFromRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   cancel(taskId: string, principalId: string, scope: string): TaskRecord {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -643,6 +715,7 @@ export class ExpertTaskStore {
         { status: string } | undefined;
       if (!row) throw new Error("TASK_NOT_FOUND");
       if (!["succeeded", "failed", "cancelled"].includes(row.status)) throw new Error("TASK_NOT_TERMINAL");
+      this.db.prepare("DELETE FROM expert_task_feedback WHERE task_id=?").run(taskId);
       this.db.prepare("DELETE FROM expert_events WHERE task_id=?").run(taskId);
       this.db.prepare("DELETE FROM expert_runs WHERE task_id=?").run(taskId);
       this.db.prepare("DELETE FROM expert_tasks WHERE task_id=?").run(taskId);
@@ -708,10 +781,13 @@ export class ExpertTaskStore {
     const offset = Number.isFinite(query.offset) ? Math.min(1000 - limit, Math.max(0, Math.floor(query.offset!))) : 0;
     const task = this.db
       .prepare(
-        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,created_at,cancellation_requested FROM expert_tasks WHERE task_id=?",
+        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,cancellation_requested FROM expert_tasks WHERE task_id=?",
       )
       .get(taskId);
     if (!task) return null;
+    const feedbackRow = this.db
+      .prepare("SELECT task_id,disposition,reason,needs_rework,updated_at FROM expert_task_feedback WHERE task_id=?")
+      .get(taskId) as Row | undefined;
     const runs = this.db
       .prepare("SELECT run_id,task_id,worker_id,fencing,status FROM expert_runs WHERE task_id=? ORDER BY rowid")
       .all(taskId);
@@ -725,10 +801,49 @@ export class ExpertTaskStore {
       .all(taskId, limit, offset);
     return {
       task,
+      feedback: feedbackRow ? this.feedbackFromRow(feedbackRow) : null,
       runs,
       events,
       eventsPage: { total, limit, offset, hasNewer: offset > 0, hasOlder: offset + events.length < total },
     };
+  }
+
+  adminFeedbackMetrics() {
+    const rows = this.db
+      .prepare(
+        `SELECT t.expert_id,t.deployment_id,t.deployment_config_version,
+          COUNT(*) AS successful,
+          SUM(CASE WHEN f.task_id IS NOT NULL THEN 1 ELSE 0 END) AS reviewed,
+          SUM(CASE WHEN f.task_id IS NULL THEN 1 ELSE 0 END) AS unreviewed,
+          SUM(CASE WHEN f.disposition='adopted' THEN 1 ELSE 0 END) AS adopted,
+          SUM(CASE WHEN f.disposition='partially_adopted' THEN 1 ELSE 0 END) AS partially_adopted,
+          SUM(CASE WHEN f.disposition='not_adopted' THEN 1 ELSE 0 END) AS not_adopted,
+          SUM(CASE WHEN f.needs_rework=1 THEN 1 ELSE 0 END) AS rework
+         FROM expert_tasks t LEFT JOIN expert_task_feedback f ON f.task_id=t.task_id
+         WHERE t.status='succeeded'
+         GROUP BY t.expert_id,t.deployment_id,t.deployment_config_version
+         ORDER BY t.expert_id,t.deployment_id,t.deployment_config_version`,
+      )
+      .all() as Row[];
+    return rows.map((row) => {
+      const reviewed = Number(row.reviewed ?? 0);
+      const adopted = Number(row.adopted ?? 0);
+      const partiallyAdopted = Number(row.partially_adopted ?? 0);
+      return {
+        expertId: String(row.expert_id ?? "legacy"),
+        deploymentId: row.deployment_id == null ? "unknown" : String(row.deployment_id),
+        deploymentConfigVersion:
+          row.deployment_config_version == null ? "unknown" : Number(row.deployment_config_version),
+        successful: Number(row.successful ?? 0),
+        reviewed,
+        unreviewed: Number(row.unreviewed ?? 0),
+        adopted,
+        partiallyAdopted,
+        notAdopted: Number(row.not_adopted ?? 0),
+        rework: Number(row.rework ?? 0),
+        adoptionRate: reviewed === 0 ? null : (adopted + partiallyAdopted) / reviewed,
+      };
+    });
   }
 
   /** Existing status contract plus concise observed activity and session queue reason. */
@@ -927,6 +1042,16 @@ export class ExpertTaskStore {
       .prepare("INSERT INTO expert_events(task_id,run_id,event_type,created_at) VALUES(?,?,?,?)")
       .run(taskId, runId, kind, Date.now());
     this.trimTaskEvents(taskId);
+  }
+
+  private feedbackFromRow(row: Row): ExpertTaskFeedback {
+    return {
+      taskId: String(row.task_id),
+      disposition: row.disposition as ExpertTaskFeedbackDisposition,
+      reason: row.reason == null ? null : String(row.reason),
+      needsRework: row.needs_rework == null ? null : Number(row.needs_rework) === 1,
+      updatedAt: Number(row.updated_at),
+    };
   }
 
   private fromRow(row: Row): TaskRecord {

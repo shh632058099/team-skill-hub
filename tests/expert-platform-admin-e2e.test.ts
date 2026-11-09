@@ -322,6 +322,92 @@ test("Admin expert configuration UI manages definitions and execution configurat
     const olderPage = await olderPageResponse.json();
     assert.equal(olderPage.eventsPage.hasNewer, true);
     assert.ok(Number(newestPage.events[0].event_id) > Number(olderPage.events[0].event_id));
+    const metricsStore = new ExpertTaskStore(runtimeDb);
+    const makeDeploymentTask = (idempotencyKey: string, version: number) => {
+      const created = metricsStore.submit({
+        principalId: "alice",
+        scope: "org",
+        idempotencyKey,
+        problem: `deployment v${version} feedback`,
+        expertId: "ota",
+        repositoryId: "repo-a",
+        deploymentSnapshot: {
+          deploymentId: "ota-prod",
+          configVersion: version,
+          runtimeProfile: "linux-ota",
+          repository: { id: "repo-a", url: "https://example.com/ota.git", branch: "main" },
+          executor: {
+            backend: "claude",
+            modelConfig: {
+              providerId: "test",
+              model: "test-model",
+              baseUrl: "http://localhost",
+              wireApi: "anthropic-messages",
+              allowedEnvNames: [],
+            },
+          },
+        },
+      });
+      const claimed = metricsStore.claim("metrics-worker", Date.now(), 30000, "ota", {
+        backend: "claude",
+        runtimeProfiles: ["linux-ota"],
+      })!;
+      assert.equal(claimed.taskId, created.taskId);
+      metricsStore.complete(claimed, `result-v${version}`);
+      return created;
+    };
+    const version1 = makeDeploymentTask("feedback-version-1", 1);
+    metricsStore.submitFeedback(version1.taskId, "alice", "org", { disposition: "adopted" });
+    const version2Rejected = makeDeploymentTask("feedback-version-2-rejected", 2);
+    metricsStore.submitFeedback(version2Rejected.taskId, "alice", "org", {
+      disposition: "not_adopted",
+      reason: "结果不适用",
+      needsRework: true,
+    });
+    makeDeploymentTask("feedback-version-2-unreviewed", 2);
+    metricsStore.close();
+
+    const metricsResponse = await fetch(base + "/admin/api/expert-tasks?status=succeeded&expertId=ota");
+    const metricsBody = await metricsResponse.json();
+    const metrics = metricsBody.feedbackMetrics as any[];
+    const legacyGroup = metrics.find((x) => x.expertId === "ota" && x.deploymentId === "unknown");
+    assert.equal(legacyGroup.successful, 1);
+    assert.equal(legacyGroup.reviewed, 0);
+    assert.equal(legacyGroup.unreviewed, 1);
+    assert.equal(legacyGroup.adoptionRate, null);
+    const version1Group = metrics.find((x) => x.deploymentId === "ota-prod" && x.deploymentConfigVersion === 1);
+    assert.deepEqual(
+      { successful: version1Group.successful, reviewed: version1Group.reviewed, adopted: version1Group.adopted },
+      { successful: 1, reviewed: 1, adopted: 1 },
+    );
+    assert.equal(version1Group.adoptionRate, 1);
+    const version2Group = metrics.find((x) => x.deploymentId === "ota-prod" && x.deploymentConfigVersion === 2);
+    assert.deepEqual(
+      {
+        successful: version2Group.successful,
+        reviewed: version2Group.reviewed,
+        unreviewed: version2Group.unreviewed,
+        notAdopted: version2Group.notAdopted,
+        rework: version2Group.rework,
+      },
+      { successful: 2, reviewed: 1, unreviewed: 1, notAdopted: 1, rework: 1 },
+    );
+    assert.equal(version2Group.adoptionRate, 0);
+    const rejectedDetailResponse = await fetch(base + "/admin/api/expert-tasks/" + version2Rejected.taskId);
+    const rejectedDetail = await rejectedDetailResponse.json();
+    assert.deepEqual(rejectedDetail.feedback, {
+      taskId: version2Rejected.taskId,
+      disposition: "not_adopted",
+      reason: "结果不适用",
+      needsRework: true,
+      updatedAt: rejectedDetail.feedback.updatedAt,
+    });
+    assert.equal(typeof rejectedDetail.feedback.updatedAt, "number");
+    assert.match(html, /taskFeedbackSummary/);
+    assert.match(html, /taskFeedbackMetrics/);
+    assert.match(html, /用户反馈统计明细/);
+    assert.match(html, /friendlyMetricValue/);
+    assert.match(html, /用户采纳反馈/);
     assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid")).status, 400);
     assert.match(html, /id="taskPage"/);
     assert.match(html, /<th>时间<\/th>/);

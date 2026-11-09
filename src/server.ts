@@ -854,9 +854,10 @@ export async function startServer(
       return { error: "invalid status" };
     }
     try {
-      return withExpertTaskStore((store) =>
-        store.adminTasks({ limit: Number(limit || 20), offset: Number(offset || 0), status, expertId, workerId, q }),
-      );
+      return withExpertTaskStore((store) => ({
+        ...store.adminTasks({ limit: Number(limit || 20), offset: Number(offset || 0), status, expertId, workerId, q }),
+        feedbackMetrics: store.adminFeedbackMetrics(),
+      }));
     } catch (error) {
       reply.code(503);
       return { error: error instanceof Error ? error.message : "TASK_LIST_FAILED" };

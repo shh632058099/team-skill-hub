@@ -1373,14 +1373,50 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "get_expert_task_result",
         {
           description:
-            "Retrieve the persisted report and evidence for an Expert Platform task only after get_expert_task_status reports succeeded. Include the actual taskId and evidence in the answer, and distinguish verified findings from hypotheses. Queued or running tasks do not yet have a report.",
+            "Retrieve the persisted report and evidence for an Expert Platform task only after get_expert_task_status reports succeeded. Include the actual taskId and evidence in the answer, and distinguish verified findings from hypotheses. For an eligible unreviewed result, feedbackGuidance tells the client to present an optional feedback prompt only after the full result, at most once per task per conversation. Never submit feedback unless the user explicitly provides it. Queued or running tasks do not yet have a report.",
           inputSchema: z.object({ taskId: z.string().uuid() }),
         },
         async ({ taskId }) => {
-          const task = expertTaskStore.get(taskId, principal.id, principal.tenantId);
-          if (task.status !== "succeeded") throw new Error("TASK_NOT_READY");
-          return toolResult({ ...task });
+          const { task, feedback } = expertDispatchService!.getResult(taskId, principal.id, principal.tenantId);
+          return toolResult({
+            ...task,
+            feedback,
+            ...(feedback
+              ? {}
+              : {
+                  feedbackGuidance: {
+                    prompt: "可选：这份专家结果你是已采纳、部分采纳，还是未采纳？如需返工也可以说明。",
+                    tool: "submit_expert_task_feedback",
+                    presentAfterFullResult: true,
+                    oncePerTaskPerConversation: true,
+                    explicitUserFeedbackOnly: true,
+                    ambiguousTaskReference: "ask_which_result",
+                  },
+                }),
+          });
         },
+      );
+
+      registerTool(
+        "submit_expert_task_feedback",
+        {
+          description:
+            "Record explicit user feedback for a succeeded Expert Platform task owned by the authenticated principal and tenant. Call only after the user clearly states whether the result was adopted, partially adopted, or not adopted. Do not infer feedback from silence, result viewing, unrelated replies, or ambiguous references; ask which task/result the user means when more than one could apply. A later explicit submission replaces the current feedback for that task.",
+          inputSchema: z.object({
+            taskId: z.string().uuid(),
+            disposition: z.enum(["adopted", "partially_adopted", "not_adopted"]),
+            reason: z.string().trim().max(4000).optional(),
+            needsRework: z.boolean().optional(),
+          }),
+        },
+        async ({ taskId, disposition, reason, needsRework }) =>
+          toolResult({
+            feedback: expertDispatchService!.submitFeedback(taskId, principal.id, principal.tenantId, {
+              disposition,
+              ...(reason === undefined ? {} : { reason }),
+              ...(needsRework === undefined ? {} : { needsRework }),
+            }),
+          }),
       );
 
       registerTool(

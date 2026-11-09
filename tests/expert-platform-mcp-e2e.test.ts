@@ -96,6 +96,7 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     const apiKey = "expert-mcp-e2e-key";
     const auth = new ApiKeyAuthenticationProvider({
       [apiKey]: { id: "ota-test-client", roles: ["developer", "internal"], tenantId: "rd" },
+      "other-expert-test-key": { id: "other-client", roles: ["developer", "internal"], tenantId: "rd" },
       "worker-readonly-test-key": { id: "mcp-worker-only", roles: ["worker-mcp-readonly"], tenantId: "rd" },
     });
     const config: AppConfig = {
@@ -289,6 +290,7 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
 
     assert.ok(listedTools.some((tool) => tool.name === "get_expert_task_events"));
     assert.ok(listedTools.some((tool) => tool.name === "wait_expert_task"));
+    assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task_feedback"));
     const initial = await callMcp(mcpUrl, apiKey, 40, "get_expert_task_events", { taskId });
     assert.equal(initial.status, "queued");
     assert.ok(Array.isArray(initial.events));
@@ -424,6 +426,41 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     assert.equal(status.expertId, "ota");
     const result = await callMcp(mcpUrl, apiKey, 3, "get_expert_task_result", { taskId });
     assert.match(String(result.result), /Read-only OTA analysis/);
+    assert.equal((result.feedbackGuidance as any)?.tool, "submit_expert_task_feedback");
+    assert.equal(result.feedback, null);
+    const feedback = await callMcp(mcpUrl, apiKey, 61, "submit_expert_task_feedback", {
+      taskId,
+      disposition: "partially_adopted",
+      reason: "需要补验证",
+      needsRework: true,
+    });
+    assert.deepEqual(feedback.feedback, {
+      taskId,
+      disposition: "partially_adopted",
+      reason: "需要补验证",
+      needsRework: true,
+      updatedAt: (feedback.feedback as any).updatedAt,
+    });
+    assert.equal(typeof (feedback.feedback as any).updatedAt, "number");
+    const reviewedResult = await callMcp(mcpUrl, apiKey, 62, "get_expert_task_result", { taskId });
+    assert.equal(reviewedResult.feedbackGuidance, undefined);
+    assert.equal((reviewedResult.feedback as any)?.disposition, "partially_adopted");
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, "other-expert-test-key", 63, "submit_expert_task_feedback", {
+          taskId,
+          disposition: "adopted",
+        }),
+      /TASK_NOT_FOUND_OR_FORBIDDEN/,
+    );
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 64, "submit_expert_task_feedback", {
+          taskId: unauthorizedExpertTask.taskId,
+          disposition: "not_adopted",
+        }),
+      /TASK_FEEDBACK_NOT_ALLOWED/,
+    );
 
     const explicit = await callMcp(mcpUrl, apiKey, 5, "submit_expert_task", {
       problem: "Review the OTA upgrade state machine after an interrupted firmware write",

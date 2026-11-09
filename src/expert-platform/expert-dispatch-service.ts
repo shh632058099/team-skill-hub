@@ -1,6 +1,6 @@
 import type { ExpertStore } from "./expert-store.js";
 import { routeExpert } from "./router.js";
-import type { DeploymentTaskSnapshot, ExpertTaskStore, TaskRecord } from "./task-store.js";
+import type { DeploymentTaskSnapshot, ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord } from "./task-store.js";
 
 export interface DispatchInput {
   principalId: string;
@@ -186,5 +186,15 @@ export class ExpertDispatchService {
       schemaVersion: deploymentSnapshot ? 2 : 1,
       ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
     });
+  }
+
+  getResult(taskId: string, principalId: string, scope: string) {
+    const task = this.tasks.get(taskId, principalId, scope);
+    if (task.status !== "succeeded") throw new Error("TASK_NOT_READY");
+    return { task, feedback: this.tasks.getFeedback(taskId, principalId, scope) };
+  }
+
+  submitFeedback(taskId: string, principalId: string, scope: string, input: ExpertTaskFeedbackInput) {
+    return this.tasks.submitFeedback(taskId, principalId, scope, input);
   }
 }

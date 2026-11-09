@@ -607,3 +607,71 @@ test("source request dedup applies only to active tasks; terminal task can be re
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("expert task feedback is owner-scoped, success-only, replaceable, and nullable", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-feedback-"));
+  const file = path.join(dir, "runtime.sqlite");
+  try {
+    const store = new ExpertTaskStore(file);
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "feedback-1",
+      problem: "inspect OTA feedback flow",
+      expertId: "ota",
+    });
+    assert.equal(store.getFeedback(task.taskId, "alice", "tenant-a"), null, "legacy/unreviewed tasks have no feedback");
+    assert.throws(
+      () => store.submitFeedback(task.taskId, "alice", "tenant-a", { disposition: "adopted" }),
+      /TASK_FEEDBACK_NOT_ALLOWED/,
+    );
+    const claim = store.claim("worker-1", Date.now(), 30_000, "ota")!;
+    store.complete(claim, "done");
+    assert.throws(
+      () => store.submitFeedback(task.taskId, "bob", "tenant-a", { disposition: "adopted" }),
+      /TASK_NOT_FOUND_OR_FORBIDDEN/,
+    );
+    assert.throws(
+      () => store.submitFeedback(task.taskId, "alice", "tenant-b", { disposition: "adopted" }),
+      /TASK_NOT_FOUND_OR_FORBIDDEN/,
+    );
+    const first = store.submitFeedback(
+      task.taskId,
+      "alice",
+      "tenant-a",
+      { disposition: "partially_adopted", reason: "需要补验证", needsRework: true },
+      1000,
+    );
+    assert.deepEqual(first, {
+      taskId: task.taskId,
+      disposition: "partially_adopted",
+      reason: "需要补验证",
+      needsRework: true,
+      updatedAt: 1000,
+    });
+    const replaced = store.submitFeedback(task.taskId, "alice", "tenant-a", { disposition: "adopted" }, 2000);
+    assert.deepEqual(replaced, {
+      taskId: task.taskId,
+      disposition: "adopted",
+      reason: null,
+      needsRework: null,
+      updatedAt: 2000,
+    });
+    const db = new DatabaseSync(file);
+    assert.equal(
+      (db.prepare("SELECT count(*) n FROM expert_task_feedback WHERE task_id=?").get(task.taskId) as any).n,
+      1,
+    );
+    db.close();
+    store.adminDeleteTask(task.taskId);
+    const afterDelete = new DatabaseSync(file);
+    assert.equal(
+      (afterDelete.prepare("SELECT count(*) n FROM expert_task_feedback WHERE task_id=?").get(task.taskId) as any).n,
+      0,
+    );
+    afterDelete.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
