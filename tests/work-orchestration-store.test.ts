@@ -1,0 +1,180 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
+
+function withStore(run: (store: WorkOrchestrationStore, file: string) => void) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const store = new WorkOrchestrationStore(file);
+    run(store, file);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("work submission is idempotent and conflicting reuse fails closed", () => {
+  withStore((store) => {
+    const first = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "work-k1",
+      sourceType: "mcp",
+      title: "Fix OTA recovery",
+      description: "Investigate and fix interrupted upgrade recovery",
+    });
+    const again = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "work-k1",
+      sourceType: "mcp",
+      title: "Fix OTA recovery",
+      description: "Investigate and fix interrupted upgrade recovery",
+    });
+
+    assert.equal(again.workItemId, first.workItemId);
+    assert.equal(first.reusedExistingWork, false);
+    assert.equal(again.reusedExistingWork, true);
+    assert.equal(again.deduplicationReason, "idempotency_key");
+    assert.throws(
+      () =>
+        store.createOrReuseWork({
+          principalId: "alice",
+          scope: "team-a",
+          idempotencyKey: "work-k1",
+          sourceType: "mcp",
+          title: "Different work",
+          description: "Different payload",
+        }),
+      /WORK_IDEMPOTENCY_CONFLICT/,
+    );
+  });
+});
+
+test("stable source identity reuses one work item across delivery retries", () => {
+  withStore((store) => {
+    const first = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "delivery-1",
+      sourceType: "github",
+      sourceScope: "openai/symphony",
+      sourceRef: "issue-123",
+      title: "Tracker issue",
+      description: "Implement the requested change",
+    });
+    const again = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "delivery-2",
+      sourceType: "github",
+      sourceScope: "openai/symphony",
+      sourceRef: "issue-123",
+      title: "Tracker issue",
+      description: "Implement the requested change",
+    });
+
+    assert.equal(again.workItemId, first.workItemId);
+    assert.equal(again.deduplicationReason, "source_identity");
+  });
+});
+
+test("work transitions use revision CAS and reject stale writers", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "cas-1",
+      sourceType: "admin",
+      title: "CAS",
+      description: "verify state revision",
+    });
+    assert.equal(work.stateRevision, 1);
+    const running = store.transitionWork(work.workItemId, "alice", "team-a", work.stateRevision, "running");
+    assert.equal(running.status, "running");
+    assert.equal(running.stateRevision, 2);
+    assert.throws(
+      () => store.transitionWork(work.workItemId, "alice", "team-a", work.stateRevision, "blocked"),
+      /STALE_WORK_REVISION/,
+    );
+  });
+});
+
+test("only one active work attempt is allowed and it pins workflow version", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "attempt-1",
+      sourceType: "mcp",
+      title: "Attempt",
+      description: "create one attempt",
+      workflowId: "code-fix-default",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 7,
+    });
+    assert.equal(attempt.sequence, 1);
+    assert.equal(attempt.workflowId, "code-fix-default");
+    assert.equal(attempt.workflowVersion, 1);
+    const current = store.getWork(work.workItemId, "alice", "team-a");
+    assert.equal(current.activeWorkAttemptId, attempt.workAttemptId);
+    assert.throws(
+      () =>
+        store.createWorkAttempt(work.workItemId, "alice", "team-a", current.stateRevision, {
+          reason: "human_rework",
+          expertId: "ota",
+          deploymentId: "ota-codex",
+          deploymentConfigVersion: 7,
+        }),
+      /ACTIVE_WORK_ATTEMPT_EXISTS/,
+    );
+  });
+});
+
+test("default workflow policy is immutable and available after reopen", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-reopen-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    let store = new WorkOrchestrationStore(file);
+    const workflow = store.getWorkflow("code-fix-default", 1);
+    assert.equal(workflow.version, 1);
+    assert.equal(workflow.definition.lifecycle.attempt.maxWorkAttempts, 5);
+    assert.equal(workflow.definition.lifecycle.attempt.maxReworks, 3);
+    assert.equal(workflow.definition.lifecycle.retry.failure.maxRunsPerWorkAttempt, 3);
+    assert.equal(workflow.definition.lifecycle.continuation.maxTurnsPerRun, 20);
+    assert.deepEqual(workflow.definition.validation.requiredEvidence, ["expert_result"]);
+
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "reopen-1",
+      sourceType: "mcp",
+      title: "Persist",
+      description: "survive reopen",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 3,
+    });
+    store.close();
+
+    store = new WorkOrchestrationStore(file);
+    const reopened = store.getWork(work.workItemId, "alice", "team-a");
+    assert.equal(reopened.activeWorkAttemptId, attempt.workAttemptId);
+    assert.equal(store.getWorkAttempt(attempt.workAttemptId).deploymentConfigVersion, 3);
+    assert.equal(store.getWorkflow("code-fix-default", 1).version, 1);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
