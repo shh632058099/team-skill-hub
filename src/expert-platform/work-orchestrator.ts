@@ -241,6 +241,10 @@ export class WorkOrchestrator {
   reconcileWork(workItemId: string, principalId: string, scope: string, now = Date.now()): WorkDetail {
     let work = this.workStore.getWork(workItemId, principalId, scope);
     if (TERMINAL_WORK.has(work.status)) return this.detail(workItemId, principalId, scope);
+    work = this.reconcilePublicationLifecycle(work, now);
+    if (TERMINAL_WORK.has(work.status) || work.status === "blocked") {
+      return this.detail(workItemId, principalId, scope);
+    }
 
     let attempt = this.workStore.getActiveAttempt(workItemId);
     if (!attempt) {
@@ -417,6 +421,10 @@ export class WorkOrchestrator {
       const gate = this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
       if (gate.ready && !TERMINAL_WORK.has(work.status)) {
         work = this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "completed", now);
+      }
+      const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+      if (workflow.definition.publication?.required && !TERMINAL_WORK.has(work.status)) {
+        return this.reconcileWork(workItemId, principalId, scope, now);
       }
     } else if (input.decision === "rework" && work.status === "waiting_review") {
       const attempts = this.workStore.listAttempts(workItemId);
@@ -843,6 +851,138 @@ export class WorkOrchestrator {
       );
     }
     return this.detail(workItemId, principalId, scope);
+  }
+
+  private reconcilePublicationLifecycle(work: WorkItemRecord, now: number): WorkItemRecord {
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+    if (!workflow.definition.publication?.required) return work;
+    if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+    if (!work.currentSubjectRevision || !/^workspace:[a-f0-9]{64}$/i.test(work.currentSubjectRevision)) return work;
+
+    const acceptedReview = this.workStore
+      .listReviewDecisions(work.workItemId)
+      .some((review) => review.subjectRevision === work.currentSubjectRevision && review.decision === "accepted");
+    if (!acceptedReview) return work;
+
+    let publication = this.publications
+      .listPublications(work.workItemId)
+      .filter((item) => item.sourceSubjectRevision === work.currentSubjectRevision)
+      .at(-1);
+
+    if (!publication) {
+      try {
+        publication = this.ensurePublication(work.workItemId, work.principalId, work.scope, now);
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "PUBLICATION_PREPARATION_FAILED";
+        if (
+          code === "PUBLICATION_WORKSPACE_UNAVAILABLE" ||
+          code === "PUBLICATION_POLICY_MISSING" ||
+          code === "PUBLICATION_NOT_ALLOWED" ||
+          code === "PUBLICATION_REPOSITORY_MISMATCH"
+        ) {
+          return this.workStore.blockWork(
+            work.workItemId,
+            work.principalId,
+            work.scope,
+            work.stateRevision,
+            "publication_blocked",
+            code,
+            now,
+          );
+        }
+        throw error;
+      }
+    }
+
+    if (publication.state === "blocked" || publication.state === "failed") {
+      if (work.status !== "blocked") {
+        return this.workStore.blockWork(
+          work.workItemId,
+          work.principalId,
+          work.scope,
+          work.stateRevision,
+          "publication_blocked",
+          publication.lastErrorCode ?? "PUBLICATION_FAILED",
+          now,
+        );
+      }
+      return work;
+    }
+
+    if (["prepared", "approved", "pushing", "pushed"].includes(publication.state)) {
+      const artifact = this.publications.getPublicationArtifact(publication.publicationId);
+      if (artifact) {
+        const hasArtifactEvidence = this.workStore
+          .listEvidence(work.workItemId)
+          .some(
+            (evidence) =>
+              !evidence.stale &&
+              evidence.type === "artifact" &&
+              evidence.artifactRef === artifact.artifactId &&
+              evidence.subjectRevision === publication!.sourceSubjectRevision,
+          );
+        if (!hasArtifactEvidence) {
+          this.recordPreparedPublicationArtifact(
+            work.workItemId,
+            work.principalId,
+            work.scope,
+            publication.publicationId,
+            now,
+          );
+        }
+      }
+    }
+
+    publication = this.publications.getPublication(publication.publicationId);
+    if (publication.state !== "pushed" || !publication.commitSha || !publication.artifactRef) {
+      return this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+    }
+
+    const publicationSubject = "publication:" + publication.publicationId + ":" + publication.commitSha;
+    const hasPublicationEvidence = this.workStore
+      .listEvidence(work.workItemId)
+      .some(
+        (evidence) =>
+          !evidence.stale &&
+          evidence.type === "publication" &&
+          evidence.status === "passed" &&
+          evidence.subjectRevision === publicationSubject &&
+          evidence.artifactRef === publication!.artifactRef,
+      );
+    if (!hasPublicationEvidence) {
+      this.workStore.recordEvidence(
+        work.workItemId,
+        work.principalId,
+        work.scope,
+        {
+          workAttemptId: publication.workAttemptId,
+          type: "publication",
+          status: "passed",
+          source: "worker_verified",
+          summary: "work_branch:" + publication.branchName + "@" + publication.commitSha,
+          artifactRef: publication.artifactRef,
+          subjectRevision: publicationSubject,
+          environmentIdentity: "publication-policy@" + publication.publicationPolicyRevision,
+          verifierIdentity: "team-skill-hub-publication",
+        },
+        now,
+      );
+    }
+
+    let current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+    const gate = this.workStore.evaluateCompletionGate(current.workItemId, current.principalId, current.scope);
+    if (gate.ready && !TERMINAL_WORK.has(current.status)) {
+      current = this.workStore.transitionWork(
+        current.workItemId,
+        current.principalId,
+        current.scope,
+        current.stateRevision,
+        "completed",
+        now,
+      );
+      this.workStore.requestTerminalWorkspaceCleanup(current.workItemId, now);
+    }
+    return current;
   }
 
   private reconcileSucceeded(

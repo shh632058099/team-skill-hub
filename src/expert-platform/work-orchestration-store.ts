@@ -41,6 +41,7 @@ export interface WorkflowDefinition {
   };
   validation: { requiredEvidence: string[]; required: VerificationPolicyStep[] };
   review: { humanReview: boolean };
+  publication?: { required: boolean; mode: "work_branch" };
   completion: {
     require: Array<
       | "latest_work_attempt_succeeded"
@@ -48,11 +49,12 @@ export interface WorkflowDefinition {
       | "no_unresolved_blocker"
       | "review_accepted"
       | "required_approvals_approved"
+      | "publication_succeeded"
     >;
-    requiredApprovals?: Array<{
-      scope: "work_completion";
-      subjectType: "workspace_revision";
-    }>;
+    requiredApprovals?: Array<
+      | { scope: "work_completion"; subjectType: "workspace_revision" }
+      | { scope: "publish_work_branch"; subjectType: "publication_artifact" }
+    >;
   };
   graph: { mode: "single-node" };
 }
@@ -534,6 +536,22 @@ export class WorkOrchestrationStore {
     definition.validation.required = normalizeVerificationPolicy(
       (definition.validation as { required?: unknown }).required,
     );
+    const publication = (definition as { publication?: unknown }).publication;
+    if (publication !== undefined) {
+      if (
+        !publication ||
+        typeof publication !== "object" ||
+        Array.isArray(publication) ||
+        typeof (publication as { required?: unknown }).required !== "boolean" ||
+        (publication as { mode?: unknown }).mode !== "work_branch"
+      ) {
+        throw new Error("INVALID_WORKFLOW");
+      }
+      definition.publication = {
+        required: (publication as { required: boolean }).required,
+        mode: "work_branch",
+      };
+    }
     const requiredRuntimeProfile = definition.execution?.requiredRuntimeProfile;
     if (requiredRuntimeProfile !== undefined) {
       try {
@@ -552,14 +570,30 @@ export class WorkOrchestrationStore {
           !item ||
           typeof item !== "object" ||
           Array.isArray(item) ||
-          (item as { scope?: unknown }).scope !== "work_completion" ||
-          (item as { subjectType?: unknown }).subjectType !== "workspace_revision",
+          !(
+            ((item as { scope?: unknown }).scope === "work_completion" &&
+              (item as { subjectType?: unknown }).subjectType === "workspace_revision") ||
+            ((item as { scope?: unknown }).scope === "publish_work_branch" &&
+              (item as { subjectType?: unknown }).subjectType === "publication_artifact")
+          ),
       )
     ) {
       throw new Error("INVALID_WORKFLOW");
     }
     if (requireApproval && requiredApprovals.length === 0) throw new Error("INVALID_WORKFLOW");
     if (!requireApproval && requiredApprovals.length > 0) throw new Error("INVALID_WORKFLOW");
+    const requirePublication = definition.completion?.require?.includes("publication_succeeded") ?? false;
+    if (requirePublication !== (definition.publication?.required === true)) throw new Error("INVALID_WORKFLOW");
+    if (definition.publication?.required) {
+      if (!requireApproval) throw new Error("INVALID_WORKFLOW");
+      if (
+        !requiredApprovals.some(
+          (item) => item.scope === "publish_work_branch" && item.subjectType === "publication_artifact",
+        )
+      ) {
+        throw new Error("INVALID_WORKFLOW");
+      }
+    }
     if (requiredApprovals.length > 0) {
       definition.completion.requiredApprovals = requiredApprovals as NonNullable<
         WorkflowDefinition["completion"]["requiredApprovals"]
@@ -1195,7 +1229,24 @@ export class WorkOrchestrationStore {
       throw new Error("INVALID_WORK_EVIDENCE");
     }
     if (!work.currentSubjectRevision || work.currentSubjectRevision !== subjectRevision) {
-      throw new Error("STALE_WORK_SUBJECT");
+      const publicationMatch =
+        type === "publication" ? /^publication:([0-9a-f-]{36}):([a-f0-9]{40,64})$/i.exec(subjectRevision) : null;
+      const publication = publicationMatch
+        ? (this.db
+            .prepare(
+              "SELECT publication_id,commit_sha,state,source_subject_revision,artifact_ref FROM work_publications WHERE publication_id=? AND work_item_id=?",
+            )
+            .get(publicationMatch[1]!, workItemId) as Row | undefined)
+        : undefined;
+      if (
+        !publication ||
+        publication.state !== "pushed" ||
+        String(publication.commit_sha ?? "").toLowerCase() !== publicationMatch![2]!.toLowerCase() ||
+        String(publication.source_subject_revision ?? "") !== work.currentSubjectRevision ||
+        String(publication.artifact_ref ?? "") !== (input.artifactRef?.trim() || "")
+      ) {
+        throw new Error("STALE_WORK_SUBJECT");
+      }
     }
 
     const existing = this.db
@@ -1444,17 +1495,52 @@ export class WorkOrchestrationStore {
     }
     if (workflow.definition.completion.require.includes("required_approvals_approved")) {
       for (const required of workflow.definition.completion.requiredApprovals ?? []) {
-        const approval = work.currentSubjectRevision
+        let requiredSubject = work.currentSubjectRevision;
+        if (required.scope === "publish_work_branch" && required.subjectType === "publication_artifact") {
+          const publication = work.currentSubjectRevision
+            ? (this.db
+                .prepare(
+                  "SELECT publication_id,commit_sha FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                )
+                .get(workItemId, work.currentSubjectRevision) as Row | undefined)
+            : undefined;
+          requiredSubject =
+            publication?.publication_id && publication.commit_sha
+              ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
+              : null;
+        }
+        const approval = requiredSubject
           ? (this.db
               .prepare(
                 "SELECT decision FROM work_approvals WHERE work_item_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
               )
-              .get(workItemId, required.scope, required.subjectType, work.currentSubjectRevision) as Row | undefined)
+              .get(workItemId, required.scope, required.subjectType, requiredSubject) as Row | undefined)
           : undefined;
         if (!approval || approval.decision !== "approved") {
           missing.push("required_approval:" + required.scope);
         }
       }
+    }
+    if (workflow.definition.completion.require.includes("publication_succeeded")) {
+      const publication = work.currentSubjectRevision
+        ? (this.db
+            .prepare(
+              "SELECT publication_id,commit_sha,artifact_ref FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND state='pushed' AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
+        : undefined;
+      const publicationSubject =
+        publication?.publication_id && publication.commit_sha
+          ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
+          : null;
+      const evidence = publicationSubject
+        ? (this.db
+            .prepare(
+              "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type='publication' AND status='passed' AND source='worker_verified' AND stale=0 AND subject_revision=? AND artifact_ref=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(workItemId, publicationSubject, String(publication!.artifact_ref ?? "")) as Row | undefined)
+        : undefined;
+      if (!publication || !evidence) missing.push("publication_succeeded");
     }
     return {
       ready: missing.length === 0,
@@ -1529,25 +1615,31 @@ export class WorkOrchestrationStore {
 
   listReconciliationWorkIds(now = Date.now(), limit = 100): string[] {
     const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const hasPublicationTable = Boolean(
+      this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_publications'").get(),
+    );
+    const waitingReviewClause = hasPublicationTable ? "OR status='waiting_review'" : "";
     return (
       this.db
         .prepare(
           [
             "SELECT work_item_id FROM work_items",
-            "WHERE status NOT IN ('completed','failed','cancelled','waiting_review')",
+            "WHERE status NOT IN ('completed','failed','cancelled')",
             "AND (",
             "status IN ('queued','rework')",
             "OR (status='running' AND (next_action_at IS NULL OR next_action_at<=?))",
             "OR (status='blocked' AND next_action_at IS NOT NULL AND next_action_at<=?)",
+            waitingReviewClause,
             ")",
             "ORDER BY CASE WHEN next_action_at IS NULL THEN 0 ELSE 1 END, COALESCE(next_action_at,updated_at), updated_at",
             "LIMIT ?",
-          ].join(" "),
+          ]
+            .filter(Boolean)
+            .join(" "),
         )
         .all(now, now, boundedLimit) as Row[]
     ).map((row) => String(row.work_item_id));
   }
-
   listEvents(workItemId: string, afterEventId = 0, limit = 100): { events: WorkEventRecord[]; nextEventId: number } {
     const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
     const rows = this.db

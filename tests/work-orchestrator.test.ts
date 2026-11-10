@@ -1079,3 +1079,158 @@ test("ensurePublication creates an owner-affine prepared-work command only after
     f.close();
   }
 });
+
+test("publication-required workflow automatically prepares, pushes evidence, and completes only after exact approval", () => {
+  const f = fixture(() => true);
+  try {
+    const modelConfig = {
+      providerId: "router",
+      model: "model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    f.experts.putDeployment({
+      id: "ota-auto-publish",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://example.test/ota.git",
+          branch: "main",
+          publicationPolicy: {
+            version: 5,
+            permissions: ["prepare-commit", "push-work-branch"],
+            branchPrefix: "skillhub/work/",
+            protectedBranches: ["main"],
+            allowedPushRemote: "origin",
+            credentialRef: "publish-ref",
+            allowForcePush: false,
+            allowDeleteRef: false,
+          },
+        },
+      ],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
+      active: true,
+      executor: { backend: "codex", modelConfig },
+    });
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("auto-publication", 1, {
+      ...structuredClone(base),
+      execution: {
+        ...structuredClone(base.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      publication: { required: true, mode: "work_branch" },
+      completion: {
+        require: [...base.completion.require, "required_approvals_approved", "publication_succeeded"],
+        requiredApprovals: [{ scope: "publish_work_branch", subjectType: "publication_artifact" }],
+      },
+    });
+
+    const submitted = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "auto-publication",
+      workflowId: "auto-publication",
+      deploymentId: "ota-auto-publish",
+    });
+    const attempt = submitted.attempts[0]!;
+    const workspace = f.work.getWorkspace(attempt.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      1100,
+      "b".repeat(40),
+    );
+    const claim = f.tasks.claim("worker-a", 1000, 30_000, "ota", {
+      backend: "codex",
+      runtimeProfiles: ["codex-workspace-write"],
+    })!;
+    const summary = {
+      baseCommit: "b".repeat(40),
+      changedFiles: ["README.md"],
+      addedFiles: [],
+      deletedFiles: [],
+      diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+      contentRevision: "a".repeat(64),
+    };
+    f.tasks.complete(claim, "changed", 2000, { commitSha: summary.baseCommit }, undefined, summary);
+    let detail = f.orchestrator.reconcileWork(submitted.work.workItemId, "alice", "team-a", 2100);
+    assert.equal(detail.work.status, "waiting_review");
+
+    detail = f.orchestrator.submitReview(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: detail.work.stateRevision,
+        subjectRevision: "workspace:" + summary.contentRevision,
+        decision: "accepted",
+      },
+      2200,
+    );
+    assert.equal(detail.work.status, "waiting_review");
+    let publication = f.publications.listPublications(detail.work.workItemId).at(-1)!;
+    assert.equal(publication.state, "preparing");
+    assert.equal(publication.executionSnapshot?.workspacePath, "/srv/workspaces/" + workspace.workspaceKey);
+
+    const prepare = f.publications.claimPublicationOperation("worker-a", 2300, 30_000)!;
+    f.publications.completePublicationOperation(
+      prepare,
+      {
+        success: true,
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      2400,
+    );
+    detail = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 2500);
+    assert.equal(detail.work.status, "waiting_review");
+    assert.equal(
+      f.work
+        .listEvidence(detail.work.workItemId)
+        .some((e) => e.type === "artifact" && e.artifactRef === "publication:" + publication.publicationId && !e.stale),
+      true,
+    );
+
+    publication = f.publications.getPublication(publication.publicationId);
+    const publicationSubject = "publication:" + publication.publicationId + ":" + publication.commitSha;
+    detail = f.orchestrator.submitApproval(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: detail.work.stateRevision,
+        subjectRevision: publicationSubject,
+        approvalScope: "publish_work_branch",
+        decision: "approved",
+      },
+      { actor: "alice", role: "developer" },
+      2600,
+    );
+    assert.equal(f.publications.getPublication(publication.publicationId).state, "approved");
+    assert.equal(detail.work.status, "waiting_review");
+
+    const push = f.publications.claimPublicationOperation("worker-a", 2700, 30_000)!;
+    assert.equal(push.operation, "push");
+    f.publications.completePublicationOperation(push, { success: true }, 2800);
+
+    detail = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 2900);
+    assert.equal(detail.work.status, "completed");
+    const publicationEvidence = f.work
+      .listEvidence(detail.work.workItemId)
+      .find((e) => e.type === "publication" && !e.stale);
+    assert.equal(publicationEvidence?.status, "passed");
+    assert.equal(publicationEvidence?.subjectRevision, publicationSubject);
+    assert.equal(publicationEvidence?.artifactRef, "publication:" + publication.publicationId);
+    assert.equal(detail.gate.ready, true);
+    assert.deepEqual(detail.gate.missing, []);
+  } finally {
+    f.close();
+  }
+});

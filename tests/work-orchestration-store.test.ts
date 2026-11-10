@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
+import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
 
 function withStore(run: (store: WorkOrchestrationStore, file: string) => void) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-"));
@@ -832,6 +833,215 @@ test("approval store accepts only platform-defined subject/scope pairs", () => {
           decision: "approved",
         }),
       /INVALID_WORK_APPROVAL/,
+    );
+  });
+});
+
+test("publication-required workflow gates completion on exact pushed artifact evidence and approval", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-gate-"));
+  const file = path.join(dir, "runtime.db");
+  const publications = new WorkPublicationStore(file);
+  try {
+    const store = new WorkOrchestrationStore(file);
+    const base = store.getWorkflow("code-fix-default").definition;
+    store.putWorkflow("publication-gate", 1, {
+      ...base,
+      publication: { required: true, mode: "work_branch" },
+      completion: {
+        require: [
+          "latest_work_attempt_succeeded",
+          "required_evidence_passed",
+          "no_unresolved_blocker",
+          "review_accepted",
+          "required_approvals_approved",
+          "publication_succeeded",
+        ],
+        requiredApprovals: [{ scope: "publish_work_branch", subjectType: "publication_artifact" }],
+      },
+    } as any);
+    let work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "publication-gate",
+      sourceType: "mcp",
+      title: "Publish",
+      description: "Publish exact branch",
+      workflowId: "publication-gate",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-write",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      baseCommit: "b".repeat(40),
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+    });
+    const sourceSubject = "workspace:" + "a".repeat(64);
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    work = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, sourceSubject, 100);
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      type: "expert_result",
+      status: "passed",
+      source: "worker_verified",
+      subjectRevision: sourceSubject,
+    });
+    work = store.finishWorkAttempt(
+      work.workItemId,
+      attempt.workAttemptId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "succeeded",
+      "waiting_review",
+      110,
+    );
+    store.submitReviewDecision(
+      work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: work.stateRevision,
+        subjectRevision: sourceSubject,
+        decision: "accepted",
+      },
+      120,
+    );
+
+    const publication = publications.createOrReusePublication(
+      {
+        workItemId: work.workItemId,
+        workAttemptId: attempt.workAttemptId,
+        workspaceId: workspace.workspaceId,
+        sourceSubjectRevision: sourceSubject,
+        baseCommit: "b".repeat(40),
+        repositoryId: "ota-repo",
+        repositoryIdentityRevision: 1,
+        publicationPolicyRevision: 1,
+        branchName: "skillhub/work/work-a1",
+        pushRemoteName: "origin",
+        ownerWorkerId: "worker-a",
+        commitTimestamp: 1_800_000_000_000,
+        commitAuthorName: "Team Skill Hub",
+        commitAuthorEmail: "team-skill-hub@local.invalid",
+        commitMessage: "Publish\n",
+        executionSnapshot: {
+          workspacePath: "/srv/workspaces/work-a1",
+          repositoryUrl: "https://example.test/ota.git",
+          defaultBranch: "main",
+          branchPrefix: "skillhub/work/",
+          protectedBranches: ["main"],
+          allowedPushRemote: "origin",
+          expectedContentRevision: "a".repeat(64),
+          approvedChangeSummary: {
+            baseCommit: "b".repeat(40),
+            changedFiles: ["README.md"],
+            addedFiles: [],
+            deletedFiles: [],
+            diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+            contentRevision: "a".repeat(64),
+          },
+        },
+      } as any,
+      130,
+    );
+    publications.transitionPublication(
+      publication.publicationId,
+      "prepared",
+      {
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      140,
+    );
+    const publicationSubject = "publication:" + publication.publicationId + ":" + "c".repeat(40);
+
+    let gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.ok(gate.missing.includes("required_approval:publish_work_branch"));
+    assert.ok(gate.missing.includes("publication_succeeded"));
+
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    store.recordApproval(
+      work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: work.stateRevision,
+        actor: "alice",
+        role: "developer",
+        approvalScope: "publish_work_branch",
+        subjectType: "publication_artifact",
+        subjectRevision: publicationSubject,
+        decision: "approved",
+      },
+      150,
+    );
+    publications.transitionPublication(publication.publicationId, "approved", {}, 150);
+    gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.ok(!gate.missing.includes("required_approval:publish_work_branch"));
+    assert.ok(gate.missing.includes("publication_succeeded"));
+
+    publications.transitionPublication(publication.publicationId, "pushing", {}, 160);
+    publications.transitionPublication(publication.publicationId, "pushed", {}, 170);
+    gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.ok(gate.missing.includes("publication_succeeded"), "pushed state alone must not satisfy gate");
+
+    store.recordEvidence(
+      work.workItemId,
+      "alice",
+      "team-a",
+      {
+        workAttemptId: attempt.workAttemptId,
+        type: "publication",
+        status: "passed",
+        source: "worker_verified",
+        artifactRef: "publication:" + publication.publicationId,
+        subjectRevision: publicationSubject,
+        environmentIdentity: "publication-policy@1",
+        verifierIdentity: "team-skill-hub-publication",
+      },
+      180,
+    );
+    gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.equal(gate.ready, true);
+    assert.deepEqual(gate.missing, []);
+
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    store.setCurrentSubjectRevision(
+      work.workItemId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "workspace:" + "e".repeat(64),
+      190,
+    );
+    assert.equal(store.listEvidence(work.workItemId).find((e) => e.type === "publication")?.stale, true);
+    assert.ok(
+      store.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("publication_succeeded"),
+    );
+
+    store.close();
+  } finally {
+    publications.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("publication_succeeded token is invalid without publication-required workflow", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-publication-gate", 1, {
+          ...base,
+          completion: { require: [...base.completion.require, "publication_succeeded"] },
+        } as any),
+      /INVALID_WORKFLOW/,
     );
   });
 });
