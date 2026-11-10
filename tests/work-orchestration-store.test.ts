@@ -665,3 +665,122 @@ test("legacy workflow without runtime or approval requirements remains normalize
     assert.deepEqual(record.definition.completion.require, base.completion.require);
   });
 });
+
+function createApprovalGatedWork(store: WorkOrchestrationStore, idempotencyKey: string) {
+  const base = store.getWorkflow("code-fix-default").definition;
+  const workflowId = "approval-gated-" + idempotencyKey;
+  store.putWorkflow(workflowId, 1, {
+    ...structuredClone(base),
+    completion: {
+      require: [...base.completion.require, "required_approvals_approved"],
+      requiredApprovals: [{ scope: "work_completion", subjectType: "workspace_revision" }],
+    },
+  });
+  const work = store.createOrReuseWork({
+    principalId: "alice",
+    scope: "team-a",
+    idempotencyKey,
+    sourceType: "mcp",
+    title: "Approval Gate",
+    description: "require exact current approval",
+    workflowId,
+  });
+  const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+    reason: "initial",
+    expertId: "ota",
+    deploymentId: "ota-write",
+    deploymentConfigVersion: 1,
+  });
+  let current = store.getWork(work.workItemId, "alice", "team-a");
+  const subject = "workspace:" + "a".repeat(64);
+  current = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", current.stateRevision, subject);
+  store.recordEvidence(work.workItemId, "alice", "team-a", {
+    workAttemptId: attempt.workAttemptId,
+    type: "expert_result",
+    status: "passed",
+    source: "worker_verified",
+    subjectRevision: subject,
+  });
+  current = store.finishWorkAttempt(
+    work.workItemId,
+    attempt.workAttemptId,
+    "alice",
+    "team-a",
+    current.stateRevision,
+    "succeeded",
+    "waiting_review",
+  );
+  return { workItemId: work.workItemId, subject, current };
+}
+
+test("completion gate requires current work_completion approval after accepted review", () => {
+  withStore((store) => {
+    const setup = createApprovalGatedWork(store, "approval-gate-review-first");
+    store.submitReviewDecision(setup.workItemId, "alice", "team-a", {
+      expectedRevision: setup.current.stateRevision,
+      subjectRevision: setup.subject,
+      decision: "accepted",
+    });
+    let gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
+    assert.equal(gate.ready, false);
+    assert.deepEqual(gate.missing, ["required_approval:work_completion"]);
+
+    let current = store.getWork(setup.workItemId, "alice", "team-a");
+    store.recordApproval(setup.workItemId, "alice", "team-a", {
+      expectedRevision: current.stateRevision,
+      actor: "alice",
+      role: "developer",
+      approvalScope: "merge",
+      subjectType: "workspace_revision",
+      subjectRevision: setup.subject,
+      decision: "approved",
+    });
+    gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
+    assert.deepEqual(gate.missing, ["required_approval:work_completion"]);
+
+    current = store.getWork(setup.workItemId, "alice", "team-a");
+    store.recordApproval(setup.workItemId, "alice", "team-a", {
+      expectedRevision: current.stateRevision,
+      actor: "alice",
+      role: "developer",
+      approvalScope: "work_completion",
+      subjectType: "workspace_revision",
+      subjectRevision: setup.subject,
+      decision: "approved",
+    });
+    gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
+    assert.equal(gate.ready, true);
+    assert.deepEqual(gate.missing, []);
+  });
+});
+
+test("approval without review is insufficient and becomes stale after subject revision changes", () => {
+  withStore((store) => {
+    const setup = createApprovalGatedWork(store, "approval-gate-approval-first");
+    store.recordApproval(setup.workItemId, "alice", "team-a", {
+      expectedRevision: setup.current.stateRevision,
+      actor: "alice",
+      role: "developer",
+      approvalScope: "work_completion",
+      subjectType: "workspace_revision",
+      subjectRevision: setup.subject,
+      decision: "approved",
+    });
+    let gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
+    assert.ok(gate.missing.includes("review_accepted"));
+    assert.ok(!gate.missing.includes("required_approval:work_completion"));
+
+    let current = store.getWork(setup.workItemId, "alice", "team-a");
+    store.setCurrentSubjectRevision(
+      setup.workItemId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "workspace:" + "b".repeat(64),
+    );
+    assert.equal(store.listApprovals(setup.workItemId).at(-1)!.stale, true);
+    gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
+    assert.ok(gate.missing.includes("required_approval:work_completion"));
+    assert.ok(gate.missing.includes("review_accepted"));
+  });
+});

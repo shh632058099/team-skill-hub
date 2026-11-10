@@ -1437,6 +1437,20 @@ export class WorkOrchestrationStore {
         : undefined;
       if (!review || review.decision !== "accepted") missing.push("review_accepted");
     }
+    if (workflow.definition.completion.require.includes("required_approvals_approved")) {
+      for (const required of workflow.definition.completion.requiredApprovals ?? []) {
+        const approval = work.currentSubjectRevision
+          ? (this.db
+              .prepare(
+                "SELECT decision FROM work_approvals WHERE work_item_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
+              )
+              .get(workItemId, required.scope, required.subjectType, work.currentSubjectRevision) as Row | undefined)
+          : undefined;
+        if (!approval || approval.decision !== "approved") {
+          missing.push("required_approval:" + required.scope);
+        }
+      }
+    }
     return {
       ready: missing.length === 0,
       missing,
