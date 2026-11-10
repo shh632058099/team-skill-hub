@@ -4,6 +4,7 @@ import { ExpertTaskStore } from "./task-store.js";
 import { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import { startExpertWorkerGrpcServer } from "./grpc-transport.js";
 import { ExpertStore } from "./expert-store.js";
+import { WorkOrchestrationStore } from "./work-orchestration-store.js";
 
 export async function startExpertHubRuntimeFromEnv(
   env: Record<string, string | undefined>,
@@ -26,6 +27,7 @@ export async function startExpertHubRuntimeFromEnv(
 
   const tasks = new ExpertTaskStore(runtimeDb);
   const experts = new ExpertStore(runtimeDb);
+  const workStore = new WorkOrchestrationStore(runtimeDb);
   const workers = new PersistentWorkerRegistry(registryDb);
   try {
     const bootstrapToken = env.EXPERT_WORKER_BOOTSTRAP_TOKEN?.trim() || undefined;
@@ -42,6 +44,7 @@ export async function startExpertHubRuntimeFromEnv(
     }
     const server = await startExpertWorkerGrpcServer(tasks, workers, grpcAddress, {
       experts,
+      workStore,
       ...(bootstrapToken ? { bootstrapToken } : {}),
       bootstrapAutoApprove,
       bootstrapAllowedCapabilities,
@@ -62,12 +65,14 @@ export async function startExpertHubRuntimeFromEnv(
         await server.close();
         tasks.close();
         experts.close();
+        workStore.close();
         workers.close();
       },
     };
   } catch (error) {
     tasks.close();
     experts.close();
+    workStore.close();
     workers.close();
     throw error;
   }

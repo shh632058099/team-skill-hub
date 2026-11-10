@@ -77,6 +77,7 @@ export type TaskRecord = {
   workflowId: string | null;
   workflowVersion: number | null;
   workspaceKey: string | null;
+  requiredWorkerId: string | null;
   continuationCount: number;
   continuationReason: string | null;
   runId: string | null;
@@ -211,6 +212,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("workflow_id", "TEXT");
     this.ensureTaskColumn("workflow_version", "INTEGER");
     this.ensureTaskColumn("workspace_key", "TEXT");
+    this.ensureTaskColumn("required_worker_id", "TEXT");
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
     // Older tasks already have a queued lifecycle event created at submission time.
@@ -496,6 +498,7 @@ export class ExpertTaskStore {
         workflowId: input.workflowId?.trim() || null,
         workflowVersion: input.workflowVersion ?? null,
         workspaceKey: input.workspaceKey?.trim() || null,
+        requiredWorkerId: null,
         reusedExistingTask: false,
         continuationCount: 0,
         continuationReason: null,
@@ -535,6 +538,7 @@ export class ExpertTaskStore {
         ? (this.db
             .prepare(
               `SELECT * FROM expert_tasks AS t WHERE expert_id=? AND (status='queued' OR (status='running' AND lease_until < ?))
+                AND (t.required_worker_id IS NULL OR t.required_worker_id=?)
                 ${compatibilitySql}
                 AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
                   WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
@@ -543,10 +547,11 @@ export class ExpertTaskStore {
                     AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
                 ORDER BY t.rowid LIMIT 1`,
             )
-            .get(expertId, now, ...compatibilityArgs) as Row | undefined)
+            .get(expertId, now, workerId, ...compatibilityArgs) as Row | undefined)
         : (this.db
             .prepare(
               `SELECT * FROM expert_tasks AS t WHERE (status='queued' OR (status='running' AND lease_until < ?))
+                AND (t.required_worker_id IS NULL OR t.required_worker_id=?)
                 ${compatibilitySql}
                 AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
                   WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
@@ -555,7 +560,7 @@ export class ExpertTaskStore {
                     AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
                 ORDER BY t.rowid LIMIT 1`,
             )
-            .get(now, ...compatibilityArgs) as Row | undefined);
+            .get(now, workerId, ...compatibilityArgs) as Row | undefined);
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -696,9 +701,19 @@ export class ExpertTaskStore {
     }
   }
 
-  scheduleContinuation(taskId: string, expectedRunId: string, reason: string, now = Date.now()): TaskRecord {
+  scheduleContinuation(
+    taskId: string,
+    expectedRunId: string,
+    reason: string,
+    now = Date.now(),
+    requiredWorkerId?: string,
+  ): TaskRecord {
     const runId = expectedRunId.trim();
     if (!runId || !reason.trim()) throw new Error("INVALID_REQUEST");
+    const normalizedWorker = requiredWorkerId?.trim() || null;
+    if (normalizedWorker && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(normalizedWorker)) {
+      throw new Error("INVALID_WORKER");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
@@ -707,9 +722,9 @@ export class ExpertTaskStore {
       if (row.run_id == null || String(row.run_id) !== runId) throw new Error("STALE_RUN");
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='queued',result=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,continuation_count=continuation_count+1,continuation_reason=? WHERE task_id=? AND status='succeeded' AND run_id=?",
+          "UPDATE expert_tasks SET status='queued',result=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,continuation_count=continuation_count+1,continuation_reason=?,required_worker_id=? WHERE task_id=? AND status='succeeded' AND run_id=?",
         )
-        .run(reason.trim().slice(0, 200), taskId, runId);
+        .run(reason.trim().slice(0, 200), normalizedWorker, taskId, runId);
       if (changed.changes !== 1) throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
       this.event(taskId, runId, "continuation_queued");
       const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
@@ -1168,6 +1183,15 @@ export class ExpertTaskStore {
     }
   }
 
+  assertActiveClaim(claim: Claim, now = Date.now()): void {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND lease_until>=?",
+      )
+      .get(claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
+    if (!row) throw new Error("STALE_ATTEMPT");
+  }
+
   /** Accept stage metadata only for the active claimed attempt; no raw model output. */
   recordStage(claim: Claim, stage: string, details = "", now = Date.now()) {
     // Accept only structured stage names and diagnostic codes. Never persist raw log text.
@@ -1275,6 +1299,7 @@ export class ExpertTaskStore {
       workflowId: row.workflow_id == null ? null : String(row.workflow_id),
       workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
       workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+      requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
       continuationCount: Number(row.continuation_count ?? 0),
       continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
       runId: row.run_id == null ? null : String(row.run_id),

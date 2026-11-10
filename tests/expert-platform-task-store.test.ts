@@ -730,6 +730,34 @@ test("successful work task can schedule a fenced continuation on the same task",
   }
 });
 
+test("continuation can be pinned to its workspace owner worker", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-continuation-owner-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      idempotencyKey: "continuation-owner",
+      problem: "inspect",
+      workItemId: "work-owner",
+      workAttemptId: "attempt-owner",
+      workflowId: "work-default",
+      workflowVersion: 1,
+      workspaceKey: "work-owner-a1",
+    });
+    const first = store.claim("worker-a", 100, 10_000)!;
+    store.complete(first, "first result", 200);
+
+    store.scheduleContinuation(task.taskId, first.runId, "verification_failed", 300, "worker-a");
+    assert.equal(store.claim("worker-b", 400, 10_000), null);
+    const second = store.claim("worker-a", 401, 10_000)!;
+    assert.equal(second.taskId, task.taskId);
+    assert.equal(second.workerId, "worker-a");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("standalone expert tasks keep null work linkage", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-standalone-link-"));
   try {

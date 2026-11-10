@@ -803,11 +803,14 @@ export class WorkOrchestrationStore {
     workerId: string,
     workspacePath: string,
     now = Date.now(),
+    baseCommit?: string,
   ): WorkspaceRecord {
     const normalizedWorker = requiredText(workerId, 200);
     if (!normalizedWorker || !path.isAbsolute(workspacePath) || workspacePath === path.parse(workspacePath).root) {
       throw new Error("INVALID_WORKSPACE_OWNER");
     }
+    const normalizedCommit = baseCommit?.trim() || null;
+    if (normalizedCommit && !/^[a-f0-9]{40,64}$/i.test(normalizedCommit)) throw new Error("INVALID_WORKSPACE_COMMIT");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as
@@ -818,9 +821,9 @@ export class WorkOrchestrationStore {
       }
       this.db
         .prepare(
-          "UPDATE work_workspaces SET owner_worker_id=?,path=?,state='ready',last_used_at=? WHERE workspace_id=?",
+          "UPDATE work_workspaces SET owner_worker_id=?,path=?,base_commit=COALESCE(?,base_commit),state='ready',last_used_at=? WHERE workspace_id=?",
         )
-        .run(normalizedWorker, workspacePath, now, workspaceId);
+        .run(normalizedWorker, workspacePath, normalizedCommit, now, workspaceId);
       const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
       this.db.exec("COMMIT");
       return this.fromWorkspaceRow(row);

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-store.js";
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
+import type { WorkOrchestrationStore } from "./work-orchestration-store.js";
 
 interface RegisterWorkerRequest {
   worker_id: string;
@@ -211,6 +212,7 @@ export interface GrpcServerOptions {
   bootstrapToken?: string;
   bootstrapAutoApprove?: boolean;
   bootstrapAllowedCapabilities?: readonly string[];
+  workStore?: WorkOrchestrationStore;
 }
 
 export interface GrpcClientOptions {
@@ -414,6 +416,44 @@ export async function startExpertWorkerGrpcServer(
       requireIdentityMatch(authenticatedId, call.request.claim.worker_id);
       const claim = toClaim(call.request.claim);
       if (workers.get(claim.workerId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      if (call.request.stage === "workspace.ready") {
+        if (!options.workStore) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
+        tasks.assertActiveClaim(claim);
+        let report: { workspaceKey?: unknown; path?: unknown; commitSha?: unknown };
+        try {
+          report = JSON.parse(call.request.details || "{}") as {
+            workspaceKey?: unknown;
+            path?: unknown;
+            commitSha?: unknown;
+          };
+        } catch {
+          throw new Error("INVALID_WORKSPACE_REPORT");
+        }
+        if (
+          typeof report.workspaceKey !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(report.workspaceKey) ||
+          typeof report.path !== "string" ||
+          !path.isAbsolute(report.path) ||
+          report.path === path.parse(report.path).root ||
+          typeof report.commitSha !== "string" ||
+          !/^[a-f0-9]{40,64}$/i.test(report.commitSha)
+        ) {
+          throw new Error("INVALID_WORKSPACE_REPORT");
+        }
+        const attempt = options.workStore.getAttemptByTask(claim.taskId);
+        if (!attempt?.workspaceId) throw new Error("WORKSPACE_NOT_FOUND");
+        const workspace = options.workStore.getWorkspace(attempt.workspaceId);
+        if (workspace.workspaceKey !== report.workspaceKey) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+        options.workStore.assignWorkspaceOwner(
+          workspace.workspaceId,
+          claim.workerId,
+          report.path,
+          Date.now(),
+          report.commitSha,
+        );
+        callback(null, {});
+        return;
+      }
       if (call.request.source_sequence && call.request.source_sequence !== "0") {
         const sequence = Number(call.request.source_sequence);
         tasks.recordActivity(

@@ -261,6 +261,29 @@ test("rework feedback replay creates exactly one new WorkAttempt", () => {
   }
 });
 
+test("continuation fails closed when the workspace owner is unavailable", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-continuation-no-owner" });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "first result", 2_000, { commitSha: "f".repeat(40) });
+
+    const blocked = f.orchestrator.requestContinuation(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "verification_failed",
+      3_000,
+    );
+    assert.equal(blocked.work.status, "blocked");
+    assert.equal(blocked.work.blockedReason, "workspace_unavailable");
+    assert.equal(blocked.work.nextActionType, null);
+    assert.equal(blocked.currentTask!.status, "succeeded");
+  } finally {
+    f.close();
+  }
+});
+
 test("durable continuation reuses the same WorkAttempt and ExpertTask but creates a new Run", () => {
   const f = fixture();
   try {
@@ -269,6 +292,14 @@ test("durable continuation reuses the same WorkAttempt and ExpertTask but create
     const taskId = detail.currentTask!.taskId;
     const firstClaim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
     f.tasks.complete(firstClaim, "first result", 2_000, { commitSha: "f".repeat(40) });
+    const workspace = f.work.getWorkspace(detail.attempts[0]!.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      2_100,
+      "f".repeat(40),
+    );
 
     const scheduled = f.orchestrator.requestContinuation(
       detail.work.workItemId,
@@ -310,6 +341,14 @@ test("continuation respects the workflow agent-turn budget", () => {
     const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-continuation-limit" });
     let claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
     f.tasks.complete(claim, "turn-1", 2_000, { commitSha: "e".repeat(40) });
+    const workspace = f.work.getWorkspace(detail.attempts[0]!.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      2_100,
+      "e".repeat(40),
+    );
 
     for (let continuation = 1; continuation <= 19; continuation++) {
       const now = 3_000 + continuation * 10;

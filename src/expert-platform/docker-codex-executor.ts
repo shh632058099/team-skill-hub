@@ -275,6 +275,18 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw error;
     }
     await report("repository.completed");
+    if (preparedRepository && claim.workspaceKey) {
+      if (!options.onStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
+      await options.onStage(
+        claim,
+        "workspace.ready",
+        JSON.stringify({
+          workspaceKey: claim.workspaceKey,
+          path: preparedRepository.path,
+          commitSha: preparedRepository.commitSha,
+        }),
+      );
+    }
     const sourcePath = preparedRepository?.path ?? options.sourcePath;
     let generatedConfigDir: string | undefined;
     let configFilePath = options.configFilePath;
