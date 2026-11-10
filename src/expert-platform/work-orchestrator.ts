@@ -119,6 +119,38 @@ export class WorkOrchestrator {
     return this.detail(workItemId, principalId, scope);
   }
 
+  requestContinuation(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    reason: string,
+    now = Date.now(),
+  ): WorkDetail {
+    const normalizedReason = reason.trim();
+    if (!normalizedReason || normalizedReason.length > 500) throw new Error("INVALID_CONTINUATION_REASON");
+    const work = this.workStore.getWork(workItemId, principalId, scope);
+    if (TERMINAL_WORK.has(work.status)) throw new Error("WORK_ALREADY_TERMINAL");
+    const attempt = this.workStore.getActiveAttempt(workItemId);
+    if (!attempt?.taskId) throw new Error("ACTIVE_WORK_ATTEMPT_REQUIRED");
+    const task = this.tasks.get(attempt.taskId, principalId, scope);
+    if (task.status !== "succeeded" || !task.runId) throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+    const consumedTurns = Math.max(
+      task.continuationCount + 1,
+      this.tasks.listRunTurns(task.taskId, principalId, scope).length,
+    );
+    if (consumedTurns >= workflow.definition.lifecycle.continuation.maxTurnsPerRun) {
+      throw new Error("WORK_CONTINUATION_LIMIT_REACHED");
+    }
+    if (work.nextActionType !== null) {
+      if (work.nextActionType === "continuation" && work.nextActionContext === normalizedReason)
+        return this.detail(workItemId, principalId, scope);
+      throw new Error("WORK_NEXT_ACTION_PENDING");
+    }
+    this.workStore.scheduleNextAction(workItemId, work.stateRevision, "continuation", now, now, normalizedReason);
+    return this.detail(workItemId, principalId, scope);
+  }
+
   getEvents(workItemId: string, principalId: string, scope: string, afterEventId = 0, limit = 100) {
     this.workStore.getWork(workItemId, principalId, scope);
     return this.workStore.listEvents(workItemId, afterEventId, limit);
@@ -154,7 +186,23 @@ export class WorkOrchestrator {
       }
     }
 
-    const task = this.tasks.get(attempt.taskId!, principalId, scope);
+    let task = this.tasks.get(attempt.taskId!, principalId, scope);
+    if (work.nextActionType === "continuation" && work.nextActionAt !== null && work.nextActionAt <= now) {
+      const continuationReason = work.nextActionContext ?? "continuation";
+      if (task.status === "succeeded") {
+        if (!task.runId) throw new Error("TASK_RUN_REQUIRED");
+        this.tasks.scheduleContinuation(task.taskId, task.runId, continuationReason, now);
+      } else if (
+        (task.status !== "queued" && task.status !== "running") ||
+        task.continuationReason !== continuationReason
+      ) {
+        throw new Error("TASK_CONTINUATION_STATE_MISMATCH");
+      }
+      work = this.workStore.getWork(workItemId, principalId, scope);
+      this.workStore.scheduleNextAction(workItemId, work.stateRevision, null, null, now);
+      work = this.workStore.getWork(workItemId, principalId, scope);
+    }
+    task = this.tasks.get(attempt.taskId!, principalId, scope);
     if (task.status === "queued" || task.status === "running") {
       return this.detail(workItemId, principalId, scope);
     }

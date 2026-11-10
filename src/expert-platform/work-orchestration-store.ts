@@ -90,6 +90,7 @@ export interface WorkItemRecord {
   priority: number | null;
   nextActionType: string | null;
   nextActionAt: number | null;
+  nextActionContext: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -322,6 +323,7 @@ export class WorkOrchestrationStore {
         "  priority INTEGER,",
         "  next_action_type TEXT,",
         "  next_action_at INTEGER,",
+        "  next_action_context TEXT,",
         "  created_at INTEGER NOT NULL,",
         "  updated_at INTEGER NOT NULL,",
         "  completed_at INTEGER,",
@@ -430,6 +432,12 @@ export class WorkOrchestrationStore {
       ].join("\n"),
     );
     this.ensureDefaultWorkflow();
+    const workColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!workColumns.has("next_action_context")) {
+      this.db.exec("ALTER TABLE work_items ADD COLUMN next_action_context TEXT");
+    }
   }
 
   private ensureDefaultWorkflow(): void {
@@ -1190,14 +1198,17 @@ export class WorkOrchestrationStore {
     actionType: string | null,
     dueAt: number | null,
     now = Date.now(),
+    context: string | null = null,
   ): WorkItemRecord {
     if (actionType !== null && !requiredText(actionType, 100)) throw new Error("INVALID_NEXT_ACTION");
+    const normalizedContext = context === null ? null : requiredText(context, 500);
+    if (context !== null && !normalizedContext) throw new Error("INVALID_NEXT_ACTION");
     if (dueAt !== null && !Number.isFinite(dueAt)) throw new Error("INVALID_NEXT_ACTION");
     const changed = this.db
       .prepare(
-        "UPDATE work_items SET next_action_type=?,next_action_at=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        "UPDATE work_items SET next_action_type=?,next_action_at=?,next_action_context=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
       )
-      .run(actionType, dueAt, now, workItemId, expectedRevision);
+      .run(actionType, dueAt, actionType === null ? null : normalizedContext, now, workItemId, expectedRevision);
     if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
     return this.getWorkInternal(workItemId);
   }
@@ -1418,6 +1429,7 @@ export class WorkOrchestrationStore {
       priority: row.priority == null ? null : Number(row.priority),
       nextActionType: row.next_action_type == null ? null : String(row.next_action_type),
       nextActionAt: row.next_action_at == null ? null : Number(row.next_action_at),
+      nextActionContext: row.next_action_context == null ? null : String(row.next_action_context),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       completedAt: row.completed_at == null ? null : Number(row.completed_at),

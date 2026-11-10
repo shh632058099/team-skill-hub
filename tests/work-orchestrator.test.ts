@@ -259,6 +259,74 @@ test("rework feedback replay creates exactly one new WorkAttempt", () => {
   }
 });
 
+test("durable continuation reuses the same WorkAttempt and ExpertTask but creates a new Run", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-continuation" });
+    const attemptId = detail.attempts[0]!.workAttemptId;
+    const taskId = detail.currentTask!.taskId;
+    const firstClaim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(firstClaim, "first result", 2_000, { commitSha: "f".repeat(40) });
+
+    const scheduled = f.orchestrator.requestContinuation(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "verification_failed",
+      3_000,
+    );
+    assert.equal(scheduled.work.status, "running");
+    assert.equal(scheduled.work.nextActionType, "continuation");
+    assert.equal(scheduled.work.nextActionContext, "verification_failed");
+    assert.equal(scheduled.attempts.length, 1);
+    assert.equal(scheduled.attempts[0]!.workAttemptId, attemptId);
+    assert.equal(scheduled.currentTask!.taskId, taskId);
+    assert.equal(scheduled.currentTask!.status, "succeeded");
+
+    f.orchestrator.reconcileDue(3_000);
+    const requeued = f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a");
+    assert.equal(requeued.work.nextActionType, null);
+    assert.equal(requeued.work.nextActionContext, null);
+    assert.equal(requeued.attempts.length, 1);
+    assert.equal(requeued.attempts[0]!.workAttemptId, attemptId);
+    assert.equal(requeued.currentTask!.taskId, taskId);
+    assert.equal(requeued.currentTask!.status, "queued");
+    assert.equal(requeued.currentTask!.continuationCount, 1);
+
+    const secondClaim = f.tasks.claim("worker-a", 3_001, 30_000, "ota")!;
+    assert.equal(secondClaim.taskId, taskId);
+    assert.notEqual(secondClaim.runId, firstClaim.runId);
+    assert.ok(secondClaim.fencing > firstClaim.fencing);
+  } finally {
+    f.close();
+  }
+});
+
+test("continuation respects the workflow agent-turn budget", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-continuation-limit" });
+    let claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "turn-1", 2_000, { commitSha: "e".repeat(40) });
+
+    for (let continuation = 1; continuation <= 19; continuation++) {
+      const now = 3_000 + continuation * 10;
+      f.orchestrator.requestContinuation(detail.work.workItemId, "alice", "team-a", "continue-" + continuation, now);
+      f.orchestrator.reconcileDue(now);
+      claim = f.tasks.claim("worker-a", now + 1, 30_000, "ota")!;
+      f.tasks.complete(claim, "turn-" + (continuation + 1), now + 2, { commitSha: "e".repeat(40) });
+    }
+
+    assert.equal(f.tasks.get(detail.currentTask!.taskId, "alice", "team-a").continuationCount, 19);
+    assert.throws(
+      () => f.orchestrator.requestContinuation(detail.work.workItemId, "alice", "team-a", "one-too-many", 10_000),
+      /WORK_CONTINUATION_LIMIT_REACHED/,
+    );
+  } finally {
+    f.close();
+  }
+});
+
 test("transient task failure schedules durable retry and reuses the same ExpertTask with a new Run", () => {
   const f = fixture();
   try {

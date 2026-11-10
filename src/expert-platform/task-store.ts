@@ -75,6 +75,9 @@ export type TaskRecord = {
   workAttemptId: string | null;
   workflowId: string | null;
   workflowVersion: number | null;
+  continuationCount: number;
+  continuationReason: string | null;
+  runId: string | null;
   /** True when this submission reused a task created by an earlier submission. */
   reusedExistingTask?: boolean;
   deduplicationReason?: "idempotency_key" | "same_source_request" | "same_active_session_task";
@@ -204,6 +207,8 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("work_attempt_id", "TEXT");
     this.ensureTaskColumn("workflow_id", "TEXT");
     this.ensureTaskColumn("workflow_version", "INTEGER");
+    this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureTaskColumn("continuation_reason", "TEXT");
     // Older tasks already have a queued lifecycle event created at submission time.
     // Backfill from that event so the new history column remains useful after upgrade.
     this.db.exec(
@@ -482,6 +487,9 @@ export class ExpertTaskStore {
         workflowId: input.workflowId?.trim() || null,
         workflowVersion: input.workflowVersion ?? null,
         reusedExistingTask: false,
+        continuationCount: 0,
+        continuationReason: null,
+        runId: null,
         ...sessionTask,
       };
     } catch (error) {
@@ -668,6 +676,31 @@ export class ExpertTaskStore {
         )
         .run(taskId, workAttemptId);
       this.event(taskId, null, "retry_queued");
+      const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  scheduleContinuation(taskId: string, expectedRunId: string, reason: string, now = Date.now()): TaskRecord {
+    const runId = expectedRunId.trim();
+    if (!runId || !reason.trim()) throw new Error("INVALID_REQUEST");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      if (row.status !== "succeeded") throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
+      if (row.run_id == null || String(row.run_id) !== runId) throw new Error("STALE_RUN");
+      const changed = this.db
+        .prepare(
+          "UPDATE expert_tasks SET status='queued',result=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,continuation_count=continuation_count+1,continuation_reason=? WHERE task_id=? AND status='succeeded' AND run_id=?",
+        )
+        .run(reason.trim().slice(0, 200), taskId, runId);
+      if (changed.changes !== 1) throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
+      this.event(taskId, runId, "continuation_queued");
       const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
       this.db.exec("COMMIT");
       return this.fromRow(updated);
@@ -1230,6 +1263,9 @@ export class ExpertTaskStore {
       workAttemptId: row.work_attempt_id == null ? null : String(row.work_attempt_id),
       workflowId: row.workflow_id == null ? null : String(row.workflow_id),
       workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
+      continuationCount: Number(row.continuation_count ?? 0),
+      continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
+      runId: row.run_id == null ? null : String(row.run_id),
     };
   }
 }

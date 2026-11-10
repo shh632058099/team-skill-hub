@@ -689,6 +689,47 @@ test("work-linked task metadata survives and failed tasks can create a new run w
   }
 });
 
+test("successful work task can schedule a fenced continuation on the same task", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-continuation-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      idempotencyKey: "continuation",
+      problem: "inspect",
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workflowId: "work-default",
+      workflowVersion: 1,
+    });
+    const first = store.claim("worker-a", 100, 10_000)!;
+    store.complete(first, "first result", 200);
+
+    const continued = store.scheduleContinuation(task.taskId, first.runId, "verification_failed", 300);
+    assert.equal(continued.taskId, task.taskId);
+    assert.equal(continued.status, "queued");
+    assert.equal(continued.result, null);
+    assert.equal(continued.continuationCount, 1);
+
+    assert.throws(
+      () => store.scheduleContinuation(task.taskId, first.runId, "duplicate", 301),
+      /TASK_CONTINUATION_NOT_ALLOWED/,
+    );
+
+    const second = store.claim("worker-a", 400, 10_000)!;
+    assert.equal(second.taskId, task.taskId);
+    assert.notEqual(second.runId, first.runId);
+    assert.equal(second.fencing, first.fencing + 1);
+    store.complete(second, "second result", 500);
+
+    assert.throws(() => store.scheduleContinuation(task.taskId, first.runId, "stale", 600), /STALE_RUN/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("standalone expert tasks keep null work linkage", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-standalone-link-"));
   try {
