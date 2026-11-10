@@ -1092,6 +1092,17 @@ test("durable orchestration claim is exclusive, fenced by epoch, and survives re
     const second = store.claimWorkForOrchestration(work.workItemId, "orchestrator-b", 1_201, 1_000);
     assert.equal(second.ownerId, "orchestrator-b");
     assert.equal(second.epoch, first.epoch + 1);
+    const afterTakeover = store.getWork(work.workItemId, "alice", "team-a");
+    assert.ok(afterTakeover.stateRevision > reopened.stateRevision);
+    assert.throws(
+      () =>
+        store.transitionWork(work.workItemId, "alice", "team-a", afterTakeover.stateRevision, "running", 1_202, {
+          ownerId: "orchestrator-a",
+          epoch: first.epoch,
+          now: 1_202,
+        }),
+      /STALE_ORCHESTRATION_CLAIM/,
+    );
     assert.throws(
       () => store.assertWorkOrchestrationClaim(work.workItemId, "orchestrator-a", first.epoch, 1_202),
       /STALE_ORCHESTRATION_CLAIM/,

@@ -10,6 +10,8 @@ import {
   type WorkAttemptRecord,
   type WorkEvidenceRecord,
   type WorkItemRecord,
+  type WorkOrchestrationFence,
+  type WorkReworkRequest,
   type WorkSubmission,
   type WorkspaceRecord,
   WorkOrchestrationStore,
@@ -200,6 +202,32 @@ function asResolvedDispatch(binding: Record<string, unknown>): ResolvedDispatch 
   };
 }
 
+function parseReworkRequest(context: string | null): WorkReworkRequest {
+  if (!context) throw new Error("INVALID_REWORK_CONTEXT");
+  let value: unknown;
+  try {
+    value = JSON.parse(context);
+  } catch {
+    throw new Error("INVALID_REWORK_CONTEXT");
+  }
+  if (!value || typeof value !== "object") throw new Error("INVALID_REWORK_CONTEXT");
+  const input = value as Record<string, unknown>;
+  if (
+    !["human_rework", "review_rework", "policy_replan"].includes(String(input.reason ?? "")) ||
+    typeof input.originWorkAttemptId !== "string" ||
+    typeof input.createdBy !== "string"
+  ) {
+    throw new Error("INVALID_REWORK_CONTEXT");
+  }
+  return {
+    reason: input.reason as WorkReworkRequest["reason"],
+    originWorkAttemptId: input.originWorkAttemptId,
+    ...(typeof input.reviewContext === "string" ? { reviewContext: input.reviewContext } : {}),
+    ...(typeof input.whatShouldChange === "string" ? { whatShouldChange: input.whatShouldChange } : {}),
+    createdBy: input.createdBy,
+  };
+}
+
 export class WorkOrchestrator {
   private readonly orchestrationOwnerId = randomUUID();
   private readonly orchestrationLeaseMs = 30_000;
@@ -226,6 +254,7 @@ export class WorkOrchestrator {
     scope: string,
     reason: string,
     now = Date.now(),
+    fence?: WorkOrchestrationFence,
   ): WorkDetail {
     const normalizedReason = reason.trim();
     if (!normalizedReason || normalizedReason.length > 500) throw new Error("INVALID_CONTINUATION_REASON");
@@ -245,6 +274,7 @@ export class WorkOrchestrator {
         "WORKSPACE_NOT_ALLOCATED",
         now,
         { resumeCondition: "manual", blockedByType: "workspace", blockedByRef: attempt.workAttemptId },
+        fence,
       );
       return this.detail(workItemId, principalId, scope);
     }
@@ -263,6 +293,7 @@ export class WorkOrchestrator {
           blockedByType: "workspace",
           blockedByRef: workspace.ownerWorkerId ?? workspace.workspaceId,
         },
+        fence,
       );
       return this.detail(workItemId, principalId, scope);
     }
@@ -276,6 +307,7 @@ export class WorkOrchestrator {
         "WORKSPACE_OWNER_OFFLINE",
         now,
         { resumeCondition: "manual", blockedByType: "workspace", blockedByRef: workspace.ownerWorkerId },
+        fence,
       );
       return this.detail(workItemId, principalId, scope);
     }
@@ -292,7 +324,15 @@ export class WorkOrchestrator {
         return this.detail(workItemId, principalId, scope);
       throw new Error("WORK_NEXT_ACTION_PENDING");
     }
-    this.workStore.scheduleNextAction(workItemId, work.stateRevision, "continuation", now, now, normalizedReason);
+    this.workStore.scheduleNextAction(
+      workItemId,
+      work.stateRevision,
+      "continuation",
+      now,
+      now,
+      normalizedReason,
+      fence,
+    );
     return this.detail(workItemId, principalId, scope);
   }
 
@@ -313,10 +353,14 @@ export class WorkOrchestrator {
       this.orchestrationLeaseMs,
     );
     try {
+      const fence = this.orchestrationFence(claim.epoch, now);
       this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, claim.epoch, now);
+      const claimedCurrent = this.workStore.getWork(workItemId, principalId, scope);
       const attempt = this.workStore.getActiveAttempt(workItemId);
       let continuationRequired = false;
-      if (current.blockedByType === "workspace") {
+      const pendingRework =
+        !attempt && claimedCurrent.nextActionType === "rework" && claimedCurrent.nextActionContext !== null;
+      if (claimedCurrent.blockedByType === "workspace") {
         if (!attempt?.workspaceId) throw new Error("WORKSPACE_NOT_ALLOCATED");
         const workspace = this.workStore.getWorkspace(attempt.workspaceId);
         if (!workspace.ownerWorkerId || !workspace.path || ["removed", "failed"].includes(workspace.state)) {
@@ -332,10 +376,23 @@ export class WorkOrchestrator {
         workItemId,
         principalId,
         scope,
-        expectedRevision,
-        attempt ? "running" : "queued",
+        claimedCurrent.stateRevision,
+        attempt ? "running" : pendingRework ? "rework" : "queued",
         now,
+        fence,
       );
+      if (pendingRework) {
+        resumed = this.workStore.scheduleNextAction(
+          workItemId,
+          resumed.stateRevision,
+          "rework",
+          now,
+          now,
+          claimedCurrent.nextActionContext,
+          fence,
+        );
+        return this.reconcileWorkClaimed(workItemId, principalId, scope, now, claim.epoch);
+      }
       if (continuationRequired) {
         this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, claim.epoch, now);
         resumed = this.workStore.scheduleNextAction(
@@ -345,6 +402,7 @@ export class WorkOrchestrator {
           now,
           now,
           "resumed_after_block",
+          fence,
         );
         return this.detail(workItemId, principalId, scope);
       }
@@ -382,24 +440,52 @@ export class WorkOrchestrator {
     now: number,
     orchestrationEpoch: number,
   ): WorkDetail {
+    const fence = this.orchestrationFence(orchestrationEpoch, now);
     this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     let work = this.workStore.getWork(workItemId, principalId, scope);
     if (TERMINAL_WORK.has(work.status)) return this.detail(workItemId, principalId, scope);
     this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
-    work = this.reconcilePublicationLifecycle(work, now);
+    work = this.reconcilePublicationLifecycle(work, now, fence);
     if (TERMINAL_WORK.has(work.status) || work.status === "blocked") {
       return this.detail(workItemId, principalId, scope);
     }
 
     let attempt = this.workStore.getActiveAttempt(workItemId);
+    if (!attempt && work.status === "rework") {
+      if (work.nextActionType !== "rework") throw new Error("REWORK_ACTION_MISSING");
+      const request = parseReworkRequest(work.nextActionContext);
+      try {
+        attempt = this.startAttempt(
+          work,
+          request.reason,
+          request.originWorkAttemptId,
+          now,
+          {
+            ...(request.reviewContext ? { reviewContext: request.reviewContext } : {}),
+            ...(request.whatShouldChange ? { whatShouldChange: request.whatShouldChange } : {}),
+            createdBy: request.createdBy,
+          },
+          fence,
+        );
+        work = this.workStore.getWork(workItemId, principalId, scope);
+      } catch (error) {
+        const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now, fence, true);
+        if (blocked) return blocked;
+        throw error;
+      }
+    }
+    if (attempt && work.nextActionType === "rework") {
+      work = this.workStore.getWork(workItemId, principalId, scope);
+      work = this.workStore.scheduleNextAction(workItemId, work.stateRevision, null, null, now, null, fence);
+    }
     if (!attempt) {
       if (work.status === "queued") {
         try {
           this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
-          attempt = this.startAttempt(work, "initial", null, now);
+          attempt = this.startAttempt(work, "initial", null, now, {}, fence);
           work = this.workStore.getWork(workItemId, principalId, scope);
         } catch (error) {
-          const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now);
+          const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now, fence);
           if (blocked) return blocked;
           throw error;
         }
@@ -413,7 +499,7 @@ export class WorkOrchestrator {
         this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
         attempt = this.dispatchAttempt(work, attempt);
       } catch (error) {
-        const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now);
+        const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now, fence);
         if (blocked) return blocked;
         throw error;
       }
@@ -435,6 +521,8 @@ export class WorkOrchestrator {
             "workspace_unavailable",
             "WORKSPACE_OWNER_UNAVAILABLE",
             now,
+            { resumeCondition: "manual", blockedByType: "workspace", blockedByRef: workspace.workspaceId },
+            fence,
           );
           return this.detail(workItemId, principalId, scope);
         }
@@ -447,6 +535,8 @@ export class WorkOrchestrator {
             "workspace_unavailable",
             "WORKSPACE_OWNER_OFFLINE",
             now,
+            { resumeCondition: "manual", blockedByType: "workspace", blockedByRef: workspace.ownerWorkerId },
+            fence,
           );
           return this.detail(workItemId, principalId, scope);
         }
@@ -467,7 +557,7 @@ export class WorkOrchestrator {
         throw new Error("TASK_CONTINUATION_STATE_MISMATCH");
       }
       work = this.workStore.getWork(workItemId, principalId, scope);
-      this.workStore.scheduleNextAction(workItemId, work.stateRevision, null, null, now);
+      this.workStore.scheduleNextAction(workItemId, work.stateRevision, null, null, now, null, fence);
       work = this.workStore.getWork(workItemId, principalId, scope);
     }
     task = this.tasks.get(attempt.taskId!, principalId, scope);
@@ -477,12 +567,12 @@ export class WorkOrchestrator {
 
     if (task.status === "succeeded") {
       this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
-      return this.reconcileSucceeded(work, attempt, task, now);
+      return this.reconcileSucceeded(work, attempt, task, now, fence);
     }
 
     if (task.status === "failed") {
       this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
-      return this.reconcileFailed(work, attempt, task, now);
+      return this.reconcileFailed(work, attempt, task, now, fence);
     }
 
     if (task.status === "cancelled") {
@@ -498,6 +588,7 @@ export class WorkOrchestrator {
           "cancelled",
           "cancelled",
           now,
+          fence,
         );
       }
       this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
@@ -561,13 +652,24 @@ export class WorkOrchestrator {
       return this.detail(work.workItemId, principalId, scope);
     }
 
-    work = this.workStore.transitionWork(work.workItemId, principalId, scope, work.stateRevision, "rework", now);
-    this.startAttempt(work, "human_rework", originAttempt.workAttemptId, now, {
-      reviewContext: JSON.stringify({ disposition: feedback.disposition, needsRework: feedback.needsRework === true }),
-      whatShouldChange: feedback.reason,
-      createdBy: principalId,
-    });
-    return this.detail(work.workItemId, principalId, scope);
+    work = this.workStore.requestRework(
+      work.workItemId,
+      principalId,
+      scope,
+      work.stateRevision,
+      {
+        reason: "human_rework",
+        originWorkAttemptId: originAttempt.workAttemptId,
+        reviewContext: JSON.stringify({
+          disposition: feedback.disposition,
+          needsRework: feedback.needsRework === true,
+        }),
+        whatShouldChange: feedback.reason,
+        createdBy: principalId,
+      },
+      now,
+    );
+    return this.reconcileWork(work.workItemId, principalId, scope, now);
   }
 
   submitReview(
@@ -592,16 +694,26 @@ export class WorkOrchestrator {
     } else if (input.decision === "rework" && work.status === "waiting_review") {
       const attempts = this.workStore.listAttempts(workItemId);
       const latest = attempts.at(-1);
-      work = this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "rework", now);
-      this.startAttempt(work, "review_rework", latest?.workAttemptId ?? null, now, {
-        reviewContext: JSON.stringify({
-          decision: input.decision,
-          subjectRevision: input.subjectRevision,
-          reason: input.reason ?? null,
-        }),
-        whatShouldChange: input.reason,
-        createdBy: principalId,
-      });
+      if (!latest) throw new Error("WORK_ATTEMPT_NOT_FOUND");
+      work = this.workStore.requestRework(
+        workItemId,
+        principalId,
+        scope,
+        work.stateRevision,
+        {
+          reason: "review_rework",
+          originWorkAttemptId: latest.workAttemptId,
+          reviewContext: JSON.stringify({
+            decision: input.decision,
+            subjectRevision: input.subjectRevision,
+            reason: input.reason ?? null,
+          }),
+          whatShouldChange: input.reason,
+          createdBy: principalId,
+        },
+        now,
+      );
+      return this.reconcileWork(workItemId, principalId, scope, now);
     } else if (input.decision === "rejected" && !TERMINAL_WORK.has(work.status)) {
       this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "failed", now);
     }
@@ -892,6 +1004,7 @@ export class WorkOrchestrator {
     parentWorkAttemptId: string | null,
     now: number,
     audit: { reviewContext?: string; whatShouldChange?: string; createdBy?: string } = {},
+    fence?: WorkOrchestrationFence,
   ): WorkAttemptRecord {
     const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const resolved = this.dispatch.resolve({
@@ -921,6 +1034,7 @@ export class WorkOrchestrator {
         dispatchBinding: resolved as unknown as Record<string, unknown>,
       },
       now,
+      fence,
     );
     this.ensureWorkspace(work.workItemId, attempt, resolved, now);
     return this.dispatchAttempt(this.workStore.getWork(work.workItemId, work.principalId, work.scope), attempt);
@@ -1009,6 +1123,8 @@ export class WorkOrchestrator {
     scope: string,
     error: unknown,
     now: number,
+    fence?: WorkOrchestrationFence,
+    preservePendingAction = false,
   ): WorkDetail | null {
     const reason = error instanceof Error ? error.message : String(error);
     const blocker = isBlocker(reason);
@@ -1023,13 +1139,18 @@ export class WorkOrchestrator {
         blocker,
         reason,
         now,
-        blockerMetadata(blocker, current),
+        { ...blockerMetadata(blocker, current), preserveNextAction: preservePendingAction },
+        fence,
       );
     }
     return this.detail(workItemId, principalId, scope);
   }
 
-  private reconcilePublicationLifecycle(work: WorkItemRecord, now: number): WorkItemRecord {
+  private reconcilePublicationLifecycle(
+    work: WorkItemRecord,
+    now: number,
+    fence?: WorkOrchestrationFence,
+  ): WorkItemRecord {
     const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     if (!workflow.definition.publication?.required) return work;
     if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
@@ -1065,6 +1186,7 @@ export class WorkOrchestrator {
             code,
             now,
             { resumeCondition: "manual", blockedByType: "publication", blockedByRef: work.workItemId },
+            fence,
           );
         }
         throw error;
@@ -1082,6 +1204,7 @@ export class WorkOrchestrator {
           publication.lastErrorCode ?? "PUBLICATION_FAILED",
           now,
           { resumeCondition: "manual", blockedByType: "publication", blockedByRef: publication.publicationId },
+          fence,
         );
       }
       return work;
@@ -1157,6 +1280,7 @@ export class WorkOrchestrator {
         current.stateRevision,
         "completed",
         now,
+        fence,
       );
       this.workStore.requestTerminalWorkspaceCleanup(current.workItemId, now);
     }
@@ -1168,6 +1292,7 @@ export class WorkOrchestrator {
     attempt: WorkAttemptRecord,
     task: TaskRecord,
     now: number,
+    fence?: WorkOrchestrationFence,
   ): WorkDetail {
     let current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
     const subjectRevision = resultSubject(task);
@@ -1179,6 +1304,7 @@ export class WorkOrchestrator {
         current.stateRevision,
         subjectRevision,
         now,
+        fence,
       );
     }
 
@@ -1235,6 +1361,7 @@ export class WorkOrchestrator {
         current.scope,
         "verification_failed",
         now,
+        fence,
       );
     }
 
@@ -1249,12 +1376,19 @@ export class WorkOrchestrator {
         "succeeded",
         "waiting_review",
         now,
+        fence,
       );
     }
     return this.detail(current.workItemId, current.principalId, current.scope);
   }
 
-  private reconcileFailed(work: WorkItemRecord, attempt: WorkAttemptRecord, task: TaskRecord, now: number): WorkDetail {
+  private reconcileFailed(
+    work: WorkItemRecord,
+    attempt: WorkAttemptRecord,
+    task: TaskRecord,
+    now: number,
+    fence?: WorkOrchestrationFence,
+  ): WorkDetail {
     let current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
     const reason = task.result ?? "EXECUTION_FAILED";
     const blocker = isBlocker(reason);
@@ -1269,6 +1403,7 @@ export class WorkOrchestrator {
           reason,
           now,
           blockerMetadata(blocker, current),
+          fence,
         );
       }
       return this.detail(current.workItemId, current.principalId, current.scope);
@@ -1281,7 +1416,7 @@ export class WorkOrchestrator {
         if (current.nextActionAt <= now) {
           this.tasks.requeueForRetry(task.taskId, attempt.workAttemptId, reason, now);
           current = this.workStore.getWork(current.workItemId, current.principalId, current.scope);
-          this.workStore.scheduleNextAction(current.workItemId, current.stateRevision, null, null, now);
+          this.workStore.scheduleNextAction(current.workItemId, current.stateRevision, null, null, now, null, fence);
         }
         return this.detail(current.workItemId, current.principalId, current.scope);
       }
@@ -1290,7 +1425,15 @@ export class WorkOrchestrator {
         workflow.definition.lifecycle.retry.failure.initialBackoffMs * 2 ** retryIndex,
         workflow.definition.lifecycle.retry.failure.maxBackoffMs,
       );
-      this.workStore.scheduleNextAction(current.workItemId, current.stateRevision, "failure_retry", now + backoff, now);
+      this.workStore.scheduleNextAction(
+        current.workItemId,
+        current.stateRevision,
+        "failure_retry",
+        now + backoff,
+        now,
+        null,
+        fence,
+      );
       return this.detail(current.workItemId, current.principalId, current.scope);
     }
 
@@ -1304,10 +1447,15 @@ export class WorkOrchestrator {
         "failed",
         "failed",
         now,
+        fence,
       );
       this.workStore.requestTerminalWorkspaceCleanup(current.workItemId, now);
     }
     return this.detail(current.workItemId, current.principalId, current.scope);
+  }
+
+  private orchestrationFence(epoch: number, now: number): WorkOrchestrationFence {
+    return { ownerId: this.orchestrationOwnerId, epoch, now };
   }
 
   private detail(workItemId: string, principalId: string, scope: string): WorkDetail {

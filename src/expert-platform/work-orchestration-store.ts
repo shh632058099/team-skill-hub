@@ -132,6 +132,20 @@ export interface WorkOrchestrationClaim {
   claimedAt: number;
 }
 
+export interface WorkOrchestrationFence {
+  ownerId: string;
+  epoch: number;
+  now: number;
+}
+
+export interface WorkReworkRequest {
+  reason: Exclude<WorkAttemptReason, "initial">;
+  originWorkAttemptId: string;
+  reviewContext?: string;
+  whatShouldChange?: string;
+  createdBy: string;
+}
+
 export interface CreateWorkAttemptInput {
   reason: WorkAttemptReason;
   expertId: string;
@@ -856,7 +870,7 @@ export class WorkOrchestrationStore {
       const nextEpoch = work.orchestrationEpoch + 1;
       const changed = this.db
         .prepare(
-          "UPDATE work_items SET orchestration_owner_id=?,orchestration_lease_until=?,orchestration_claimed_at=?,orchestration_epoch=? WHERE work_item_id=? AND orchestration_epoch=? AND (orchestration_owner_id IS NULL OR orchestration_lease_until IS NULL OR orchestration_lease_until<=? OR orchestration_owner_id=?)",
+          "UPDATE work_items SET orchestration_owner_id=?,orchestration_lease_until=?,orchestration_claimed_at=?,orchestration_epoch=?,state_revision=state_revision+CASE WHEN orchestration_owner_id IS NULL THEN 0 ELSE 1 END WHERE work_item_id=? AND orchestration_epoch=? AND (orchestration_owner_id IS NULL OR orchestration_lease_until IS NULL OR orchestration_lease_until<=? OR orchestration_owner_id=?)",
         )
         .run(owner, leaseUntil, now, nextEpoch, workItemId, work.orchestrationEpoch, now, owner);
       if (changed.changes !== 1) throw new Error("WORK_ORCHESTRATION_CLAIMED");
@@ -906,6 +920,7 @@ export class WorkOrchestrationStore {
     expectedRevision: number,
     status: WorkStatus,
     now = Date.now(),
+    fence?: WorkOrchestrationFence,
   ): WorkItemRecord {
     if (!WORK_STATUSES.has(status) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
       throw new Error("INVALID_WORK_TRANSITION");
@@ -914,6 +929,7 @@ export class WorkOrchestrationStore {
     try {
       const current = this.getWork(workItemId, principalId, scope);
       if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      this.assertWorkOrchestrationFence(current, fence);
       if (TERMINAL_WORK_STATUSES.has(current.status) && current.status !== status) {
         throw new Error("WORK_ALREADY_TERMINAL");
       }
@@ -933,6 +949,59 @@ export class WorkOrchestrationStore {
     }
   }
 
+  requestRework(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedRevision: number,
+    input: WorkReworkRequest,
+    now = Date.now(),
+  ): WorkItemRecord {
+    const originWorkAttemptId = requiredText(input.originWorkAttemptId, 200);
+    const createdBy = requiredText(input.createdBy, 200);
+    if (
+      !originWorkAttemptId ||
+      !createdBy ||
+      !["human_rework", "review_rework", "policy_replan"].includes(input.reason)
+    ) {
+      throw new Error("INVALID_REWORK_REQUEST");
+    }
+    const payload = JSON.stringify({
+      reason: input.reason,
+      originWorkAttemptId,
+      reviewContext: optionalText(input.reviewContext, 4000),
+      whatShouldChange: optionalText(input.whatShouldChange, 4000),
+      createdBy,
+    });
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      if (work.status !== "waiting_review") throw new Error("WORK_REWORK_NOT_ALLOWED");
+      const origin = this.getWorkAttempt(originWorkAttemptId);
+      if (origin.workItemId !== workItemId) throw new Error("INVALID_REWORK_REQUEST");
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET status='rework',next_action_type='rework',next_action_at=?,next_action_context=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND status='waiting_review'",
+        )
+        .run(now, payload, now, workItemId, principalId, scope, expectedRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.event(
+        workItemId,
+        null,
+        "work.rework",
+        JSON.stringify({ reason: input.reason, originWorkAttemptId, createdBy }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   createWorkAttempt(
     workItemId: string,
     principalId: string,
@@ -940,6 +1009,7 @@ export class WorkOrchestrationStore {
     expectedRevision: number,
     input: CreateWorkAttemptInput,
     now = Date.now(),
+    fence?: WorkOrchestrationFence,
   ): WorkAttemptRecord {
     const expertId = requiredText(input.expertId, 200);
     const deploymentId = requiredText(input.deploymentId, 200);
@@ -957,6 +1027,7 @@ export class WorkOrchestrationStore {
     try {
       const work = this.getWork(workItemId, principalId, scope);
       if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      this.assertWorkOrchestrationFence(work, fence);
       if (TERMINAL_WORK_STATUSES.has(work.status)) throw new Error("WORK_ALREADY_TERMINAL");
       const active = this.db
         .prepare("SELECT work_attempt_id FROM work_attempts WHERE work_item_id=? AND status='active'")
@@ -1320,6 +1391,7 @@ export class WorkOrchestrationStore {
     expectedRevision: number,
     subjectRevision: string,
     now = Date.now(),
+    fence?: WorkOrchestrationFence,
   ): WorkItemRecord {
     const revision = requiredText(subjectRevision, 500);
     if (!revision) throw new Error("INVALID_WORK_SUBJECT");
@@ -1327,6 +1399,7 @@ export class WorkOrchestrationStore {
     try {
       const work = this.getWork(workItemId, principalId, scope);
       if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      this.assertWorkOrchestrationFence(work, fence);
       if (work.currentSubjectRevision === revision) {
         this.db.exec("COMMIT");
         return work;
@@ -1604,6 +1677,7 @@ export class WorkOrchestrationStore {
     attemptStatus: Exclude<WorkAttemptStatus, "active">,
     nextWorkStatus: WorkStatus,
     now = Date.now(),
+    fence?: WorkOrchestrationFence,
   ): WorkItemRecord {
     if (!["succeeded", "failed", "cancelled"].includes(attemptStatus) || !WORK_STATUSES.has(nextWorkStatus)) {
       throw new Error("INVALID_WORK_ATTEMPT_FINISH");
@@ -1613,6 +1687,7 @@ export class WorkOrchestrationStore {
       const work = this.getWork(workItemId, principalId, scope);
       if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
       if (work.activeWorkAttemptId !== workAttemptId) throw new Error("STALE_WORK_ATTEMPT");
+      this.assertWorkOrchestrationFence(work, fence);
       const changedAttempt = this.db
         .prepare(
           "UPDATE work_attempts SET status=?,finished_at=? WHERE work_attempt_id=? AND work_item_id=? AND status='active'",
@@ -1751,42 +1826,64 @@ export class WorkOrchestrationStore {
     reason: string,
     context: string | null,
     now = Date.now(),
-    metadata: { resumeCondition?: string; blockedByType?: string; blockedByRef?: string } = {},
+    metadata: {
+      resumeCondition?: string;
+      blockedByType?: string;
+      blockedByRef?: string;
+      preserveNextAction?: boolean;
+    } = {},
+    fence?: WorkOrchestrationFence,
   ): WorkItemRecord {
     const blockedReason = requiredText(reason, 200);
     const resumeCondition = requiredText(metadata.resumeCondition ?? "manual", 500);
     const blockedByType = optionalText(metadata.blockedByType, 200);
     const blockedByRef = optionalText(metadata.blockedByRef, 500);
     if (!blockedReason || !resumeCondition) throw new Error("INVALID_BLOCK_REASON");
-    const changed = this.db
-      .prepare(
-        "UPDATE work_items SET status='blocked',blocked_reason=?,blocked_context=?,blocked_at=?,resume_condition=?,blocked_by_type=?,blocked_by_ref=?,next_action_type=NULL,next_action_at=NULL,next_action_context=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
-      )
-      .run(
-        blockedReason,
-        context,
-        now,
-        resumeCondition,
-        blockedByType,
-        blockedByRef,
-        now,
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getWork(workItemId, principalId, scope);
+      if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      this.assertWorkOrchestrationFence(current, fence);
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET status='blocked',blocked_reason=?,blocked_context=?,blocked_at=?,resume_condition=?,blocked_by_type=?,blocked_by_ref=?,next_action_type=CASE WHEN ?=1 THEN next_action_type ELSE NULL END,next_action_at=NULL,next_action_context=CASE WHEN ?=1 THEN next_action_context ELSE NULL END,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
+        )
+        .run(
+          blockedReason,
+          context,
+          now,
+          resumeCondition,
+          blockedByType,
+          blockedByRef,
+          metadata.preserveNextAction === true ? 1 : 0,
+          metadata.preserveNextAction === true ? 1 : 0,
+          now,
+          workItemId,
+          principalId,
+          scope,
+          expectedRevision,
+        );
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.event(
         workItemId,
-        principalId,
-        scope,
-        expectedRevision,
+        current.activeWorkAttemptId,
+        "work.blocked",
+        JSON.stringify({
+          reason: blockedReason,
+          resumeCondition,
+          blockedByType,
+          blockedByRef,
+          preservedNextAction: metadata.preserveNextAction === true,
+        }),
+        now,
       );
-    if (changed.changes !== 1) {
-      this.getWork(workItemId, principalId, scope);
-      throw new Error("STALE_WORK_REVISION");
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    this.event(
-      workItemId,
-      this.getWorkInternal(workItemId).activeWorkAttemptId,
-      "work.blocked",
-      JSON.stringify({ reason: blockedReason, resumeCondition, blockedByType, blockedByRef }),
-      now,
-    );
-    return this.getWork(workItemId, principalId, scope);
   }
 
   resumeBlockedWork(
@@ -1794,13 +1891,14 @@ export class WorkOrchestrationStore {
     principalId: string,
     scope: string,
     expectedRevision: number,
-    nextStatus: "queued" | "running",
+    nextStatus: "queued" | "running" | "rework",
     now = Date.now(),
+    fence?: WorkOrchestrationFence,
   ): WorkItemRecord {
     if (
       !Number.isSafeInteger(expectedRevision) ||
       expectedRevision < 1 ||
-      !["queued", "running"].includes(nextStatus)
+      !["queued", "running", "rework"].includes(nextStatus)
     ) {
       throw new Error("INVALID_WORK_RESUME");
     }
@@ -1809,6 +1907,7 @@ export class WorkOrchestrationStore {
       const current = this.getWork(workItemId, principalId, scope);
       if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
       if (current.status !== "blocked") throw new Error("WORK_NOT_BLOCKED");
+      this.assertWorkOrchestrationFence(current, fence);
       const changed = this.db
         .prepare(
           "UPDATE work_items SET status=?,blocked_reason=NULL,blocked_context=NULL,blocked_at=NULL,resume_condition=NULL,blocked_by_type=NULL,blocked_by_ref=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND status='blocked'",
@@ -1842,28 +1941,41 @@ export class WorkOrchestrationStore {
     dueAt: number | null,
     now = Date.now(),
     context: string | null = null,
+    fence?: WorkOrchestrationFence,
   ): WorkItemRecord {
     if (actionType !== null && !requiredText(actionType, 100)) throw new Error("INVALID_NEXT_ACTION");
-    const normalizedContext = context === null ? null : requiredText(context, 500);
+    const contextLimit = actionType === "rework" ? 10_000 : 500;
+    const normalizedContext = context === null ? null : requiredText(context, contextLimit);
     if (context !== null && !normalizedContext) throw new Error("INVALID_NEXT_ACTION");
     if (dueAt !== null && !Number.isFinite(dueAt)) throw new Error("INVALID_NEXT_ACTION");
-    const changed = this.db
-      .prepare(
-        "UPDATE work_items SET next_action_type=?,next_action_at=?,next_action_context=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
-      )
-      .run(actionType, dueAt, actionType === null ? null : normalizedContext, now, workItemId, expectedRevision);
-    if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
-    const updated = this.getWorkInternal(workItemId);
-    if (actionType === "failure_retry") {
-      this.event(
-        workItemId,
-        updated.activeWorkAttemptId,
-        "run.retry_scheduled",
-        JSON.stringify({ dueAt, reason: normalizedContext }),
-        now,
-      );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getWorkInternal(workItemId);
+      if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      this.assertWorkOrchestrationFence(current, fence);
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET next_action_type=?,next_action_at=?,next_action_context=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(actionType, dueAt, actionType === null ? null : normalizedContext, now, workItemId, expectedRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      const updatedRow = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      const updated = this.fromWorkRow(updatedRow);
+      if (actionType === "failure_retry") {
+        this.event(
+          workItemId,
+          updated.activeWorkAttemptId,
+          "run.retry_scheduled",
+          JSON.stringify({ dueAt, reason: normalizedContext }),
+          now,
+        );
+      }
+      this.db.exec("COMMIT");
+      return updated;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    return updated;
   }
 
   recordRunContinued(
@@ -2011,6 +2123,18 @@ export class WorkOrchestrationStore {
 
   close(): void {
     this.db.close();
+  }
+
+  private assertWorkOrchestrationFence(work: WorkItemRecord, fence?: WorkOrchestrationFence): void {
+    if (!fence) return;
+    if (
+      work.orchestrationOwnerId !== fence.ownerId ||
+      work.orchestrationEpoch !== fence.epoch ||
+      work.orchestrationLeaseUntil === null ||
+      work.orchestrationLeaseUntil <= fence.now
+    ) {
+      throw new Error("STALE_ORCHESTRATION_CLAIM");
+    }
   }
 
   private event(

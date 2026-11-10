@@ -294,6 +294,144 @@ test("startup reconciliation recovers durable work after stores reopen", () => {
   }
 });
 
+test("startup reconciliation recovers a durable rework request created before its WorkAttempt", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-rework-restart-"));
+  const db = path.join(dir, "runtime.sqlite");
+  let experts = new ExpertStore(db);
+  let tasks = new ExpertTaskStore(db);
+  let work = new WorkOrchestrationStore(db);
+  try {
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA Expert",
+      capabilities: ["ota"],
+      keywords: ["ota", "upgrade"],
+      active: true,
+    });
+    experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    let orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+    const detail = orchestrator.submitWork({ ...submission, idempotencyKey: "work-rework-restart" });
+    const taskClaim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    tasks.complete(taskClaim, "initial result", 2_000, { commitSha: "e".repeat(40) });
+    const waiting = orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(waiting.work.status, "waiting_review");
+
+    const pending = work.requestRework(
+      waiting.work.workItemId,
+      "alice",
+      "team-a",
+      waiting.work.stateRevision,
+      {
+        reason: "human_rework",
+        originWorkAttemptId: waiting.attempts[0]!.workAttemptId,
+        reviewContext: JSON.stringify({ disposition: "partially_adopted", needsRework: true }),
+        whatShouldChange: "补断电恢复验证",
+        createdBy: "alice",
+      },
+      4_000,
+    );
+    assert.equal(pending.status, "rework");
+    assert.equal(pending.nextActionType, "rework");
+
+    work.close();
+    tasks.close();
+    experts.close();
+    experts = new ExpertStore(db);
+    tasks = new ExpertTaskStore(db);
+    work = new WorkOrchestrationStore(db);
+    orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+
+    const processed = orchestrator.reconcileStartup(5_000, 100);
+    assert.ok(processed.includes(detail.work.workItemId));
+    const recovered = orchestrator.getWork(detail.work.workItemId, "alice", "team-a");
+    assert.equal(recovered.work.status, "running");
+    assert.equal(recovered.work.nextActionType, null);
+    assert.equal(recovered.attempts.length, 2);
+    assert.equal(recovered.attempts[1]!.reason, "human_rework");
+    assert.equal(recovered.attempts[1]!.originWorkAttemptId, waiting.attempts[0]!.workAttemptId);
+    assert.equal(recovered.attempts[1]!.whatShouldChange, "补断电恢复验证");
+    assert.equal(recovered.attempts[1]!.createdBy, "alice");
+  } finally {
+    work.close();
+    tasks.close();
+    experts.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("blocked rework preserves its durable action and resumes as rework instead of initial", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-rework-block-resume" });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "initial result", 2_000, { commitSha: "9".repeat(40) });
+    const waiting = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+
+    const pending = f.work.requestRework(
+      waiting.work.workItemId,
+      "alice",
+      "team-a",
+      waiting.work.stateRevision,
+      {
+        reason: "human_rework",
+        originWorkAttemptId: waiting.attempts[0]!.workAttemptId,
+        reviewContext: JSON.stringify({ disposition: "partially_adopted", needsRework: true }),
+        whatShouldChange: "补电源异常路径",
+        createdBy: "alice",
+      },
+      4_000,
+    );
+    assert.equal(pending.nextActionType, "rework");
+
+    f.experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: false,
+    });
+    const blocked = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 4_100);
+    assert.equal(blocked.work.status, "blocked");
+    assert.equal(blocked.work.nextActionType, "rework");
+    assert.equal(blocked.work.nextActionAt, null);
+    assert.match(blocked.work.nextActionContext ?? "", /human_rework/);
+
+    f.experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    const resumed = f.orchestrator.resumeWork(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      blocked.work.stateRevision,
+      5_000,
+    );
+    assert.equal(resumed.work.status, "running");
+    assert.equal(resumed.work.nextActionType, null);
+    assert.equal(resumed.attempts.length, 2);
+    assert.equal(resumed.attempts[1]!.reason, "human_rework");
+    assert.equal(resumed.attempts[1]!.whatShouldChange, "补电源异常路径");
+  } finally {
+    f.close();
+  }
+});
+
 test("successful task becomes revision-bound evidence then accepted review completes work", () => {
   const f = fixture();
   try {
