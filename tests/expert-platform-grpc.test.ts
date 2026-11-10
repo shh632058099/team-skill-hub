@@ -295,3 +295,60 @@ test("worker can only claim tasks targeted to its authorized expert capability",
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("gRPC completion transports workspace change summary durably", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-write-summary-"));
+  try {
+    const runtimeDb = path.join(dir, "runtime.sqlite");
+    const tasks = new ExpertTaskStore(runtimeDb);
+    const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+    workers.enroll("worker-write", ["ota"]);
+    workers.approve("worker-write");
+    const token = workers.issueCredential("worker-write");
+    const submitted = tasks.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "grpc-write-summary",
+      problem: "modify",
+      expertId: "ota",
+    });
+    const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0");
+    const client = new ExpertWorkerClient(server.address, { workerId: "worker-write", credential: token });
+    const claim = await client.claimTask("worker-write", "ota", "ota");
+    assert.ok(claim);
+    const summary = {
+      baseCommit: "a".repeat(40),
+      changedFiles: ["fixture.txt"],
+      addedFiles: [],
+      deletedFiles: [],
+      diffStat: { filesChanged: 1, insertions: 1, deletions: 1 },
+      contentRevision: "d".repeat(64),
+    };
+    const verification = [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed" as const,
+        exitCode: 0,
+        durationMs: 5,
+        errorCode: null,
+        subjectRevision: "workspace:" + summary.contentRevision,
+        environmentIdentity: "worker:worker-write",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ];
+    await client.completeTask(claim!, "done", { commitSha: summary.baseCommit }, verification, summary);
+    assert.deepEqual(tasks.get(submitted.taskId, "alice", "org").workspaceChangeSummary, summary);
+    client.close();
+    await server.close();
+    tasks.close();
+    workers.close();
+
+    const reopened = new ExpertTaskStore(runtimeDb);
+    assert.deepEqual(reopened.get(submitted.taskId, "alice", "org").workspaceChangeSummary, summary);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

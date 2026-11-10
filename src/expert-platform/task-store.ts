@@ -9,6 +9,7 @@ import {
   type VerificationEvidenceResult,
   type VerificationPolicyStep,
 } from "./verification-policy.js";
+import { normalizeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type ExpertTaskFeedbackDisposition = "adopted" | "partially_adopted" | "not_adopted";
@@ -86,6 +87,7 @@ export type TaskRecord = {
   workspaceKey: string | null;
   validationSnapshot: VerificationPolicyStep[];
   verificationResults: VerificationEvidenceResult[];
+  workspaceChangeSummary: WorkspaceChangeSummary | null;
   requiredWorkerId: string | null;
   continuationCount: number;
   continuationReason: string | null;
@@ -224,6 +226,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("workspace_key", "TEXT");
     this.ensureTaskColumn("validation_snapshot_json", "TEXT");
     this.ensureTaskColumn("verification_results_json", "TEXT");
+    this.ensureTaskColumn("workspace_change_summary_json", "TEXT");
     this.ensureTaskColumn("required_worker_id", "TEXT");
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
@@ -515,6 +518,7 @@ export class ExpertTaskStore {
         workspaceKey: input.workspaceKey?.trim() || null,
         validationSnapshot,
         verificationResults: [],
+        workspaceChangeSummary: null,
         requiredWorkerId: null,
         reusedExistingTask: false,
         continuationCount: 0,
@@ -631,20 +635,30 @@ export class ExpertTaskStore {
     now = Date.now(),
     sourceMetadata?: TaskSourceMetadata,
     verificationResultsInput?: VerificationEvidenceResult[],
+    workspaceChangeSummaryInput?: WorkspaceChangeSummary,
   ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const source = sourceMetadata ?? parseSourceMetadata(result) ?? undefined;
       const verificationResults = normalizeVerificationEvidenceResults(verificationResultsInput);
+      const workspaceChangeSummary =
+        workspaceChangeSummaryInput === undefined ? null : normalizeWorkspaceChangeSummary(workspaceChangeSummaryInput);
+      if (workspaceChangeSummary && (!source?.commitSha || workspaceChangeSummary.baseCommit !== source.commitSha)) {
+        throw new Error("WORKSPACE_CHANGE_BASE_MISMATCH");
+      }
+      const expectedVerificationSubject = workspaceChangeSummary
+        ? `workspace:${workspaceChangeSummary.contentRevision}`
+        : source?.commitSha;
       if (
         verificationResults.length > 0 &&
-        (!source?.commitSha || verificationResults.some((item) => item.subjectRevision !== source.commitSha))
+        (!expectedVerificationSubject ||
+          verificationResults.some((item) => item.subjectRevision !== expectedVerificationSubject))
       ) {
         throw new Error("VERIFICATION_SUBJECT_MISMATCH");
       }
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),verification_results_json=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
+          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),verification_results_json=?,workspace_change_summary_json=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
         )
         .run(
           result,
@@ -652,6 +666,7 @@ export class ExpertTaskStore {
           source?.repositoryBranch ?? null,
           source?.commitSha ?? null,
           JSON.stringify(verificationResults),
+          workspaceChangeSummary ? JSON.stringify(workspaceChangeSummary) : null,
           claim.taskId,
           claim.runId,
           claim.workerId,
@@ -1339,6 +1354,9 @@ export class ExpertTaskStore {
       verificationResults: normalizeVerificationEvidenceResults(
         row.verification_results_json ? JSON.parse(String(row.verification_results_json)) : [],
       ),
+      workspaceChangeSummary: row.workspace_change_summary_json
+        ? normalizeWorkspaceChangeSummary(JSON.parse(String(row.workspace_change_summary_json)))
+        : null,
       requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
       continuationCount: Number(row.continuation_count ?? 0),
       continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),

@@ -891,3 +891,69 @@ test("expert task feedback is owner-scoped, success-only, replaceable, and nulla
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("task completion persists workspace change summary and validates verification against workspace revision", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-workspace-summary-persist-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    let store = new ExpertTaskStore(db);
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "workspace-summary",
+      problem: "modify fixture",
+      workItemId: "work-write",
+      workAttemptId: "attempt-write",
+      workflowId: "write-flow",
+      workflowVersion: 1,
+    });
+    const summary = {
+      baseCommit: "a".repeat(40),
+      changedFiles: ["fixture.txt"],
+      addedFiles: ["added.txt"],
+      deletedFiles: [],
+      diffStat: { filesChanged: 2, insertions: 3, deletions: 1 },
+      contentRevision: "c".repeat(64),
+    };
+    const verification = [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed" as const,
+        exitCode: 0,
+        durationMs: 20,
+        errorCode: null,
+        subjectRevision: "workspace:" + summary.contentRevision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ];
+
+    const first = store.claim("worker-a", 1_000, 30_000)!;
+    assert.throws(
+      () =>
+        store.complete(
+          first,
+          "done",
+          2_000,
+          { commitSha: summary.baseCommit },
+          [{ ...verification[0]!, subjectRevision: summary.baseCommit }],
+          summary,
+        ),
+      /VERIFICATION_SUBJECT_MISMATCH/,
+    );
+    const second = store.claim("worker-a", 40_000, 30_000)!;
+    store.complete(second, "done", 41_000, { commitSha: summary.baseCommit }, verification, summary);
+    const completed = store.get(task.taskId, "alice", "tenant-a");
+    assert.deepEqual(completed.workspaceChangeSummary, summary);
+    assert.deepEqual(completed.verificationResults, verification);
+    store.close();
+
+    store = new ExpertTaskStore(db);
+    assert.deepEqual(store.get(task.taskId, "alice", "tenant-a").workspaceChangeSummary, summary);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

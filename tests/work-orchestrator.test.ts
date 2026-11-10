@@ -651,3 +651,108 @@ test("permission blocker is durable and does not retry", () => {
     f.close();
   }
 });
+
+test("write task uses workspace content revision and invalidates prior revision decisions", () => {
+  const f = fixture();
+  try {
+    f.experts.putDeployment({
+      id: "ota-write",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
+      active: true,
+    });
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("write-verified", 1, {
+      ...structuredClone(base),
+      execution: {
+        ...structuredClone(base.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      validation: {
+        requiredEvidence: ["expert_result", "unit_test"],
+        required: [
+          {
+            id: "unit",
+            type: "command",
+            argv: ["npm", "test"],
+            timeoutMs: 60_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+    });
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "work-write-subject",
+      workflowId: "write-verified",
+      deploymentId: "ota-write",
+    });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    const summary = {
+      baseCommit: "a".repeat(40),
+      changedFiles: ["fixture.txt"],
+      addedFiles: [],
+      deletedFiles: [],
+      diffStat: { filesChanged: 1, insertions: 1, deletions: 1 },
+      contentRevision: "c".repeat(64),
+    };
+    const subject = "workspace:" + summary.contentRevision;
+    f.tasks.complete(
+      claim,
+      "changed",
+      2_000,
+      { commitSha: summary.baseCommit },
+      [
+        {
+          stepId: "unit",
+          type: "command",
+          evidenceType: "unit_test",
+          status: "passed",
+          exitCode: 0,
+          durationMs: 10,
+          errorCode: null,
+          subjectRevision: subject,
+          environmentIdentity: "worker:worker-a",
+          verifierIdentity: "team-skill-hub-worker",
+        },
+      ],
+      summary,
+    );
+
+    const waiting = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(waiting.work.currentSubjectRevision, subject);
+    assert.deepEqual(waiting.evidence.map((item) => [item.type, item.subjectRevision, item.stale]).sort(), [
+      ["expert_result", subject, false],
+      ["unit_test", subject, false],
+    ]);
+
+    let work = f.work.getWork(detail.work.workItemId, "alice", "team-a");
+    f.work.submitReviewDecision(work.workItemId, "alice", "team-a", {
+      expectedRevision: work.stateRevision,
+      subjectRevision: subject,
+      decision: "accepted",
+    });
+    work = f.work.getWork(work.workItemId, "alice", "team-a");
+    f.work.recordApproval(work.workItemId, "alice", "team-a", {
+      expectedRevision: work.stateRevision,
+      actor: "alice",
+      role: "developer",
+      approvalScope: "work_completion",
+      subjectType: "workspace_revision",
+      subjectRevision: subject,
+      decision: "approved",
+    });
+    work = f.work.getWork(work.workItemId, "alice", "team-a");
+    const nextSubject = "workspace:" + "d".repeat(64);
+    f.work.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, nextSubject, 4_000);
+
+    assert.ok(f.work.listEvidence(work.workItemId).every((item) => item.stale));
+    assert.ok(f.work.listApprovals(work.workItemId).every((item) => item.stale));
+    assert.ok(f.work.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("review_accepted"));
+  } finally {
+    f.close();
+  }
+});

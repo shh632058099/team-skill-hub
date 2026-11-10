@@ -26,6 +26,7 @@ export interface RemoteWorkerClient {
     result: string,
     source?: WorkerExecutionResult["source"],
     verificationResults?: VerificationEvidenceResult[],
+    workspaceChangeSummary?: WorkspaceChangeSummary,
   ): Promise<unknown>;
   failTask(claim: Claim, reason: string): Promise<unknown>;
   reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
@@ -123,7 +124,8 @@ export async function runRemoteWorkerOnce(
     const result = typeof execution === "string" ? execution : execution.result;
     const source = typeof execution === "string" ? undefined : execution.source;
     const verificationResults = typeof execution === "string" ? undefined : execution.verificationResults;
-    await client.completeTask(claim, result, source, verificationResults);
+    const workspaceChangeSummary = typeof execution === "string" ? undefined : execution.workspaceChangeSummary;
+    await client.completeTask(claim, result, source, verificationResults, workspaceChangeSummary);
     return true;
   } finally {
     clearInterval(heartbeat);

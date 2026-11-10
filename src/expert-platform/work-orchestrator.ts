@@ -89,6 +89,9 @@ function isRetryable(reason: string): boolean {
 }
 
 function resultSubject(task: TaskRecord): string {
+  if (task.workspaceChangeSummary) {
+    return `workspace:${task.workspaceChangeSummary.contentRevision}`;
+  }
   if (task.commitSha) return task.commitSha;
   return (
     "task-result:" +

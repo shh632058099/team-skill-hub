@@ -58,6 +58,15 @@ test("daemon forwards executor verification results when completing a task", asy
     },
   ];
   let completedVerification: unknown;
+  const summary = {
+    baseCommit: "a".repeat(40),
+    changedFiles: ["fixture.txt"],
+    addedFiles: [],
+    deletedFiles: [],
+    diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+    contentRevision: "c".repeat(64),
+  };
+  let completedSummary: unknown;
   const runtime = createExpertWorkerRuntime(
     {
       hubAddress: "hub:7443",
@@ -87,8 +96,9 @@ test("daemon forwards executor verification results when completing a task", asy
           problem: "verify",
         }),
         renewLease: async () => undefined,
-        completeTask: async (_claim, _result, _source, verificationResults) => {
+        completeTask: async (_claim, _result, _source, verificationResults, workspaceChangeSummary) => {
           completedVerification = verificationResults;
+          completedSummary = workspaceChangeSummary;
         },
         failTask: async () => undefined,
         close: () => undefined,
@@ -97,12 +107,14 @@ test("daemon forwards executor verification results when completing a task", asy
         result: "done",
         source: { commitSha: "a".repeat(40) },
         verificationResults: verification,
+        workspaceChangeSummary: summary,
       }),
     },
   );
 
   assert.equal(await runtime.runOnce(), true);
   assert.deepEqual(completedVerification, verification);
+  assert.deepEqual(completedSummary, summary);
   runtime.close();
 });
 

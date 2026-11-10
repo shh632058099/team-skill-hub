@@ -13,6 +13,7 @@ import {
   normalizeVerificationPolicy,
   type VerificationEvidenceResult,
 } from "./verification-policy.js";
+import { normalizeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 interface RegisterWorkerRequest {
   worker_id: string;
@@ -59,6 +60,7 @@ interface CompleteTaskRequest {
   repository_branch?: string;
   commit_sha?: string;
   verification_results_json?: string;
+  workspace_change_summary_json?: string;
 }
 interface FailTaskRequest {
   claim?: LeaseRequest;
@@ -416,12 +418,16 @@ export async function startExpertWorkerGrpcServer(
       const verificationResults = call.request.verification_results_json
         ? normalizeVerificationEvidenceResults(JSON.parse(call.request.verification_results_json))
         : [];
+      const workspaceChangeSummary = call.request.workspace_change_summary_json
+        ? normalizeWorkspaceChangeSummary(JSON.parse(call.request.workspace_change_summary_json))
+        : undefined;
       tasks.complete(
         claim,
         call.request.result,
         Date.now(),
         Object.keys(source).length ? source : undefined,
         verificationResults,
+        workspaceChangeSummary,
       );
       callback(null, {});
     } catch (error) {
@@ -820,6 +826,7 @@ export class ExpertWorkerClient {
     result: string,
     source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string },
     verificationResults?: VerificationEvidenceResult[],
+    workspaceChangeSummary?: WorkspaceChangeSummary,
   ): Promise<Empty> {
     return unary((callback) =>
       this.client.CompleteTask(
@@ -830,6 +837,7 @@ export class ExpertWorkerClient {
           repository_branch: source?.repositoryBranch ?? "",
           commit_sha: source?.commitSha ?? "",
           verification_results_json: verificationResults?.length ? JSON.stringify(verificationResults) : "",
+          workspace_change_summary_json: workspaceChangeSummary ? JSON.stringify(workspaceChangeSummary) : "",
         },
         this.metadata,
         callback,

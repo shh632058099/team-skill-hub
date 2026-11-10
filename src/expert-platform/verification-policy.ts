@@ -49,7 +49,7 @@ export function normalizeVerificationEvidenceResults(value: unknown): Verificati
       durationMs < 0 ||
       durationMs > 86_400_000 ||
       (errorCode !== null && !/^[A-Z][A-Z0-9_]{0,79}$/.test(errorCode)) ||
-      !/^[a-f0-9]{40,64}$/i.test(subjectRevision) ||
+      !(/^[a-f0-9]{40,64}$/i.test(subjectRevision) || /^workspace:[a-f0-9]{64}$/i.test(subjectRevision)) ||
       !environmentIdentity ||
       environmentIdentity.length > 500 ||
       !verifierIdentity ||

@@ -28,6 +28,68 @@ const MAX_CHANGED_FILES = 500;
 const MAX_PATH_LENGTH = 1024;
 const MAX_GIT_OUTPUT = 16 * 1024 * 1024;
 
+function normalizeSummaryPath(value: unknown): string {
+  if (typeof value !== "string") throw new Error("INVALID_WORKSPACE_CHANGE_SUMMARY");
+  try {
+    return validateRelativePath(value);
+  } catch {
+    throw new Error("INVALID_WORKSPACE_CHANGE_SUMMARY");
+  }
+}
+
+export function normalizeWorkspaceChangeSummary(input: unknown): WorkspaceChangeSummary {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("INVALID_WORKSPACE_CHANGE_SUMMARY");
+  }
+  const value = input as Partial<WorkspaceChangeSummary>;
+  if (
+    typeof value.baseCommit !== "string" ||
+    !/^[a-f0-9]{40,64}$/i.test(value.baseCommit) ||
+    typeof value.contentRevision !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(value.contentRevision) ||
+    !Array.isArray(value.changedFiles) ||
+    !Array.isArray(value.addedFiles) ||
+    !Array.isArray(value.deletedFiles) ||
+    !value.diffStat ||
+    typeof value.diffStat !== "object"
+  ) {
+    throw new Error("INVALID_WORKSPACE_CHANGE_SUMMARY");
+  }
+  const changedFiles = value.changedFiles.map(normalizeSummaryPath);
+  const addedFiles = value.addedFiles.map(normalizeSummaryPath);
+  const deletedFiles = value.deletedFiles.map(normalizeSummaryPath);
+  const allPaths = [...changedFiles, ...addedFiles, ...deletedFiles];
+  if (
+    allPaths.length > MAX_CHANGED_FILES ||
+    new Set(allPaths).size !== allPaths.length ||
+    changedFiles.join("\0") !== [...changedFiles].sort().join("\0") ||
+    addedFiles.join("\0") !== [...addedFiles].sort().join("\0") ||
+    deletedFiles.join("\0") !== [...deletedFiles].sort().join("\0")
+  ) {
+    throw new Error("INVALID_WORKSPACE_CHANGE_SUMMARY");
+  }
+  const { filesChanged, insertions, deletions } = value.diffStat;
+  if (
+    !Number.isSafeInteger(filesChanged) ||
+    !Number.isSafeInteger(insertions) ||
+    !Number.isSafeInteger(deletions) ||
+    filesChanged! < 0 ||
+    insertions! < 0 ||
+    deletions! < 0 ||
+    filesChanged !== allPaths.length
+  ) {
+    throw new Error("INVALID_WORKSPACE_CHANGE_SUMMARY");
+  }
+  return {
+    baseCommit: value.baseCommit.toLowerCase(),
+    changedFiles,
+    addedFiles,
+    deletedFiles,
+    diffStat: { filesChanged: filesChanged!, insertions: insertions!, deletions: deletions! },
+    contentRevision: value.contentRevision.toLowerCase(),
+  };
+}
+
 function runGit(workspacePath: string, args: readonly string[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", ["-C", workspacePath, ...args], {
