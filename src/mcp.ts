@@ -1474,7 +1474,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "get_work",
           {
             description:
-              "Get and reconcile one WorkItem owned by the authenticated principal. Returns current Work state, WorkAttempts, current ExpertTask, evidence and Completion Gate.",
+              "Get and reconcile one WorkItem owned by the authenticated principal. Returns current Work state, WorkAttempts, current ExpertTask, Run/Turn history, current Workspace, verification summary, evidence and Completion Gate.",
             inputSchema: z.object({ workItemId: z.string().uuid() }),
           },
           async ({ workItemId }) =>
@@ -1485,7 +1485,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "wait_work",
           {
             description:
-              "Wait for durable WorkItem progress. Reconciles the linked ExpertTask before returning, includes cursor-based Work events and nextEventId, and stops early when the Work leaves running/queued/rework or becomes terminal.",
+              "Wait for durable WorkItem progress. Reconciles the linked ExpertTask before returning, includes Run/Turn history, current Workspace, verification summary, cursor-based Work events and nextEventId, and stops early when the Work leaves running/queued/rework or becomes terminal.",
             inputSchema: z.object({
               workItemId: z.string().uuid(),
               afterEventId: z.number().int().min(0).default(0),

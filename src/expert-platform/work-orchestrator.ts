@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ExpertDispatchService, ResolvedDispatch } from "./expert-dispatch-service.js";
-import type { ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord } from "./task-store.js";
+import type { ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord, TaskRunTurnRecord } from "./task-store.js";
 import {
   type CompletionGateResult,
   type ReviewDecision,
@@ -24,6 +24,15 @@ export interface WorkDetail {
   attempts: WorkAttemptRecord[];
   evidence: WorkEvidenceRecord[];
   currentTask: TaskRecord | null;
+  turns: TaskRunTurnRecord[];
+  workspace: WorkspaceRecord | null;
+  verification: {
+    requiredEvidence: string[];
+    requiredSteps: TaskRecord["validationSnapshot"];
+    results: TaskRecord["verificationResults"];
+    passed: number;
+    failed: number;
+  };
   gate: CompletionGateResult;
 }
 
@@ -687,11 +696,24 @@ export class WorkOrchestrator {
     const attempts = this.workStore.listAttempts(workItemId);
     const latest = attempts.at(-1);
     const currentTask = latest?.taskId ? this.tasks.get(latest.taskId, principalId, scope) : null;
+    const turns = currentTask ? this.tasks.listRunTurns(currentTask.taskId, principalId, scope) : [];
+    const workspace = latest?.workspaceId ? this.workStore.getWorkspace(latest.workspaceId) : null;
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+    const verificationResults = currentTask?.verificationResults ?? [];
     return {
       work,
       attempts,
       evidence: this.workStore.listEvidence(workItemId),
       currentTask,
+      turns,
+      workspace,
+      verification: {
+        requiredEvidence: workflow.definition.validation.requiredEvidence,
+        requiredSteps: currentTask?.validationSnapshot ?? workflow.definition.validation.required,
+        results: verificationResults,
+        passed: verificationResults.filter((item) => item.status === "passed").length,
+        failed: verificationResults.filter((item) => item.status === "failed").length,
+      },
       gate: this.workStore.evaluateCompletionGate(workItemId, principalId, scope),
     };
   }

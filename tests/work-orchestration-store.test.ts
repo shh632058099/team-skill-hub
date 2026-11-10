@@ -342,6 +342,75 @@ test("completion gate requires current evidence and accepted review", () => {
   });
 });
 
+test("completion gate rejects failed and stale required verification evidence", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    store.putWorkflow("verified-gate", 1, {
+      ...base,
+      validation: {
+        requiredEvidence: ["unit_test"],
+        required: [
+          {
+            id: "unit",
+            type: "command",
+            argv: ["npm", "test"],
+            timeoutMs: 60_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+      review: { humanReview: false },
+      completion: {
+        require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
+      },
+    });
+
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "gate-verification",
+      sourceType: "mcp",
+      title: "Verified gate",
+      description: "only current passing verification may satisfy the gate",
+      workflowId: "verified-gate",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 1,
+    });
+    let current = store.getWork(work.workItemId, "alice", "team-a");
+    current = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", current.stateRevision, "rev-a");
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      type: "unit_test",
+      status: "failed",
+      source: "worker_verified",
+      subjectRevision: "rev-a",
+    });
+    current = store.finishWorkAttempt(
+      work.workItemId,
+      attempt.workAttemptId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    assert.ok(
+      store.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("required_evidence:unit_test"),
+    );
+
+    store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", current.stateRevision, "rev-b");
+    const evidence = store.listEvidence(work.workItemId);
+    assert.equal(evidence[0]!.stale, true);
+    assert.ok(
+      store.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("required_evidence:unit_test"),
+    );
+  });
+});
+
 test("stable source identity reuses one work item across delivery retries", () => {
   withStore((store) => {
     const first = store.createOrReuseWork({

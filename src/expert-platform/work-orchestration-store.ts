@@ -1157,10 +1157,17 @@ export class WorkOrchestrationStore {
 
     const existing = this.db
       .prepare(
-        "SELECT * FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND source=? AND subject_revision=? AND task_id IS ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND source=? AND subject_revision=? AND task_id IS ? AND run_id IS ? ORDER BY created_at DESC LIMIT 1",
       )
-      .get(workItemId, input.workAttemptId, type, input.source, subjectRevision, input.taskId?.trim() || null) as
-      Row | undefined;
+      .get(
+        workItemId,
+        input.workAttemptId,
+        type,
+        input.source,
+        subjectRevision,
+        input.taskId?.trim() || null,
+        input.runId?.trim() || null,
+      ) as Row | undefined;
     if (existing) return this.fromEvidenceRow(existing);
     const evidenceId = randomUUID();
     this.db

@@ -69,6 +69,11 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /id="workItems"/);
     assert.match(html, /id="workPage"/);
     assert.match(html, /工作项详情/);
+    assert.match(html, /Verification/);
+    assert.match(html, /Run \/ Turns/);
+    assert.match(html, /workVerification/);
+    assert.match(html, /workTurnRows/);
+    assert.match(html, /Continuation/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
@@ -502,6 +507,12 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.ok(reconciledWork.currentTask?.taskId);
     assert.equal(Array.isArray(reconciledWork.workspaces), true);
     assert.equal(Array.isArray(reconciledWork.events), true);
+    assert.equal(Array.isArray(reconciledWork.turns), true);
+    assert.ok(reconciledWork.workspace);
+    assert.ok(reconciledWork.workspace.workspaceKey);
+    assert.deepEqual(reconciledWork.verification.requiredEvidence, ["expert_result"]);
+    assert.equal(Array.isArray(reconciledWork.verification.requiredSteps), true);
+    assert.equal(Array.isArray(reconciledWork.verification.results), true);
 
     const workCancel = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/cancel", {
       method: "POST",

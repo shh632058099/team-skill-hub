@@ -186,6 +186,8 @@ test("MCP Work API drives durable work through review, rework, authorization and
 
     const claim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
     assert.equal(claim.taskId, taskId);
+    tasks.recordActivity(claim, "model.started", 1, "", 0, 1_100);
+    tasks.recordActivity(claim, "model.completed", 2, "", 0, 1_200);
     tasks.complete(claim, "OTA analysis complete", 2_000, { commitSha: "a".repeat(40) });
 
     const waiting = await callMcp(mcpUrl, apiKey, 5, "wait_work", {
@@ -195,6 +197,15 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(waiting.work.status, "waiting_review");
     assert.equal(waiting.evidence[0].subjectRevision, "a".repeat(40));
+    assert.equal(waiting.turns.length, 1);
+    assert.equal(waiting.turns[0].runId, claim.runId);
+    assert.equal(waiting.turns[0].status, "succeeded");
+    assert.equal(waiting.workspace.workspaceKey, submitted.currentTask.workspaceKey);
+    assert.deepEqual(waiting.verification.requiredEvidence, ["expert_result"]);
+    assert.deepEqual(waiting.verification.requiredSteps, []);
+    assert.deepEqual(waiting.verification.results, []);
+    assert.equal(waiting.verification.passed, 0);
+    assert.equal(waiting.verification.failed, 0);
     assert.ok(Array.isArray(waiting.events));
     assert.ok(Number(waiting.nextEventId) > 0);
 
@@ -394,6 +405,187 @@ test("server startup reconciliation advances durable completed work without a cl
     assert.equal(status, "waiting_review");
   } finally {
     observer?.close();
+    if (app) await app.close();
+    if (oldRuntimeDb === undefined) delete process.env.EXPERT_RUNTIME_DB;
+    else process.env.EXPERT_RUNTIME_DB = oldRuntimeDb;
+    if (oldInterval === undefined) delete process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS;
+    else process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS = oldInterval;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("server restart resumes one durable verification continuation and preserves one WorkAttempt", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "work-verification-restart-"));
+  const runtimeDb = path.join(root, "runtime.sqlite");
+  const dataDir = path.join(root, "app-data");
+  const oldRuntimeDb = process.env.EXPERT_RUNTIME_DB;
+  const oldInterval = process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS;
+  process.env.EXPERT_RUNTIME_DB = runtimeDb;
+  process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS = "20";
+
+  let app: Awaited<ReturnType<typeof StartServer>> | undefined;
+  let observerTasks: ExpertTaskStore | undefined;
+  let observerWork: WorkOrchestrationStore | undefined;
+  try {
+    const experts = new ExpertStore(runtimeDb);
+    const tasks = new ExpertTaskStore(runtimeDb);
+    const work = new WorkOrchestrationStore(runtimeDb);
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA Expert",
+      capabilities: ["ota"],
+      keywords: ["ota"],
+      active: true,
+    });
+    experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    const baseWorkflow = work.getWorkflow("code-fix-default").definition;
+    work.putWorkflow("restart-verified", 1, {
+      ...baseWorkflow,
+      lifecycle: { ...baseWorkflow.lifecycle, continuation: { maxTurnsPerRun: 2 } },
+      validation: {
+        requiredEvidence: ["expert_result", "unit_test"],
+        required: [
+          {
+            id: "unit",
+            type: "command",
+            argv: ["npm", "test"],
+            timeoutMs: 60_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+    });
+    const orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+    const detail = orchestrator.submitWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "restart-verification-continuation",
+      sourceType: "mcp",
+      title: "Restart verification continuation",
+      description: "resume a failed verifier exactly once after restart",
+      workflowId: "restart-verified",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      repositoryId: "ota-repo",
+    });
+    const attempt = detail.attempts[0]!;
+    const workspace = work.getWorkspace(attempt.workspaceId!);
+    const revision = "f".repeat(40);
+    work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      1_100,
+      revision,
+    );
+    const first = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    tasks.complete(first, "first run", 2_000, { commitSha: revision }, [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "failed",
+        exitCode: 1,
+        durationMs: 10,
+        errorCode: "VERIFICATION_EXIT_NONZERO",
+        subjectRevision: revision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ]);
+    const scheduled = orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(scheduled.work.nextActionType, "continuation");
+    assert.equal(scheduled.currentTask!.continuationCount, 0);
+    assert.equal(scheduled.attempts.length, 1);
+    const taskId = scheduled.currentTask!.taskId;
+    work.close();
+    tasks.close();
+    experts.close();
+
+    const auth = new ApiKeyAuthenticationProvider({
+      "work-restart-key": { id: "alice", roles: ["developer", "internal"], tenantId: "team-a" },
+    });
+    const search = new SqliteFtsSearchBackend();
+    const config: AppConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: [],
+      authentication: { mode: "api-key", apiKeys: {} },
+      repositories: [],
+    };
+    const service = new SkillHubApplicationService(
+      config,
+      [],
+      new MemoryRegistryStore(),
+      search,
+      new SearchRoutingStrategy(search),
+      auth,
+      new StaticRolePermissionProvider(),
+      [],
+      new LoggingEventSink(),
+    );
+    await service.initialize();
+    const { startServer } = await import("../src/server.js");
+    app = await startServer(config, service);
+
+    observerTasks = new ExpertTaskStore(runtimeDb);
+    observerWork = new WorkOrchestrationStore(runtimeDb);
+    const requeueDeadline = Date.now() + 1_500;
+    let continued = observerTasks.get(taskId, "alice", "team-a");
+    while ((continued.status !== "queued" || continued.continuationCount !== 1) && Date.now() < requeueDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      continued = observerTasks.get(taskId, "alice", "team-a");
+    }
+    assert.equal(continued.status, "queued");
+    assert.equal(continued.continuationCount, 1);
+    assert.equal(observerWork.listAttempts(detail.work.workItemId).length, 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(observerTasks.get(taskId, "alice", "team-a").continuationCount, 1);
+
+    const second = observerTasks.claim("worker-a", Date.now(), 30_000, "ota")!;
+    assert.equal(second.taskId, taskId);
+    assert.notEqual(second.runId, first.runId);
+    observerTasks.complete(second, "second run", Date.now(), { commitSha: revision }, [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed",
+        exitCode: 0,
+        durationMs: 8,
+        errorCode: null,
+        subjectRevision: revision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ]);
+
+    const finishDeadline = Date.now() + 1_500;
+    let finalStatus = observerWork.getWork(detail.work.workItemId, "alice", "team-a").status;
+    while (finalStatus !== "waiting_review" && Date.now() < finishDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      finalStatus = observerWork.getWork(detail.work.workItemId, "alice", "team-a").status;
+    }
+    assert.equal(finalStatus, "waiting_review");
+    assert.equal(observerWork.listAttempts(detail.work.workItemId).length, 1);
+    const unitEvidence = observerWork
+      .listEvidence(detail.work.workItemId)
+      .filter((item) => item.type === "unit_test" && item.subjectRevision === revision);
+    assert.equal(unitEvidence.length, 2);
+    assert.deepEqual(unitEvidence.map((item) => item.status).sort(), ["failed", "passed"]);
+  } finally {
+    observerTasks?.close();
+    observerWork?.close();
     if (app) await app.close();
     if (oldRuntimeDb === undefined) delete process.env.EXPERT_RUNTIME_DB;
     else process.env.EXPERT_RUNTIME_DB = oldRuntimeDb;
