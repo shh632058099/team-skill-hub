@@ -81,6 +81,8 @@ export interface WorkPublicationRecord {
   pushedAt: number | null;
   lastErrorCode: string | null;
   lastErrorContext: string | null;
+  retryCount: number;
+  nextAttemptAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -115,6 +117,8 @@ export type CreatePublicationInput = Omit<
   | "pushedAt"
   | "lastErrorCode"
   | "lastErrorContext"
+  | "retryCount"
+  | "nextAttemptAt"
   | "createdAt"
   | "updatedAt"
 > & { pushRefspec?: string; executionSnapshot?: PublicationExecutionSnapshot };
@@ -193,6 +197,8 @@ export class WorkPublicationStore {
         "  operation_fencing INTEGER NOT NULL DEFAULT 0,",
         "  operation_lease_until INTEGER,",
         "  operation_claimed_worker_id TEXT,",
+        "  retry_count INTEGER NOT NULL DEFAULT 0,",
+        "  next_attempt_at INTEGER,",
         "  created_at INTEGER NOT NULL,",
         "  updated_at INTEGER NOT NULL,",
         "  UNIQUE(work_attempt_id, repository_id)",
@@ -213,6 +219,8 @@ export class WorkPublicationStore {
       ["operation_fencing", "INTEGER NOT NULL DEFAULT 0"],
       ["operation_lease_until", "INTEGER"],
       ["operation_claimed_worker_id", "TEXT"],
+      ["retry_count", "INTEGER NOT NULL DEFAULT 0"],
+      ["next_attempt_at", "INTEGER"],
     ];
     for (const [name, definition] of additions) {
       if (!columns.has(name)) this.db.exec("ALTER TABLE work_publications ADD COLUMN " + name + " " + definition);
@@ -260,6 +268,8 @@ export class WorkPublicationStore {
             "  operation_fencing INTEGER NOT NULL DEFAULT 0,",
             "  operation_lease_until INTEGER,",
             "  operation_claimed_worker_id TEXT,",
+            "  retry_count INTEGER NOT NULL DEFAULT 0,",
+            "  next_attempt_at INTEGER",
             "  created_at INTEGER NOT NULL,",
             "  updated_at INTEGER NOT NULL,",
             "  UNIQUE(work_attempt_id, repository_id)",
@@ -269,12 +279,12 @@ export class WorkPublicationStore {
             " repository_id,repository_identity_revision,publication_policy_revision,branch_name,commit_sha,tree_sha,",
             " artifact_ref,push_remote_name,push_refspec,owner_worker_id,commit_timestamp,commit_author_name,",
             " commit_author_email,commit_message,execution_snapshot_json,prepared_at,approved_at,pushed_at,",
-            " last_error_code,last_error_context,operation_fencing,operation_lease_until,operation_claimed_worker_id,created_at,updated_at",
+            " last_error_code,last_error_context,operation_fencing,operation_lease_until,operation_claimed_worker_id,retry_count,next_attempt_at,created_at,updated_at",
             ") SELECT publication_id,work_item_id,work_attempt_id,workspace_id,state,source_subject_revision,base_commit,",
             " repository_id,repository_identity_revision,publication_policy_revision,branch_name,commit_sha,tree_sha,",
             " artifact_ref,push_remote_name,push_refspec,owner_worker_id,commit_timestamp,commit_author_name,",
             " commit_author_email,commit_message,execution_snapshot_json,prepared_at,approved_at,pushed_at,",
-            " last_error_code,last_error_context,operation_fencing,operation_lease_until,operation_claimed_worker_id,created_at,updated_at",
+            " last_error_code,last_error_context,operation_fencing,operation_lease_until,operation_claimed_worker_id,retry_count,next_attempt_at,created_at,updated_at",
             " FROM work_publications_legacy;",
             "DROP TABLE work_publications_legacy;",
             "CREATE INDEX IF NOT EXISTS idx_work_publication_item ON work_publications(work_item_id, created_at);",
@@ -358,7 +368,7 @@ export class WorkPublicationStore {
           "repository_id,repository_identity_revision,publication_policy_revision,branch_name,commit_sha,tree_sha," +
           "artifact_ref,push_remote_name,push_refspec,owner_worker_id,commit_timestamp,commit_author_name," +
           "commit_author_email,commit_message,execution_snapshot_json,prepared_at,approved_at,pushed_at,last_error_code,last_error_context," +
-          "operation_fencing,operation_lease_until,operation_claimed_worker_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          "operation_fencing,operation_lease_until,operation_claimed_worker_id,retry_count,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       )
       .run(
         publicationId,
@@ -390,6 +400,8 @@ export class WorkPublicationStore {
         null,
         0,
         null,
+        null,
+        0,
         null,
         now,
         now,
@@ -480,11 +492,12 @@ export class WorkPublicationStore {
       const row = this.db
         .prepare(
           "SELECT * FROM work_publications WHERE owner_worker_id=? " +
-            "AND state IN ('preparing','approved') " +
+            "AND state IN ('preparing','approved','pushing') " +
             "AND (operation_lease_until IS NULL OR operation_lease_until<?) " +
+            "AND (next_attempt_at IS NULL OR next_attempt_at<=?) " +
             "ORDER BY created_at,publication_id LIMIT 1",
         )
-        .get(owner, now) as Row | undefined;
+        .get(owner, now, now) as Row | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -565,10 +578,23 @@ export class WorkPublicationStore {
       let pushedAt = current.pushedAt;
       let lastErrorCode: string | null = null;
       let lastErrorContext: string | null = null;
+      let retryCount = Number(row.retry_count ?? 0);
+      let nextAttemptAt: number | null = null;
       if (!result.success) {
-        nextState = "blocked";
         lastErrorCode = requiredText(result.errorCode, 100);
         lastErrorContext = result.errorContext?.trim().slice(0, 1000) || null;
+        if (claim.operation === "push" && lastErrorCode === "PUBLICATION_PUSH_FAILED") {
+          retryCount += 1;
+          if (retryCount < 3) {
+            const backoffMs = retryCount === 1 ? 1_000 : 5_000;
+            nextState = "approved";
+            nextAttemptAt = now + backoffMs;
+          } else {
+            nextState = "blocked";
+          }
+        } else {
+          nextState = "blocked";
+        }
       } else if (claim.operation === "prepare") {
         commitSha = requiredText(result.commitSha ?? "", 128);
         treeSha = requiredText(result.treeSha ?? "", 128);
@@ -584,7 +610,7 @@ export class WorkPublicationStore {
       this.db
         .prepare(
           "UPDATE work_publications SET state=?,commit_sha=?,tree_sha=?,artifact_ref=?,push_refspec=?,prepared_at=?,pushed_at=?," +
-            "last_error_code=?,last_error_context=?,operation_lease_until=NULL,operation_claimed_worker_id=NULL,updated_at=? " +
+            "last_error_code=?,last_error_context=?,retry_count=?,next_attempt_at=?,operation_lease_until=NULL,operation_claimed_worker_id=NULL,updated_at=? " +
             "WHERE publication_id=? AND operation_fencing=? AND operation_claimed_worker_id=?",
         )
         .run(
@@ -597,6 +623,8 @@ export class WorkPublicationStore {
           pushedAt,
           lastErrorCode,
           lastErrorContext,
+          retryCount,
+          nextAttemptAt,
           now,
           claim.publicationId,
           claim.fencing,
@@ -663,6 +691,8 @@ export class WorkPublicationStore {
       pushedAt: row.pushed_at == null ? null : Number(row.pushed_at),
       lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
       lastErrorContext: row.last_error_context == null ? null : String(row.last_error_context),
+      retryCount: Number(row.retry_count ?? 0),
+      nextAttemptAt: row.next_attempt_at == null ? null : Number(row.next_attempt_at),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     };

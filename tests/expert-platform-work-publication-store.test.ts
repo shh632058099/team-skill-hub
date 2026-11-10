@@ -171,3 +171,119 @@ test("publication operation claim is owner-affine and carries immutable executio
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("expired pushing lease is reclaimed by the same owner with new fencing", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-push-recovery-"));
+  try {
+    const store = new WorkPublicationStore(path.join(dir, "runtime.sqlite"));
+    const publication = store.createOrReusePublication({
+      ...fixture(),
+      executionSnapshot: {
+        workspacePath: "/srv/workspaces/work1",
+        repositoryUrl: "/srv/remotes/ota.git",
+        defaultBranch: "main",
+        branchPrefix: "skillhub/work/",
+        protectedBranches: ["main"],
+        allowedPushRemote: "origin",
+        expectedContentRevision: "a".repeat(64),
+        approvedChangeSummary: {
+          baseCommit: "b".repeat(40),
+          changedFiles: ["README.md"],
+          addedFiles: [],
+          deletedFiles: [],
+          diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+          contentRevision: "a".repeat(64),
+        },
+      },
+    } as any);
+    store.transitionPublication(publication.publicationId, "prepared", {
+      commitSha: "c".repeat(40),
+      treeSha: "d".repeat(40),
+      artifactRef: "publication:" + publication.publicationId,
+    });
+    store.transitionPublication(publication.publicationId, "approved", {}, 1000);
+    const first = store.claimPublicationOperation("worker-1", 2000, 100)!;
+    assert.equal(first.operation, "push");
+    assert.equal(first.fencing, 1);
+    assert.equal(store.claimPublicationOperation("worker-1", 2099, 100), null);
+
+    const recovered = store.claimPublicationOperation("worker-1", 2101, 100)!;
+    assert.equal(recovered.operation, "push");
+    assert.equal(recovered.fencing, 2);
+    assert.throws(
+      () => store.completePublicationOperation(first, { success: true }, 2102),
+      /STALE_PUBLICATION_OPERATION/,
+    );
+    store.completePublicationOperation(recovered, { success: true }, 2102);
+    assert.equal(store.getPublication(publication.publicationId).state, "pushed");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("transient push failures use bounded durable backoff before blocking", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-push-retry-"));
+  try {
+    const store = new WorkPublicationStore(path.join(dir, "runtime.sqlite"));
+    const publication = store.createOrReusePublication({
+      ...fixture(),
+      executionSnapshot: {
+        workspacePath: "/srv/workspaces/work1",
+        repositoryUrl: "/srv/remotes/ota.git",
+        defaultBranch: "main",
+        branchPrefix: "skillhub/work/",
+        protectedBranches: ["main"],
+        allowedPushRemote: "origin",
+        expectedContentRevision: "a".repeat(64),
+        approvedChangeSummary: {
+          baseCommit: "b".repeat(40),
+          changedFiles: ["README.md"],
+          addedFiles: [],
+          deletedFiles: [],
+          diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+          contentRevision: "a".repeat(64),
+        },
+      },
+    } as any);
+    store.transitionPublication(publication.publicationId, "prepared", {
+      commitSha: "c".repeat(40),
+      treeSha: "d".repeat(40),
+      artifactRef: "publication:" + publication.publicationId,
+    });
+    store.transitionPublication(publication.publicationId, "approved", {}, 1000);
+
+    const first = store.claimPublicationOperation("worker-1", 2000, 1000)!;
+    const retry1 = store.completePublicationOperation(
+      first,
+      { success: false, errorCode: "PUBLICATION_PUSH_FAILED" },
+      2100,
+    );
+    assert.equal(retry1.state, "approved");
+    assert.equal((retry1 as any).retryCount, 1);
+    assert.equal((retry1 as any).nextAttemptAt, 3100);
+    assert.equal(store.claimPublicationOperation("worker-1", 3099, 1000), null);
+
+    const second = store.claimPublicationOperation("worker-1", 3100, 1000)!;
+    const retry2 = store.completePublicationOperation(
+      second,
+      { success: false, errorCode: "PUBLICATION_PUSH_FAILED" },
+      3200,
+    );
+    assert.equal((retry2 as any).retryCount, 2);
+    assert.equal((retry2 as any).nextAttemptAt, 8200);
+
+    const third = store.claimPublicationOperation("worker-1", 8200, 1000)!;
+    const blocked = store.completePublicationOperation(
+      third,
+      { success: false, errorCode: "PUBLICATION_PUSH_FAILED" },
+      8300,
+    );
+    assert.equal(blocked.state, "blocked");
+    assert.equal((blocked as any).retryCount, 3);
+    assert.equal((blocked as any).nextAttemptAt, null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
