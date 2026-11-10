@@ -7,6 +7,7 @@ import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-se
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
+import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
 
 function fixture(workerAvailable?: (workerId: string, now: number) => boolean) {
@@ -15,6 +16,7 @@ function fixture(workerAvailable?: (workerId: string, now: number) => boolean) {
   const experts = new ExpertStore(db);
   const tasks = new ExpertTaskStore(db);
   const work = new WorkOrchestrationStore(db);
+  const publications = new WorkPublicationStore(db);
   experts.putDefinition({
     id: "ota",
     displayName: "OTA Expert",
@@ -33,14 +35,16 @@ function fixture(workerAvailable?: (workerId: string, now: number) => boolean) {
     active: true,
   });
   const dispatch = new ExpertDispatchService(experts, tasks);
-  const orchestrator = new WorkOrchestrator(work, tasks, dispatch, workerAvailable);
+  const orchestrator = new WorkOrchestrator(work, tasks, dispatch, workerAvailable, publications);
   return {
     dir,
     experts,
     tasks,
     work,
+    publications,
     orchestrator,
     close() {
+      publications.close();
       work.close();
       tasks.close();
       experts.close();
@@ -752,6 +756,102 @@ test("write task uses workspace content revision and invalidates prior revision 
     assert.ok(f.work.listEvidence(work.workItemId).every((item) => item.stale));
     assert.ok(f.work.listApprovals(work.workItemId).every((item) => item.stale));
     assert.ok(f.work.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("review_accepted"));
+  } finally {
+    f.close();
+  }
+});
+
+test("prepared publication artifact binds current workspace revision and blocks when source becomes stale", () => {
+  const f = fixture();
+  try {
+    let work = f.work.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "publication-artifact",
+      sourceType: "mcp",
+      title: "Publish accepted change",
+      description: "prepare a controlled commit",
+    });
+    const attempt = f.work.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = f.work.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+      baseCommit: "b".repeat(40),
+    });
+    work = f.work.getWork(work.workItemId, "alice", "team-a");
+    const subject = "workspace:" + "a".repeat(64);
+    work = f.work.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, subject, 100);
+    const publication = f.publications.createOrReusePublication(
+      {
+        workItemId: work.workItemId,
+        workAttemptId: attempt.workAttemptId,
+        workspaceId: workspace.workspaceId,
+        sourceSubjectRevision: subject,
+        baseCommit: "b".repeat(40),
+        repositoryId: "ota-repo",
+        repositoryIdentityRevision: 1,
+        publicationPolicyRevision: 2,
+        branchName: "skillhub/work/work-a1",
+        pushRemoteName: "origin",
+        pushRefspec: "c".repeat(40) + ":refs/heads/skillhub/work/work-a1",
+        ownerWorkerId: "worker-a",
+        commitTimestamp: 1_800_000_000_000,
+        commitAuthorName: "Team Skill Hub",
+        commitAuthorEmail: "team-skill-hub@local.invalid",
+        commitMessage: "Publish\\n",
+      },
+      110,
+    );
+    f.publications.transitionPublication(
+      publication.publicationId,
+      "prepared",
+      {
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+      },
+      120,
+    );
+
+    f.orchestrator.recordPreparedPublicationArtifact(
+      work.workItemId,
+      "alice",
+      "team-a",
+      publication.publicationId,
+      130,
+    );
+    const artifact = f.publications.getPublicationArtifact(publication.publicationId);
+    assert.equal(artifact?.sourceSubjectRevision, subject);
+    assert.equal(artifact?.commitSha, "c".repeat(40));
+    assert.equal(artifact?.treeSha, "d".repeat(40));
+    const evidence = f.work.listEvidence(work.workItemId).find((item) => item.type === "artifact");
+    assert.equal(evidence?.status, "passed");
+    assert.equal(evidence?.source, "worker_verified");
+    assert.equal(evidence?.artifactRef, "publication:" + publication.publicationId);
+    assert.equal(evidence?.subjectRevision, subject);
+    assert.equal(evidence?.stale, false);
+
+    work = f.work.getWork(work.workItemId, "alice", "team-a");
+    const changedSubject = "workspace:" + "e".repeat(64);
+    f.work.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, changedSubject, 140);
+    assert.equal(f.work.listEvidence(work.workItemId).find((item) => item.type === "artifact")?.stale, true);
+    assert.throws(
+      () =>
+        f.orchestrator.recordPreparedPublicationArtifact(
+          work.workItemId,
+          "alice",
+          "team-a",
+          publication.publicationId,
+          150,
+        ),
+      /PUBLICATION_SOURCE_STALE/,
+    );
+    assert.equal(f.publications.getPublication(publication.publicationId).state, "blocked");
   } finally {
     f.close();
   }

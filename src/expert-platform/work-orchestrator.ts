@@ -14,6 +14,7 @@ import {
   type WorkspaceRecord,
   WorkOrchestrationStore,
 } from "./work-orchestration-store.js";
+import { WorkPublicationStore } from "./work-publication-store.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -150,6 +151,7 @@ export class WorkOrchestrator {
     private readonly tasks: ExpertTaskStore,
     private readonly dispatch: ExpertDispatchService,
     private readonly workerAvailable: (workerId: string, now: number) => boolean = () => true,
+    private readonly publications?: WorkPublicationStore,
   ) {}
 
   submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
@@ -483,6 +485,53 @@ export class WorkOrchestrator {
     now = Date.now(),
   ): WorkDetail {
     this.workStore.recordEvidence(workItemId, principalId, scope, input, now);
+    return this.detail(workItemId, principalId, scope);
+  }
+
+  recordPreparedPublicationArtifact(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    publicationId: string,
+    now = Date.now(),
+  ): WorkDetail {
+    if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+    const work = this.workStore.getWork(workItemId, principalId, scope);
+    const publication = this.publications.getPublication(publicationId);
+    if (publication.workItemId !== workItemId) throw new Error("PUBLICATION_WORK_MISMATCH");
+    if (work.currentSubjectRevision !== publication.sourceSubjectRevision) {
+      if (["preparing", "prepared", "approved", "pushing"].includes(publication.state)) {
+        this.publications.transitionPublication(
+          publicationId,
+          "blocked",
+          {
+            lastErrorCode: "PUBLICATION_SOURCE_STALE",
+            lastErrorContext: work.currentSubjectRevision ?? "missing_current_subject",
+          },
+          now,
+        );
+      }
+      throw new Error("PUBLICATION_SOURCE_STALE");
+    }
+    const artifact = this.publications.getPublicationArtifact(publicationId);
+    if (!artifact) throw new Error("PUBLICATION_ARTIFACT_NOT_PREPARED");
+    this.workStore.recordEvidence(
+      workItemId,
+      principalId,
+      scope,
+      {
+        workAttemptId: publication.workAttemptId,
+        type: "artifact",
+        status: "passed",
+        source: "worker_verified",
+        summary: "git_commit:" + artifact.commitSha,
+        artifactRef: artifact.artifactId,
+        subjectRevision: publication.sourceSubjectRevision,
+        environmentIdentity: "publication-policy@" + publication.publicationPolicyRevision,
+        verifierIdentity: "team-skill-hub-publication",
+      },
+      now,
+    );
     return this.detail(workItemId, principalId, scope);
   }
 

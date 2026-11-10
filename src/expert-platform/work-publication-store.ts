@@ -37,6 +37,22 @@ export interface WorkPublicationRecord {
   updatedAt: number;
 }
 
+export interface PublicationArtifact {
+  artifactId: string;
+  kind: "git_commit";
+  workItemId: string;
+  workAttemptId: string;
+  publicationId: string;
+  sourceSubjectRevision: string;
+  repositoryId: string;
+  baseCommit: string;
+  branchName: string;
+  commitSha: string;
+  treeSha: string;
+  publicationPolicyRevision: number;
+  createdAt: number;
+}
+
 export type CreatePublicationInput = Omit<
   WorkPublicationRecord,
   | "publicationId"
@@ -293,6 +309,27 @@ export class WorkPublicationStore {
         publicationId,
       );
     return this.getPublication(publicationId);
+  }
+
+  getPublicationArtifact(publicationId: string): PublicationArtifact | null {
+    const publication = this.getPublication(publicationId);
+    if (!publication.commitSha || !publication.treeSha || !publication.artifactRef || !publication.preparedAt)
+      return null;
+    return {
+      artifactId: publication.artifactRef,
+      kind: "git_commit",
+      workItemId: publication.workItemId,
+      workAttemptId: publication.workAttemptId,
+      publicationId: publication.publicationId,
+      sourceSubjectRevision: publication.sourceSubjectRevision,
+      repositoryId: publication.repositoryId,
+      baseCommit: publication.baseCommit,
+      branchName: publication.branchName,
+      commitSha: publication.commitSha,
+      treeSha: publication.treeSha,
+      publicationPolicyRevision: publication.publicationPolicyRevision,
+      createdAt: publication.preparedAt,
+    };
   }
 
   private fromRow(row: Row): WorkPublicationRecord {
