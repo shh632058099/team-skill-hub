@@ -147,6 +147,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
       expertId: "ota",
+      routingMode: "explicit",
       repositoryId: "ota-repo",
       deploymentId: "ota-default",
     });
@@ -161,6 +162,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
       expertId: "ota",
+      routingMode: "explicit",
       repositoryId: "ota-repo",
       deploymentId: "ota-default",
     });
@@ -174,6 +176,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
           description: "Different payload",
           idempotencyKey: "mcp-work-1",
           expertId: "ota",
+          routingMode: "explicit",
           repositoryId: "ota-repo",
           deploymentId: "ota-default",
         }),
@@ -237,11 +240,29 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: unspecifiedRouteIds.work.workItemId,
     });
 
+    const autoRoutingIgnoresPlaceholders = await callMcp(mcpUrl, apiKey, 64, "submit_work", {
+      title: "Auto routing ignores placeholder route values",
+      description: "Auto routing must ignore model-generated placeholder route identifiers",
+      idempotencyKey: "mcp-work-auto-routing-placeholder",
+      expertId: "ota",
+      routingMode: "auto",
+      repositoryId: "unspecified",
+      deploymentId: "unspecified",
+    });
+    assert.equal(autoRoutingIgnoresPlaceholders.work.status, "running");
+    assert.equal(autoRoutingIgnoresPlaceholders.work.repositoryId, null);
+    assert.equal(autoRoutingIgnoresPlaceholders.work.requestedDeploymentId, null);
+    assert.equal(autoRoutingIgnoresPlaceholders.currentTask.deploymentId, "ota-default");
+    await callMcp(mcpUrl, apiKey, 65, "cancel_work", {
+      workItemId: autoRoutingIgnoresPlaceholders.work.workItemId,
+    });
+
     const reworkSubmission = await callMcp(mcpUrl, apiKey, 7, "submit_work", {
       title: "Inspect OTA retry",
       description: "Inspect OTA retry path",
       idempotencyKey: "mcp-work-rework",
       expertId: "ota",
+      routingMode: "explicit",
       repositoryId: "ota-repo",
       deploymentId: "ota-default",
     });
@@ -269,6 +290,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       description: "Cancel this OTA work before execution",
       idempotencyKey: "mcp-work-cancel",
       expertId: "ota",
+      routingMode: "explicit",
       repositoryId: "ota-repo",
       deploymentId: "ota-default",
     });

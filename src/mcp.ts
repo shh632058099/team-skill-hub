@@ -1416,21 +1416,37 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission. Do not invent deploymentId or repositoryId: omit them for Hub routing unless the user supplied an exact ID or an exact currently-active ID was just returned by Team Skill Hub.",
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
               idempotencyKey: z.string().trim().min(1).max(200),
+              routingMode: z
+                .enum(["auto", "explicit"])
+                .default("auto")
+                .describe(
+                  "Use auto unless the user explicitly supplied exact deployment/repository IDs. In auto mode, deploymentId and repositoryId are ignored.",
+                ),
               expertId: z.string().trim().min(1).max(200).optional(),
               repositoryId: z.string().trim().min(1).max(200).optional(),
               deploymentId: z.string().trim().min(1).max(200).optional(),
               priority: z.number().int().optional(),
             }),
           },
-          async ({ title, description, idempotencyKey, expertId, repositoryId, deploymentId, priority }) => {
+          async ({
+            title,
+            description,
+            idempotencyKey,
+            routingMode,
+            expertId,
+            repositoryId,
+            deploymentId,
+            priority,
+          }) => {
             const normalizedExpertId = normalizeOptionalMcpIdentifier(expertId);
             const normalizedRepositoryId = normalizeOptionalMcpIdentifier(repositoryId);
             const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
+            const explicitRouting = routingMode === "explicit";
             return toolResult(
               workOrchestrator.submitWork({
                 principalId: principal.id,
@@ -1440,8 +1456,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 title,
                 description,
                 ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
-                ...(normalizedRepositoryId === undefined ? {} : { repositoryId: normalizedRepositoryId }),
-                ...(normalizedDeploymentId === undefined ? {} : { deploymentId: normalizedDeploymentId }),
+                ...(explicitRouting && normalizedRepositoryId !== undefined
+                  ? { repositoryId: normalizedRepositoryId }
+                  : {}),
+                ...(explicitRouting && normalizedDeploymentId !== undefined
+                  ? { deploymentId: normalizedDeploymentId }
+                  : {}),
                 ...(priority === undefined ? {} : { priority }),
                 sourceSessionId: sessionId ?? transportSessionId,
                 sourceClient: client?.slice(0, 200) || "mcp",
