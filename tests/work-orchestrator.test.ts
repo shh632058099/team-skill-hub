@@ -117,6 +117,71 @@ test("cancelWork cancels the linked task and closes the active WorkAttempt", () 
     f.close();
   }
 });
+test("active reconciliation advances completed tasks without a client read", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-active-reconcile" });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "background result", 2_000, { commitSha: "c".repeat(40) });
+
+    const processed = f.orchestrator.reconcileActive(3_000, 100);
+
+    assert.deepEqual(processed, [detail.work.workItemId]);
+    const persisted = f.work.getWork(detail.work.workItemId, "alice", "team-a");
+    assert.equal(persisted.status, "waiting_review");
+  } finally {
+    f.close();
+  }
+});
+
+test("startup reconciliation recovers durable work after stores reopen", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-restart-"));
+  const db = path.join(dir, "runtime.sqlite");
+  let experts = new ExpertStore(db);
+  let tasks = new ExpertTaskStore(db);
+  let work = new WorkOrchestrationStore(db);
+  try {
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA Expert",
+      capabilities: ["ota"],
+      keywords: ["ota", "upgrade"],
+      active: true,
+    });
+    experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    let orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+    const detail = orchestrator.submitWork({ ...submission, idempotencyKey: "work-restart-reconcile" });
+    const claim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    tasks.complete(claim, "completed while hub is restarting", 2_000, { commitSha: "d".repeat(40) });
+
+    work.close();
+    tasks.close();
+    experts.close();
+
+    experts = new ExpertStore(db);
+    tasks = new ExpertTaskStore(db);
+    work = new WorkOrchestrationStore(db);
+    orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+
+    const processed = orchestrator.reconcileStartup(3_000, 100);
+
+    assert.ok(processed.includes(detail.work.workItemId));
+    assert.equal(work.getWork(detail.work.workItemId, "alice", "team-a").status, "waiting_review");
+  } finally {
+    work.close();
+    tasks.close();
+    experts.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("successful task becomes revision-bound evidence then accepted review completes work", () => {
   const f = fixture();

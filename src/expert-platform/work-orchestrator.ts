@@ -170,6 +170,20 @@ export class WorkOrchestrator {
     return processed;
   }
 
+  reconcileActive(now = Date.now(), limit = 100): string[] {
+    const processed: string[] = [];
+    for (const workItemId of this.workStore.listReconciliationWorkIds(now, limit)) {
+      const work = this.workStore.getWorkInternal(workItemId);
+      this.reconcileWork(workItemId, work.principalId, work.scope, now);
+      processed.push(workItemId);
+    }
+    return processed;
+  }
+
+  reconcileStartup(now = Date.now(), limit = 100): string[] {
+    return this.reconcileActive(now, limit);
+  }
+
   handleTaskFeedback(
     taskId: string,
     principalId: string,

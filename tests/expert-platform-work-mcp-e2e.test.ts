@@ -7,6 +7,9 @@ import { SkillHubApplicationService } from "../src/application.js";
 import { LoggingEventSink } from "../src/events.js";
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
+import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-service.js";
+import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
+import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
 import { MemoryRegistryStore } from "../src/registry.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
 import { ApiKeyAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
@@ -39,6 +42,7 @@ async function callMcp(
     },
     body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
   });
+
   assert.equal(response.status, 200);
   const body = await response.text();
   const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
@@ -246,6 +250,101 @@ test("MCP Work API drives durable work through review, rework, authorization and
     if (app) await app.close();
     if (oldRuntimeDb === undefined) delete process.env.EXPERT_RUNTIME_DB;
     else process.env.EXPERT_RUNTIME_DB = oldRuntimeDb;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("server startup reconciliation advances durable completed work without a client read", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "work-reconcile-server-"));
+  const runtimeDb = path.join(root, "runtime.sqlite");
+  const dataDir = path.join(root, "app-data");
+  const oldRuntimeDb = process.env.EXPERT_RUNTIME_DB;
+  const oldInterval = process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS;
+  process.env.EXPERT_RUNTIME_DB = runtimeDb;
+  process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS = "20";
+
+  let app: Awaited<ReturnType<typeof StartServer>> | undefined;
+  let observer: WorkOrchestrationStore | undefined;
+  try {
+    const experts = new ExpertStore(runtimeDb);
+    const tasks = new ExpertTaskStore(runtimeDb);
+    const work = new WorkOrchestrationStore(runtimeDb);
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA Expert",
+      capabilities: ["ota"],
+      keywords: ["ota"],
+      active: true,
+    });
+    experts.putDeployment({
+      id: "ota-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    const orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+    const detail = orchestrator.submitWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "server-reconcile-1",
+      sourceType: "mcp",
+      title: "Recover completed work",
+      description: "observe task completion after server restart",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      repositoryId: "ota-repo",
+    });
+    const claim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    tasks.complete(claim, "done before restart", 2_000, { commitSha: "e".repeat(40) });
+    work.close();
+    tasks.close();
+    experts.close();
+
+    const auth = new ApiKeyAuthenticationProvider({
+      "work-reconcile-key": { id: "alice", roles: ["developer", "internal"], tenantId: "team-a" },
+    });
+    const search = new SqliteFtsSearchBackend();
+    const config: AppConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: [],
+      authentication: { mode: "api-key", apiKeys: {} },
+      repositories: [],
+    };
+    const service = new SkillHubApplicationService(
+      config,
+      [],
+      new MemoryRegistryStore(),
+      search,
+      new SearchRoutingStrategy(search),
+      auth,
+      new StaticRolePermissionProvider(),
+      [],
+      new LoggingEventSink(),
+    );
+    await service.initialize();
+    const { startServer } = await import("../src/server.js");
+    app = await startServer(config, service);
+
+    observer = new WorkOrchestrationStore(runtimeDb);
+    const deadline = Date.now() + 1_500;
+    let status = observer.getWork(detail.work.workItemId, "alice", "team-a").status;
+    while (status !== "waiting_review" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      status = observer.getWork(detail.work.workItemId, "alice", "team-a").status;
+    }
+    assert.equal(status, "waiting_review");
+  } finally {
+    observer?.close();
+    if (app) await app.close();
+    if (oldRuntimeDb === undefined) delete process.env.EXPERT_RUNTIME_DB;
+    else process.env.EXPERT_RUNTIME_DB = oldRuntimeDb;
+    if (oldInterval === undefined) delete process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS;
+    else process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS = oldInterval;
     rmSync(root, { recursive: true, force: true });
   }
 });

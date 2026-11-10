@@ -1213,6 +1213,27 @@ export class WorkOrchestrationStore {
     ).map((row) => String(row.work_item_id));
   }
 
+  listReconciliationWorkIds(now = Date.now(), limit = 100): string[] {
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    return (
+      this.db
+        .prepare(
+          [
+            "SELECT work_item_id FROM work_items",
+            "WHERE status NOT IN ('completed','failed','cancelled','waiting_review')",
+            "AND (",
+            "status IN ('queued','rework')",
+            "OR (status='running' AND (next_action_at IS NULL OR next_action_at<=?))",
+            "OR (status='blocked' AND next_action_at IS NOT NULL AND next_action_at<=?)",
+            ")",
+            "ORDER BY CASE WHEN next_action_at IS NULL THEN 0 ELSE 1 END, COALESCE(next_action_at,updated_at), updated_at",
+            "LIMIT ?",
+          ].join(" "),
+        )
+        .all(now, now, boundedLimit) as Row[]
+    ).map((row) => String(row.work_item_id));
+  }
+
   listEvents(workItemId: string, afterEventId = 0, limit = 100): { events: WorkEventRecord[]; nextEventId: number } {
     const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
     const rows = this.db

@@ -30,6 +30,9 @@ import {
   type ExpertMcpProfile,
 } from "./expert-platform/expert-store.js";
 import { ExpertTaskStore } from "./expert-platform/task-store.js";
+import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service.js";
+import { WorkOrchestrationStore } from "./expert-platform/work-orchestration-store.js";
+import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
 import {
@@ -217,6 +220,25 @@ export async function startServer(
   );
   const mcpHandler = createSkillHubMcpHandler(service);
   const nodeHandler = toNodeHandler(mcpHandler);
+
+  const workRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+  let workReconcileTimer: ReturnType<typeof setInterval> | undefined;
+  let workRuntimeResources:
+    | { work: WorkOrchestrationStore; tasks: ExpertTaskStore; experts: ExpertStore; orchestrator: WorkOrchestrator }
+    | undefined;
+  if (workRuntimeDb) {
+    const work = new WorkOrchestrationStore(workRuntimeDb);
+    const tasks = new ExpertTaskStore(workRuntimeDb);
+    const experts = new ExpertStore(workRuntimeDb);
+    const orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+    workRuntimeResources = { work, tasks, experts, orchestrator };
+    app.addHook("onClose", async () => {
+      if (workReconcileTimer) clearInterval(workReconcileTimer);
+      work.close();
+      tasks.close();
+      experts.close();
+    });
+  }
 
   const adminLoginRequired = process.env.ADMIN_LOGIN_REQUIRED === "true";
   const adminSessionCookieSecure = process.env.ADMIN_SESSION_COOKIE_SECURE === "true";
@@ -3747,5 +3769,29 @@ export async function startServer(
   });
 
   await app.listen({ host: config.host, port: config.port });
+  if (workRuntimeResources) {
+    const intervalMs = Math.max(
+      10,
+      Math.min(Number(process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS ?? 1000) || 1000, 60_000),
+    );
+    const limit = Math.max(1, Math.min(Number(process.env.EXPERT_WORK_RECONCILE_LIMIT ?? 100) || 100, 500));
+    const reconcile = (startup: boolean) => {
+      try {
+        if (startup) workRuntimeResources!.orchestrator.reconcileStartup(Date.now(), limit);
+        else workRuntimeResources!.orchestrator.reconcileActive(Date.now(), limit);
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "work.reconcile_failed",
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    };
+    reconcile(true);
+    workReconcileTimer = setInterval(() => reconcile(false), intervalMs);
+    workReconcileTimer.unref?.();
+  }
   return app;
 }
