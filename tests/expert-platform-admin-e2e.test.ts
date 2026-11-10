@@ -520,6 +520,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(reconciledWork.workspaceChangeSummary, null);
     assert.equal(Array.isArray(reconciledWork.reviews), true);
     assert.equal(Array.isArray(reconciledWork.approvals), true);
+    assert.equal(reconciledWork.publication, null);
 
     const workCancel = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/cancel", {
       method: "POST",
@@ -580,6 +581,8 @@ test("Admin expert configuration UI manages definitions and execution configurat
 
 // Task detail must expose the persisted client/session identity to operators.
 test("expert task detail UI displays persisted source session and client", () => {
+  assert.match(ADMIN_EXPERTS_HTML, /Publication/);
+  assert.match(ADMIN_EXPERTS_HTML, /workPublication/);
   assert.match(ADMIN_EXPERTS_HTML, /source_session_id/);
   assert.match(ADMIN_EXPERTS_HTML, /source_client/);
 });

@@ -512,6 +512,17 @@ test("MCP Work API drives durable work through review, rework, authorization and
         commitAuthorName: "Team Skill Hub",
         commitAuthorEmail: "team-skill-hub@local.invalid",
         commitMessage: "Publication approval MCP\n",
+        executionSnapshot: {
+          workspacePath: "/srv/workspaces/mcp-publication",
+          repositoryUrl: "https://example.test/ota.git",
+          defaultBranch: "main",
+          branchPrefix: "skillhub/work/",
+          protectedBranches: ["main"],
+          allowedPushRemote: "origin",
+          credentialRef: "publish-ref",
+          expectedContentRevision: publicationSummary.contentRevision,
+          approvedChangeSummary: publicationSummary,
+        },
       },
       13_000,
     );
@@ -526,6 +537,32 @@ test("MCP Work API drives durable work through review, rework, authorization and
       13_100,
     );
     publicationStore.close();
+    const publicationVisible = await callMcp(mcpUrl, apiKey, 82, "get_work", {
+      workItemId: publicationSubmission.work.workItemId,
+    });
+    assert.deepEqual(publicationVisible.publication, {
+      publicationId: preparedPublication.publicationId,
+      state: "prepared",
+      sourceSubjectRevision: publicationWorkspaceSubject,
+      repositoryId: "ota-repo",
+      publicationPolicyRevision: 1,
+      branchName: "skillhub/work/mcp-publication-a1",
+      commitSha: "2".repeat(40),
+      treeSha: "3".repeat(40),
+      artifactRef: "publication:" + preparedPublication.publicationId,
+      approvalState: "pending",
+      retryCount: 0,
+      nextAttemptAt: null,
+      lastErrorCode: null,
+      lastErrorContext: null,
+      preparedAt: 13_100,
+      approvedAt: null,
+      pushedAt: null,
+    });
+    const visibleJson = JSON.stringify(publicationVisible);
+    assert.equal(visibleJson.includes("credentialRef"), false);
+    assert.equal(visibleJson.includes("publish-ref"), false);
+    assert.equal(visibleJson.includes("executionSnapshot"), false);
     const publicationSubject = "publication:" + preparedPublication.publicationId + ":" + preparedPublication.commitSha;
 
     await assert.rejects(

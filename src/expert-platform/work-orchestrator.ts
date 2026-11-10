@@ -45,6 +45,25 @@ export interface WorkDetail {
   workspaceChangeSummary: TaskRecord["workspaceChangeSummary"];
   reviews: ReviewDecisionRecord[];
   approvals: WorkApprovalRecord[];
+  publication: {
+    publicationId: string;
+    state: WorkPublicationRecord["state"];
+    sourceSubjectRevision: string;
+    repositoryId: string;
+    publicationPolicyRevision: number;
+    branchName: string;
+    commitSha: string | null;
+    treeSha: string | null;
+    artifactRef: string | null;
+    approvalState: "pending" | "approved" | "rejected";
+    retryCount: number;
+    nextAttemptAt: number | null;
+    lastErrorCode: string | null;
+    lastErrorContext: string | null;
+    preparedAt: number | null;
+    approvedAt: number | null;
+    pushedAt: number | null;
+  } | null;
 }
 
 export interface WorkReviewInput {
@@ -1140,6 +1159,43 @@ export class WorkOrchestrator {
     const workspace = latest?.workspaceId ? this.workStore.getWorkspace(latest.workspaceId) : null;
     const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const verificationResults = currentTask?.verificationResults ?? [];
+    const approvals = this.workStore.listApprovals(workItemId);
+    const publicationRecord = this.publications?.listPublications(workItemId).at(-1) ?? null;
+    const publicationSubject = publicationRecord?.commitSha
+      ? "publication:" + publicationRecord.publicationId + ":" + publicationRecord.commitSha
+      : null;
+    const publicationApproval = publicationSubject
+      ? approvals
+          .filter(
+            (approval) =>
+              !approval.stale &&
+              approval.approvalScope === "publish_work_branch" &&
+              approval.subjectType === "publication_artifact" &&
+              approval.subjectRevision === publicationSubject,
+          )
+          .at(-1)
+      : undefined;
+    const publication = publicationRecord
+      ? {
+          publicationId: publicationRecord.publicationId,
+          state: publicationRecord.state,
+          sourceSubjectRevision: publicationRecord.sourceSubjectRevision,
+          repositoryId: publicationRecord.repositoryId,
+          publicationPolicyRevision: publicationRecord.publicationPolicyRevision,
+          branchName: publicationRecord.branchName,
+          commitSha: publicationRecord.commitSha,
+          treeSha: publicationRecord.treeSha,
+          artifactRef: publicationRecord.artifactRef,
+          approvalState: (publicationApproval?.decision ?? "pending") as "pending" | "approved" | "rejected",
+          retryCount: publicationRecord.retryCount,
+          nextAttemptAt: publicationRecord.nextAttemptAt,
+          lastErrorCode: publicationRecord.lastErrorCode,
+          lastErrorContext: publicationRecord.lastErrorContext,
+          preparedAt: publicationRecord.preparedAt,
+          approvedAt: publicationRecord.approvedAt,
+          pushedAt: publicationRecord.pushedAt,
+        }
+      : null;
     return {
       work,
       attempts,
@@ -1164,7 +1220,8 @@ export class WorkOrchestrator {
       },
       workspaceChangeSummary: currentTask?.workspaceChangeSummary ?? null,
       reviews: this.workStore.listReviewDecisions(workItemId),
-      approvals: this.workStore.listApprovals(workItemId),
+      approvals,
+      publication,
     };
   }
 }
