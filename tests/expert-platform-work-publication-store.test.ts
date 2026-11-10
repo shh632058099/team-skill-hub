@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
 
 function fixture() {
@@ -282,6 +283,157 @@ test("transient push failures use bounded durable backoff before blocking", () =
     assert.equal(blocked.state, "blocked");
     assert.equal((blocked as any).retryCount, 3);
     assert.equal((blocked as any).nextAttemptAt, null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy publication schema with NOT NULL push_refspec migrates cleanly", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-legacy-migration-"));
+  const file = path.join(dir, "runtime.sqlite");
+  try {
+    const db = new DatabaseSync(file);
+    db.exec(
+      [
+        "CREATE TABLE work_publications (",
+        " publication_id TEXT PRIMARY KEY,",
+        " work_item_id TEXT NOT NULL,",
+        " work_attempt_id TEXT NOT NULL,",
+        " workspace_id TEXT NOT NULL,",
+        " state TEXT NOT NULL,",
+        " source_subject_revision TEXT NOT NULL,",
+        " base_commit TEXT NOT NULL,",
+        " repository_id TEXT NOT NULL,",
+        " repository_identity_revision INTEGER,",
+        " publication_policy_revision INTEGER NOT NULL,",
+        " branch_name TEXT NOT NULL,",
+        " commit_sha TEXT,",
+        " tree_sha TEXT,",
+        " artifact_ref TEXT,",
+        " push_remote_name TEXT NOT NULL,",
+        " push_refspec TEXT NOT NULL,",
+        " owner_worker_id TEXT NOT NULL,",
+        " commit_timestamp INTEGER NOT NULL,",
+        " commit_author_name TEXT NOT NULL,",
+        " commit_author_email TEXT NOT NULL,",
+        " commit_message TEXT NOT NULL,",
+        " execution_snapshot_json TEXT,",
+        " prepared_at INTEGER,",
+        " approved_at INTEGER,",
+        " pushed_at INTEGER,",
+        " last_error_code TEXT,",
+        " last_error_context TEXT,",
+        " operation_fencing INTEGER NOT NULL DEFAULT 0,",
+        " operation_lease_until INTEGER,",
+        " operation_claimed_worker_id TEXT,",
+        " retry_count INTEGER NOT NULL DEFAULT 0,",
+        " next_attempt_at INTEGER,",
+        " created_at INTEGER NOT NULL,",
+        " updated_at INTEGER NOT NULL,",
+        " UNIQUE(work_attempt_id, repository_id)",
+        ");",
+      ].join("\n"),
+    );
+    db.prepare(
+      "INSERT INTO work_publications(publication_id,work_item_id,work_attempt_id,workspace_id,state,source_subject_revision,base_commit,repository_id,repository_identity_revision,publication_policy_revision,branch_name,commit_sha,tree_sha,artifact_ref,push_remote_name,push_refspec,owner_worker_id,commit_timestamp,commit_author_name,commit_author_email,commit_message,execution_snapshot_json,prepared_at,approved_at,pushed_at,last_error_code,last_error_context,operation_fencing,operation_lease_until,operation_claimed_worker_id,retry_count,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    ).run(
+      "pub-legacy",
+      "work-1",
+      "attempt-1",
+      "workspace-1",
+      "prepared",
+      "workspace:" + "a".repeat(64),
+      "b".repeat(40),
+      "repo-1",
+      1,
+      1,
+      "skillhub/work/legacy-a1",
+      "c".repeat(40),
+      "d".repeat(40),
+      "publication:pub-legacy",
+      "origin",
+      "c".repeat(40) + ":refs/heads/skillhub/work/legacy-a1",
+      "worker-1",
+      1800000000000,
+      "Team Skill Hub",
+      "team-skill-hub@local.invalid",
+      "Legacy\n",
+      null,
+      1000,
+      null,
+      null,
+      null,
+      null,
+      0,
+      null,
+      null,
+      0,
+      null,
+      900,
+      1000,
+    );
+    db.close();
+
+    const migrated = new WorkPublicationStore(file);
+    const publication = migrated.getPublication("pub-legacy");
+    assert.equal(publication.pushRefspec, "c".repeat(40) + ":refs/heads/skillhub/work/legacy-a1");
+    assert.equal(publication.retryCount, 0);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("publication completion rejects operation mismatch even with current fencing", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-operation-fencing-"));
+  try {
+    const store = new WorkPublicationStore(path.join(dir, "runtime.sqlite"));
+    const publication = store.createOrReusePublication({
+      ...fixture(),
+      executionSnapshot: {
+        workspacePath: "/srv/workspaces/work1",
+        repositoryUrl: "/srv/remotes/ota.git",
+        defaultBranch: "main",
+        branchPrefix: "skillhub/work/",
+        protectedBranches: ["main"],
+        allowedPushRemote: "origin",
+        expectedContentRevision: "a".repeat(64),
+        approvedChangeSummary: {
+          baseCommit: "b".repeat(40),
+          changedFiles: ["README.md"],
+          addedFiles: [],
+          deletedFiles: [],
+          diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+          contentRevision: "a".repeat(64),
+        },
+      },
+    } as any);
+    store.transitionPublication(publication.publicationId, "prepared", {
+      commitSha: "c".repeat(40),
+      treeSha: "d".repeat(40),
+      artifactRef: "publication:" + publication.publicationId,
+    });
+    store.transitionPublication(publication.publicationId, "approved");
+    const push = store.claimPublicationOperation("worker-1", 2000, 30_000)!;
+    assert.equal(push.operation, "push");
+    assert.throws(
+      () =>
+        store.completePublicationOperation(
+          { ...push, operation: "prepare" },
+          {
+            success: true,
+            commitSha: "e".repeat(40),
+            treeSha: "f".repeat(40),
+            artifactRef: "publication:" + publication.publicationId,
+            pushRefspec: "e".repeat(40) + ":refs/heads/" + publication.branchName,
+          },
+          2100,
+        ),
+      /STALE_PUBLICATION_OPERATION|INVALID_PUBLICATION_OPERATION/,
+    );
+    assert.equal(store.getPublication(publication.publicationId).state, "pushing");
+    assert.equal(store.getPublication(publication.publicationId).commitSha, "c".repeat(40));
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

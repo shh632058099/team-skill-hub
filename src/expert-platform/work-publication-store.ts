@@ -269,7 +269,7 @@ export class WorkPublicationStore {
             "  operation_lease_until INTEGER,",
             "  operation_claimed_worker_id TEXT,",
             "  retry_count INTEGER NOT NULL DEFAULT 0,",
-            "  next_attempt_at INTEGER",
+            "  next_attempt_at INTEGER,",
             "  created_at INTEGER NOT NULL,",
             "  updated_at INTEGER NOT NULL,",
             "  UNIQUE(work_attempt_id, repository_id)",
@@ -561,8 +561,10 @@ export class WorkPublicationStore {
         Row | undefined;
       if (!row) throw new Error("PUBLICATION_NOT_FOUND");
       const current = this.fromRow(row);
+      const expectedState: WorkPublicationState = claim.operation === "prepare" ? "preparing" : "pushing";
       if (
         current.ownerWorkerId !== claim.ownerWorkerId ||
+        current.state !== expectedState ||
         Number(row.operation_fencing ?? 0) !== claim.fencing ||
         String(row.operation_claimed_worker_id ?? "") !== claim.ownerWorkerId ||
         Number(row.operation_lease_until ?? 0) < now
