@@ -452,3 +452,80 @@ test("dispatch resolves MCP Profile defaults with sparse overrides and snapshots
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("dispatch filters deployments by required runtime profile and fails closed on mismatch", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-runtime-profile-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA",
+      capabilities: ["ota"],
+      keywords: ["upgrade"],
+      active: true,
+    });
+    const common = {
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      active: true,
+    };
+    experts.putDeployment({ ...common, id: "ota-ro", runtimeProfile: "codex-readonly" });
+    experts.putDeployment({ ...common, id: "ota-rw", runtimeProfile: "codex-workspace-write" });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+
+    const auto = dispatch.resolve({
+      principalId: "alice",
+      scope: "org",
+      problem: "upgrade failure",
+      repositoryId: "ota-repo",
+      requiredRuntimeProfile: "codex-workspace-write",
+    });
+    assert.equal(auto.deploymentId, "ota-rw");
+
+    assert.throws(
+      () =>
+        dispatch.resolve({
+          principalId: "alice",
+          scope: "org",
+          problem: "upgrade failure",
+          repositoryId: "ota-repo",
+          requiredRuntimeProfile: "claude-workspace-write",
+        }),
+      /RUNTIME_PROFILE_UNAVAILABLE/,
+    );
+
+    assert.throws(
+      () =>
+        dispatch.resolve({
+          principalId: "alice",
+          scope: "org",
+          problem: "upgrade failure",
+          expertId: "ota",
+          selectionMode: "explicit",
+          repositoryId: "ota-repo",
+          deploymentId: "ota-ro",
+          requiredRuntimeProfile: "codex-workspace-write",
+        }),
+      /RUNTIME_PROFILE_MISMATCH/,
+    );
+
+    const legacy = dispatch.resolve({
+      principalId: "alice",
+      scope: "org",
+      problem: "upgrade failure",
+      expertId: "ota",
+      selectionMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-ro",
+    });
+    assert.equal(legacy.deploymentId, "ota-ro");
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

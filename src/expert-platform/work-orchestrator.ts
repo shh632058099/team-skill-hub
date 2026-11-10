@@ -66,6 +66,11 @@ function isBlocker(reason: string): string | null {
     return "resource_unavailable";
   if (
     normalized.includes("DEPLOYMENT_FORBIDDEN") ||
+    normalized.includes("RUNTIME_PROFILE_MISMATCH") ||
+    normalized.includes("RUNTIME_PROFILE_UNAVAILABLE") ||
+    normalized.includes("RUNTIME_PROFILE_UNSUPPORTED") ||
+    normalized.includes("RUNTIME_PROFILE_REQUIRED") ||
+    normalized.includes("WORKSPACE_WRITE_NOT_ALLOWED") ||
     normalized.includes("EXPERT_FORBIDDEN") ||
     normalized.includes("MCP_PROFILE_TOOL_NOT_ALLOWED") ||
     normalized.includes("STALE_DEPLOYMENT_CONFIG") ||
@@ -442,6 +447,7 @@ export class WorkOrchestrator {
     parentWorkAttemptId: string | null,
     now: number,
   ): WorkAttemptRecord {
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const resolved = this.dispatch.resolve({
       principalId: work.principalId,
       scope: work.scope,
@@ -450,6 +456,7 @@ export class WorkOrchestrator {
       selectionMode: work.requestedExpertId ? "explicit" : "auto",
       repositoryId: work.repositoryId ?? undefined,
       deploymentId: work.requestedDeploymentId ?? undefined,
+      requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile,
     });
     const attempt = this.workStore.createWorkAttempt(
       work.workItemId,
@@ -506,6 +513,8 @@ export class WorkOrchestrator {
         selectionMode: "explicit",
         repositoryId: work.repositoryId ?? undefined,
         deploymentId: attempt.deploymentId,
+        requiredRuntimeProfile: this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion).definition
+          .execution.requiredRuntimeProfile,
       });
       if (fresh.deploymentConfigVersion !== attempt.deploymentConfigVersion) {
         throw new Error("STALE_DEPLOYMENT_CONFIG");
