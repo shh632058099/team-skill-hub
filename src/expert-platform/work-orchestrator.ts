@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ExpertDispatchService, ResolvedDispatch } from "./expert-dispatch-service.js";
 import type { ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord, TaskRunTurnRecord } from "./task-store.js";
 import {
@@ -166,6 +166,8 @@ function asResolvedDispatch(binding: Record<string, unknown>): ResolvedDispatch 
 }
 
 export class WorkOrchestrator {
+  private readonly orchestrationOwnerId = randomUUID();
+  private readonly orchestrationLeaseMs = 30_000;
   constructor(
     private readonly workStore: WorkOrchestrationStore,
     private readonly tasks: ExpertTaskStore,
@@ -258,8 +260,32 @@ export class WorkOrchestrator {
   }
 
   reconcileWork(workItemId: string, principalId: string, scope: string, now = Date.now()): WorkDetail {
+    const current = this.workStore.getWork(workItemId, principalId, scope);
+    if (TERMINAL_WORK.has(current.status)) return this.detail(workItemId, principalId, scope);
+    const claim = this.workStore.claimWorkForOrchestration(
+      workItemId,
+      this.orchestrationOwnerId,
+      now,
+      this.orchestrationLeaseMs,
+    );
+    try {
+      return this.reconcileWorkClaimed(workItemId, principalId, scope, now, claim.epoch);
+    } finally {
+      this.workStore.releaseWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, claim.epoch, now);
+    }
+  }
+
+  private reconcileWorkClaimed(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    now: number,
+    orchestrationEpoch: number,
+  ): WorkDetail {
+    this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     let work = this.workStore.getWork(workItemId, principalId, scope);
     if (TERMINAL_WORK.has(work.status)) return this.detail(workItemId, principalId, scope);
+    this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     work = this.reconcilePublicationLifecycle(work, now);
     if (TERMINAL_WORK.has(work.status) || work.status === "blocked") {
       return this.detail(workItemId, principalId, scope);
@@ -269,6 +295,7 @@ export class WorkOrchestrator {
     if (!attempt) {
       if (work.status === "queued") {
         try {
+          this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
           attempt = this.startAttempt(work, "initial", null, now);
           work = this.workStore.getWork(workItemId, principalId, scope);
         } catch (error) {
@@ -283,6 +310,7 @@ export class WorkOrchestrator {
 
     if (!attempt.taskId) {
       try {
+        this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
         attempt = this.dispatchAttempt(work, attempt);
       } catch (error) {
         const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now);
@@ -322,6 +350,7 @@ export class WorkOrchestrator {
           );
           return this.detail(workItemId, principalId, scope);
         }
+        this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
         this.tasks.scheduleContinuation(task.taskId, task.runId, continuationReason, now, workspace.ownerWorkerId);
       } else if (
         (task.status !== "queued" && task.status !== "running") ||
@@ -339,16 +368,19 @@ export class WorkOrchestrator {
     }
 
     if (task.status === "succeeded") {
+      this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
       return this.reconcileSucceeded(work, attempt, task, now);
     }
 
     if (task.status === "failed") {
+      this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
       return this.reconcileFailed(work, attempt, task, now);
     }
 
     if (task.status === "cancelled") {
       work = this.workStore.getWork(workItemId, principalId, scope);
       if (work.activeWorkAttemptId === attempt.workAttemptId) {
+        this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
         this.workStore.finishWorkAttempt(
           workItemId,
           attempt.workAttemptId,

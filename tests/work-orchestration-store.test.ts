@@ -1045,3 +1045,53 @@ test("publication_succeeded token is invalid without publication-required workfl
     );
   });
 });
+
+test("durable orchestration claim is exclusive, fenced by epoch, and survives reopen", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-claim-"));
+  const file = path.join(dir, "runtime.db");
+  let store = new WorkOrchestrationStore(file);
+  try {
+    const work = store.createOrReuseWork(
+      {
+        principalId: "alice",
+        scope: "team-a",
+        idempotencyKey: "claim-1",
+        sourceType: "mcp",
+        title: "Claim",
+        description: "claim",
+      },
+      100,
+    );
+
+    const first = store.claimWorkForOrchestration(work.workItemId, "orchestrator-a", 200, 1_000);
+    assert.equal(first.ownerId, "orchestrator-a");
+    assert.equal(first.epoch, work.orchestrationEpoch + 1);
+    assert.equal(store.getWork(work.workItemId, "alice", "team-a").orchestrationOwnerId, "orchestrator-a");
+    assert.throws(
+      () => store.claimWorkForOrchestration(work.workItemId, "orchestrator-b", 300, 1_000),
+      /WORK_ORCHESTRATION_CLAIMED/,
+    );
+
+    store.close();
+    store = new WorkOrchestrationStore(file);
+    const reopened = store.getWork(work.workItemId, "alice", "team-a");
+    assert.equal(reopened.orchestrationOwnerId, "orchestrator-a");
+    assert.equal(reopened.orchestrationLeaseUntil, 1_200);
+    store.assertWorkOrchestrationClaim(work.workItemId, "orchestrator-a", first.epoch, 1_199);
+
+    const second = store.claimWorkForOrchestration(work.workItemId, "orchestrator-b", 1_201, 1_000);
+    assert.equal(second.ownerId, "orchestrator-b");
+    assert.equal(second.epoch, first.epoch + 1);
+    assert.throws(
+      () => store.assertWorkOrchestrationClaim(work.workItemId, "orchestrator-a", first.epoch, 1_202),
+      /STALE_ORCHESTRATION_CLAIM/,
+    );
+    store.assertWorkOrchestrationClaim(work.workItemId, "orchestrator-b", second.epoch, 1_202);
+
+    store.releaseWorkOrchestrationClaim(work.workItemId, "orchestrator-b", second.epoch, 1_203);
+    assert.equal(store.getWork(work.workItemId, "alice", "team-a").orchestrationOwnerId, null);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

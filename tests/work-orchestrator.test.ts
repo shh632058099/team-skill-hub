@@ -169,6 +169,27 @@ test("submitWork creates one WorkAttempt and one linked ExpertTask and reuses th
   }
 });
 
+test("orchestrator respects durable foreign claim and only dispatches after the lease expires", () => {
+  const f = fixture();
+  try {
+    const work = f.work.createOrReuseWork({ ...submission, idempotencyKey: "work-foreign-claim" }, 100);
+    f.work.claimWorkForOrchestration(work.workItemId, "other-orchestrator", 200, 1_000);
+
+    assert.throws(
+      () => f.orchestrator.reconcileWork(work.workItemId, "alice", "team-a", 300),
+      /WORK_ORCHESTRATION_CLAIMED/,
+    );
+    assert.equal(f.work.listAttempts(work.workItemId).length, 0);
+
+    const recovered = f.orchestrator.reconcileWork(work.workItemId, "alice", "team-a", 1_201);
+    assert.equal(recovered.attempts.length, 1);
+    assert.ok(recovered.currentTask);
+    assert.equal(f.work.getWork(work.workItemId, "alice", "team-a").orchestrationOwnerId, null);
+  } finally {
+    f.close();
+  }
+});
+
 test("reconciliation recovers an attempt created before its deterministic task link without duplicate dispatch", () => {
   const f = fixture();
   try {

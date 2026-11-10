@@ -100,6 +100,9 @@ export interface WorkItemRecord {
   workflowVersion: number;
   activeWorkAttemptId: string | null;
   orchestrationEpoch: number;
+  orchestrationOwnerId: string | null;
+  orchestrationLeaseUntil: number | null;
+  orchestrationClaimedAt: number | null;
   priority: number | null;
   nextActionType: string | null;
   nextActionAt: number | null;
@@ -115,6 +118,14 @@ export interface WorkItemRecord {
   blockedContext: string | null;
   reusedExistingWork?: boolean;
   deduplicationReason?: "idempotency_key" | "source_identity";
+}
+
+export interface WorkOrchestrationClaim {
+  workItemId: string;
+  ownerId: string;
+  epoch: number;
+  leaseUntil: number;
+  claimedAt: number;
 }
 
 export interface CreateWorkAttemptInput {
@@ -340,6 +351,9 @@ export class WorkOrchestrationStore {
         "  workflow_version INTEGER NOT NULL,",
         "  active_work_attempt_id TEXT,",
         "  orchestration_epoch INTEGER NOT NULL DEFAULT 1,",
+        "  orchestration_owner_id TEXT,",
+        "  orchestration_lease_until INTEGER,",
+        "  orchestration_claimed_at INTEGER,",
         "  priority INTEGER,",
         "  next_action_type TEXT,",
         "  next_action_at INTEGER,",
@@ -457,6 +471,15 @@ export class WorkOrchestrationStore {
     );
     if (!workColumns.has("next_action_context")) {
       this.db.exec("ALTER TABLE work_items ADD COLUMN next_action_context TEXT");
+    }
+    if (!workColumns.has("orchestration_owner_id")) {
+      this.db.exec("ALTER TABLE work_items ADD COLUMN orchestration_owner_id TEXT");
+    }
+    if (!workColumns.has("orchestration_lease_until")) {
+      this.db.exec("ALTER TABLE work_items ADD COLUMN orchestration_lease_until INTEGER");
+    }
+    if (!workColumns.has("orchestration_claimed_at")) {
+      this.db.exec("ALTER TABLE work_items ADD COLUMN orchestration_claimed_at INTEGER");
     }
     this.migrateWorkspaceSchema();
     this.ensureWorkspaceCleanupSchema();
@@ -753,6 +776,96 @@ export class WorkOrchestrationStore {
     const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row | undefined;
     if (!row) throw new Error("WORK_NOT_FOUND");
     return this.fromWorkRow(row);
+  }
+
+  claimWorkForOrchestration(
+    workItemId: string,
+    ownerId: string,
+    now = Date.now(),
+    leaseMs = 30_000,
+  ): WorkOrchestrationClaim {
+    const owner = requiredText(ownerId, 200);
+    if (!owner || !Number.isFinite(now) || !Number.isFinite(leaseMs) || leaseMs <= 0) {
+      throw new Error("INVALID_ORCHESTRATION_CLAIM");
+    }
+    const leaseUntil = now + leaseMs;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row | undefined;
+      if (!row) throw new Error("WORK_NOT_FOUND");
+      const work = this.fromWorkRow(row);
+      if (TERMINAL_WORK_STATUSES.has(work.status)) throw new Error("WORK_ALREADY_TERMINAL");
+      if (
+        work.orchestrationOwnerId &&
+        work.orchestrationOwnerId !== owner &&
+        work.orchestrationLeaseUntil !== null &&
+        work.orchestrationLeaseUntil > now
+      ) {
+        throw new Error("WORK_ORCHESTRATION_CLAIMED");
+      }
+      if (
+        work.orchestrationOwnerId === owner &&
+        work.orchestrationLeaseUntil !== null &&
+        work.orchestrationLeaseUntil > now
+      ) {
+        this.db
+          .prepare(
+            "UPDATE work_items SET orchestration_lease_until=?,orchestration_claimed_at=? WHERE work_item_id=? AND orchestration_owner_id=? AND orchestration_epoch=?",
+          )
+          .run(leaseUntil, now, workItemId, owner, work.orchestrationEpoch);
+        this.db.exec("COMMIT");
+        return {
+          workItemId,
+          ownerId: owner,
+          epoch: work.orchestrationEpoch,
+          leaseUntil,
+          claimedAt: now,
+        };
+      }
+      const nextEpoch = work.orchestrationEpoch + 1;
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET orchestration_owner_id=?,orchestration_lease_until=?,orchestration_claimed_at=?,orchestration_epoch=? WHERE work_item_id=? AND orchestration_epoch=? AND (orchestration_owner_id IS NULL OR orchestration_lease_until IS NULL OR orchestration_lease_until<=? OR orchestration_owner_id=?)",
+        )
+        .run(owner, leaseUntil, now, nextEpoch, workItemId, work.orchestrationEpoch, now, owner);
+      if (changed.changes !== 1) throw new Error("WORK_ORCHESTRATION_CLAIMED");
+      this.db.exec("COMMIT");
+      return { workItemId, ownerId: owner, epoch: nextEpoch, leaseUntil, claimedAt: now };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  assertWorkOrchestrationClaim(workItemId: string, ownerId: string, epoch: number, now = Date.now()): void {
+    const owner = requiredText(ownerId, 200);
+    if (!owner || !Number.isSafeInteger(epoch) || epoch < 1 || !Number.isFinite(now)) {
+      throw new Error("INVALID_ORCHESTRATION_CLAIM");
+    }
+    const row = this.db
+      .prepare(
+        "SELECT orchestration_owner_id,orchestration_epoch,orchestration_lease_until FROM work_items WHERE work_item_id=?",
+      )
+      .get(workItemId) as Row | undefined;
+    if (!row) throw new Error("WORK_NOT_FOUND");
+    if (
+      row.orchestration_owner_id !== owner ||
+      Number(row.orchestration_epoch) !== epoch ||
+      row.orchestration_lease_until == null ||
+      Number(row.orchestration_lease_until) <= now
+    ) {
+      throw new Error("STALE_ORCHESTRATION_CLAIM");
+    }
+  }
+
+  releaseWorkOrchestrationClaim(workItemId: string, ownerId: string, epoch: number, now = Date.now()): void {
+    this.assertWorkOrchestrationClaim(workItemId, ownerId, epoch, now);
+    const changed = this.db
+      .prepare(
+        "UPDATE work_items SET orchestration_owner_id=NULL,orchestration_lease_until=NULL,orchestration_claimed_at=NULL WHERE work_item_id=? AND orchestration_owner_id=? AND orchestration_epoch=?",
+      )
+      .run(workItemId, ownerId, epoch);
+    if (changed.changes !== 1) throw new Error("STALE_ORCHESTRATION_CLAIM");
   }
 
   transitionWork(
@@ -1821,6 +1934,9 @@ export class WorkOrchestrationStore {
       workflowVersion: Number(row.workflow_version),
       activeWorkAttemptId: row.active_work_attempt_id == null ? null : String(row.active_work_attempt_id),
       orchestrationEpoch: Number(row.orchestration_epoch),
+      orchestrationOwnerId: row.orchestration_owner_id == null ? null : String(row.orchestration_owner_id),
+      orchestrationLeaseUntil: row.orchestration_lease_until == null ? null : Number(row.orchestration_lease_until),
+      orchestrationClaimedAt: row.orchestration_claimed_at == null ? null : Number(row.orchestration_claimed_at),
       priority: row.priority == null ? null : Number(row.priority),
       nextActionType: row.next_action_type == null ? null : String(row.next_action_type),
       nextActionAt: row.next_action_at == null ? null : Number(row.next_action_at),
