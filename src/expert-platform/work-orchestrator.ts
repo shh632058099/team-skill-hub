@@ -106,6 +106,11 @@ export class WorkOrchestrator {
     return this.detail(workItemId, principalId, scope);
   }
 
+  getEvents(workItemId: string, principalId: string, scope: string, afterEventId = 0, limit = 100) {
+    this.workStore.getWork(workItemId, principalId, scope);
+    return this.workStore.listEvents(workItemId, afterEventId, limit);
+  }
+
   reconcileWork(workItemId: string, principalId: string, scope: string, now = Date.now()): WorkDetail {
     let work = this.workStore.getWork(workItemId, principalId, scope);
     if (TERMINAL_WORK.has(work.status)) return this.detail(workItemId, principalId, scope);

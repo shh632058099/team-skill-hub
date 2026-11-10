@@ -197,6 +197,15 @@ export interface CompletionGateResult {
   subjectRevision: string | null;
 }
 
+export interface WorkEventRecord {
+  eventId: number;
+  workItemId: string;
+  workAttemptId: string | null;
+  eventType: string;
+  details: Record<string, unknown> | null;
+  createdAt: number;
+}
+
 type Row = Record<string, unknown>;
 
 const DEFAULT_WORKFLOW_ID = "code-fix-default";
@@ -1202,6 +1211,27 @@ export class WorkOrchestrationStore {
         )
         .all(now, boundedLimit) as Row[]
     ).map((row) => String(row.work_item_id));
+  }
+
+  listEvents(workItemId: string, afterEventId = 0, limit = 100): { events: WorkEventRecord[]; nextEventId: number } {
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = this.db
+      .prepare(
+        "SELECT event_id,work_item_id,work_attempt_id,event_type,details,created_at FROM work_events WHERE work_item_id=? AND event_id>? ORDER BY event_id LIMIT ?",
+      )
+      .all(workItemId, Math.max(0, Math.floor(afterEventId)), boundedLimit) as Row[];
+    const events = rows.map((row) => ({
+      eventId: Number(row.event_id),
+      workItemId: String(row.work_item_id),
+      workAttemptId: row.work_attempt_id == null ? null : String(row.work_attempt_id),
+      eventType: String(row.event_type),
+      details: row.details ? (JSON.parse(String(row.details)) as Record<string, unknown>) : null,
+      createdAt: Number(row.created_at),
+    }));
+    return {
+      events,
+      nextEventId: events.at(-1)?.eventId ?? Math.max(0, Math.floor(afterEventId)),
+    };
   }
 
   close(): void {
