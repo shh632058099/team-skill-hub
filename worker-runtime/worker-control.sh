@@ -290,7 +290,8 @@ prepare_instance_env() {
     EXPERT_ALLOW_MANAGED_PATH_OVERRIDES \
     EXPERT_HEARTBEAT_MS \
     EXPERT_POLL_MS \
-    EXPERT_TASK_TIMEOUT_MS
+    EXPERT_TASK_TIMEOUT_MS \
+    EXPERT_TASK_IDLE_TIMEOUT_MS
   set -a
   # shellcheck disable=SC1090
   source "$CONFIG"

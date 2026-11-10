@@ -158,6 +158,31 @@ test("process runner enforces deadline and abort", async () => {
   );
 });
 
+test("process runner enforces optional idle timeout and resets it on output", async () => {
+  await assert.rejects(
+    () =>
+      runCodexProcess({
+        executable: process.execPath,
+        args: ["-e", "setInterval(() => {}, 1000)"],
+        timeoutMs: 1000,
+        idleTimeoutMs: 100,
+      }),
+    /CODEX_IDLE_TIMEOUT/,
+  );
+
+  const output = await runCodexProcess({
+    executable: process.execPath,
+    args: [
+      "-e",
+      "let n=0; const t=setInterval(()=>{process.stdout.write('x'); if(++n===4){clearInterval(t); setTimeout(()=>process.exit(0),20)}},50)",
+    ],
+    timeoutMs: 1000,
+    idleTimeoutMs: 200,
+    parseResult: (value) => value,
+  });
+  assert.equal(output, "xxxx");
+});
+
 test("process runner abort kills the subprocess process group, including child processes", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "codex-abort-tree-"));
   const pidFile = path.join(dir, "child.pid");

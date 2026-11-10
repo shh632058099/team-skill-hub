@@ -27,6 +27,7 @@ export interface ExpertWorkerRuntimeConfig {
   heartbeatMs: number;
   pollMs: number;
   taskTimeoutMs: number;
+  taskIdleTimeoutMs?: number;
   tlsCaPath?: string;
   tlsCertPath?: string;
   tlsKeyPath?: string;
@@ -266,6 +267,9 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     heartbeatMs: positiveInteger(env.EXPERT_HEARTBEAT_MS, 10_000),
     pollMs: positiveInteger(env.EXPERT_POLL_MS, 3_000),
     taskTimeoutMs: positiveInteger(env.EXPERT_TASK_TIMEOUT_MS, 120_000),
+    ...(env.EXPERT_TASK_IDLE_TIMEOUT_MS?.trim()
+      ? { taskIdleTimeoutMs: positiveInteger(env.EXPERT_TASK_IDLE_TIMEOUT_MS, 120_000) }
+      : {}),
     tlsCaPath,
     tlsCertPath,
     tlsKeyPath,

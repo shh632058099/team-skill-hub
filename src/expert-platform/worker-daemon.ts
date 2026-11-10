@@ -88,6 +88,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      ...(config.taskIdleTimeoutMs !== undefined ? { idleTimeoutMs: config.taskIdleTimeoutMs } : {}),
       onActivity,
       onStage: async (claim, stage, details) => {
         if (stage === "workspace.ready") {
@@ -121,6 +122,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      ...(config.taskIdleTimeoutMs !== undefined ? { idleTimeoutMs: config.taskIdleTimeoutMs } : {}),
       onActivity,
       onStage: async (claim, stage, details) => {
         if (stage === "workspace.ready") {

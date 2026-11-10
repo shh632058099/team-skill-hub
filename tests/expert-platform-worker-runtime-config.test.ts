@@ -119,6 +119,7 @@ test("worker runtime config parses a cross-host Docker Codex deployment", () => 
     EXPERT_HEARTBEAT_MS: "10000",
     EXPERT_POLL_MS: "3000",
     EXPERT_TASK_TIMEOUT_MS: "90000",
+    EXPERT_TASK_IDLE_TIMEOUT_MS: "45000",
     EXPERT_TLS_CA_PATH: "/etc/expert/ca.pem",
     EXPERT_TLS_CERT_PATH: "/etc/expert/worker.pem",
     EXPERT_TLS_KEY_PATH: "/etc/expert/worker-key.pem",
@@ -135,6 +136,7 @@ test("worker runtime config parses a cross-host Docker Codex deployment", () => 
   assert.equal(config.heartbeatMs, 10_000);
   assert.equal(config.pollMs, 3_000);
   assert.equal(config.taskTimeoutMs, 90_000);
+  assert.equal(config.taskIdleTimeoutMs, 45_000);
   assert.equal(config.tlsCaPath, "/etc/expert/ca.pem");
   assert.equal(config.tlsCertPath, "/etc/expert/worker.pem");
   assert.equal(config.tlsKeyPath, "/etc/expert/worker-key.pem");

@@ -90,6 +90,7 @@ export interface CodexProcessOptions {
   executable: string;
   args: readonly string[];
   timeoutMs: number;
+  idleTimeoutMs?: number;
   maxOutputBytes?: number;
   signal?: AbortSignal;
   onAbort?: () => Promise<void>;
@@ -102,7 +103,13 @@ export interface CodexProcessOptions {
 /** Low-level subprocess transport; caller must enforce container isolation. */
 export async function runCodexProcess(options: CodexProcessOptions): Promise<string> {
   const limit = options.maxOutputBytes ?? (options.streamingBackend ? 64 * 1024 * 1024 : 4 * 1024 * 1024);
-  if (!options.executable || !Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || limit <= 0) {
+  if (
+    !options.executable ||
+    !Number.isFinite(options.timeoutMs) ||
+    options.timeoutMs <= 0 ||
+    (options.idleTimeoutMs !== undefined && (!Number.isFinite(options.idleTimeoutMs) || options.idleTimeoutMs <= 0)) ||
+    limit <= 0
+  ) {
     throw new Error("INVALID_REQUEST");
   }
   if (options.signal?.aborted) throw new Error("CODEX_CANCELLED");
@@ -145,7 +152,8 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(hardTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       options.signal?.removeEventListener("abort", onAbort);
       if (error) reject(error);
       else {
@@ -157,7 +165,7 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
         }
       }
     };
-    const terminate = (reason: "CODEX_CANCELLED" | "CODEX_TIMEOUT") => {
+    const terminate = (reason: "CODEX_CANCELLED" | "CODEX_TIMEOUT" | "CODEX_IDLE_TIMEOUT") => {
       if (settled || terminating) return;
       terminating = true;
       void (async () => {
@@ -181,9 +189,17 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
       })();
     };
     const onAbort = () => terminate("CODEX_CANCELLED");
-    const timer = setTimeout(() => terminate("CODEX_TIMEOUT"), options.timeoutMs);
+    const hardTimer = setTimeout(() => terminate("CODEX_TIMEOUT"), options.timeoutMs);
+    let idleTimer: NodeJS.Timeout | undefined;
+    const resetIdleTimer = () => {
+      if (options.idleTimeoutMs === undefined || settled || terminating) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => terminate("CODEX_IDLE_TIMEOUT"), options.idleTimeoutMs);
+    };
+    resetIdleTimer();
     options.signal?.addEventListener("abort", onAbort, { once: true });
     const onChunk = (chunk: Buffer, record: boolean) => {
+      resetIdleTimer();
       bytes += chunk.length;
       if (bytes > limit) {
         kill();

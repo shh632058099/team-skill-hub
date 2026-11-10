@@ -36,6 +36,7 @@ export interface DockerCodexExecutorOptions {
   authFilePath?: string;
   configFilePath?: string;
   timeoutMs: number;
+  idleTimeoutMs?: number;
   maxOutputBytes?: number;
   onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
   onActivity?: (claim: Claim, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>;
@@ -523,6 +524,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           executable: "docker",
           args,
           timeoutMs: options.timeoutMs,
+          ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
           maxOutputBytes: options.maxOutputBytes ?? (streaming ? 64 * 1024 * 1024 : undefined),
           signal,
           onAbort: () => stopDockerContainer(containerName),
