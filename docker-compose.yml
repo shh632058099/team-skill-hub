@@ -45,7 +45,7 @@ services:
       AUTH_MODE: ${AUTH_MODE:-development}
       SKILL_HUB_API_KEYS_JSON: ${SKILL_HUB_API_KEYS_JSON:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      SKILL_HUB_ALLOWED_HOSTS:
+      SKILL_HUB_ALLOWED_HOSTS: "${SKILL_HUB_ALLOWED_HOSTS:-},team-skill-hub"
     volumes:
       - ${SKILL_HUB_CONFIG_FILE:-./config/repositories.yaml}:/app/config/repositories.yaml:ro
       - ${HOME}/.ssh:/root/.ssh:ro
