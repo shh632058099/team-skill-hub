@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
+import { resolveRuntimeProfilePolicy, type RuntimeProfileId } from "./runtime-profile-policy.js";
 import { DatabaseSync } from "node:sqlite";
 
 export type WorkStatus =
@@ -31,6 +32,7 @@ export interface WorkflowDefinition {
     blocked: { timeoutPolicy: "manual" };
   };
   execution: {
+    requiredRuntimeProfile?: RuntimeProfileId;
     workspace: {
       strategy: "isolated";
       reuseOnContinuation: boolean;
@@ -41,8 +43,16 @@ export interface WorkflowDefinition {
   review: { humanReview: boolean };
   completion: {
     require: Array<
-      "latest_work_attempt_succeeded" | "required_evidence_passed" | "no_unresolved_blocker" | "review_accepted"
+      | "latest_work_attempt_succeeded"
+      | "required_evidence_passed"
+      | "no_unresolved_blocker"
+      | "review_accepted"
+      | "required_approvals_approved"
     >;
+    requiredApprovals?: Array<{
+      scope: "work_completion";
+      subjectType: "workspace_revision";
+    }>;
   };
   graph: { mode: "single-node" };
 }
@@ -524,6 +534,39 @@ export class WorkOrchestrationStore {
     definition.validation.required = normalizeVerificationPolicy(
       (definition.validation as { required?: unknown }).required,
     );
+    const requiredRuntimeProfile = definition.execution?.requiredRuntimeProfile;
+    if (requiredRuntimeProfile !== undefined) {
+      try {
+        resolveRuntimeProfilePolicy(requiredRuntimeProfile);
+      } catch {
+        throw new Error("INVALID_WORKFLOW");
+      }
+    }
+    const requireApproval = definition.completion?.require?.includes("required_approvals_approved") ?? false;
+    const rawApprovals = (definition.completion as { requiredApprovals?: unknown } | undefined)?.requiredApprovals;
+    if (rawApprovals !== undefined && !Array.isArray(rawApprovals)) throw new Error("INVALID_WORKFLOW");
+    const requiredApprovals = Array.isArray(rawApprovals) ? rawApprovals : [];
+    if (
+      requiredApprovals.some(
+        (item) =>
+          !item ||
+          typeof item !== "object" ||
+          Array.isArray(item) ||
+          (item as { scope?: unknown }).scope !== "work_completion" ||
+          (item as { subjectType?: unknown }).subjectType !== "workspace_revision",
+      )
+    ) {
+      throw new Error("INVALID_WORKFLOW");
+    }
+    if (requireApproval && requiredApprovals.length === 0) throw new Error("INVALID_WORKFLOW");
+    if (!requireApproval && requiredApprovals.length > 0) throw new Error("INVALID_WORKFLOW");
+    if (requiredApprovals.length > 0) {
+      definition.completion.requiredApprovals = requiredApprovals as NonNullable<
+        WorkflowDefinition["completion"]["requiredApprovals"]
+      >;
+    } else {
+      delete definition.completion.requiredApprovals;
+    }
     return definition;
   }
 

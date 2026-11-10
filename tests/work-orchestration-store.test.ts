@@ -596,3 +596,72 @@ test("default workflow policy is immutable and available after reopen", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("workflow accepts platform write profile and structured approval requirements", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    const record = store.putWorkflow("write-flow", 1, {
+      ...structuredClone(base),
+      execution: {
+        ...structuredClone(base.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      completion: {
+        require: [...base.completion.require, "required_approvals_approved"],
+        requiredApprovals: [{ scope: "work_completion", subjectType: "workspace_revision" }],
+      },
+    });
+    assert.equal(record.definition.execution.requiredRuntimeProfile, "codex-workspace-write");
+    assert.deepEqual(record.definition.completion.requiredApprovals, [
+      { scope: "work_completion", subjectType: "workspace_revision" },
+    ]);
+  });
+});
+
+test("workflow rejects unknown write profiles and malformed approval requirements", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-profile", 1, {
+          ...structuredClone(base),
+          execution: {
+            ...structuredClone(base.execution),
+            requiredRuntimeProfile: "custom-workspace-write" as any,
+          },
+        }),
+      /INVALID_WORKFLOW/,
+    );
+    assert.throws(
+      () =>
+        store.putWorkflow("missing-approval", 1, {
+          ...structuredClone(base),
+          completion: {
+            require: [...base.completion.require, "required_approvals_approved"] as any,
+          },
+        }),
+      /INVALID_WORKFLOW/,
+    );
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-approval", 1, {
+          ...structuredClone(base),
+          completion: {
+            require: [...base.completion.require, "required_approvals_approved"] as any,
+            requiredApprovals: [{ scope: "merge", subjectType: "source_revision" }] as any,
+          },
+        }),
+      /INVALID_WORKFLOW/,
+    );
+  });
+});
+
+test("legacy workflow without runtime or approval requirements remains normalized unchanged", () => {
+  withStore((store) => {
+    const base = structuredClone(store.getWorkflow("code-fix-default").definition);
+    const record = store.putWorkflow("legacy-compatible", 1, base);
+    assert.equal(record.definition.execution.requiredRuntimeProfile, undefined);
+    assert.equal(record.definition.completion.requiredApprovals, undefined);
+    assert.deepEqual(record.definition.completion.require, base.completion.require);
+  });
+});
