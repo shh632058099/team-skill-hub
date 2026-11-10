@@ -83,6 +83,8 @@ function buildExpertCodexConfig(
     `base_url = ${tomlString(config.baseUrl)}`,
     `wire_api = ${tomlString(config.wireApi)}`,
     ...(envKey ? [`env_key = ${tomlString(envKey)}`] : []),
+    "requires_openai_auth = false",
+    "supports_websockets = false",
     "",
   ].join("\n");
   const envNames = [

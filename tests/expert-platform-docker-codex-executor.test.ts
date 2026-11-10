@@ -280,6 +280,8 @@ test("Docker Codex executor mounts an isolated per-expert provider config", asyn
   assert.match(generatedContent, /model = "gpt-5\.6-luna"/);
   assert.match(generatedContent, /model_provider = "bst"/);
   assert.match(generatedContent, /base_url = "https:\/\/route\.briancs\.shop\/v1"/);
+  assert.match(generatedContent, /requires_openai_auth = false/);
+  assert.match(generatedContent, /supports_websockets = false/);
   assert.ok(seen?.args.includes("OPENAI_API_KEY"));
   assert.ok(seen?.args.includes("HTTPS_PROXY"));
   assert.equal(existsSync(generatedPath), false, "temporary provider config must be removed after execution");
