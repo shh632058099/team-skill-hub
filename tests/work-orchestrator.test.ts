@@ -90,6 +90,8 @@ test("submitWork creates one WorkAttempt and one linked ExpertTask and reuses th
     assert.ok(first.currentTask);
     assert.equal(first.currentTask!.workItemId, first.work.workItemId);
     assert.equal(first.currentTask!.workAttemptId, first.attempts[0]!.workAttemptId);
+    const workspace = f.work.getWorkspace(first.attempts[0]!.workspaceId!);
+    assert.equal(first.currentTask!.workspaceKey, workspace.workspaceKey);
 
     const replay = f.orchestrator.submitWork(submission);
     assert.equal(replay.work.workItemId, first.work.workItemId);

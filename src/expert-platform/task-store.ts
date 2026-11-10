@@ -52,6 +52,7 @@ export type Submission = {
   workAttemptId?: string;
   workflowId?: string;
   workflowVersion?: number;
+  workspaceKey?: string;
 };
 export type TaskRecord = {
   taskId: string;
@@ -75,6 +76,7 @@ export type TaskRecord = {
   workAttemptId: string | null;
   workflowId: string | null;
   workflowVersion: number | null;
+  workspaceKey: string | null;
   continuationCount: number;
   continuationReason: string | null;
   runId: string | null;
@@ -111,6 +113,7 @@ export type Claim = {
   repositoryGitProxyUrl?: string;
   modelConfig?: ExpertModelConfig;
   deploymentSnapshot?: DeploymentTaskSnapshot;
+  workspaceKey?: string | null;
 };
 type Row = Record<string, unknown>;
 
@@ -207,6 +210,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("work_attempt_id", "TEXT");
     this.ensureTaskColumn("workflow_id", "TEXT");
     this.ensureTaskColumn("workflow_version", "INTEGER");
+    this.ensureTaskColumn("workspace_key", "TEXT");
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
     // Older tasks already have a queued lifecycle event created at submission time.
@@ -317,6 +321,9 @@ export class ExpertTaskStore {
       throw new Error("INVALID_REQUEST");
     }
     const workLinkValues = [input.workItemId, input.workAttemptId, input.workflowId, input.workflowVersion];
+    if (input.workspaceKey !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(input.workspaceKey)) {
+      throw new Error("INVALID_WORKSPACE_KEY");
+    }
     if (
       workLinkValues.some((value) => value !== undefined) &&
       (!input.workItemId?.trim() ||
@@ -339,6 +346,7 @@ export class ExpertTaskStore {
           workAttemptId: input.workAttemptId?.trim() || null,
           workflowId: input.workflowId?.trim() || null,
           workflowVersion: input.workflowVersion ?? null,
+          workspaceKey: input.workspaceKey?.trim() || null,
           ...(snapshot
             ? {
                 deploymentId: snapshot.deploymentId,
@@ -433,7 +441,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -457,6 +465,7 @@ export class ExpertTaskStore {
           input.workAttemptId?.trim() || null,
           input.workflowId?.trim() || null,
           input.workflowVersion ?? null,
+          input.workspaceKey?.trim() || null,
           Date.now(),
         );
       this.event(taskId, null, "queued");
@@ -486,6 +495,7 @@ export class ExpertTaskStore {
         workAttemptId: input.workAttemptId?.trim() || null,
         workflowId: input.workflowId?.trim() || null,
         workflowVersion: input.workflowVersion ?? null,
+        workspaceKey: input.workspaceKey?.trim() || null,
         reusedExistingTask: false,
         continuationCount: 0,
         continuationReason: null,
@@ -579,6 +589,7 @@ export class ExpertTaskStore {
         fencing,
         problem: String(row.problem),
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
+        workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
         ...(row.deployment_snapshot_json
           ? { deploymentSnapshot: JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot }
           : {}),
@@ -1263,6 +1274,7 @@ export class ExpertTaskStore {
       workAttemptId: row.work_attempt_id == null ? null : String(row.work_attempt_id),
       workflowId: row.workflow_id == null ? null : String(row.workflow_id),
       workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
+      workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
       continuationCount: Number(row.continuation_count ?? 0),
       continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
       runId: row.run_id == null ? null : String(row.run_id),

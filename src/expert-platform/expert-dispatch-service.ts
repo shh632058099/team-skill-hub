@@ -18,6 +18,7 @@ export interface DispatchInput {
   workAttemptId?: string;
   workflowId?: string;
   workflowVersion?: number;
+  workspaceKey?: string;
 }
 
 export interface AvailableExpert {
@@ -200,6 +201,7 @@ export class ExpertDispatchService {
       workAttemptId: input.workAttemptId,
       workflowId: input.workflowId,
       workflowVersion: input.workflowVersion,
+      workspaceKey: input.workspaceKey,
       problem: input.problem,
       expertId: resolved.expertId,
       repositoryId: resolved.repositoryId,

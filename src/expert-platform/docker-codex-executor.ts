@@ -265,6 +265,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
               branch: claim.repositoryBranch,
               ...(claim.repositoryGitProxyUrl ? { gitProxyUrl: claim.repositoryGitProxyUrl } : {}),
               root: options.repositoryRoot ?? `${options.sourcePath.replace(/\/[^/]+$/, "")}/expert-repositories`,
+              ...(claim.workspaceKey ? { workspaceKey: claim.workspaceKey } : {}),
               ...(claim.repositoryCredentialRef ? { credentialRef: claim.repositoryCredentialRef } : {}),
               credentials: options.gitCredentialConfigs,
             })

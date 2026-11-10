@@ -9,6 +9,7 @@ import {
   type WorkEvidenceRecord,
   type WorkItemRecord,
   type WorkSubmission,
+  type WorkspaceRecord,
   WorkOrchestrationStore,
 } from "./work-orchestration-store.js";
 
@@ -395,8 +396,8 @@ export class WorkOrchestrator {
     attempt: WorkAttemptRecord,
     resolved: ResolvedDispatch,
     now: number,
-  ): void {
-    this.workStore.ensureWorkspace(
+  ): WorkspaceRecord {
+    return this.workStore.ensureWorkspace(
       workItemId,
       attempt.workAttemptId,
       {
@@ -434,8 +435,10 @@ export class WorkOrchestrator {
         fresh as unknown as Record<string, unknown>,
         attempt.deploymentConfigVersion,
       );
-      this.ensureWorkspace(work.workItemId, attempt, resolved, Date.now());
     }
+
+    const workspace = this.ensureWorkspace(work.workItemId, attempt, resolved, Date.now());
+    attempt = this.workStore.getWorkAttempt(attempt.workAttemptId);
 
     const task = this.dispatch.submitResolved(
       {
@@ -452,6 +455,7 @@ export class WorkOrchestrator {
         workAttemptId: attempt.workAttemptId,
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
+        workspaceKey: workspace.workspaceKey,
       },
       resolved,
     );

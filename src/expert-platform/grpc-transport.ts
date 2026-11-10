@@ -37,6 +37,7 @@ interface ClaimTaskResponse {
   repository_git_proxy_url?: string;
   model_config_json?: string;
   deployment_snapshot_json?: string;
+  workspace_key?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -326,6 +327,7 @@ export async function startExpertWorkerGrpcServer(
                   ? JSON.stringify(claim.deploymentSnapshot.executor.modelConfig)
                   : modelConfigJson,
                 deployment_snapshot_json: claim.deploymentSnapshot ? JSON.stringify(claim.deploymentSnapshot) : "",
+                workspace_key: claim.workspaceKey ?? "",
               };
             })()
           : { has_task: false },
@@ -609,6 +611,7 @@ export class ExpertWorkerClient {
       ...(response.deployment_snapshot_json
         ? { deploymentSnapshot: parseClaimDeploymentSnapshot(response.deployment_snapshot_json) }
         : {}),
+      ...(response.workspace_key ? { workspaceKey: response.workspace_key } : {}),
     };
   }
 

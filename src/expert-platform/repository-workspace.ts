@@ -21,6 +21,7 @@ export interface PrepareRepositoryInput {
   url: string;
   branch: string;
   root: string;
+  workspaceKey?: string;
   credentialRef?: string;
   gitProxyUrl?: string;
   credentials?: Readonly<Record<string, GitCredentialConfig>>;
@@ -84,6 +85,9 @@ export function grantExecutionContainerReadAccess(
 export async function prepareRepositoryWorkspace(
   input: PrepareRepositoryInput,
 ): Promise<{ path: string; commitSha: string }> {
+  if (input.workspaceKey !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(input.workspaceKey)) {
+    throw new Error("INVALID_WORKSPACE_KEY");
+  }
   if (
     !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(input.id) ||
     !input.url ||
@@ -152,7 +156,12 @@ export async function prepareRepositoryWorkspace(
     }
     const run = input.runGit ?? runGit;
     mkdirSync(input.root, { recursive: true });
-    const destination = path.join(input.root, input.id);
+    const workspaceRoot = input.workspaceKey ? path.join(input.root, input.workspaceKey) : input.root;
+    if (input.workspaceKey && path.dirname(workspaceRoot) !== path.resolve(input.root)) {
+      throw new Error("INVALID_WORKSPACE_KEY");
+    }
+    mkdirSync(workspaceRoot, { recursive: true });
+    const destination = path.join(workspaceRoot, input.id);
     if (!existsSync(path.join(destination, ".git"))) {
       if (existsSync(destination)) throw new Error("SOURCE_REPOSITORY_PATH_NOT_EMPTY");
       await run(

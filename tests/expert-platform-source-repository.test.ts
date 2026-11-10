@@ -112,6 +112,38 @@ test("worker clones configured repositories and refreshes to the configured bran
   }
 });
 
+test("repository checkouts are isolated by workspaceKey and reused within one workspace", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "expert-workspace-key-"));
+  try {
+    const seed = path.join(root, "seed");
+    const bare = path.join(root, "origin.git");
+    const workspaceRoot = path.join(root, "workspaces");
+    await mkdir(seed);
+    git(["init", "-b", "main"], seed);
+    git(["config", "user.email", "test@example.invalid"], seed);
+    git(["config", "user.name", "Expert Test"], seed);
+    await writeFile(path.join(seed, "README.md"), "workspace isolation\n");
+    git(["add", "README.md"], seed);
+    git(["commit", "-m", "initial"], seed);
+    git(["init", "--bare", bare]);
+    git(["remote", "add", "origin", bare], seed);
+    git(["push", "-u", "origin", "main"], seed);
+
+    const common = { id: "repo-workspace-key", url: bare, branch: "main", root: workspaceRoot };
+    const first = await prepareRepositoryWorkspace({ ...common, workspaceKey: "work-11111111-a1" });
+    const again = await prepareRepositoryWorkspace({ ...common, workspaceKey: "work-11111111-a1" });
+    const second = await prepareRepositoryWorkspace({ ...common, workspaceKey: "work-11111111-a2" });
+
+    assert.equal(again.path, first.path);
+    assert.notEqual(second.path, first.path);
+    assert.equal(first.path, path.join(workspaceRoot, "work-11111111-a1", common.id));
+    assert.equal(second.path, path.join(workspaceRoot, "work-11111111-a2", common.id));
+    await assert.rejects(prepareRepositoryWorkspace({ ...common, workspaceKey: "../escape" }), /INVALID_WORKSPACE_KEY/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Git credential config supports SSH key paths and HTTPS token environment references", () => {
   assert.deepEqual(
     loadGitCredentialConfigs(

@@ -42,6 +42,7 @@ message ClaimTaskResponse {
   string repository_git_proxy_url = 10;
   string model_config_json = 11;
   string deployment_snapshot_json = 12;
+  string workspace_key = 13;
 }
 
 message LeaseRequest {
