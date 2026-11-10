@@ -84,6 +84,17 @@ export type TaskRecord = {
 };
 export type TaskSourceMetadata = { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
 
+export type TaskRunTurnRecord = {
+  taskId: string;
+  runId: string;
+  turnIndex: number;
+  status: "running" | "succeeded" | "failed";
+  startSequence: number | null;
+  finishSequence: number | null;
+  startedAt: number;
+  finishedAt: number | null;
+};
+
 export type Claim = {
   taskId: string;
   runId: string;
@@ -147,6 +158,17 @@ export class ExpertTaskStore {
         fencing INTEGER NOT NULL,
         status TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS expert_run_turns (
+        run_id TEXT NOT NULL REFERENCES expert_runs(run_id),
+        task_id TEXT NOT NULL REFERENCES expert_tasks(task_id),
+        turn_index INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed')),
+        start_sequence INTEGER,
+        finish_sequence INTEGER,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        PRIMARY KEY(run_id,turn_index)
+      );
       CREATE TABLE IF NOT EXISTS expert_events (
         event_id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL REFERENCES expert_tasks(task_id),
@@ -193,6 +215,7 @@ export class ExpertTaskStore {
       WHERE recent.task_id=expert_events.task_id ORDER BY event_id DESC LIMIT 1000
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
+      CREATE INDEX IF NOT EXISTS idx_expert_run_turn_task ON expert_run_turns(task_id,run_id,turn_index);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);
@@ -579,6 +602,7 @@ export class ExpertTaskStore {
         );
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
       this.db.prepare("UPDATE expert_runs SET status='succeeded' WHERE run_id=?").run(claim.runId);
+      this.closeActiveRunTurn(claim.runId, "succeeded", now);
       this.event(claim.taskId, claim.runId, "succeeded");
       this.db.exec("COMMIT");
     } catch (error) {
@@ -618,6 +642,7 @@ export class ExpertTaskStore {
         .run(terminalStatus, reason, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
       this.db.prepare("UPDATE expert_runs SET status=? WHERE run_id=?").run(terminalStatus, claim.runId);
+      this.closeActiveRunTurn(claim.runId, "failed", now);
       this.event(claim.taskId, claim.runId, terminalStatus);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -988,6 +1013,59 @@ export class ExpertTaskStore {
     };
   }
 
+  listRunTurns(taskId: string, principalId: string, scope: string): TaskRunTurnRecord[] {
+    this.get(taskId, principalId, scope);
+    return (
+      this.db
+        .prepare(
+          "SELECT task_id,run_id,turn_index,status,start_sequence,finish_sequence,started_at,finished_at FROM expert_run_turns WHERE task_id=? ORDER BY rowid",
+        )
+        .all(taskId) as Row[]
+    ).map((row) => ({
+      taskId: String(row.task_id),
+      runId: String(row.run_id),
+      turnIndex: Number(row.turn_index),
+      status: String(row.status) as TaskRunTurnRecord["status"],
+      startSequence: row.start_sequence == null ? null : Number(row.start_sequence),
+      finishSequence: row.finish_sequence == null ? null : Number(row.finish_sequence),
+      startedAt: Number(row.started_at),
+      finishedAt: row.finished_at == null ? null : Number(row.finished_at),
+    }));
+  }
+
+  private updateRunTurnFromActivity(claim: Claim, stage: string, sourceSequence: number, now: number): void {
+    if (stage === "model.started") {
+      const active = this.db
+        .prepare("SELECT 1 FROM expert_run_turns WHERE run_id=? AND status='running' LIMIT 1")
+        .get(claim.runId);
+      if (active) return;
+      const next = this.db
+        .prepare("SELECT COALESCE(MAX(turn_index),0)+1 AS n FROM expert_run_turns WHERE run_id=?")
+        .get(claim.runId) as { n: number };
+      this.db
+        .prepare(
+          "INSERT INTO expert_run_turns(run_id,task_id,turn_index,status,start_sequence,started_at) VALUES(?,?,?,'running',?,?)",
+        )
+        .run(claim.runId, claim.taskId, Number(next.n), sourceSequence, now);
+      return;
+    }
+    if (stage === "model.completed" || stage === "model.failed") {
+      this.db
+        .prepare(
+          "UPDATE expert_run_turns SET status=?,finish_sequence=?,finished_at=? WHERE run_id=? AND status='running'",
+        )
+        .run(stage === "model.completed" ? "succeeded" : "failed", sourceSequence, now, claim.runId);
+    }
+  }
+
+  private closeActiveRunTurn(runId: string, status: "succeeded" | "failed", now: number): void {
+    this.db
+      .prepare(
+        "UPDATE expert_run_turns SET status=?,finished_at=COALESCE(finished_at,?) WHERE run_id=? AND status='running'",
+      )
+      .run(status, now, runId);
+  }
+
   /** Best-effort bounded activity recording; legacy lifecycle stages remain unchanged. */
   recordActivity(
     claim: Claim,
@@ -1036,6 +1114,7 @@ export class ExpertTaskStore {
           VALUES(?,?,?,'',?,?,?,?)`,
             )
             .run(claim.taskId, claim.runId, stage, sourceSequence, toolCode || null, count || null, now);
+        this.updateRunTurnFromActivity(claim, stage, sourceSequence, now);
         this.trimTaskEvents(claim.taskId);
       }
       this.db.exec("COMMIT");

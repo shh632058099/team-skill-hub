@@ -505,6 +505,44 @@ test("activity events are bounded, deduplicated and owner-cursor scoped", () => 
   }
 });
 
+test("run turns are persisted, deduplicated and fenced by the active run", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-run-turns-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({ principalId: "owner", scope: "tenant", idempotencyKey: "turns", problem: "read code" });
+    const claim = store.claim("worker", 100, 10_000)!;
+
+    store.recordActivity(claim, "model.started", 1, "", 0, 101);
+    store.recordActivity(claim, "model.started", 2, "", 0, 102);
+    store.recordActivity(claim, "model.completed", 3, "", 0, 103);
+    store.recordActivity(claim, "model.started", 4, "", 0, 104);
+    store.recordActivity(claim, "model.failed", 5, "", 0, 105);
+    store.recordActivity(claim, "model.failed", 5, "", 0, 106);
+
+    const turns = store.listRunTurns(task.taskId, "owner", "tenant");
+    assert.deepEqual(
+      turns.map((turn) => ({
+        runId: turn.runId,
+        turnIndex: turn.turnIndex,
+        status: turn.status,
+        startSequence: turn.startSequence,
+        finishSequence: turn.finishSequence,
+      })),
+      [
+        { runId: claim.runId, turnIndex: 1, status: "succeeded", startSequence: 1, finishSequence: 3 },
+        { runId: claim.runId, turnIndex: 2, status: "failed", startSequence: 4, finishSequence: 5 },
+      ],
+    );
+
+    store.fail(claim, "EXECUTION_FAILED", 110);
+    assert.throws(() => store.recordActivity(claim, "model.started", 6, "", 0, 111), /STALE_ATTEMPT/);
+    assert.throws(() => store.listRunTurns(task.taskId, "other", "tenant"), /TASK_NOT_FOUND_OR_FORBIDDEN/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("source request dedup reuses active auto delegation despite changed problem and idempotency key", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-source-request-"));
   try {
