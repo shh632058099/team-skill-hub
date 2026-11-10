@@ -61,6 +61,69 @@ const submission = {
   repositoryId: "ota-repo",
 } as const;
 
+test("WorkAttempt pins workflow validation policy into ExpertTask and Worker claim", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    const validationV1 = [
+      {
+        id: "unit-test",
+        type: "command",
+        argv: ["npm", "test"],
+        timeoutMs: 120_000,
+        evidenceType: "unit_test",
+      },
+    ];
+    f.work.putWorkflow(
+      "verified-readonly",
+      1,
+      {
+        ...base,
+        validation: {
+          requiredEvidence: ["expert_result", "unit_test"],
+          required: validationV1,
+        },
+      },
+      100,
+    );
+
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "work-validation-snapshot",
+      workflowId: "verified-readonly",
+    });
+    assert.equal(detail.attempts[0]!.workflowVersion, 1);
+    assert.deepEqual(detail.currentTask!.validationSnapshot, validationV1);
+
+    f.work.putWorkflow(
+      "verified-readonly",
+      2,
+      {
+        ...base,
+        validation: {
+          requiredEvidence: ["expert_result", "lint"],
+          required: [
+            {
+              id: "lint",
+              type: "command",
+              argv: ["npm", "run", "lint"],
+              timeoutMs: 60_000,
+              evidenceType: "lint",
+            },
+          ],
+        },
+      },
+      200,
+    );
+    assert.deepEqual(f.tasks.get(detail.currentTask!.taskId, "alice", "team-a").validationSnapshot, validationV1);
+
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    assert.deepEqual(claim.validationSnapshot, validationV1);
+  } finally {
+    f.close();
+  }
+});
+
 test("deterministic dispatch rejection becomes durable blocked work instead of retrying forever", () => {
   const f = fixture();
   try {

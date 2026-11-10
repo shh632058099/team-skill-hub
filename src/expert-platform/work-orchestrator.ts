@@ -503,6 +503,8 @@ export class WorkOrchestrator {
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
+        validationSnapshot: this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion).definition
+          .validation.required,
       },
       resolved,
     );

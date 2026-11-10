@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 import { DatabaseSync } from "node:sqlite";
 
 export type WorkStatus =
@@ -36,7 +37,7 @@ export interface WorkflowDefinition {
       cleanup: "on_terminal" | "retain";
     };
   };
-  validation: { requiredEvidence: string[] };
+  validation: { requiredEvidence: string[]; required: VerificationPolicyStep[] };
   review: { humanReview: boolean };
   completion: {
     require: Array<
@@ -239,7 +240,7 @@ const DEFAULT_WORKFLOW: WorkflowDefinition = {
       cleanup: "on_terminal",
     },
   },
-  validation: { requiredEvidence: ["expert_result"] },
+  validation: { requiredEvidence: ["expert_result"], required: [] },
   review: { humanReview: true },
   completion: {
     require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker", "review_accepted"],
@@ -508,6 +509,53 @@ export class WorkOrchestrationStore {
       .run(DEFAULT_WORKFLOW_ID, DEFAULT_WORKFLOW_VERSION, JSON.stringify(DEFAULT_WORKFLOW), Date.now());
   }
 
+  private normalizeWorkflowDefinition(value: unknown): WorkflowDefinition {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("INVALID_WORKFLOW");
+    const definition = structuredClone(value) as WorkflowDefinition;
+    if (
+      !definition.validation ||
+      !Array.isArray(definition.validation.requiredEvidence) ||
+      definition.validation.requiredEvidence.some(
+        (type) => typeof type !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(type),
+      )
+    ) {
+      throw new Error("INVALID_WORKFLOW");
+    }
+    definition.validation.required = normalizeVerificationPolicy(
+      (definition.validation as { required?: unknown }).required,
+    );
+    return definition;
+  }
+
+  putWorkflow(
+    workflowId: string,
+    version: number,
+    definition: WorkflowDefinition,
+    now = Date.now(),
+  ): WorkflowDefinitionRecord {
+    const id = requiredText(workflowId, 200);
+    if (!id || !Number.isSafeInteger(version) || version < 1 || !Number.isFinite(now))
+      throw new Error("INVALID_WORKFLOW");
+    const normalized = this.normalizeWorkflowDefinition(definition);
+    const encoded = JSON.stringify(normalized);
+    const existing = this.db
+      .prepare("SELECT * FROM work_workflows WHERE workflow_id=? AND version=?")
+      .get(id, version) as Row | undefined;
+    if (existing) {
+      if (String(existing.definition_json) !== encoded) throw new Error("WORKFLOW_VERSION_CONFLICT");
+      return {
+        workflowId: id,
+        version,
+        definition: normalized,
+        createdAt: Number(existing.created_at),
+      };
+    }
+    this.db
+      .prepare("INSERT INTO work_workflows(workflow_id,version,definition_json,created_at) VALUES(?,?,?,?)")
+      .run(id, version, encoded, now);
+    return { workflowId: id, version, definition: normalized, createdAt: now };
+  }
+
   getWorkflow(workflowId: string, version?: number): WorkflowDefinitionRecord {
     const id = requiredText(workflowId, 200);
     if (!id) throw new Error("INVALID_WORKFLOW");
@@ -521,7 +569,7 @@ export class WorkOrchestrationStore {
     return {
       workflowId: String(row.workflow_id),
       version: Number(row.version),
-      definition: JSON.parse(String(row.definition_json)) as WorkflowDefinition,
+      definition: this.normalizeWorkflowDefinition(JSON.parse(String(row.definition_json))),
       createdAt: Number(row.created_at),
     };
   }

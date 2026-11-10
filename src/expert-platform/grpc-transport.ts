@@ -8,6 +8,7 @@ import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-stor
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
 import type { WorkOrchestrationStore } from "./work-orchestration-store.js";
+import { normalizeVerificationPolicy } from "./verification-policy.js";
 
 interface RegisterWorkerRequest {
   worker_id: string;
@@ -39,6 +40,7 @@ interface ClaimTaskResponse {
   model_config_json?: string;
   deployment_snapshot_json?: string;
   workspace_key?: string;
+  validation_snapshot_json?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -358,6 +360,7 @@ export async function startExpertWorkerGrpcServer(
                   : modelConfigJson,
                 deployment_snapshot_json: claim.deploymentSnapshot ? JSON.stringify(claim.deploymentSnapshot) : "",
                 workspace_key: claim.workspaceKey ?? "",
+                validation_snapshot_json: JSON.stringify(claim.validationSnapshot ?? []),
               };
             })()
           : { has_task: false },
@@ -750,6 +753,9 @@ export class ExpertWorkerClient {
         ? { deploymentSnapshot: parseClaimDeploymentSnapshot(response.deployment_snapshot_json) }
         : {}),
       ...(response.workspace_key ? { workspaceKey: response.workspace_key } : {}),
+      ...(response.validation_snapshot_json
+        ? { validationSnapshot: normalizeVerificationPolicy(JSON.parse(response.validation_snapshot_json)) }
+        : {}),
     };
   }
 

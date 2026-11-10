@@ -426,6 +426,68 @@ test("only one active work attempt is allowed and it pins workflow version", () 
   });
 });
 
+test("workflow validation policy is append-only, version-pinned and rejects malformed definitions", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    const definition = {
+      ...base,
+      validation: {
+        requiredEvidence: ["expert_result", "unit_test"],
+        required: [
+          {
+            id: "unit-test",
+            type: "command",
+            argv: ["npm", "test"],
+            timeoutMs: 120_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+    };
+    const registered = store.putWorkflow("verified-code-fix", 1, definition, 100);
+    assert.deepEqual(registered.definition.validation.required, definition.validation.required);
+    assert.equal(store.putWorkflow("verified-code-fix", 1, definition, 101).version, 1);
+    assert.throws(
+      () => store.putWorkflow("verified-code-fix", 1, { ...definition, review: { humanReview: false } }, 102),
+      /WORKFLOW_VERSION_CONFLICT/,
+    );
+    assert.throws(
+      () =>
+        store.putWorkflow(
+          "bad-validation",
+          1,
+          {
+            ...base,
+            validation: {
+              requiredEvidence: ["unit_test"],
+              required: [{ id: "bad", type: "command", argv: [], timeoutMs: 1_000, evidenceType: "unit_test" }],
+            },
+          },
+          103,
+        ),
+      /INVALID_VERIFICATION_POLICY/,
+    );
+
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workflow-pin",
+      sourceType: "mcp",
+      title: "workflow pin",
+      description: "workflow pin",
+      workflowId: "verified-code-fix",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    assert.equal(attempt.workflowId, "verified-code-fix");
+    assert.equal(attempt.workflowVersion, 1);
+  });
+});
+
 test("default workflow policy is immutable and available after reopen", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-reopen-"));
   const file = path.join(dir, "runtime.db");

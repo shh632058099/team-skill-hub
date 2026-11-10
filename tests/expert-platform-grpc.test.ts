@@ -107,6 +107,15 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
       workflowId: attempt.workflowId,
       workflowVersion: attempt.workflowVersion,
       workspaceKey: workspace.workspaceKey,
+      validationSnapshot: [
+        {
+          id: "unit-test",
+          type: "command",
+          argv: ["npm", "test"],
+          timeoutMs: 120_000,
+          evidenceType: "unit_test",
+        },
+      ],
     });
     work.linkAttemptTask(attempt.workAttemptId, task.taskId);
 
@@ -114,6 +123,15 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
     const client = new ExpertWorkerClient(server.address, { workerId: "worker-1", credential: token });
     const claim = await client.claimTask("worker-1", "ota");
     assert.equal(claim?.workspaceKey, workspace.workspaceKey);
+    assert.deepEqual(claim?.validationSnapshot, [
+      {
+        id: "unit-test",
+        type: "command",
+        argv: ["npm", "test"],
+        timeoutMs: 120_000,
+        evidenceType: "unit_test",
+      },
+    ]);
 
     await client.reportTaskStage(
       claim!,

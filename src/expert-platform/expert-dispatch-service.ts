@@ -1,6 +1,7 @@
 import type { ExpertStore } from "./expert-store.js";
 import { routeExpert } from "./router.js";
 import type { DeploymentTaskSnapshot, ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord } from "./task-store.js";
+import type { VerificationPolicyStep } from "./verification-policy.js";
 
 export interface DispatchInput {
   principalId: string;
@@ -19,6 +20,7 @@ export interface DispatchInput {
   workflowId?: string;
   workflowVersion?: number;
   workspaceKey?: string;
+  validationSnapshot?: VerificationPolicyStep[];
 }
 
 export interface AvailableExpert {
@@ -202,6 +204,7 @@ export class ExpertDispatchService {
       workflowId: input.workflowId,
       workflowVersion: input.workflowVersion,
       workspaceKey: input.workspaceKey,
+      validationSnapshot: input.validationSnapshot,
       problem: input.problem,
       expertId: resolved.expertId,
       repositoryId: resolved.repositoryId,

@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ExpertModelConfig } from "./expert-store.js";
+import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type ExpertTaskFeedbackDisposition = "adopted" | "partially_adopted" | "not_adopted";
@@ -53,6 +54,7 @@ export type Submission = {
   workflowId?: string;
   workflowVersion?: number;
   workspaceKey?: string;
+  validationSnapshot?: VerificationPolicyStep[];
 };
 export type TaskRecord = {
   taskId: string;
@@ -77,6 +79,7 @@ export type TaskRecord = {
   workflowId: string | null;
   workflowVersion: number | null;
   workspaceKey: string | null;
+  validationSnapshot: VerificationPolicyStep[];
   requiredWorkerId: string | null;
   continuationCount: number;
   continuationReason: string | null;
@@ -115,6 +118,7 @@ export type Claim = {
   modelConfig?: ExpertModelConfig;
   deploymentSnapshot?: DeploymentTaskSnapshot;
   workspaceKey?: string | null;
+  validationSnapshot?: VerificationPolicyStep[];
 };
 type Row = Record<string, unknown>;
 
@@ -212,6 +216,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("workflow_id", "TEXT");
     this.ensureTaskColumn("workflow_version", "INTEGER");
     this.ensureTaskColumn("workspace_key", "TEXT");
+    this.ensureTaskColumn("validation_snapshot_json", "TEXT");
     this.ensureTaskColumn("required_worker_id", "TEXT");
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
@@ -326,6 +331,7 @@ export class ExpertTaskStore {
     if (input.workspaceKey !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(input.workspaceKey)) {
       throw new Error("INVALID_WORKSPACE_KEY");
     }
+    const validationSnapshot = normalizeVerificationPolicy(input.validationSnapshot);
     if (
       workLinkValues.some((value) => value !== undefined) &&
       (!input.workItemId?.trim() ||
@@ -349,6 +355,7 @@ export class ExpertTaskStore {
           workflowId: input.workflowId?.trim() || null,
           workflowVersion: input.workflowVersion ?? null,
           workspaceKey: input.workspaceKey?.trim() || null,
+          validationSnapshot,
           ...(snapshot
             ? {
                 deploymentId: snapshot.deploymentId,
@@ -443,7 +450,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -468,6 +475,7 @@ export class ExpertTaskStore {
           input.workflowId?.trim() || null,
           input.workflowVersion ?? null,
           input.workspaceKey?.trim() || null,
+          JSON.stringify(validationSnapshot),
           Date.now(),
         );
       this.event(taskId, null, "queued");
@@ -498,6 +506,7 @@ export class ExpertTaskStore {
         workflowId: input.workflowId?.trim() || null,
         workflowVersion: input.workflowVersion ?? null,
         workspaceKey: input.workspaceKey?.trim() || null,
+        validationSnapshot,
         requiredWorkerId: null,
         reusedExistingTask: false,
         continuationCount: 0,
@@ -595,6 +604,9 @@ export class ExpertTaskStore {
         problem: String(row.problem),
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
         workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+        validationSnapshot: normalizeVerificationPolicy(
+          row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
+        ),
         ...(row.deployment_snapshot_json
           ? { deploymentSnapshot: JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot }
           : {}),
@@ -1299,6 +1311,9 @@ export class ExpertTaskStore {
       workflowId: row.workflow_id == null ? null : String(row.workflow_id),
       workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
       workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+      validationSnapshot: normalizeVerificationPolicy(
+        row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
+      ),
       requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
       continuationCount: Number(row.continuation_count ?? 0),
       continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
