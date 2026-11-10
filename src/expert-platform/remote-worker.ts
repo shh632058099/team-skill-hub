@@ -1,18 +1,39 @@
 import type { Claim } from "./task-store.js";
+import type { VerificationEvidenceResult } from "./verification-policy.js";
+import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
+import type { PublicationOperationLease, PublicationOperationResult } from "./work-publication-store.js";
 
 export type WorkerExecutionResult = {
   result: string;
   source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
+  verificationResults?: VerificationEvidenceResult[];
+  workspaceChangeSummary?: WorkspaceChangeSummary;
+};
+
+export type WorkspaceCleanupLease = {
+  workspaceId: string;
+  workspaceKey: string;
+  ownerWorkerId: string;
+  fencing: number;
 };
 
 export interface RemoteWorkerClient {
+  claimPublicationOperation?(workerId: string): Promise<PublicationOperationLease | null>;
+  completePublicationOperation?(claim: PublicationOperationLease, result: PublicationOperationResult): Promise<unknown>;
+  claimWorkspaceCleanup?(workerId: string): Promise<WorkspaceCleanupLease | null>;
+  completeWorkspaceCleanup?(claim: WorkspaceCleanupLease, success: boolean, errorCode?: string): Promise<unknown>;
   claimTask(workerId: string, expertId: string, capability: string): Promise<Claim | null>;
   renewLease(claim: Claim): Promise<unknown>;
-  completeTask(claim: Claim, result: string, source?: WorkerExecutionResult["source"]): Promise<unknown>;
+  completeTask(
+    claim: Claim,
+    result: string,
+    source?: WorkerExecutionResult["source"],
+    verificationResults?: VerificationEvidenceResult[],
+    workspaceChangeSummary?: WorkspaceChangeSummary,
+  ): Promise<unknown>;
   failTask(claim: Claim, reason: string): Promise<unknown>;
   reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
 }
-
 export interface RemoteWorkerOptions {
   heartbeatMs?: number;
   expertId?: string;
@@ -105,7 +126,9 @@ export async function runRemoteWorkerOnce(
     }
     const result = typeof execution === "string" ? execution : execution.result;
     const source = typeof execution === "string" ? undefined : execution.source;
-    await client.completeTask(claim, result, source);
+    const verificationResults = typeof execution === "string" ? undefined : execution.verificationResults;
+    const workspaceChangeSummary = typeof execution === "string" ? undefined : execution.workspaceChangeSummary;
+    await client.completeTask(claim, result, source, verificationResults, workspaceChangeSummary);
     return true;
   } finally {
     clearInterval(heartbeat);

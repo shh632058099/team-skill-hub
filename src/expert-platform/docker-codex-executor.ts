@@ -5,11 +5,18 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { Claim } from "./task-store.js";
 import type { ExpertModelConfig } from "./expert-store.js";
-import { prepareRepositoryWorkspace, type GitCredentialConfig } from "./repository-workspace.js";
-import { buildCodexReadOnlyArgs } from "./codex-runtime.js";
-import { parseClaudeResult, buildClaudeReadOnlyArgs } from "./claude-runtime.js";
+import {
+  grantExecutionContainerAccess,
+  prepareRepositoryWorkspace,
+  type GitCredentialConfig,
+} from "./repository-workspace.js";
+import { buildCodexArgs } from "./codex-runtime.js";
+import { parseClaudeResult, buildClaudeArgs } from "./claude-runtime.js";
 import { buildCodexDockerArgs } from "./codex-container-executor.js";
 import { runCodexProcess, type CodexProcessOptions } from "./codex-process.js";
+import { runVerificationPolicy } from "./verification-runner.js";
+import { assertRuntimeProfileBackend } from "./runtime-profile-policy.js";
+import { computeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 export interface DockerCodexExecutorOptions {
   image: string;
@@ -33,6 +40,7 @@ export interface DockerCodexExecutorOptions {
   onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
   onActivity?: (claim: Claim, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>;
   runProcess?: (options: CodexProcessOptions) => Promise<string>;
+  runVerificationPolicy?: typeof runVerificationPolicy;
 }
 
 const PROXY_ENV_NAMES = new Set([
@@ -103,6 +111,15 @@ function validateMcpEndpoint(raw: string): void {
     ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname)
   )
     throw new Error("WORKER_MCP_URL_INVALID");
+}
+
+function mergeNoProxyHost(current: string | undefined, host: string): string {
+  const values = (current ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!values.some((value) => value.toLowerCase() === host.toLowerCase())) values.push(host);
+  return values.join(",");
 }
 
 function readMcpWorkerKey(file: string | undefined): string {
@@ -210,10 +227,29 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     claim: Claim,
     signal: AbortSignal,
   ): Promise<
-    string | { result: string; source: { repositoryUrl?: string; repositoryBranch?: string; commitSha: string } }
+    | string
+    | {
+        result: string;
+        source: { repositoryUrl?: string; repositoryBranch?: string; commitSha: string };
+        verificationResults?: import("./verification-policy.js").VerificationEvidenceResult[];
+        workspaceChangeSummary?: WorkspaceChangeSummary;
+      }
   > => {
     const backend = options.backend ?? "claude";
     if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
+    let runtimePolicy: {
+      workspaceAccess: "read-only" | "read-write";
+      agentPermissions: "read-only" | "workspace-write";
+    } = { workspaceAccess: "read-only", agentPermissions: "read-only" };
+    const runtimeProfile = claim.deploymentSnapshot?.runtimeProfile;
+    if (runtimeProfile) {
+      try {
+        runtimePolicy = assertRuntimeProfileBackend(runtimeProfile, backend);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "UNKNOWN_RUNTIME_PROFILE") throw error;
+      }
+    }
+    const workspaceAccess = runtimePolicy.workspaceAccess;
     if (claim.deploymentSnapshot && claim.deploymentSnapshot.executor.backend !== backend)
       throw new Error("EXPERT_BACKEND_UNSUPPORTED");
     if (
@@ -225,13 +261,14 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     const streaming = process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0" && !options.runProcess;
     let codexArgs =
       backend === "claude"
-        ? buildClaudeReadOnlyArgs(
+        ? buildClaudeArgs(
             claim.problem,
             claim.deploymentSnapshot?.executor.modelConfig.model ?? options.claudeModel ?? "sonnet",
             streaming,
             options.claudeMaxTurns ?? 12,
+            runtimePolicy.agentPermissions,
           )
-        : buildCodexReadOnlyArgs(claim.problem);
+        : buildCodexArgs(claim.problem, runtimePolicy.agentPermissions);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
     // worker's unrelated default sourcePath. Legacy IDs retain compatibility.
@@ -254,8 +291,10 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
               id: claim.repositoryId,
               url: claim.repositoryUrl,
               branch: claim.repositoryBranch,
+              workspaceAccess,
               ...(claim.repositoryGitProxyUrl ? { gitProxyUrl: claim.repositoryGitProxyUrl } : {}),
               root: options.repositoryRoot ?? `${options.sourcePath.replace(/\/[^/]+$/, "")}/expert-repositories`,
+              ...(claim.workspaceKey ? { workspaceKey: claim.workspaceKey } : {}),
               ...(claim.repositoryCredentialRef ? { credentialRef: claim.repositoryCredentialRef } : {}),
               credentials: options.gitCredentialConfigs,
             })
@@ -265,6 +304,21 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw error;
     }
     await report("repository.completed");
+    if (workspaceAccess === "read-write" && !preparedRepository) {
+      throw new Error("WORKSPACE_WRITE_REPOSITORY_REQUIRED");
+    }
+    if (preparedRepository && claim.workspaceKey) {
+      if (!options.onStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
+      await options.onStage(
+        claim,
+        "workspace.ready",
+        JSON.stringify({
+          workspaceKey: claim.workspaceKey,
+          path: preparedRepository.path,
+          commitSha: preparedRepository.commitSha,
+        }),
+      );
+    }
     const sourcePath = preparedRepository?.path ?? options.sourcePath;
     let generatedConfigDir: string | undefined;
     let configFilePath = options.configFilePath;
@@ -276,11 +330,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw new Error("EXPERT_MODEL_PROTOCOL_MISMATCH");
     }
     if (backend === "claude" && claim.modelConfig) {
-      codexArgs = buildClaudeReadOnlyArgs(
+      codexArgs = buildClaudeArgs(
         claim.problem,
         claim.modelConfig.model,
         streaming,
         options.claudeMaxTurns ?? 12,
+        runtimePolicy.agentPermissions,
       );
     }
     let claudeChildEnv: NodeJS.ProcessEnv | undefined;
@@ -328,6 +383,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     }
     let mcpConfigFilePath: string | undefined;
     let mcpChildEnv: NodeJS.ProcessEnv | undefined;
+    let mcpProxyBypassEnv: NodeJS.ProcessEnv | undefined;
     try {
       const mcp = claim.deploymentSnapshot?.mcp;
       if (mcp) {
@@ -337,6 +393,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           url = mcp.urlOverride ?? options.mcpDefaultUrl;
           if (!url) throw new Error("WORKER_MCP_URL_NOT_CONFIGURED");
           validateMcpEndpoint(url);
+          const mcpHost = new URL(url).hostname;
+          mcpProxyBypassEnv = {
+            NO_PROXY: mergeNoProxyHost(process.env.NO_PROXY ?? process.env.no_proxy, mcpHost),
+            no_proxy: mergeNoProxyHost(process.env.no_proxy ?? process.env.NO_PROXY, mcpHost),
+          };
+          envNames = [...new Set([...envNames, "NO_PROXY", "no_proxy"])];
           if (
             !Array.isArray(mcp.allowedTools) ||
             mcp.allowedTools.length === 0 ||
@@ -403,7 +465,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       }
       const containerName = `expert-${createHash("sha256").update(`${claim.taskId}:${claim.runId}:${claim.fencing}`).digest("hex").slice(0, 24)}`;
 
-      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : undefined;
+      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
       const args = buildCodexDockerArgs({
         image: options.image,
         containerName,
@@ -411,9 +473,10 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           ? { taskLabels: { taskId: claim.taskId, runId: claim.runId, fencing: claim.fencing } }
           : {}),
         sourcePath,
+        workspaceAccess,
         network: options.network,
         seccompProfile: options.seccompProfile,
-        ...(workerGroupId !== undefined ? { supplementalGroupId: workerGroupId } : {}),
+        supplementalGroupId: workerGroupId,
         envNames,
         authFilePath: options.authFilePath,
         configFilePath,
@@ -461,8 +524,14 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           maxOutputBytes: options.maxOutputBytes ?? (streaming ? 64 * 1024 * 1024 : undefined),
           signal,
           onAbort: () => stopDockerContainer(containerName),
-          ...(claudeChildEnv || mcpChildEnv
-            ? { env: { ...(claudeChildEnv ?? process.env), ...(mcpChildEnv ?? {}) } }
+          ...(claudeChildEnv || mcpChildEnv || mcpProxyBypassEnv
+            ? {
+                env: {
+                  ...(claudeChildEnv ?? process.env),
+                  ...(mcpChildEnv ?? {}),
+                  ...(mcpProxyBypassEnv ?? {}),
+                },
+              }
             : {}),
           ...(streaming
             ? {
@@ -501,6 +570,37 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         }
       }
       await report(`${backend}.completed`);
+      let workspaceChangeSummary: WorkspaceChangeSummary | undefined;
+      if (workspaceAccess === "read-write") {
+        workspaceChangeSummary = await computeWorkspaceChangeSummary(
+          preparedRepository!.path,
+          preparedRepository!.commitSha,
+        );
+        grantExecutionContainerAccess(preparedRepository!.path, "read-only");
+      }
+      let verificationResults: import("./verification-policy.js").VerificationEvidenceResult[] | undefined;
+      if ((claim.validationSnapshot?.length ?? 0) > 0) {
+        if (!preparedRepository) throw new Error("VERIFICATION_WORKSPACE_UNAVAILABLE");
+        const verificationRunner = options.runVerificationPolicy ?? runVerificationPolicy;
+        const rawVerification = await verificationRunner(
+          preparedRepository.path,
+          claim.validationSnapshot ?? [],
+          signal,
+          {
+            image: options.image,
+            containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
+            supplementalGroupId: workerGroupId,
+          },
+        );
+        verificationResults = rawVerification.map((verification) => ({
+          ...verification,
+          subjectRevision: workspaceChangeSummary
+            ? `workspace:${workspaceChangeSummary.contentRevision}`
+            : preparedRepository.commitSha,
+          environmentIdentity: `worker:${claim.workerId}`,
+          verifierIdentity: "team-skill-hub-worker",
+        }));
+      }
       await report("container.completed");
       return preparedRepository
         ? {
@@ -510,6 +610,8 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
               repositoryBranch: claim.repositoryBranch,
               commitSha: preparedRepository.commitSha,
             },
+            ...(verificationResults ? { verificationResults } : {}),
+            ...(workspaceChangeSummary ? { workspaceChangeSummary } : {}),
           }
         : result;
     } finally {

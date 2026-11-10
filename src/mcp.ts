@@ -1,4 +1,5 @@
 import { verifyClientSessionProof } from "./expert-platform/session-proof.js";
+import path from "node:path";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { observeReuse } from "./reuse-observability.js";
 import * as z from "zod/v4";
@@ -7,13 +8,35 @@ import { loadClientIntegrationStatus } from "./client-integration/release.js";
 import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service.js";
 import { ExpertStore } from "./expert-platform/expert-store.js";
 import { ExpertTaskStore } from "./expert-platform/task-store.js";
+import { WorkOrchestrationStore } from "./expert-platform/work-orchestration-store.js";
+import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
+import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
+import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
 
 // The experimental task API is opt-in until an isolated Worker runtime is provisioned.
-const expertTaskStore = process.env.EXPERT_RUNTIME_DB ? new ExpertTaskStore(process.env.EXPERT_RUNTIME_DB) : null;
-const expertStore = process.env.EXPERT_RUNTIME_DB ? new ExpertStore(process.env.EXPERT_RUNTIME_DB) : null;
+const expertRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+const expertTaskStore = expertRuntimeDb ? new ExpertTaskStore(expertRuntimeDb) : null;
+const expertStore = expertRuntimeDb ? new ExpertStore(expertRuntimeDb) : null;
 const expertDispatchService =
   expertTaskStore && expertStore ? new ExpertDispatchService(expertStore, expertTaskStore) : null;
-
+const workOrchestrationStore = expertRuntimeDb ? new WorkOrchestrationStore(expertRuntimeDb) : null;
+const workPublicationStore = expertRuntimeDb ? new WorkPublicationStore(expertRuntimeDb) : null;
+const workerAvailability = expertRuntimeDb
+  ? createWorkerAvailabilityProbe(
+      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
+        path.join(path.dirname(expertRuntimeDb), "expert-workers.sqlite"),
+    )
+  : undefined;
+const workOrchestrator =
+  workOrchestrationStore && expertTaskStore && expertDispatchService
+    ? new WorkOrchestrator(
+        workOrchestrationStore,
+        expertTaskStore,
+        expertDispatchService,
+        workerAvailability,
+        workPublicationStore ?? undefined,
+      )
+    : null;
 const filterSchema = {
   repositories: z.array(z.string()).optional(),
   domain: z.string().optional(),
@@ -98,6 +121,11 @@ function toolResult(value: unknown) {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: value as Record<string, unknown>,
   };
+}
+
+function normalizeOptionalMcpIdentifier(value: string | undefined): string | undefined {
+  if (value === undefined || value === ":omit:" || value === "__UNSPECIFIED__") return undefined;
+  return value;
 }
 
 const WORKER_MCP_READ_ONLY_TOOLS = new Set([
@@ -1397,6 +1425,274 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         },
       );
 
+      if (workOrchestrator) {
+        registerTool(
+          "submit_work",
+          {
+            description:
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
+            inputSchema: z.object({
+              title: z.string().trim().min(1).max(500),
+              description: z.string().trim().min(1).max(10000),
+              idempotencyKey: z.string().trim().min(1).max(200),
+              workflowId: z.string().trim().min(1).max(200).optional(),
+              routingMode: z
+                .enum(["auto", "explicit"])
+                .default("auto")
+                .describe(
+                  "Use auto unless the user explicitly supplied exact deployment/repository IDs. In auto mode, deploymentId and repositoryId are ignored.",
+                ),
+              expertId: z.string().trim().min(1).max(200).optional(),
+              repositoryId: z.string().trim().min(1).max(200).optional(),
+              deploymentId: z.string().trim().min(1).max(200).optional(),
+              priority: z.number().int().optional(),
+            }),
+          },
+          async ({
+            title,
+            description,
+            idempotencyKey,
+            routingMode,
+            workflowId,
+            expertId,
+            repositoryId,
+            deploymentId,
+            priority,
+          }) => {
+            const normalizedExpertId = normalizeOptionalMcpIdentifier(expertId);
+            const normalizedRepositoryId = normalizeOptionalMcpIdentifier(repositoryId);
+            const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
+            const explicitRouting = routingMode === "explicit";
+            return toolResult(
+              workOrchestrator.submitWork({
+                principalId: principal.id,
+                scope: principal.tenantId,
+                idempotencyKey,
+                sourceType: "mcp",
+                title,
+                description,
+                ...(workflowId === undefined ? {} : { workflowId }),
+                ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
+                ...(explicitRouting && normalizedRepositoryId !== undefined
+                  ? { repositoryId: normalizedRepositoryId }
+                  : {}),
+                ...(explicitRouting && normalizedDeploymentId !== undefined
+                  ? { deploymentId: normalizedDeploymentId }
+                  : {}),
+                ...(priority === undefined ? {} : { priority }),
+                sourceSessionId: sessionId ?? transportSessionId,
+                sourceClient: client?.slice(0, 200) || "mcp",
+              }),
+            );
+          },
+        );
+
+        registerTool(
+          "get_work",
+          {
+            description:
+              "Get and reconcile one WorkItem owned by the authenticated principal. Returns current Work state, WorkAttempts, current ExpertTask, Run/Turn history, current Workspace, verification summary, evidence and Completion Gate.",
+            inputSchema: z.object({ workItemId: z.string().uuid() }),
+          },
+          async ({ workItemId }) =>
+            toolResult(workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId)),
+        );
+
+        registerTool(
+          "wait_work",
+          {
+            description:
+              "Wait for durable WorkItem progress. Reconciles the linked ExpertTask before returning, includes Run/Turn history, current Workspace, verification summary, cursor-based Work events and nextEventId, and stops early when the Work leaves running/queued/rework or becomes terminal.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              afterEventId: z.number().int().min(0).default(0),
+              timeoutMs: z.number().int().min(0).max(30000).default(15000),
+              limit: z.number().int().min(1).max(100).default(50),
+            }),
+          },
+          async ({ workItemId, afterEventId, timeoutMs, limit }, ctx) => {
+            workOrchestrator.getWork(workItemId, principal.id, principal.tenantId);
+            const signal: AbortSignal = ctx.mcpReq.signal;
+            const deadline = performance.now() + timeoutMs;
+            let cursor = afterEventId;
+            const collected: ReturnType<WorkOrchestrator["getEvents"]>["events"] = [];
+            let detail = workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId);
+            while (true) {
+              if (signal.aborted) throw new Error("WAIT_CANCELLED");
+              const page = workOrchestrator.getEvents(
+                workItemId,
+                principal.id,
+                principal.tenantId,
+                cursor,
+                Math.max(1, limit - collected.length),
+              );
+              collected.push(...page.events);
+              cursor = page.nextEventId;
+              detail = workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId);
+              const terminal = ["completed", "failed", "cancelled"].includes(detail.work.status);
+              const active = ["queued", "running", "rework"].includes(detail.work.status);
+              const timedOut = performance.now() >= deadline;
+              if (terminal || !active || collected.length >= limit || timedOut) {
+                return toolResult({
+                  ...detail,
+                  events: collected,
+                  nextEventId: cursor,
+                  terminal,
+                  timedOut: timedOut && !terminal,
+                });
+              }
+              const remaining = Math.max(0, deadline - performance.now());
+              await new Promise<void>((resolve, reject) => {
+                const timer = setTimeout(
+                  () => {
+                    signal.removeEventListener("abort", aborted);
+                    resolve();
+                  },
+                  Math.min(500, remaining),
+                );
+                const aborted = () => {
+                  clearTimeout(timer);
+                  signal.removeEventListener("abort", aborted);
+                  reject(new Error("WAIT_CANCELLED"));
+                };
+                signal.addEventListener("abort", aborted, { once: true });
+              });
+            }
+          },
+        );
+
+        registerTool(
+          "review_work",
+          {
+            description:
+              "Submit an explicit Work review decision for the current subject revision. accepted can satisfy the human-review Completion Gate; rework creates a new WorkAttempt; rejected terminates the Work. This is distinct from ExpertTask feedback.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+              subjectRevision: z.string().trim().min(1).max(500),
+              decision: z.enum(["accepted", "rework", "rejected"]),
+              reason: z.string().trim().max(4000).optional(),
+            }),
+          },
+          async ({ workItemId, expectedRevision, subjectRevision, decision, reason }) =>
+            toolResult(
+              workOrchestrator.submitReview(workItemId, principal.id, principal.tenantId, {
+                expectedRevision,
+                subjectRevision,
+                decision,
+                ...(reason === undefined ? {} : { reason }),
+              }),
+            ),
+        );
+
+        registerTool(
+          "approve_work",
+          {
+            description:
+              "Record an explicit human authorization decision for either the exact current writable Workspace revision or an exact prepared Publication Artifact. This never grants runtime write permission, push permission is artifact-specific, and approval must never be inferred or self-approved by an agent. Only authenticated admin/developer principals may approve.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+              subjectRevision: z.string().trim().min(1).max(500),
+              approvalScope: z.enum(["work_completion", "publish_work_branch"]),
+              decision: z.enum(["approved", "rejected"]),
+            }),
+          },
+          async ({ workItemId, expectedRevision, subjectRevision, approvalScope, decision }) => {
+            const approvalRole = principal.roles.includes("admin")
+              ? "admin"
+              : principal.roles.includes("developer")
+                ? "developer"
+                : null;
+            if (!approvalRole) throw new Error("WORK_APPROVAL_FORBIDDEN");
+            return toolResult(
+              workOrchestrator.submitApproval(
+                workItemId,
+                principal.id,
+                principal.tenantId,
+                {
+                  expectedRevision,
+                  subjectRevision,
+                  approvalScope,
+                  decision,
+                },
+                { actor: principal.id, role: approvalRole },
+              ),
+            );
+          },
+        );
+
+        registerTool(
+          "record_work_evidence",
+          {
+            description:
+              "Record explicit human/external evidence for a WorkItem. Evidence is bound to a WorkAttempt and current subject revision; stale evidence cannot satisfy Completion Gate. Agent self-reported evidence is not accepted through this user-facing tool.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              workAttemptId: z.string().uuid(),
+              type: z.string().trim().min(1).max(200),
+              status: z.enum(["pending", "passed", "failed", "unknown"]),
+              source: z.enum(["human_verified", "external_verified"]),
+              subjectRevision: z.string().trim().min(1).max(500),
+              summary: z.string().trim().max(4000).optional(),
+              artifactRef: z.string().trim().max(2000).optional(),
+              environmentIdentity: z.string().trim().max(1000).optional(),
+              verifierIdentity: z.string().trim().max(1000).optional(),
+            }),
+          },
+          async ({
+            workItemId,
+            workAttemptId,
+            type,
+            status,
+            source,
+            subjectRevision,
+            summary,
+            artifactRef,
+            environmentIdentity,
+            verifierIdentity,
+          }) =>
+            toolResult(
+              workOrchestrator.recordEvidence(workItemId, principal.id, principal.tenantId, {
+                workAttemptId,
+                type,
+                status,
+                source,
+                subjectRevision,
+                ...(summary === undefined ? {} : { summary }),
+                ...(artifactRef === undefined ? {} : { artifactRef }),
+                ...(environmentIdentity === undefined ? {} : { environmentIdentity }),
+                ...(verifierIdentity === undefined ? {} : { verifierIdentity }),
+              }),
+            ),
+        );
+
+        registerTool(
+          "resume_work",
+          {
+            description:
+              "Explicitly resume a blocked WorkItem after its external blocker has been addressed. The current WorkItem revision is required; resume revalidates durable orchestration and Workspace ownership before any dispatch.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+            }),
+          },
+          async ({ workItemId, expectedRevision }) =>
+            toolResult(workOrchestrator.resumeWork(workItemId, principal.id, principal.tenantId, expectedRevision)),
+        );
+
+        registerTool(
+          "cancel_work",
+          {
+            description:
+              "Cancel a WorkItem owned by the authenticated principal. Cancellation propagates to its current ExpertTask and closes the active WorkAttempt.",
+            inputSchema: z.object({ workItemId: z.string().uuid() }),
+          },
+          async ({ workItemId }) =>
+            toolResult(workOrchestrator.cancelWork(workItemId, principal.id, principal.tenantId)),
+        );
+      }
+
       registerTool(
         "submit_expert_task_feedback",
         {
@@ -1409,14 +1705,29 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             needsRework: z.boolean().optional(),
           }),
         },
-        async ({ taskId, disposition, reason, needsRework }) =>
-          toolResult({
-            feedback: expertDispatchService!.submitFeedback(taskId, principal.id, principal.tenantId, {
-              disposition,
-              ...(reason === undefined ? {} : { reason }),
-              ...(needsRework === undefined ? {} : { needsRework }),
-            }),
-          }),
+        async ({ taskId, disposition, reason, needsRework }) => {
+          const feedbackInput = {
+            disposition,
+            ...(reason === undefined ? {} : { reason }),
+            ...(needsRework === undefined ? {} : { needsRework }),
+          };
+          const feedback = expertDispatchService!.submitFeedback(
+            taskId,
+            principal.id,
+            principal.tenantId,
+            feedbackInput,
+          );
+          const linkedWork = workOrchestrator?.handleTaskFeedback(
+            taskId,
+            principal.id,
+            principal.tenantId,
+            feedbackInput,
+          );
+          return toolResult({
+            feedback,
+            ...(linkedWork ? { work: linkedWork } : {}),
+          });
+        },
       );
 
       registerTool(

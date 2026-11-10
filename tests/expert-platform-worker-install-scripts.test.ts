@@ -144,6 +144,28 @@ test("worker env example documents instance-derived paths instead of runnable si
 
 test("manual controller initializes isolated worker instances and rejects unsafe names", () => {
   const fx = controllerFixture();
+  const configured = fx.run([
+    "init",
+    "ota-codex-01",
+    "--backend",
+    "codex",
+    "--runtime-profile",
+    "codex-readonly",
+    "--docker-network",
+    "team-skill-hub_default",
+    "--mcp-credential-ref",
+    "skillhub-readonly",
+  ]);
+  assert.equal(configured.status, 0, configured.stderr);
+  const configuredEnv = readFileSync(path.join(fx.etc, "workers", "ota-codex-01.env"), "utf8");
+  assert.match(configuredEnv, /^EXPERT_EXECUTOR_BACKEND=codex$/m);
+  assert.match(configuredEnv, /^EXPERT_RUNTIME_PROFILES=codex-readonly$/m);
+  assert.match(configuredEnv, /^EXPERT_DOCKER_NETWORK=team-skill-hub_default$/m);
+  assert.match(
+    configuredEnv,
+    /EXPERT_MCP_CREDENTIAL_FILES_JSON='\{"skillhub-readonly":".*instances\/ota-codex-01\/keys\/skillhub-readonly"\}'/,
+  );
+
   const created = fx.run(["init", "claude-01"]);
   assert.equal(created.status, 0, created.stderr);
   assert.match(readFileSync(path.join(fx.etc, "workers", "claude-01.env"), "utf8"), /EXPERT_WORKER_ID=/);
@@ -435,4 +457,22 @@ test("user-mode controller derives etc template from install root, not a stale e
         });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(path.join(etc, "workers", "user-01.env")), true);
+});
+
+test("worker documentation makes workspace-write profiles an explicit operator opt-in", () => {
+  const envExample = readFileSync(new URL("worker.env.example", runtime), "utf8");
+  const readme = readFileSync(new URL("README.md", runtime), "utf8");
+  const addExpert = readFileSync(new URL("../docs/expert-platform/add-expert.md", import.meta.url), "utf8");
+
+  assert.match(envExample, /codex-readonly,codex-workspace-write/);
+  assert.match(envExample, /claude-readonly,claude-workspace-write/);
+  assert.match(envExample, /workspace-write.*explicit|explicit.*workspace-write/i);
+  assert.doesNotMatch(envExample, /^EXPERT_RUNTIME_PROFILES=.*workspace-write/m);
+
+  for (const source of [readme, addExpert]) {
+    assert.match(source, /codex-workspace-write/);
+    assert.match(source, /claude-workspace-write/);
+    assert.match(source, /EXPERT_RUNTIME_PROFILES=.*readonly.*workspace-write/);
+    assert.match(source, /不会|不会自动|explicit|显式/i);
+  }
 });

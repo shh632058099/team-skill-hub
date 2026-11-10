@@ -115,6 +115,13 @@ Set the Runtime path once (use the default or the directory passed to `--install
 WORKER_INSTALL_DIR=/opt/team-skill-hub-worker
 sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init claude-01
 sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init codex-01
+
+# Recommended v2 Codex worker initialization:
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init ota-codex-01 \
+  --backend codex \
+  --runtime-profile codex-readonly \
+  --docker-network team-skill-hub_default \
+  --mcp-credential-ref skillhub-readonly
 ```
 
 This creates:
@@ -128,6 +135,8 @@ This creates:
 and the equivalent paths for `codex-01`.
 
 Edit each generated env file. The launcher injects `EXPERT_WORKER_INSTANCE`; do not set it manually.
+
+When v2 options are supplied to `init`, the generated instance env persists the selected backend, runtime profile, Docker network, and the instance-local MCP credential mapping. The command never accepts or writes the MCP secret itself. Put the key at `instances/<instance>/keys/<credential-ref>` with mode `0600` before starting the Worker.
 
 Unless explicitly overridden, these paths are derived automatically:
 
@@ -205,6 +214,34 @@ Put MCP/Git credential files under:
 ```
 
 Never share repository checkouts between Worker instances.
+
+## Workspace-write Runtime Profiles
+
+Runtime Profile advertisement is an explicit security boundary. Upgrading or reinstalling the Worker does **not** automatically add write capability.
+
+A read-only Worker remains:
+
+```dotenv
+EXPERT_RUNTIME_PROFILES=claude-readonly
+```
+
+or:
+
+```dotenv
+EXPERT_RUNTIME_PROFILES=codex-readonly
+```
+
+To intentionally allow an instance to execute both read-only and isolated workspace-write Deployments, the operator must explicitly opt in:
+
+```dotenv
+# Claude instance
+EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
+
+# Codex instance
+EXPERT_RUNTIME_PROFILES=codex-readonly,codex-workspace-write
+```
+
+`*-workspace-write` allows only the assigned WorkAttempt Workspace to be mounted read-write. The task container root filesystem and credential/config mounts remain read-only. Claude write mode allows `Read,Glob,Grep,Edit,Write` but not Bash; Codex uses `--sandbox workspace-write`. Verification still runs in a separate read-only/no-network container.
 
 ## Claude and Codex on one host
 

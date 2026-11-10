@@ -38,6 +38,7 @@ export interface CodexDockerConfig {
   containerName?: string;
   taskLabels?: { taskId: string; runId: string; fencing: number };
   sourcePath: string;
+  workspaceAccess?: "read-only" | "read-write";
   network: string;
   seccompProfile?: "default" | "unconfined";
   supplementalGroupId?: number;
@@ -127,7 +128,7 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     "--cpus",
     "2",
     "--mount",
-    `type=bind,src=${config.sourcePath},dst=/workspace,readonly`,
+    `type=bind,src=${config.sourcePath},dst=/workspace${config.workspaceAccess === "read-write" ? "" : ",readonly"}`,
     "--mount",
     "type=tmpfs,dst=/tmp,tmpfs-size=33554432",
     "--tmpfs",

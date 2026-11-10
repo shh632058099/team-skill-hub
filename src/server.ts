@@ -30,8 +30,15 @@ import {
   type ExpertMcpProfile,
 } from "./expert-platform/expert-store.js";
 import { ExpertTaskStore } from "./expert-platform/task-store.js";
+import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service.js";
+import { WorkOrchestrationStore, type WorkStatus } from "./expert-platform/work-orchestration-store.js";
+import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
+import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
-import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
+import {
+  createWorkerAvailabilityProbe,
+  PersistentWorkerRegistry,
+} from "./expert-platform/persistent-worker-registry.js";
 import {
   applyAdminConfig,
   editableConfigFromApp,
@@ -217,6 +224,41 @@ export async function startServer(
   );
   const mcpHandler = createSkillHubMcpHandler(service);
   const nodeHandler = toNodeHandler(mcpHandler);
+
+  const workRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+  let workReconcileTimer: ReturnType<typeof setInterval> | undefined;
+  let workRuntimeResources:
+    | {
+        work: WorkOrchestrationStore;
+        publications: WorkPublicationStore;
+        tasks: ExpertTaskStore;
+        experts: ExpertStore;
+        orchestrator: WorkOrchestrator;
+      }
+    | undefined;
+  if (workRuntimeDb) {
+    const work = new WorkOrchestrationStore(workRuntimeDb);
+    const publications = new WorkPublicationStore(workRuntimeDb);
+    const tasks = new ExpertTaskStore(workRuntimeDb);
+    const experts = new ExpertStore(workRuntimeDb);
+    const registryDb =
+      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() || path.join(path.dirname(workRuntimeDb), "expert-workers.sqlite");
+    const orchestrator = new WorkOrchestrator(
+      work,
+      tasks,
+      new ExpertDispatchService(experts, tasks),
+      createWorkerAvailabilityProbe(registryDb),
+      publications,
+    );
+    workRuntimeResources = { work, publications, tasks, experts, orchestrator };
+    app.addHook("onClose", async () => {
+      if (workReconcileTimer) clearInterval(workReconcileTimer);
+      work.close();
+      publications.close();
+      tasks.close();
+      experts.close();
+    });
+  }
 
   const adminLoginRequired = process.env.ADMIN_LOGIN_REQUIRED === "true";
   const adminSessionCookieSecure = process.env.ADMIN_SESSION_COOKIE_SECURE === "true";
@@ -841,6 +883,119 @@ export async function startServer(
       store.close();
     }
   };
+
+  const requireWorkRuntime = () => {
+    if (!workRuntimeResources) throw new Error("EXPERT_RUNTIME_DB_NOT_CONFIGURED");
+    return workRuntimeResources;
+  };
+  const adminWorkDetail = (workItemId: string) => {
+    const runtime = requireWorkRuntime();
+    const owner = runtime.work.getWorkInternal(workItemId);
+    const detail = runtime.orchestrator.getWork(workItemId, owner.principalId, owner.scope);
+    const workspaces = runtime.work.listWorkspaces(workItemId);
+    const reviews = runtime.work.listReviewDecisions(workItemId);
+    const approvals = runtime.work.listApprovals(workItemId);
+    const events = runtime.work.listEvents(workItemId, 0, 200).events;
+    const runs = detail.attempts.flatMap((attempt) => {
+      if (!attempt.taskId) return [];
+      const taskDetail = runtime.tasks.adminTaskDetail(attempt.taskId);
+      return (taskDetail?.runs ?? []).map((run) => ({
+        ...run,
+        workAttemptId: attempt.workAttemptId,
+        sequence: attempt.sequence,
+      }));
+    });
+    return { ...detail, workspaces, reviews, approvals, events, runs };
+  };
+  const adminWorkError = (error: unknown, reply: any) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const status =
+      message === "EXPERT_RUNTIME_DB_NOT_CONFIGURED"
+        ? 503
+        : message === "WORK_NOT_FOUND"
+          ? 404
+          : ["WORK_ALREADY_TERMINAL", "STALE_WORK_REVISION", "STALE_WORK_ATTEMPT"].includes(message)
+            ? 409
+            : 400;
+    return reply.code(status).send({ error: message });
+  };
+
+  app.get<{
+    Querystring: { limit?: string; offset?: string; status?: string; q?: string };
+  }>("/admin/api/work-items", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    const status = request.query.status?.trim();
+    const allowedStatuses = [
+      "queued",
+      "running",
+      "blocked",
+      "waiting_review",
+      "rework",
+      "completed",
+      "failed",
+      "cancelled",
+    ];
+    if (status && !allowedStatuses.includes(status)) return reply.code(400).send({ error: "invalid work status" });
+    try {
+      return requireWorkRuntime().work.adminListWorkItems({
+        limit: Number(request.query.limit || 20),
+        offset: Number(request.query.offset || 0),
+        ...(status ? { status: status as WorkStatus } : {}),
+        ...(request.query.q?.trim() ? { q: request.query.q.trim() } : {}),
+      });
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/admin/api/work-items/:id", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
+    try {
+      return adminWorkDetail(request.params.id);
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/work-items/:id/reconcile", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
+    try {
+      const runtime = requireWorkRuntime();
+      const owner = runtime.work.getWorkInternal(request.params.id);
+      runtime.orchestrator.reconcileWork(request.params.id, owner.principalId, owner.scope);
+      return adminWorkDetail(request.params.id);
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/work-items/:id/resume", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
+    try {
+      const runtime = requireWorkRuntime();
+      const owner = runtime.work.getWorkInternal(request.params.id);
+      runtime.orchestrator.resumeWork(request.params.id, owner.principalId, owner.scope, owner.stateRevision);
+      return adminWorkDetail(request.params.id);
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/api/work-items/:id/cancel", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
+    try {
+      const runtime = requireWorkRuntime();
+      const owner = runtime.work.getWorkInternal(request.params.id);
+      runtime.orchestrator.cancelWork(request.params.id, owner.principalId, owner.scope);
+      return adminWorkDetail(request.params.id);
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
   app.get<{
     Querystring: { limit?: string; offset?: string; status?: string; expertId?: string; workerId?: string; q?: string };
   }>("/admin/api/expert-tasks", async (request, reply) => {
@@ -3747,5 +3902,29 @@ export async function startServer(
   });
 
   await app.listen({ host: config.host, port: config.port });
+  if (workRuntimeResources) {
+    const intervalMs = Math.max(
+      10,
+      Math.min(Number(process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS ?? 1000) || 1000, 60_000),
+    );
+    const limit = Math.max(1, Math.min(Number(process.env.EXPERT_WORK_RECONCILE_LIMIT ?? 100) || 100, 500));
+    const reconcile = (startup: boolean) => {
+      try {
+        if (startup) workRuntimeResources!.orchestrator.reconcileStartup(Date.now(), limit);
+        else workRuntimeResources!.orchestrator.reconcileActive(Date.now(), limit);
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "work.reconcile_failed",
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    };
+    reconcile(true);
+    workReconcileTimer = setInterval(() => reconcile(false), intervalMs);
+    workReconcileTimer.unref?.();
+  }
   return app;
 }

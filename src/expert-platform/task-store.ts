@@ -2,7 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ExpertModelConfig } from "./expert-store.js";
+import type { ExpertModelConfig, RepositoryPublicationPolicy } from "./expert-store.js";
+import {
+  normalizeVerificationEvidenceResults,
+  normalizeVerificationPolicy,
+  type VerificationEvidenceResult,
+  type VerificationPolicyStep,
+} from "./verification-policy.js";
+import { normalizeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type ExpertTaskFeedbackDisposition = "adopted" | "partially_adopted" | "not_adopted";
@@ -22,7 +29,14 @@ export type DeploymentTaskSnapshot = {
   deploymentId: string;
   configVersion: number;
   runtimeProfile: string;
-  repository: { id: string; url: string; branch: string; credentialRef?: string; gitProxyUrl?: string } | null;
+  repository: {
+    id: string;
+    url: string;
+    branch: string;
+    credentialRef?: string;
+    gitProxyUrl?: string;
+    publicationPolicy?: RepositoryPublicationPolicy;
+  } | null;
   executor: { backend: "claude" | "codex"; modelConfig: ExpertModelConfig };
   mcp?: {
     profileRef?: string;
@@ -48,6 +62,12 @@ export type Submission = {
   sourceRequestSlot?: string;
   schemaVersion?: number;
   deploymentSnapshot?: DeploymentTaskSnapshot;
+  workItemId?: string;
+  workAttemptId?: string;
+  workflowId?: string;
+  workflowVersion?: number;
+  workspaceKey?: string;
+  validationSnapshot?: VerificationPolicyStep[];
 };
 export type TaskRecord = {
   taskId: string;
@@ -67,6 +87,18 @@ export type TaskRecord = {
   repositoryBranch?: string | null;
   commitSha?: string | null;
   cancellationRequested?: boolean;
+  workItemId: string | null;
+  workAttemptId: string | null;
+  workflowId: string | null;
+  workflowVersion: number | null;
+  workspaceKey: string | null;
+  validationSnapshot: VerificationPolicyStep[];
+  verificationResults: VerificationEvidenceResult[];
+  workspaceChangeSummary: WorkspaceChangeSummary | null;
+  requiredWorkerId: string | null;
+  continuationCount: number;
+  continuationReason: string | null;
+  runId: string | null;
   /** True when this submission reused a task created by an earlier submission. */
   reusedExistingTask?: boolean;
   deduplicationReason?: "idempotency_key" | "same_source_request" | "same_active_session_task";
@@ -75,6 +107,17 @@ export type TaskRecord = {
   activeSessionTaskStatus?: TaskStatus;
 };
 export type TaskSourceMetadata = { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
+
+export type TaskRunTurnRecord = {
+  taskId: string;
+  runId: string;
+  turnIndex: number;
+  status: "running" | "succeeded" | "failed";
+  startSequence: number | null;
+  finishSequence: number | null;
+  startedAt: number;
+  finishedAt: number | null;
+};
 
 export type Claim = {
   taskId: string;
@@ -89,6 +132,8 @@ export type Claim = {
   repositoryGitProxyUrl?: string;
   modelConfig?: ExpertModelConfig;
   deploymentSnapshot?: DeploymentTaskSnapshot;
+  workspaceKey?: string | null;
+  validationSnapshot?: VerificationPolicyStep[];
 };
 type Row = Record<string, unknown>;
 
@@ -139,6 +184,17 @@ export class ExpertTaskStore {
         fencing INTEGER NOT NULL,
         status TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS expert_run_turns (
+        run_id TEXT NOT NULL REFERENCES expert_runs(run_id),
+        task_id TEXT NOT NULL REFERENCES expert_tasks(task_id),
+        turn_index INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed')),
+        start_sequence INTEGER,
+        finish_sequence INTEGER,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        PRIMARY KEY(run_id,turn_index)
+      );
       CREATE TABLE IF NOT EXISTS expert_events (
         event_id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL REFERENCES expert_tasks(task_id),
@@ -170,6 +226,17 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("deployment_config_version", "INTEGER");
     this.ensureTaskColumn("deployment_snapshot_json", "TEXT");
     this.ensureTaskColumn("created_at", "INTEGER");
+    this.ensureTaskColumn("work_item_id", "TEXT");
+    this.ensureTaskColumn("work_attempt_id", "TEXT");
+    this.ensureTaskColumn("workflow_id", "TEXT");
+    this.ensureTaskColumn("workflow_version", "INTEGER");
+    this.ensureTaskColumn("workspace_key", "TEXT");
+    this.ensureTaskColumn("validation_snapshot_json", "TEXT");
+    this.ensureTaskColumn("verification_results_json", "TEXT");
+    this.ensureTaskColumn("workspace_change_summary_json", "TEXT");
+    this.ensureTaskColumn("required_worker_id", "TEXT");
+    this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureTaskColumn("continuation_reason", "TEXT");
     // Older tasks already have a queued lifecycle event created at submission time.
     // Backfill from that event so the new history column remains useful after upgrade.
     this.db.exec(
@@ -181,6 +248,7 @@ export class ExpertTaskStore {
       WHERE recent.task_id=expert_events.task_id ORDER BY event_id DESC LIMIT 1000
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_expert_task_run ON expert_runs(task_id);
+      CREATE INDEX IF NOT EXISTS idx_expert_run_turn_task ON expert_run_turns(task_id,run_id,turn_index);
       CREATE INDEX IF NOT EXISTS idx_expert_event_task ON expert_events(task_id,event_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_expert_event_run_seq ON expert_events(run_id,source_sequence) WHERE source_sequence IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_expert_task_status ON expert_tasks(status,expert_id);
@@ -276,6 +344,21 @@ export class ExpertTaskStore {
     ) {
       throw new Error("INVALID_REQUEST");
     }
+    const workLinkValues = [input.workItemId, input.workAttemptId, input.workflowId, input.workflowVersion];
+    if (input.workspaceKey !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(input.workspaceKey)) {
+      throw new Error("INVALID_WORKSPACE_KEY");
+    }
+    const validationSnapshot = normalizeVerificationPolicy(input.validationSnapshot);
+    if (
+      workLinkValues.some((value) => value !== undefined) &&
+      (!input.workItemId?.trim() ||
+        !input.workAttemptId?.trim() ||
+        !input.workflowId?.trim() ||
+        !Number.isSafeInteger(input.workflowVersion) ||
+        Number(input.workflowVersion) < 1)
+    ) {
+      throw new Error("INVALID_WORK_LINK");
+    }
     const digest = createHash("sha256")
       .update(
         JSON.stringify({
@@ -284,6 +367,12 @@ export class ExpertTaskStore {
           repositoryId,
           selectionMode,
           schemaVersion,
+          workItemId: input.workItemId?.trim() || null,
+          workAttemptId: input.workAttemptId?.trim() || null,
+          workflowId: input.workflowId?.trim() || null,
+          workflowVersion: input.workflowVersion ?? null,
+          workspaceKey: input.workspaceKey?.trim() || null,
+          validationSnapshot,
           ...(snapshot
             ? {
                 deploymentId: snapshot.deploymentId,
@@ -378,7 +467,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -398,6 +487,12 @@ export class ExpertTaskStore {
           snapshot?.deploymentId ?? input.deploymentId ?? null,
           snapshot?.configVersion ?? null,
           snapshot ? JSON.stringify(snapshot) : null,
+          input.workItemId?.trim() || null,
+          input.workAttemptId?.trim() || null,
+          input.workflowId?.trim() || null,
+          input.workflowVersion ?? null,
+          input.workspaceKey?.trim() || null,
+          JSON.stringify(validationSnapshot),
           Date.now(),
         );
       this.event(taskId, null, "queued");
@@ -423,7 +518,19 @@ export class ExpertTaskStore {
         sourceSessionId,
         sourceClient,
         sourceRequestId,
+        workItemId: input.workItemId?.trim() || null,
+        workAttemptId: input.workAttemptId?.trim() || null,
+        workflowId: input.workflowId?.trim() || null,
+        workflowVersion: input.workflowVersion ?? null,
+        workspaceKey: input.workspaceKey?.trim() || null,
+        validationSnapshot,
+        verificationResults: [],
+        workspaceChangeSummary: null,
+        requiredWorkerId: null,
         reusedExistingTask: false,
+        continuationCount: 0,
+        continuationReason: null,
+        runId: null,
         ...sessionTask,
       };
     } catch (error) {
@@ -459,6 +566,7 @@ export class ExpertTaskStore {
         ? (this.db
             .prepare(
               `SELECT * FROM expert_tasks AS t WHERE expert_id=? AND (status='queued' OR (status='running' AND lease_until < ?))
+                AND (t.required_worker_id IS NULL OR t.required_worker_id=?)
                 ${compatibilitySql}
                 AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
                   WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
@@ -467,10 +575,11 @@ export class ExpertTaskStore {
                     AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
                 ORDER BY t.rowid LIMIT 1`,
             )
-            .get(expertId, now, ...compatibilityArgs) as Row | undefined)
+            .get(expertId, now, workerId, ...compatibilityArgs) as Row | undefined)
         : (this.db
             .prepare(
               `SELECT * FROM expert_tasks AS t WHERE (status='queued' OR (status='running' AND lease_until < ?))
+                AND (t.required_worker_id IS NULL OR t.required_worker_id=?)
                 ${compatibilitySql}
                 AND NOT EXISTS (SELECT 1 FROM expert_tasks AS earlier
                   WHERE t.source_session_id IS NOT NULL AND earlier.rowid < t.rowid
@@ -479,7 +588,7 @@ export class ExpertTaskStore {
                     AND earlier.expert_id=t.expert_id AND earlier.status IN ('queued','running'))
                 ORDER BY t.rowid LIMIT 1`,
             )
-            .get(now, ...compatibilityArgs) as Row | undefined);
+            .get(now, workerId, ...compatibilityArgs) as Row | undefined);
       if (!row) {
         this.db.exec("COMMIT");
         return null;
@@ -513,6 +622,10 @@ export class ExpertTaskStore {
         fencing,
         problem: String(row.problem),
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
+        workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+        validationSnapshot: normalizeVerificationPolicy(
+          row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
+        ),
         ...(row.deployment_snapshot_json
           ? { deploymentSnapshot: JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot }
           : {}),
@@ -523,19 +636,44 @@ export class ExpertTaskStore {
     }
   }
 
-  complete(claim: Claim, result: string, now = Date.now(), sourceMetadata?: TaskSourceMetadata): void {
+  complete(
+    claim: Claim,
+    result: string,
+    now = Date.now(),
+    sourceMetadata?: TaskSourceMetadata,
+    verificationResultsInput?: VerificationEvidenceResult[],
+    workspaceChangeSummaryInput?: WorkspaceChangeSummary,
+  ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const source = sourceMetadata ?? parseSourceMetadata(result) ?? undefined;
+      const verificationResults = normalizeVerificationEvidenceResults(verificationResultsInput);
+      const workspaceChangeSummary =
+        workspaceChangeSummaryInput === undefined ? null : normalizeWorkspaceChangeSummary(workspaceChangeSummaryInput);
+      if (workspaceChangeSummary && (!source?.commitSha || workspaceChangeSummary.baseCommit !== source.commitSha)) {
+        throw new Error("WORKSPACE_CHANGE_BASE_MISMATCH");
+      }
+      const expectedVerificationSubject = workspaceChangeSummary
+        ? `workspace:${workspaceChangeSummary.contentRevision}`
+        : source?.commitSha;
+      if (
+        verificationResults.length > 0 &&
+        (!expectedVerificationSubject ||
+          verificationResults.some((item) => item.subjectRevision !== expectedVerificationSubject))
+      ) {
+        throw new Error("VERIFICATION_SUBJECT_MISMATCH");
+      }
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
+          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),verification_results_json=?,workspace_change_summary_json=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
         )
         .run(
           result,
           source?.repositoryUrl ?? null,
           source?.repositoryBranch ?? null,
           source?.commitSha ?? null,
+          JSON.stringify(verificationResults),
+          workspaceChangeSummary ? JSON.stringify(workspaceChangeSummary) : null,
           claim.taskId,
           claim.runId,
           claim.workerId,
@@ -544,6 +682,7 @@ export class ExpertTaskStore {
         );
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
       this.db.prepare("UPDATE expert_runs SET status='succeeded' WHERE run_id=?").run(claim.runId);
+      this.closeActiveRunTurn(claim.runId, "succeeded", now);
       this.event(claim.taskId, claim.runId, "succeeded");
       this.db.exec("COMMIT");
     } catch (error) {
@@ -583,12 +722,79 @@ export class ExpertTaskStore {
         .run(terminalStatus, reason, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
       this.db.prepare("UPDATE expert_runs SET status=? WHERE run_id=?").run(terminalStatus, claim.runId);
+      this.closeActiveRunTurn(claim.runId, "failed", now);
       this.event(claim.taskId, claim.runId, terminalStatus);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  requeueForRetry(taskId: string, expectedWorkAttemptId: string, reason: string, now = Date.now()): TaskRecord {
+    const workAttemptId = expectedWorkAttemptId.trim();
+    if (!workAttemptId || !reason.trim()) throw new Error("INVALID_REQUEST");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      if (row.work_attempt_id == null || String(row.work_attempt_id) !== workAttemptId) {
+        throw new Error("STALE_WORK_ATTEMPT");
+      }
+      if (row.status !== "failed") throw new Error("TASK_RETRY_NOT_ALLOWED");
+      this.db
+        .prepare(
+          "UPDATE expert_tasks SET status='queued',result=NULL,run_id=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0 WHERE task_id=? AND status='failed' AND work_attempt_id=?",
+        )
+        .run(taskId, workAttemptId);
+      this.event(taskId, null, "retry_queued");
+      const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  scheduleContinuation(
+    taskId: string,
+    expectedRunId: string,
+    reason: string,
+    now = Date.now(),
+    requiredWorkerId?: string,
+  ): TaskRecord {
+    const runId = expectedRunId.trim();
+    if (!runId || !reason.trim()) throw new Error("INVALID_REQUEST");
+    const normalizedWorker = requiredWorkerId?.trim() || null;
+    if (normalizedWorker && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(normalizedWorker)) {
+      throw new Error("INVALID_WORKER");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      if (row.status !== "succeeded") throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
+      if (row.run_id == null || String(row.run_id) !== runId) throw new Error("STALE_RUN");
+      const changed = this.db
+        .prepare(
+          "UPDATE expert_tasks SET status='queued',result=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,continuation_count=continuation_count+1,continuation_reason=?,required_worker_id=? WHERE task_id=? AND status='succeeded' AND run_id=?",
+        )
+        .run(reason.trim().slice(0, 200), normalizedWorker, taskId, runId);
+      if (changed.changes !== 1) throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
+      this.event(taskId, runId, "continuation_queued");
+      const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  runCount(taskId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM expert_runs WHERE task_id=?").get(taskId) as { n: number };
+    return Number(row.n);
   }
 
   get(taskId: string, principalId: string, scope: string): TaskRecord {
@@ -922,6 +1128,59 @@ export class ExpertTaskStore {
     };
   }
 
+  listRunTurns(taskId: string, principalId: string, scope: string): TaskRunTurnRecord[] {
+    this.get(taskId, principalId, scope);
+    return (
+      this.db
+        .prepare(
+          "SELECT task_id,run_id,turn_index,status,start_sequence,finish_sequence,started_at,finished_at FROM expert_run_turns WHERE task_id=? ORDER BY rowid",
+        )
+        .all(taskId) as Row[]
+    ).map((row) => ({
+      taskId: String(row.task_id),
+      runId: String(row.run_id),
+      turnIndex: Number(row.turn_index),
+      status: String(row.status) as TaskRunTurnRecord["status"],
+      startSequence: row.start_sequence == null ? null : Number(row.start_sequence),
+      finishSequence: row.finish_sequence == null ? null : Number(row.finish_sequence),
+      startedAt: Number(row.started_at),
+      finishedAt: row.finished_at == null ? null : Number(row.finished_at),
+    }));
+  }
+
+  private updateRunTurnFromActivity(claim: Claim, stage: string, sourceSequence: number, now: number): void {
+    if (stage === "model.started") {
+      const active = this.db
+        .prepare("SELECT 1 FROM expert_run_turns WHERE run_id=? AND status='running' LIMIT 1")
+        .get(claim.runId);
+      if (active) return;
+      const next = this.db
+        .prepare("SELECT COALESCE(MAX(turn_index),0)+1 AS n FROM expert_run_turns WHERE run_id=?")
+        .get(claim.runId) as { n: number };
+      this.db
+        .prepare(
+          "INSERT INTO expert_run_turns(run_id,task_id,turn_index,status,start_sequence,started_at) VALUES(?,?,?,'running',?,?)",
+        )
+        .run(claim.runId, claim.taskId, Number(next.n), sourceSequence, now);
+      return;
+    }
+    if (stage === "model.completed" || stage === "model.failed") {
+      this.db
+        .prepare(
+          "UPDATE expert_run_turns SET status=?,finish_sequence=?,finished_at=? WHERE run_id=? AND status='running'",
+        )
+        .run(stage === "model.completed" ? "succeeded" : "failed", sourceSequence, now, claim.runId);
+    }
+  }
+
+  private closeActiveRunTurn(runId: string, status: "succeeded" | "failed", now: number): void {
+    this.db
+      .prepare(
+        "UPDATE expert_run_turns SET status=?,finished_at=COALESCE(finished_at,?) WHERE run_id=? AND status='running'",
+      )
+      .run(status, now, runId);
+  }
+
   /** Best-effort bounded activity recording; legacy lifecycle stages remain unchanged. */
   recordActivity(
     claim: Claim,
@@ -970,6 +1229,7 @@ export class ExpertTaskStore {
           VALUES(?,?,?,'',?,?,?,?)`,
             )
             .run(claim.taskId, claim.runId, stage, sourceSequence, toolCode || null, count || null, now);
+        this.updateRunTurnFromActivity(claim, stage, sourceSequence, now);
         this.trimTaskEvents(claim.taskId);
       }
       this.db.exec("COMMIT");
@@ -977,6 +1237,15 @@ export class ExpertTaskStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  assertActiveClaim(claim: Claim, now = Date.now()): void {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND lease_until>=?",
+      )
+      .get(claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
+    if (!row) throw new Error("STALE_ATTEMPT");
   }
 
   /** Accept stage metadata only for the active claimed attempt; no raw model output. */
@@ -1081,6 +1350,24 @@ export class ExpertTaskStore {
       repositoryBranch: row.repository_branch == null ? null : String(row.repository_branch),
       commitSha: row.commit_sha == null ? null : String(row.commit_sha),
       cancellationRequested: Number(row.cancellation_requested ?? 0) === 1,
+      workItemId: row.work_item_id == null ? null : String(row.work_item_id),
+      workAttemptId: row.work_attempt_id == null ? null : String(row.work_attempt_id),
+      workflowId: row.workflow_id == null ? null : String(row.workflow_id),
+      workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
+      workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+      validationSnapshot: normalizeVerificationPolicy(
+        row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
+      ),
+      verificationResults: normalizeVerificationEvidenceResults(
+        row.verification_results_json ? JSON.parse(String(row.verification_results_json)) : [],
+      ),
+      workspaceChangeSummary: row.workspace_change_summary_json
+        ? normalizeWorkspaceChangeSummary(JSON.parse(String(row.workspace_change_summary_json)))
+        : null,
+      requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
+      continuationCount: Number(row.continuation_count ?? 0),
+      continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
+      runId: row.run_id == null ? null : String(row.run_id),
     };
   }
 }

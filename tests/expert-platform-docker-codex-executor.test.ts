@@ -52,6 +52,10 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
   };
   const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "fake-test-model-key";
+  const savedNoProxy = process.env.NO_PROXY;
+  const savedLowerNoProxy = process.env.no_proxy;
+  process.env.NO_PROXY = "127.0.0.1,localhost";
+  process.env.no_proxy = "localhost";
   const originalUmask = process.umask(0o077);
   try {
     for (const backend of ["codex", "claude"] as const) {
@@ -68,6 +72,11 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
           const argv = options.args.join(" ");
           assert.ok(!argv.includes(key), "Docker arguments must not contain secrets");
           assert.ok(!argv.includes("--network host"));
+          assert.match(String(options.env?.NO_PROXY), /(?:^|,)hub\.internal(?:,|$)/);
+          assert.match(String(options.env?.no_proxy), /(?:^|,)hub\.internal(?:,|$)/);
+          assert.match(String(options.env?.NO_PROXY), /(?:^|,)localhost(?:,|$)/);
+          assert.ok(options.args.includes("NO_PROXY"));
+          assert.ok(options.args.includes("no_proxy"));
           const pathSuffix =
             backend === "codex" ? ",dst=/run/codex-config.toml,readonly" : ",dst=/run/expert-mcp.json,readonly";
           const mount = options.args.find((arg) => arg.endsWith(pathSuffix));
@@ -104,6 +113,10 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
     process.umask(originalUmask);
     if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+    if (savedNoProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = savedNoProxy;
+    if (savedLowerNoProxy === undefined) delete process.env.no_proxy;
+    else process.env.no_proxy = savedLowerNoProxy;
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -131,6 +144,94 @@ test("Docker Codex executor runs codex JSONL through docker with read-only sourc
   assert.ok(seen?.args.includes("--json"));
   assert.equal(seen?.args.at(-1), claim.problem);
   assert.equal(seen?.signal, signal);
+});
+
+test("Docker executor runs pinned verification in the prepared workspace and returns revision-bound results", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-verification-integration-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "marker.txt"), "verified\n");
+    execFileSync("git", ["-C", origin, "add", "marker.txt"]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "init",
+    ]);
+    const commitSha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: [],
+      timeoutMs: 1_000,
+      runProcess: async () => "agent result",
+      runVerificationPolicy: async (_workspace, policy) =>
+        policy.map((step) => ({
+          stepId: step.id,
+          type: step.type,
+          evidenceType: step.evidenceType,
+          status: "passed" as const,
+          exitCode: 0,
+          durationMs: 1,
+          errorCode: null,
+        })),
+      onStage: async () => undefined,
+    });
+    const result = await executor(
+      {
+        ...claim,
+        repositoryId: "repo-test",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-1-a1",
+        validationSnapshot: [
+          {
+            id: "marker",
+            type: "command",
+            argv: [process.execPath, "-e", "require('fs').accessSync('marker.txt')"],
+            timeoutMs: 2_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+      new AbortController().signal,
+    );
+
+    assert.equal(typeof result, "object");
+    assert.equal((result as { source?: { commitSha?: string } }).source?.commitSha, commitSha);
+    assert.deepEqual((result as { verificationResults?: unknown[] }).verificationResults, [
+      {
+        stepId: "marker",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed",
+        exitCode: 0,
+        errorCode: null,
+        subjectRevision: commitSha,
+        environmentIdentity: "worker:worker-1",
+        verifierIdentity: "team-skill-hub-worker",
+        durationMs: (result as { verificationResults: Array<{ durationMs: number }> }).verificationResults[0]!
+          .durationMs,
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Docker Codex executor mounts an isolated per-expert provider config", async () => {
@@ -321,4 +422,244 @@ test("Docker executor emits generic failure codes, not raw process stderr", asyn
   assert.ok(stages.includes("codex.failed:EXECUTION_FAILED"));
   assert.ok(stages.includes("container.failed:EXECUTION_FAILED"));
   assert.doesNotMatch(stages.join(" "), /never-log-this-secret/);
+});
+
+test("Docker executor keeps legacy profiles read-only and rejects write profile without prepared workspace before launch", async () => {
+  const modelConfig = {
+    providerId: "router",
+    model: "test-model",
+    baseUrl: "https://router.example/v1",
+    wireApi: "responses" as const,
+    allowedEnvNames: ["OPENAI_API_KEY"],
+  };
+  const makeExecutor = () => {
+    let launched = false;
+    let args: readonly string[] = [];
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "worker",
+      sourcePath: "/work/repo",
+      network: "expert-egress",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      runProcess: async (options) => {
+        launched = true;
+        args = options.args;
+        return "done";
+      },
+    });
+    return { executor, launched: () => launched, args: () => args };
+  };
+  const claimFor = (runtimeProfile: string) => ({
+    ...claim,
+    modelConfig,
+    deploymentSnapshot: {
+      deploymentId: "deployment",
+      configVersion: 1,
+      runtimeProfile,
+      repository: { id: "repo", url: "https://example.org/repo.git", branch: "main" },
+      executor: { backend: "codex" as const, modelConfig },
+    },
+  });
+
+  const writable = makeExecutor();
+  await assert.rejects(
+    () => writable.executor(claimFor("codex-workspace-write"), new AbortController().signal),
+    /WORKSPACE_WRITE_REPOSITORY_REQUIRED/,
+  );
+  assert.equal(writable.launched(), false, "write profile must fail before Docker launch without a prepared workspace");
+
+  const legacy = makeExecutor();
+  await legacy.executor(claimFor("legacy-custom"), new AbortController().signal);
+  assert.equal(legacy.launched(), true);
+  assert.ok(legacy.args().includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
+  assert.ok(legacy.args().includes("read-only"));
+});
+test("workspace-write executor captures deterministic change summary before verification", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-summary-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "fixture.txt"), "before\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+    const modelConfig = {
+      providerId: "router",
+      model: "test-model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      onStage: async () => undefined,
+      runProcess: async (options) => {
+        const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
+        assert.ok(mount);
+        const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+        assert.notEqual(statSync(source).mode & 0o020, 0, "workspace-write checkout must be group-writable");
+        writeFileSync(path.join(source, "fixture.txt"), "after\n");
+        writeFileSync(path.join(source, "added.txt"), "new\n");
+        return "changed";
+      },
+    });
+    const result = await executor(
+      {
+        ...claim,
+        repositoryId: "repo-write",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-write-a1",
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "write",
+          configVersion: 1,
+          runtimeProfile: "codex-workspace-write",
+          repository: { id: "repo-write", url: origin, branch: "main" },
+          executor: { backend: "codex", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.equal(typeof result, "object");
+    const summary = (result as { workspaceChangeSummary?: any }).workspaceChangeSummary;
+    assert.deepEqual(summary.changedFiles, ["fixture.txt"]);
+    assert.deepEqual(summary.addedFiles, ["added.txt"]);
+    assert.deepEqual(summary.deletedFiles, []);
+    assert.match(summary.contentRevision, /^[a-f0-9]{64}$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace-write verification observes mutated content and binds evidence to workspace revision", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-verification-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "fixture.txt"), "before\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+    const modelConfig = {
+      providerId: "router",
+      model: "test-model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    let verifiedWorkspace = "";
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      onStage: async () => undefined,
+      runProcess: async (options) => {
+        const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
+        assert.ok(mount);
+        const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+        writeFileSync(path.join(source, "fixture.txt"), "after\n");
+        chmodSync(path.join(source, ".git", "index"), 0o600);
+        return "changed";
+      },
+      runVerificationPolicy: async (workspace, policy, _signal, options) => {
+        verifiedWorkspace = workspace;
+        assert.equal(options.supplementalGroupId, 10001);
+        assert.equal(readFileSync(path.join(workspace, "fixture.txt"), "utf8"), "after\n");
+        assert.notEqual(
+          statSync(path.join(workspace, ".git", "index")).mode & 0o040,
+          0,
+          "verifier must be able to read Git index",
+        );
+        assert.equal(statSync(workspace).mode & 0o020, 0, "workspace must be frozen read-only before verification");
+        return policy.map((step) => ({
+          stepId: step.id,
+          type: step.type,
+          evidenceType: step.evidenceType,
+          status: "passed" as const,
+          exitCode: 0,
+          durationMs: 1,
+          errorCode: null,
+        }));
+      },
+    });
+    const result = await executor(
+      {
+        ...claim,
+        repositoryId: "repo-write-verify",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-write-verify-a1",
+        validationSnapshot: [
+          {
+            id: "unit",
+            type: "command",
+            argv: ["node", "-e", "process.exit(0)"],
+            timeoutMs: 1000,
+            evidenceType: "unit_test",
+          },
+        ],
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "write",
+          configVersion: 1,
+          runtimeProfile: "codex-workspace-write",
+          repository: { id: "repo-write-verify", url: origin, branch: "main" },
+          executor: { backend: "codex", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.equal(typeof result, "object");
+    const typed = result as {
+      workspaceChangeSummary: { contentRevision: string };
+      verificationResults: Array<{ subjectRevision: string }>;
+    };
+    assert.ok(verifiedWorkspace.includes("work-write-verify-a1"));
+    assert.equal(
+      typed.verificationResults[0]!.subjectRevision,
+      "workspace:" + typed.workspaceChangeSummary.contentRevision,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

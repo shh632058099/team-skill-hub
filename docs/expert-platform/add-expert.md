@@ -219,8 +219,17 @@ Worker Runtime 是宿主机级安装；实际可运行配置必须按 instance �
 
 ```bash
 sudo /opt/team-skill-hub-worker/current/worker-control.sh init yocto-claude-01
+
+# 推荐：创建 Codex v2 Worker 时直接持久化执行约束
+sudo /opt/team-skill-hub-worker/current/worker-control.sh init ota-codex-01 \
+  --backend codex \
+  --runtime-profile codex-readonly \
+  --docker-network team-skill-hub_default \
+  --mcp-credential-ref skillhub-readonly
 sudoedit /etc/team-skill-hub-worker/workers/yocto-claude-01.env
 sudo chmod 600 /etc/team-skill-hub-worker/workers/yocto-claude-01.env
+# init 不接收也不会写入真实 MCP Key；将 Key 单独保存为：
+# /etc/team-skill-hub-worker/instances/ota-codex-01/keys/skillhub-readonly
 ```
 
 填写：
@@ -234,7 +243,9 @@ EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_RUNTIME_PROFILES=claude-readonly
 ```
 
-`EXPERT_WORKER_INSTANCE` 由 controller/systemd 自动注入，不要在 env 中手工配置。默认 credential、source、repositories 路径分别位于：
+`EXPERT_WORKER_INSTANCE` 由 controller/systemd 自动注入，不要在 env 中手工配置。
+
+使用上述 v2 初始化参数时，controller 会将 backend、runtime profile、Docker network 和 `credentialRef -> instance-local key file` 映射直接写入实例 env；因此 Worker/主机重启后不会回退到模板默认值。真实 MCP Key 仍必须保存在实例私有 key 文件中并使用 `0600` 权限。默认 credential、source、repositories 路径分别位于：
 
 ```text
 /var/lib/team-skill-hub-worker/<instance>/worker-credential
@@ -243,6 +254,30 @@ EXPERT_RUNTIME_PROFILES=claude-readonly
 ```
 
 Bootstrap Token 只用于首次登记/审批后的凭据交换。正式 credential 保存后，从该实例 env 中删除 `EXPERT_WORKER_BOOTSTRAP_TOKEN`。
+
+### 5.2.1 显式启用 workspace-write
+
+`workspace-write` 属于执行权限，不会因为 Worker 升级、重新安装或新增 Deployment 而自动开启。现有 Worker 保持只读，只有部署者明确修改 `EXPERT_RUNTIME_PROFILES` 后才允许领取对应写入型 Deployment。
+
+只读配置保持：
+
+```dotenv
+EXPERT_RUNTIME_PROFILES=claude-readonly
+# 或
+EXPERT_RUNTIME_PROFILES=codex-readonly
+```
+
+需要同一 Worker 同时支持只读和隔离 Workspace 写入时，显式配置：
+
+```dotenv
+# Claude
+EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
+
+# Codex
+EXPERT_RUNTIME_PROFILES=codex-readonly,codex-workspace-write
+```
+
+这不会把 Worker 主机或整个容器改成可写：只有当前 WorkAttempt 的 `/workspace` bind mount 为读写；容器 rootfs、MCP/模型/Git 凭据和配置仍保持只读。Claude 的 `claude-workspace-write` 仅增加 `Edit/Write`，不开放 Bash；Codex 使用 `--sandbox workspace-write`。Build/Test 仍由独立只读 Verification 容器执行。
 
 ### 5.3 网页审批和状态管理
 

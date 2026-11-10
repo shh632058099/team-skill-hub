@@ -21,6 +21,8 @@ export interface PrepareRepositoryInput {
   url: string;
   branch: string;
   root: string;
+  workspaceKey?: string;
+  workspaceAccess?: WorkspaceAccess;
   credentialRef?: string;
   gitProxyUrl?: string;
   credentials?: Readonly<Record<string, GitCredentialConfig>>;
@@ -52,15 +54,19 @@ function sshCommand(keyPath: string): string {
   return `ssh -i '${escaped}' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`;
 }
 
-/** Make a private Worker checkout group-readable by the execution container.
+export type WorkspaceAccess = "read-only" | "read-write";
+
+/** Prepare a private Worker checkout for the execution container.
  * Non-root Workers keep their own primary group; root Workers retain the image GID 10001 fallback.
- * Never follow symlinks outside the checkout.
+ * The working tree may be group-writable for an explicit workspace-write profile, but .git metadata
+ * always remains group-readable only. Never follow symlinks outside the checkout.
  */
-export function grantExecutionContainerReadAccess(
+export function grantExecutionContainerAccess(
   root: string,
+  access: WorkspaceAccess,
   containerGid = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001,
 ): void {
-  const visit = (file: string): void => {
+  const visit = (file: string, gitMetadata: boolean): void => {
     const stat = lstatSync(file);
     if (stat.isSymbolicLink()) return;
     if (!stat.isDirectory() && !stat.isFile()) return;
@@ -74,16 +80,31 @@ export function grantExecutionContainerReadAccess(
       }
     }
     const ownerBits = (stat.mode >> 6) & 0o7;
-    const groupBits = stat.isDirectory() ? ownerBits & 0o5 : ownerBits & 0o4;
+    const groupBits =
+      access === "read-write" && !gitMetadata ? ownerBits : stat.isDirectory() ? ownerBits & 0o5 : ownerBits & 0o4;
     chmodSync(file, (stat.mode & 0o707) | (groupBits << 3));
-    if (stat.isDirectory()) for (const entry of readdirSync(file)) visit(path.join(file, entry));
+    if (stat.isDirectory()) {
+      for (const entry of readdirSync(file)) {
+        visit(path.join(file, entry), gitMetadata || (file === root && entry === ".git"));
+      }
+    }
   };
-  visit(root);
+  visit(root, false);
+}
+
+export function grantExecutionContainerReadAccess(
+  root: string,
+  containerGid = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001,
+): void {
+  grantExecutionContainerAccess(root, "read-only", containerGid);
 }
 
 export async function prepareRepositoryWorkspace(
   input: PrepareRepositoryInput,
 ): Promise<{ path: string; commitSha: string }> {
+  if (input.workspaceKey !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(input.workspaceKey)) {
+    throw new Error("INVALID_WORKSPACE_KEY");
+  }
   if (
     !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(input.id) ||
     !input.url ||
@@ -152,8 +173,14 @@ export async function prepareRepositoryWorkspace(
     }
     const run = input.runGit ?? runGit;
     mkdirSync(input.root, { recursive: true });
-    const destination = path.join(input.root, input.id);
-    if (!existsSync(path.join(destination, ".git"))) {
+    const workspaceRoot = input.workspaceKey ? path.join(input.root, input.workspaceKey) : input.root;
+    if (input.workspaceKey && path.dirname(workspaceRoot) !== path.resolve(input.root)) {
+      throw new Error("INVALID_WORKSPACE_KEY");
+    }
+    mkdirSync(workspaceRoot, { recursive: true });
+    const destination = path.join(workspaceRoot, input.id);
+    const existingWorkspace = existsSync(path.join(destination, ".git"));
+    if (!existingWorkspace) {
       if (existsSync(destination)) throw new Error("SOURCE_REPOSITORY_PATH_NOT_EMPTY");
       await run(
         [
@@ -189,10 +216,13 @@ export async function prepareRepositoryWorkspace(
       });
       if (remote !== input.url) throw new Error("SOURCE_REPOSITORY_REMOTE_MISMATCH");
     }
-    await run(["-C", destination, "fetch", "--depth", "1", "--prune", "origin", input.branch], undefined, env);
-    await run(["-C", destination, "checkout", "-B", input.branch, "FETCH_HEAD"], undefined, env);
-    await run(["-C", destination, "reset", "--hard", "FETCH_HEAD"], undefined, env);
-    await run(["-C", destination, "clean", "-fdx"], undefined, env);
+    const preserveWorkAttemptWorkspace = Boolean(input.workspaceKey && existingWorkspace);
+    if (!preserveWorkAttemptWorkspace) {
+      await run(["-C", destination, "fetch", "--depth", "1", "--prune", "origin", input.branch], undefined, env);
+      await run(["-C", destination, "checkout", "-B", input.branch, "FETCH_HEAD"], undefined, env);
+      await run(["-C", destination, "reset", "--hard", "FETCH_HEAD"], undefined, env);
+      await run(["-C", destination, "clean", "-fdx"], undefined, env);
+    }
     const origin = await new Promise<string>((resolve, reject) => {
       const child = spawn("git", ["-C", destination, "rev-parse", "HEAD"], { env, stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
@@ -206,7 +236,7 @@ export async function prepareRepositoryWorkspace(
       );
     });
     if (!/^[a-f0-9]{40,64}$/i.test(origin)) throw new Error("SOURCE_REPOSITORY_COMMIT_UNAVAILABLE");
-    grantExecutionContainerReadAccess(destination);
+    grantExecutionContainerAccess(destination, input.workspaceAccess ?? "read-only");
     return { path: destination, commitSha: origin };
   } finally {
     if (credentialTempDir) rmSync(credentialTempDir, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import type { ExpertStore } from "./expert-store.js";
 import { routeExpert } from "./router.js";
 import type { DeploymentTaskSnapshot, ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord } from "./task-store.js";
+import type { VerificationPolicyStep } from "./verification-policy.js";
 
 export interface DispatchInput {
   principalId: string;
@@ -14,6 +15,13 @@ export interface DispatchInput {
   selectionMode?: "explicit" | "auto";
   repositoryId?: string;
   deploymentId?: string;
+  workItemId?: string;
+  workAttemptId?: string;
+  workflowId?: string;
+  workflowVersion?: number;
+  workspaceKey?: string;
+  validationSnapshot?: VerificationPolicyStep[];
+  requiredRuntimeProfile?: string;
 }
 
 export interface AvailableExpert {
@@ -22,6 +30,16 @@ export interface AvailableExpert {
   capabilities: string[];
   keywords: string[];
   repositoryIds: string[];
+}
+
+export interface ResolvedDispatch {
+  expertId: string;
+  selectionMode: "explicit" | "auto";
+  repositoryId?: string;
+  deploymentId: string;
+  deploymentConfigVersion: number;
+  runtimeProfile?: string;
+  deploymentSnapshot?: DeploymentTaskSnapshot;
 }
 
 export class ExpertDispatchService {
@@ -53,21 +71,12 @@ export class ExpertDispatchService {
     return [...available.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
-  submit(input: DispatchInput): TaskRecord {
-    // Resolve an already-active auto delegation before attempting to route a
-    // rephrased problem. Router availability/scoring must not defeat idempotency.
-    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
-    if ((input.selectionMode ?? "auto") === "auto" && input.sourceRequestId) {
-      const existing = this.tasks.findActiveSourceRequest({ ...input, sourceRequestSlot: autoSourceRequestSlot });
-      if (existing) return existing;
-    }
+  resolve(input: Omit<DispatchInput, "idempotencyKey"> & { idempotencyKey?: string }): ResolvedDispatch {
     const deployments = this.experts.listDeployments();
     const candidates = deployments.flatMap((deployment) => {
       if (!deployment.active) return [];
       const definition = this.experts.getDefinition(deployment.expertId);
       if (!definition.active) return [];
-      // Keep each Deployment as its own authorization tuple. Do not merge principals
-      // and repositories independently, which would grant their cross product.
       return [
         {
           id: definition.id,
@@ -87,7 +96,7 @@ export class ExpertDispatchService {
       selectionMode: input.selectionMode,
       repositoryId: input.repositoryId,
     });
-
+    const requiredRuntimeProfile = input.requiredRuntimeProfile?.trim() || undefined;
     const availableRepositoryIds = [
       ...new Set(
         deployments
@@ -97,18 +106,16 @@ export class ExpertDispatchService {
               deployment.expertId === route.expertId &&
               deployment.principals.includes(input.principalId) &&
               (!input.deploymentId || deployment.id === input.deploymentId) &&
+              (!requiredRuntimeProfile || deployment.runtimeProfile === requiredRuntimeProfile) &&
               (!input.repositoryId || deployment.repositoryIds.includes(input.repositoryId)),
           )
           .flatMap((deployment) => deployment.repositories ?? [])
           .map((repository) => repository.id),
       ),
     ].sort();
-    if (!input.repositoryId && availableRepositoryIds.length > 1) {
-      throw new Error("REPOSITORY_REQUIRED");
-    }
+    if (!input.repositoryId && availableRepositoryIds.length > 1) throw new Error("REPOSITORY_REQUIRED");
     const configuredRepositoryId = input.repositoryId ?? availableRepositoryIds[0];
-
-    const eligible = deployments.filter(
+    const eligibleBase = deployments.filter(
       (deployment) =>
         deployment.active &&
         deployment.expertId === route.expertId &&
@@ -116,12 +123,26 @@ export class ExpertDispatchService {
         (!input.deploymentId || deployment.id === input.deploymentId) &&
         (!configuredRepositoryId || deployment.repositoryIds.includes(configuredRepositoryId)),
     );
+    if (
+      input.deploymentId &&
+      requiredRuntimeProfile &&
+      eligibleBase.some((deployment) => deployment.id === input.deploymentId) &&
+      eligibleBase.find((deployment) => deployment.id === input.deploymentId)?.runtimeProfile !== requiredRuntimeProfile
+    ) {
+      throw new Error("RUNTIME_PROFILE_MISMATCH");
+    }
+    const eligible = requiredRuntimeProfile
+      ? eligibleBase.filter((deployment) => deployment.runtimeProfile === requiredRuntimeProfile)
+      : eligibleBase;
     const selected = input.deploymentId
       ? eligible.find((deployment) => deployment.id === input.deploymentId)
       : eligible.length === 1
         ? eligible[0]
         : undefined;
-    if (!selected) throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
+    if (!selected) {
+      if (requiredRuntimeProfile && !input.deploymentId) throw new Error("RUNTIME_PROFILE_UNAVAILABLE");
+      throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
+    }
     const source = (selected.repositories ?? []).find((repository) => repository.id === configuredRepositoryId);
     if (selected.executor && !source) throw new Error("SOURCE_REPOSITORY_UNAVAILABLE");
     const configuredMcp = selected.mcp;
@@ -137,8 +158,9 @@ export class ExpertDispatchService {
       if (
         configuredMcp?.allowedTools &&
         configuredMcp.allowedTools.some((tool) => !profile!.allowedTools.includes(tool))
-      )
+      ) {
         throw new Error("MCP_PROFILE_TOOL_NOT_ALLOWED");
+      }
       effectiveMcp = {
         profileRef: profile.id,
         urlOverride: configuredMcp?.urlOverride ?? profile.url,
@@ -147,7 +169,6 @@ export class ExpertDispatchService {
         required: configuredMcp?.required ?? profile.required,
       };
     } else if (configuredMcp?.credentialRef && configuredMcp.allowedTools) {
-      // Compatibility for legacy full-field MCP records created before Profiles existed.
       effectiveMcp = {
         ...configuredMcp,
         credentialRef: configuredMcp.credentialRef,
@@ -166,7 +187,30 @@ export class ExpertDispatchService {
             ...(effectiveMcp ? { mcp: effectiveMcp } : {}),
           }
         : undefined;
+    return {
+      expertId: route.expertId,
+      selectionMode: route.selectionMode,
+      ...(configuredRepositoryId ? { repositoryId: configuredRepositoryId } : {}),
+      deploymentId: selected.id,
+      deploymentConfigVersion: selected.configVersion ?? 1,
+      runtimeProfile: selected.runtimeProfile,
+      ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
+    };
+  }
+  submit(input: DispatchInput): TaskRecord {
+    // Resolve an already-active auto delegation before attempting to route a
+    // rephrased problem. Router availability/scoring must not defeat idempotency.
+    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
+    if ((input.selectionMode ?? "auto") === "auto" && input.sourceRequestId) {
+      const existing = this.tasks.findActiveSourceRequest({ ...input, sourceRequestSlot: autoSourceRequestSlot });
+      if (existing) return existing;
+    }
+    const resolved = this.resolve(input);
+    return this.submitResolved(input, resolved);
+  }
 
+  submitResolved(input: DispatchInput, resolved: ResolvedDispatch): TaskRecord {
+    const autoSourceRequestSlot = JSON.stringify(["auto", input.repositoryId ?? null]);
     return this.tasks.submit({
       principalId: input.principalId,
       scope: input.scope,
@@ -174,17 +218,23 @@ export class ExpertDispatchService {
       sourceSessionId: input.sourceSessionId,
       sourceClient: input.sourceClient,
       sourceRequestId: input.sourceRequestId,
+      workItemId: input.workItemId,
+      workAttemptId: input.workAttemptId,
+      workflowId: input.workflowId,
+      workflowVersion: input.workflowVersion,
+      workspaceKey: input.workspaceKey,
+      validationSnapshot: input.validationSnapshot,
       problem: input.problem,
-      expertId: route.expertId,
-      repositoryId: configuredRepositoryId,
-      selectionMode: route.selectionMode,
-      deploymentId: selected.id,
+      expertId: resolved.expertId,
+      repositoryId: resolved.repositoryId,
+      selectionMode: resolved.selectionMode,
+      deploymentId: resolved.deploymentId,
       sourceRequestSlot:
-        route.selectionMode === "auto"
+        resolved.selectionMode === "auto"
           ? autoSourceRequestSlot
-          : JSON.stringify([route.expertId, configuredRepositoryId ?? null, selected.id]),
-      schemaVersion: deploymentSnapshot ? 2 : 1,
-      ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
+          : JSON.stringify([resolved.expertId, resolved.repositoryId ?? null, resolved.deploymentId]),
+      schemaVersion: resolved.deploymentSnapshot ? 2 : 1,
+      ...(resolved.deploymentSnapshot ? { deploymentSnapshot: resolved.deploymentSnapshot } : {}),
     });
   }
 

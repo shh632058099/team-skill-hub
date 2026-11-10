@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { buildClaudeReadOnlyArgs, parseClaudeResult } from "../src/expert-platform/claude-runtime.js";
+import { buildClaudeArgs, buildClaudeReadOnlyArgs, parseClaudeResult } from "../src/expert-platform/claude-runtime.js";
 import { createDockerCodexExecutor } from "../src/expert-platform/docker-codex-executor.js";
 import type { Claim } from "../src/expert-platform/task-store.js";
 
@@ -204,5 +208,93 @@ test("Claude max turns is configurable and validated", () => {
   assert.equal(buildClaudeReadOnlyArgs("inspect", "sonnet", false, 5000)[5], "5000");
   for (const bad of [0, -1, 1.5, NaN, Infinity]) {
     assert.throws(() => buildClaudeReadOnlyArgs("inspect", "sonnet", false, bad), /INVALID_CLAUDE_MAX_TURNS/);
+  }
+});
+
+test("Claude workspace-write enables Edit and Write but never Bash or NotebookEdit", () => {
+  const args = buildClaudeArgs("modify fixture", "sonnet", false, 12, "workspace-write");
+  const tools = args[args.indexOf("--tools") + 1];
+  const allowed = args[args.indexOf("--allowedTools") + 1];
+  assert.equal(tools, "Read,Glob,Grep,Edit,Write");
+  assert.equal(allowed, "Read,Glob,Grep,Edit,Write");
+  for (const forbidden of ["Bash", "NotebookEdit", "Agent"]) {
+    assert.ok(!tools.includes(forbidden));
+    assert.ok(!allowed.includes(forbidden));
+  }
+});
+
+test("Claude workspace-write profile gets rw workspace while keeping container root read-only", async () => {
+  const previous = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "synthetic";
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-claude-write-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "README.md"), "fixture\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+
+    let args: readonly string[] = [];
+    const modelConfig = {
+      providerId: "router",
+      model: "sonnet",
+      baseUrl: "https://router.example/anthropic",
+      wireApi: "anthropic-messages" as const,
+      allowedEnvNames: ["ANTHROPIC_API_KEY"],
+    };
+    const executor = createDockerCodexExecutor({
+      backend: "claude",
+      image: "expert-claude",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: ["ANTHROPIC_API_KEY"],
+      timeoutMs: 1000,
+      onStage: async () => undefined,
+      runProcess: async (options) => {
+        args = options.args;
+        return "done";
+      },
+    });
+    await executor(
+      {
+        ...claim,
+        repositoryId: "repo-claude-write",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-claude-write-a1",
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "claude-write",
+          configVersion: 1,
+          runtimeProfile: "claude-workspace-write",
+          repository: { id: "repo-claude-write", url: origin, branch: "main" },
+          executor: { backend: "claude", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.ok(args.includes("--read-only"), "rootfs stays read-only");
+    const workspaceMount = args.find((arg) => arg.includes(",dst=/workspace"));
+    assert.ok(workspaceMount);
+    assert.match(workspaceMount!, /work-claude-write-a1/);
+    assert.ok(!workspaceMount!.endsWith(",readonly"));
+    assert.ok(args.includes("Read,Glob,Grep,Edit,Write"));
+    assert.ok(!args.join(" ").includes("Bash"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previous;
   }
 });

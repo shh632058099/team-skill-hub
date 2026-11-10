@@ -9,6 +9,10 @@ service ExpertWorkerService {
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
   rpc ReportTaskStage(TaskStageRequest) returns (Empty);
+  rpc ClaimWorkspaceCleanup(WorkspaceCleanupClaimRequest) returns (WorkspaceCleanupClaimResponse);
+  rpc CompleteWorkspaceCleanup(WorkspaceCleanupCompleteRequest) returns (Empty);
+  rpc ClaimPublicationOperation(PublicationOperationClaimRequest) returns (PublicationOperationClaimResponse);
+  rpc CompletePublicationOperation(PublicationOperationCompleteRequest) returns (Empty);
 }
 
 message RegisterWorkerRequest {
@@ -42,6 +46,8 @@ message ClaimTaskResponse {
   string repository_git_proxy_url = 10;
   string model_config_json = 11;
   string deployment_snapshot_json = 12;
+  string workspace_key = 13;
+  string validation_snapshot_json = 14;
 }
 
 message LeaseRequest {
@@ -61,6 +67,8 @@ message CompleteTaskRequest {
   string repository_url = 3;
   string repository_branch = 4;
   string commit_sha = 5;
+  string verification_results_json = 6;
+  string workspace_change_summary_json = 7;
 }
 
 message FailTaskRequest {
@@ -75,6 +83,64 @@ message TaskStageRequest {
   uint64 source_sequence = 4;
   string tool_code = 5;
   uint32 count = 6;
+}
+
+message WorkspaceCleanupClaimRequest {
+  string worker_id = 1;
+}
+
+message WorkspaceCleanupClaimResponse {
+  bool has_cleanup = 1;
+  string workspace_id = 2;
+  string workspace_key = 3;
+  uint64 fencing = 4;
+}
+
+message WorkspaceCleanupCompleteRequest {
+  string worker_id = 1;
+  string workspace_id = 2;
+  string workspace_key = 3;
+  uint64 fencing = 4;
+  bool success = 5;
+  string error_code = 6;
+}
+
+message PublicationOperationClaimRequest {
+  string worker_id = 1;
+}
+
+message PublicationOperationClaimResponse {
+  bool has_operation = 1;
+  string publication_id = 2;
+  string operation = 3;
+  uint64 fencing = 4;
+  string workspace_id = 5;
+  string branch_name = 6;
+  string source_subject_revision = 7;
+  string base_commit = 8;
+  string commit_sha = 9;
+  string tree_sha = 10;
+  string artifact_ref = 11;
+  string push_refspec = 12;
+  uint64 commit_timestamp = 13;
+  string commit_author_name = 14;
+  string commit_author_email = 15;
+  string commit_message = 16;
+  string execution_snapshot_json = 17;
+}
+
+message PublicationOperationCompleteRequest {
+  string worker_id = 1;
+  string publication_id = 2;
+  string operation = 3;
+  uint64 fencing = 4;
+  bool success = 5;
+  string commit_sha = 6;
+  string tree_sha = 7;
+  string artifact_ref = 8;
+  string push_refspec = 9;
+  string error_code = 10;
+  string error_context = 11;
 }
 
 message Empty {}

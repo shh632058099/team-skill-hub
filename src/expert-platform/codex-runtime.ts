@@ -1,6 +1,10 @@
-export function buildCodexReadOnlyArgs(problem: string): string[] {
+export function buildCodexArgs(problem: string, permissions: "read-only" | "workspace-write"): string[] {
   if (!problem.trim() || problem.length > 10_000) throw new Error("INVALID_REQUEST");
-  return ["exec", "--sandbox", "read-only", "--ephemeral", "--json", "--skip-git-repo-check", problem];
+  return ["exec", "--sandbox", permissions, "--ephemeral", "--json", "--skip-git-repo-check", problem];
+}
+
+export function buildCodexReadOnlyArgs(problem: string): string[] {
+  return buildCodexArgs(problem, "read-only");
 }
 
 export function parseCodexJsonlResult(jsonl: string): string {

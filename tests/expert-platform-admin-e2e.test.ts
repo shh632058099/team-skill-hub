@@ -11,6 +11,7 @@ import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js"
 import { DevelopmentAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
+import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { startServer } from "../src/server.js";
 import { ADMIN_EXPERTS_HTML } from "../src/expert-admin-ui.js";
 
@@ -64,6 +65,20 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /执行配置/);
     assert.match(html, /Worker 管理/);
     assert.match(html, /任务运行记录/);
+    assert.match(html, /Work Items/);
+    assert.match(html, /id="workItems"/);
+    assert.match(html, /id="workPage"/);
+    assert.match(html, /工作项详情/);
+    assert.match(html, /Verification/);
+    assert.match(html, /Run \/ Turns/);
+    assert.match(html, /返工审计/);
+    assert.match(html, /workVerification/);
+    assert.match(html, /workTurnRows/);
+    assert.match(html, /Continuation/);
+    assert.match(html, /id="workResume"/);
+    assert.match(html, /Runtime Profile/);
+    assert.match(html, /Workspace Changes/);
+    assert.match(html, /Changed Paths/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
@@ -461,6 +476,85 @@ test("Admin expert configuration UI manages definitions and execution configurat
     );
     assert.equal((await fetch(base + "/admin/api/expert-tasks/not-a-uuid/stop", { method: "POST" })).status, 400);
 
+    const workStore = new WorkOrchestrationStore(runtimeDb);
+    const adminWork = workStore.createOrReuseWork({
+      principalId: "team-a",
+      scope: "org",
+      idempotencyKey: "admin-work-list",
+      sourceType: "admin-test",
+      title: "Admin WorkItem",
+      description: "inspect through admin work page",
+      expertId: "ota",
+      deploymentId: "ota-from-url",
+      repositoryId: urlDeploymentBody.deployment.repositoryIds[0],
+    });
+    workStore.close();
+
+    const workListResponse = await fetch(base + "/admin/api/work-items?status=queued");
+    assert.equal(workListResponse.status, 200);
+    const workList = await workListResponse.json();
+    assert.equal(workList.total, 1);
+    assert.equal(workList.items[0].workItemId, adminWork.workItemId);
+
+    const workDetailBefore = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId);
+    assert.equal(workDetailBefore.status, 200);
+    const workDetailBeforeBody = await workDetailBefore.json();
+    assert.equal(workDetailBeforeBody.work.status, "queued");
+    assert.deepEqual(workDetailBeforeBody.attempts, []);
+
+    const workReconcile = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/reconcile", {
+      method: "POST",
+    });
+    assert.equal(workReconcile.status, 200);
+    const reconciledWork = await workReconcile.json();
+    assert.equal(reconciledWork.work.status, "running");
+    assert.equal(reconciledWork.attempts.length, 1);
+    assert.ok(reconciledWork.currentTask?.taskId);
+    assert.equal(Array.isArray(reconciledWork.workspaces), true);
+    assert.equal(Array.isArray(reconciledWork.events), true);
+    assert.equal(Array.isArray(reconciledWork.turns), true);
+    assert.ok(reconciledWork.workspace);
+    assert.ok(reconciledWork.workspace.workspaceKey);
+    assert.deepEqual(reconciledWork.verification.requiredEvidence, ["expert_result"]);
+    assert.equal(Array.isArray(reconciledWork.verification.requiredSteps), true);
+    assert.equal(Array.isArray(reconciledWork.verification.results), true);
+    assert.deepEqual(reconciledWork.runtime, { requiredProfile: null, effectiveProfile: "linux-ota" });
+    assert.equal(reconciledWork.workspaceChangeSummary, null);
+    assert.equal(Array.isArray(reconciledWork.reviews), true);
+    assert.equal(Array.isArray(reconciledWork.approvals), true);
+    assert.equal(reconciledWork.publication, null);
+
+    const blockedStore = new WorkOrchestrationStore(runtimeDb);
+    const latestAdminWork = blockedStore.getWork(adminWork.workItemId, "team-a", "org");
+    const blockedAdminWork = blockedStore.blockWork(
+      adminWork.workItemId,
+      "team-a",
+      "org",
+      latestAdminWork.stateRevision,
+      "operator_input",
+      "ADMIN_RESUME_TEST",
+      Date.now(),
+      { resumeCondition: "manual", blockedByType: "operator", blockedByRef: "admin" },
+    );
+    blockedStore.close();
+    assert.equal(blockedAdminWork.status, "blocked");
+
+    const workResume = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/resume", {
+      method: "POST",
+    });
+    assert.equal(workResume.status, 200);
+    const resumedAdminWork = await workResume.json();
+    assert.equal(resumedAdminWork.work.status, "running");
+    assert.equal(resumedAdminWork.work.blockedReason, null);
+
+    const workCancel = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/cancel", {
+      method: "POST",
+    });
+    assert.equal(workCancel.status, 200);
+    const cancelledWork = await workCancel.json();
+    assert.equal(cancelledWork.work.status, "cancelled");
+
+    assert.equal((await fetch(base + "/admin/api/work-items/not-a-uuid")).status, 400);
     const store = new ExpertStore(runtimeDb);
     try {
       assert.deepEqual(
@@ -512,6 +606,8 @@ test("Admin expert configuration UI manages definitions and execution configurat
 
 // Task detail must expose the persisted client/session identity to operators.
 test("expert task detail UI displays persisted source session and client", () => {
+  assert.match(ADMIN_EXPERTS_HTML, /Publication/);
+  assert.match(ADMIN_EXPERTS_HTML, /workPublication/);
   assert.match(ADMIN_EXPERTS_HTML, /source_session_id/);
   assert.match(ADMIN_EXPERTS_HTML, /source_client/);
 });

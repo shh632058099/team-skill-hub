@@ -7,6 +7,18 @@ import { fileURLToPath } from "node:url";
 import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-store.js";
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
+import type { WorkOrchestrationStore } from "./work-orchestration-store.js";
+import type {
+  PublicationOperationLease,
+  PublicationOperationResult,
+  WorkPublicationStore,
+} from "./work-publication-store.js";
+import {
+  normalizeVerificationEvidenceResults,
+  normalizeVerificationPolicy,
+  type VerificationEvidenceResult,
+} from "./verification-policy.js";
+import { normalizeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 interface RegisterWorkerRequest {
   worker_id: string;
@@ -37,6 +49,8 @@ interface ClaimTaskResponse {
   repository_git_proxy_url?: string;
   model_config_json?: string;
   deployment_snapshot_json?: string;
+  workspace_key?: string;
+  validation_snapshot_json?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -50,6 +64,8 @@ interface CompleteTaskRequest {
   repository_url?: string;
   repository_branch?: string;
   commit_sha?: string;
+  verification_results_json?: string;
+  workspace_change_summary_json?: string;
 }
 interface FailTaskRequest {
   claim?: LeaseRequest;
@@ -66,6 +82,60 @@ interface TaskStageRequest {
 interface Empty {}
 interface LeaseResponse {
   cancellation_requested: boolean;
+}
+
+interface WorkspaceCleanupClaimRequest {
+  worker_id: string;
+}
+interface WorkspaceCleanupClaimResponse {
+  has_cleanup: boolean;
+  workspace_id?: string;
+  workspace_key?: string;
+  fencing?: string;
+}
+interface WorkspaceCleanupCompleteRequest {
+  worker_id: string;
+  workspace_id: string;
+  workspace_key: string;
+  fencing: string;
+  success: boolean;
+  error_code?: string;
+}
+
+interface PublicationOperationClaimRequest {
+  worker_id: string;
+}
+interface PublicationOperationClaimResponse {
+  has_operation: boolean;
+  publication_id?: string;
+  operation?: string;
+  fencing?: string;
+  workspace_id?: string;
+  branch_name?: string;
+  source_subject_revision?: string;
+  base_commit?: string;
+  commit_sha?: string;
+  tree_sha?: string;
+  artifact_ref?: string;
+  push_refspec?: string;
+  commit_timestamp?: string;
+  commit_author_name?: string;
+  commit_author_email?: string;
+  commit_message?: string;
+  execution_snapshot_json?: string;
+}
+interface PublicationOperationCompleteRequest {
+  worker_id: string;
+  publication_id: string;
+  operation: string;
+  fencing: string;
+  success: boolean;
+  commit_sha?: string;
+  tree_sha?: string;
+  artifact_ref?: string;
+  push_refspec?: string;
+  error_code?: string;
+  error_context?: string;
 }
 
 type UnaryHandler<Request, Response> = (
@@ -102,6 +172,26 @@ interface WorkerServiceClient extends grpc.Client {
   ): grpc.ClientUnaryCall;
   FailTask(
     request: FailTaskRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+  ): grpc.ClientUnaryCall;
+  ClaimWorkspaceCleanup(
+    request: WorkspaceCleanupClaimRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: WorkspaceCleanupClaimResponse) => void,
+  ): grpc.ClientUnaryCall;
+  CompleteWorkspaceCleanup(
+    request: WorkspaceCleanupCompleteRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+  ): grpc.ClientUnaryCall;
+  ClaimPublicationOperation(
+    request: PublicationOperationClaimRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: PublicationOperationClaimResponse) => void,
+  ): grpc.ClientUnaryCall;
+  CompletePublicationOperation(
+    request: PublicationOperationCompleteRequest,
     metadata: grpc.Metadata,
     callback: (error: grpc.ServiceError | null, response: Empty) => void,
   ): grpc.ClientUnaryCall;
@@ -210,6 +300,8 @@ export interface GrpcServerOptions {
   bootstrapToken?: string;
   bootstrapAutoApprove?: boolean;
   bootstrapAllowedCapabilities?: readonly string[];
+  workStore?: WorkOrchestrationStore;
+  publicationStore?: WorkPublicationStore;
 }
 
 export interface GrpcClientOptions {
@@ -326,6 +418,8 @@ export async function startExpertWorkerGrpcServer(
                   ? JSON.stringify(claim.deploymentSnapshot.executor.modelConfig)
                   : modelConfigJson,
                 deployment_snapshot_json: claim.deploymentSnapshot ? JSON.stringify(claim.deploymentSnapshot) : "",
+                workspace_key: claim.workspaceKey ?? "",
+                validation_snapshot_json: JSON.stringify(claim.validationSnapshot ?? []),
               };
             })()
           : { has_task: false },
@@ -373,7 +467,20 @@ export async function startExpertWorkerGrpcServer(
         ...(call.request.repository_branch ? { repositoryBranch: call.request.repository_branch } : {}),
         ...(call.request.commit_sha ? { commitSha: call.request.commit_sha } : {}),
       };
-      tasks.complete(claim, call.request.result, Date.now(), Object.keys(source).length ? source : undefined);
+      const verificationResults = call.request.verification_results_json
+        ? normalizeVerificationEvidenceResults(JSON.parse(call.request.verification_results_json))
+        : [];
+      const workspaceChangeSummary = call.request.workspace_change_summary_json
+        ? normalizeWorkspaceChangeSummary(JSON.parse(call.request.workspace_change_summary_json))
+        : undefined;
+      tasks.complete(
+        claim,
+        call.request.result,
+        Date.now(),
+        Object.keys(source).length ? source : undefined,
+        verificationResults,
+        workspaceChangeSummary,
+      );
       callback(null, {});
     } catch (error) {
       callback(
@@ -412,6 +519,44 @@ export async function startExpertWorkerGrpcServer(
       requireIdentityMatch(authenticatedId, call.request.claim.worker_id);
       const claim = toClaim(call.request.claim);
       if (workers.get(claim.workerId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      if (call.request.stage === "workspace.ready") {
+        if (!options.workStore) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
+        tasks.assertActiveClaim(claim);
+        let report: { workspaceKey?: unknown; path?: unknown; commitSha?: unknown };
+        try {
+          report = JSON.parse(call.request.details || "{}") as {
+            workspaceKey?: unknown;
+            path?: unknown;
+            commitSha?: unknown;
+          };
+        } catch {
+          throw new Error("INVALID_WORKSPACE_REPORT");
+        }
+        if (
+          typeof report.workspaceKey !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(report.workspaceKey) ||
+          typeof report.path !== "string" ||
+          !path.isAbsolute(report.path) ||
+          report.path === path.parse(report.path).root ||
+          typeof report.commitSha !== "string" ||
+          !/^[a-f0-9]{40,64}$/i.test(report.commitSha)
+        ) {
+          throw new Error("INVALID_WORKSPACE_REPORT");
+        }
+        const attempt = options.workStore.getAttemptByTask(claim.taskId);
+        if (!attempt?.workspaceId) throw new Error("WORKSPACE_NOT_FOUND");
+        const workspace = options.workStore.getWorkspace(attempt.workspaceId);
+        if (workspace.workspaceKey !== report.workspaceKey) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+        options.workStore.assignWorkspaceOwner(
+          workspace.workspaceId,
+          claim.workerId,
+          report.path,
+          Date.now(),
+          report.commitSha,
+        );
+        callback(null, {});
+        return;
+      }
       if (call.request.source_sequence && call.request.source_sequence !== "0") {
         const sequence = Number(call.request.source_sequence);
         tasks.recordActivity(
@@ -431,6 +576,180 @@ export async function startExpertWorkerGrpcServer(
     }
   };
 
+  const claimWorkspaceCleanup: UnaryHandler<WorkspaceCleanupClaimRequest, WorkspaceCleanupClaimResponse> = (
+    call,
+    callback,
+  ) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.workStore) throw new Error("WORKSPACE_CLEANUP_UNAVAILABLE");
+      if (workers.get(authenticatedId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      workers.recordHeartbeat(authenticatedId);
+      const claim = options.workStore.claimWorkspaceCleanup(authenticatedId);
+      callback(
+        null,
+        claim
+          ? {
+              has_cleanup: true,
+              workspace_id: claim.workspaceId,
+              workspace_key: claim.workspaceKey,
+              fencing: String(claim.fencing),
+            }
+          : { has_cleanup: false },
+      );
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "WORKSPACE_CLEANUP_CLAIM_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
+  const completeWorkspaceCleanup: UnaryHandler<WorkspaceCleanupCompleteRequest, Empty> = (call, callback) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.workStore) throw new Error("WORKSPACE_CLEANUP_UNAVAILABLE");
+      const fencing = Number(call.request.fencing);
+      if (
+        !call.request.workspace_id ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(call.request.workspace_key) ||
+        !Number.isSafeInteger(fencing) ||
+        fencing < 1
+      ) {
+        throw new Error("INVALID_WORKSPACE_CLEANUP");
+      }
+      const workspace = options.workStore.getWorkspace(call.request.workspace_id);
+      if (workspace.workspaceKey !== call.request.workspace_key) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+      options.workStore.completeWorkspaceCleanup(
+        call.request.workspace_id,
+        authenticatedId,
+        fencing,
+        call.request.success,
+        call.request.error_code || null,
+      );
+      callback(null, {});
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "WORKSPACE_CLEANUP_COMPLETE_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
+  const claimPublicationOperation: UnaryHandler<PublicationOperationClaimRequest, PublicationOperationClaimResponse> = (
+    call,
+    callback,
+  ) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.publicationStore) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+      if (workers.get(authenticatedId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      workers.recordHeartbeat(authenticatedId);
+      const claim = options.publicationStore.claimPublicationOperation(authenticatedId);
+      callback(
+        null,
+        claim
+          ? {
+              has_operation: true,
+              publication_id: claim.publicationId,
+              operation: claim.operation,
+              fencing: String(claim.fencing),
+              workspace_id: claim.workspaceId,
+              branch_name: claim.branchName,
+              source_subject_revision: claim.sourceSubjectRevision,
+              base_commit: claim.baseCommit,
+              commit_sha: claim.commitSha ?? "",
+              tree_sha: claim.treeSha ?? "",
+              artifact_ref: claim.artifactRef ?? "",
+              push_refspec: claim.pushRefspec ?? "",
+              commit_timestamp: String(claim.commitTimestamp),
+              commit_author_name: claim.commitAuthorName,
+              commit_author_email: claim.commitAuthorEmail,
+              commit_message: claim.commitMessage,
+              execution_snapshot_json: claim.executionSnapshot ? JSON.stringify(claim.executionSnapshot) : "",
+            }
+          : { has_operation: false },
+      );
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "PUBLICATION_OPERATION_CLAIM_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
+  const completePublicationOperation: UnaryHandler<PublicationOperationCompleteRequest, Empty> = (call, callback) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.publicationStore) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+      const fencing = Number(call.request.fencing);
+      if (
+        !call.request.publication_id ||
+        (call.request.operation !== "prepare" && call.request.operation !== "push") ||
+        !Number.isSafeInteger(fencing) ||
+        fencing < 1
+      ) {
+        throw new Error("INVALID_PUBLICATION_OPERATION");
+      }
+      const publication = options.publicationStore.getPublication(call.request.publication_id);
+      const claim: PublicationOperationLease = {
+        publicationId: publication.publicationId,
+        ownerWorkerId: authenticatedId,
+        operation: call.request.operation,
+        fencing,
+        workspaceId: publication.workspaceId,
+        branchName: publication.branchName,
+        sourceSubjectRevision: publication.sourceSubjectRevision,
+        baseCommit: publication.baseCommit,
+        commitSha: publication.commitSha,
+        treeSha: publication.treeSha,
+        artifactRef: publication.artifactRef,
+        pushRefspec: publication.pushRefspec,
+        commitTimestamp: publication.commitTimestamp,
+        commitAuthorName: publication.commitAuthorName,
+        commitAuthorEmail: publication.commitAuthorEmail,
+        commitMessage: publication.commitMessage,
+        executionSnapshot: publication.executionSnapshot,
+      };
+      const result: PublicationOperationResult = call.request.success
+        ? {
+            success: true,
+            ...(call.request.commit_sha ? { commitSha: call.request.commit_sha } : {}),
+            ...(call.request.tree_sha ? { treeSha: call.request.tree_sha } : {}),
+            ...(call.request.artifact_ref ? { artifactRef: call.request.artifact_ref } : {}),
+            ...(call.request.push_refspec ? { pushRefspec: call.request.push_refspec } : {}),
+          }
+        : {
+            success: false,
+            errorCode: call.request.error_code || "PUBLICATION_OPERATION_FAILED",
+            ...(call.request.error_context ? { errorContext: call.request.error_context } : {}),
+          };
+      options.publicationStore.completePublicationOperation(claim, result);
+      callback(null, {});
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "PUBLICATION_OPERATION_COMPLETE_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
   server.addService(proto.expert.v1.ExpertWorkerService.service, {
     RegisterWorker: registerWorker,
     ClaimTask: claimTask,
@@ -438,6 +757,10 @@ export async function startExpertWorkerGrpcServer(
     CompleteTask: completeTask,
     FailTask: failTask,
     ReportTaskStage: reportTaskStage,
+    ClaimWorkspaceCleanup: claimWorkspaceCleanup,
+    CompleteWorkspaceCleanup: completeWorkspaceCleanup,
+    ClaimPublicationOperation: claimPublicationOperation,
+    CompletePublicationOperation: completePublicationOperation,
   });
 
   const serverCredentials = options.tls
@@ -609,7 +932,128 @@ export class ExpertWorkerClient {
       ...(response.deployment_snapshot_json
         ? { deploymentSnapshot: parseClaimDeploymentSnapshot(response.deployment_snapshot_json) }
         : {}),
+      ...(response.workspace_key ? { workspaceKey: response.workspace_key } : {}),
+      ...(response.validation_snapshot_json
+        ? { validationSnapshot: normalizeVerificationPolicy(JSON.parse(response.validation_snapshot_json)) }
+        : {}),
     };
+  }
+
+  async claimPublicationOperation(workerId: string): Promise<PublicationOperationLease | null> {
+    const response = await unary<PublicationOperationClaimResponse>((callback) =>
+      this.client.ClaimPublicationOperation({ worker_id: workerId }, this.metadata, callback),
+    );
+    if (!response.has_operation) return null;
+    const fencing = Number(response.fencing);
+    const commitTimestamp = Number(response.commit_timestamp);
+    if (
+      !response.publication_id ||
+      (response.operation !== "prepare" && response.operation !== "push") ||
+      !response.workspace_id ||
+      !response.branch_name ||
+      !response.source_subject_revision ||
+      !response.base_commit ||
+      !Number.isSafeInteger(fencing) ||
+      fencing < 1 ||
+      !Number.isSafeInteger(commitTimestamp) ||
+      commitTimestamp < 1
+    ) {
+      throw new Error("INVALID_PUBLICATION_OPERATION_RESPONSE");
+    }
+    let executionSnapshot: PublicationOperationLease["executionSnapshot"] = null;
+    if (response.execution_snapshot_json) {
+      try {
+        executionSnapshot = JSON.parse(
+          response.execution_snapshot_json,
+        ) as PublicationOperationLease["executionSnapshot"];
+      } catch {
+        throw new Error("INVALID_PUBLICATION_OPERATION_RESPONSE");
+      }
+    }
+    return {
+      publicationId: response.publication_id,
+      ownerWorkerId: workerId,
+      operation: response.operation,
+      fencing,
+      workspaceId: response.workspace_id,
+      branchName: response.branch_name,
+      sourceSubjectRevision: response.source_subject_revision,
+      baseCommit: response.base_commit,
+      commitSha: response.commit_sha || null,
+      treeSha: response.tree_sha || null,
+      artifactRef: response.artifact_ref || null,
+      pushRefspec: response.push_refspec || null,
+      commitTimestamp,
+      commitAuthorName: response.commit_author_name ?? "",
+      commitAuthorEmail: response.commit_author_email ?? "",
+      commitMessage: response.commit_message ?? "",
+      executionSnapshot,
+    };
+  }
+
+  completePublicationOperation(claim: PublicationOperationLease, result: PublicationOperationResult): Promise<Empty> {
+    return unary((callback) =>
+      this.client.CompletePublicationOperation(
+        {
+          worker_id: claim.ownerWorkerId,
+          publication_id: claim.publicationId,
+          operation: claim.operation,
+          fencing: String(claim.fencing),
+          success: result.success,
+          ...(result.success
+            ? {
+                commit_sha: result.commitSha ?? "",
+                tree_sha: result.treeSha ?? "",
+                artifact_ref: result.artifactRef ?? "",
+                push_refspec: result.pushRefspec ?? "",
+              }
+            : {
+                error_code: result.errorCode,
+                error_context: result.errorContext ?? "",
+              }),
+        },
+        this.metadata,
+        callback,
+      ),
+    );
+  }
+
+  async claimWorkspaceCleanup(workerId: string): Promise<import("./remote-worker.js").WorkspaceCleanupLease | null> {
+    const response = await unary<WorkspaceCleanupClaimResponse>((callback) =>
+      this.client.ClaimWorkspaceCleanup({ worker_id: workerId }, this.metadata, callback),
+    );
+    if (!response.has_cleanup) return null;
+    const fencing = Number(response.fencing);
+    if (!response.workspace_id || !response.workspace_key || !Number.isSafeInteger(fencing) || fencing < 1) {
+      throw new Error("INVALID_WORKSPACE_CLEANUP_RESPONSE");
+    }
+    return {
+      workspaceId: response.workspace_id,
+      workspaceKey: response.workspace_key,
+      ownerWorkerId: workerId,
+      fencing,
+    };
+  }
+
+  completeWorkspaceCleanup(
+    claim: import("./remote-worker.js").WorkspaceCleanupLease,
+    success: boolean,
+    errorCode = "",
+  ): Promise<Empty> {
+    return unary((callback) =>
+      this.client.CompleteWorkspaceCleanup(
+        {
+          worker_id: claim.ownerWorkerId,
+          workspace_id: claim.workspaceId,
+          workspace_key: claim.workspaceKey,
+          fencing: String(claim.fencing),
+          success,
+          error_code: errorCode,
+        },
+        this.metadata,
+        callback,
+      ),
+    );
   }
 
   renewLease(claim: Claim): Promise<LeaseResponse> {
@@ -620,6 +1064,8 @@ export class ExpertWorkerClient {
     claim: Claim,
     result: string,
     source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string },
+    verificationResults?: VerificationEvidenceResult[],
+    workspaceChangeSummary?: WorkspaceChangeSummary,
   ): Promise<Empty> {
     return unary((callback) =>
       this.client.CompleteTask(
@@ -629,6 +1075,8 @@ export class ExpertWorkerClient {
           repository_url: source?.repositoryUrl ?? "",
           repository_branch: source?.repositoryBranch ?? "",
           commit_sha: source?.commitSha ?? "",
+          verification_results_json: verificationResults?.length ? JSON.stringify(verificationResults) : "",
+          workspace_change_summary_json: workspaceChangeSummary ? JSON.stringify(workspaceChangeSummary) : "",
         },
         this.metadata,
         callback,

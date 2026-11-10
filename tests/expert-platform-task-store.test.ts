@@ -505,6 +505,44 @@ test("activity events are bounded, deduplicated and owner-cursor scoped", () => 
   }
 });
 
+test("run turns are persisted, deduplicated and fenced by the active run", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-run-turns-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({ principalId: "owner", scope: "tenant", idempotencyKey: "turns", problem: "read code" });
+    const claim = store.claim("worker", 100, 10_000)!;
+
+    store.recordActivity(claim, "model.started", 1, "", 0, 101);
+    store.recordActivity(claim, "model.started", 2, "", 0, 102);
+    store.recordActivity(claim, "model.completed", 3, "", 0, 103);
+    store.recordActivity(claim, "model.started", 4, "", 0, 104);
+    store.recordActivity(claim, "model.failed", 5, "", 0, 105);
+    store.recordActivity(claim, "model.failed", 5, "", 0, 106);
+
+    const turns = store.listRunTurns(task.taskId, "owner", "tenant");
+    assert.deepEqual(
+      turns.map((turn) => ({
+        runId: turn.runId,
+        turnIndex: turn.turnIndex,
+        status: turn.status,
+        startSequence: turn.startSequence,
+        finishSequence: turn.finishSequence,
+      })),
+      [
+        { runId: claim.runId, turnIndex: 1, status: "succeeded", startSequence: 1, finishSequence: 3 },
+        { runId: claim.runId, turnIndex: 2, status: "failed", startSequence: 4, finishSequence: 5 },
+      ],
+    );
+
+    store.fail(claim, "EXECUTION_FAILED", 110);
+    assert.throws(() => store.recordActivity(claim, "model.started", 6, "", 0, 111), /STALE_ATTEMPT/);
+    assert.throws(() => store.listRunTurns(task.taskId, "other", "tenant"), /TASK_NOT_FOUND_OR_FORBIDDEN/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("source request dedup reuses active auto delegation despite changed problem and idempotency key", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-source-request-"));
   try {
@@ -608,6 +646,184 @@ test("source request dedup applies only to active tasks; terminal task can be re
   }
 });
 
+test("work-linked task metadata survives and failed tasks can create a new run without a new task", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-work-link-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "work-link-1",
+      problem: "inspect OTA",
+      expertId: "ota",
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workflowId: "code-fix-default",
+      workflowVersion: 1,
+    });
+    assert.equal(task.workItemId, "work-1");
+    assert.equal(task.workAttemptId, "attempt-1");
+    assert.equal(task.workflowId, "code-fix-default");
+    assert.equal(task.workflowVersion, 1);
+
+    const firstClaim = store.claim("worker-1", 1_000, 30_000, "ota")!;
+    store.fail(firstClaim, "EXECUTION_FAILED", 2_000);
+    assert.equal(store.get(task.taskId, "alice", "tenant-a").status, "failed");
+
+    assert.throws(
+      () => store.requeueForRetry(task.taskId, "other-attempt", "EXECUTION_FAILED", 3_000),
+      /STALE_WORK_ATTEMPT/,
+    );
+    const queued = store.requeueForRetry(task.taskId, "attempt-1", "EXECUTION_FAILED", 3_000);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.taskId, task.taskId);
+    assert.equal(queued.workAttemptId, "attempt-1");
+
+    const secondClaim = store.claim("worker-1", 4_000, 30_000, "ota")!;
+    assert.equal(secondClaim.taskId, task.taskId);
+    assert.notEqual(secondClaim.runId, firstClaim.runId);
+    assert.ok(secondClaim.fencing > firstClaim.fencing);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("successful work task can schedule a fenced continuation on the same task", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-continuation-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      idempotencyKey: "continuation",
+      problem: "inspect",
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workflowId: "work-default",
+      workflowVersion: 1,
+    });
+    const first = store.claim("worker-a", 100, 10_000)!;
+    store.complete(first, "first result", 200);
+
+    const continued = store.scheduleContinuation(task.taskId, first.runId, "verification_failed", 300);
+    assert.equal(continued.taskId, task.taskId);
+    assert.equal(continued.status, "queued");
+    assert.equal(continued.result, null);
+    assert.equal(continued.continuationCount, 1);
+
+    assert.throws(
+      () => store.scheduleContinuation(task.taskId, first.runId, "duplicate", 301),
+      /TASK_CONTINUATION_NOT_ALLOWED/,
+    );
+
+    const second = store.claim("worker-a", 400, 10_000)!;
+    assert.equal(second.taskId, task.taskId);
+    assert.notEqual(second.runId, first.runId);
+    assert.equal(second.fencing, first.fencing + 1);
+    store.complete(second, "second result", 500);
+
+    assert.throws(() => store.scheduleContinuation(task.taskId, first.runId, "stale", 600), /STALE_RUN/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("continuation can be pinned to its workspace owner worker", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-continuation-owner-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      idempotencyKey: "continuation-owner",
+      problem: "inspect",
+      workItemId: "work-owner",
+      workAttemptId: "attempt-owner",
+      workflowId: "work-default",
+      workflowVersion: 1,
+      workspaceKey: "work-owner-a1",
+    });
+    const first = store.claim("worker-a", 100, 10_000)!;
+    store.complete(first, "first result", 200);
+
+    store.scheduleContinuation(task.taskId, first.runId, "verification_failed", 300, "worker-a");
+    assert.equal(store.claim("worker-b", 400, 10_000), null);
+    const second = store.claim("worker-a", 401, 10_000)!;
+    assert.equal(second.taskId, task.taskId);
+    assert.equal(second.workerId, "worker-a");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("standalone expert tasks keep null work linkage", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-standalone-link-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "standalone-1",
+      problem: "legacy standalone task",
+    });
+    assert.equal(task.workItemId, null);
+    assert.equal(task.workAttemptId, null);
+    assert.equal(task.workflowId, null);
+    assert.equal(task.workflowVersion, null);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("task completion persists revision-bound verification results and rejects mismatched subjects", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-verification-results-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    let store = new ExpertTaskStore(db);
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "verification-results",
+      problem: "verify",
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workflowId: "verified",
+      workflowVersion: 1,
+    });
+    const first = store.claim("worker-a", 1_000, 30_000)!;
+    const result = {
+      stepId: "unit",
+      type: "command",
+      evidenceType: "unit_test",
+      status: "passed" as const,
+      exitCode: 0,
+      durationMs: 25,
+      errorCode: null,
+      subjectRevision: "a".repeat(40),
+      environmentIdentity: "worker:worker-a",
+      verifierIdentity: "team-skill-hub-worker",
+    };
+    assert.throws(
+      () => store.complete(first, "done", 2_000, { commitSha: "b".repeat(40) }, [result]),
+      /VERIFICATION_SUBJECT_MISMATCH/,
+    );
+
+    const second = store.claim("worker-a", 40_000, 30_000)!;
+    store.complete(second, "done", 41_000, { commitSha: "a".repeat(40) }, [result]);
+    assert.deepEqual(store.get(task.taskId, "alice", "tenant-a").verificationResults, [result]);
+    store.close();
+
+    store = new ExpertTaskStore(db);
+    assert.deepEqual(store.get(task.taskId, "alice", "tenant-a").verificationResults, [result]);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("expert task feedback is owner-scoped, success-only, replaceable, and nullable", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-feedback-"));
   const file = path.join(dir, "runtime.sqlite");
@@ -670,6 +886,72 @@ test("expert task feedback is owner-scoped, success-only, replaceable, and nulla
       0,
     );
     afterDelete.close();
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("task completion persists workspace change summary and validates verification against workspace revision", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-workspace-summary-persist-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    let store = new ExpertTaskStore(db);
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "workspace-summary",
+      problem: "modify fixture",
+      workItemId: "work-write",
+      workAttemptId: "attempt-write",
+      workflowId: "write-flow",
+      workflowVersion: 1,
+    });
+    const summary = {
+      baseCommit: "a".repeat(40),
+      changedFiles: ["fixture.txt"],
+      addedFiles: ["added.txt"],
+      deletedFiles: [],
+      diffStat: { filesChanged: 2, insertions: 3, deletions: 1 },
+      contentRevision: "c".repeat(64),
+    };
+    const verification = [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed" as const,
+        exitCode: 0,
+        durationMs: 20,
+        errorCode: null,
+        subjectRevision: "workspace:" + summary.contentRevision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ];
+
+    const first = store.claim("worker-a", 1_000, 30_000)!;
+    assert.throws(
+      () =>
+        store.complete(
+          first,
+          "done",
+          2_000,
+          { commitSha: summary.baseCommit },
+          [{ ...verification[0]!, subjectRevision: summary.baseCommit }],
+          summary,
+        ),
+      /VERIFICATION_SUBJECT_MISMATCH/,
+    );
+    const second = store.claim("worker-a", 40_000, 30_000)!;
+    store.complete(second, "done", 41_000, { commitSha: summary.baseCommit }, verification, summary);
+    const completed = store.get(task.taskId, "alice", "tenant-a");
+    assert.deepEqual(completed.workspaceChangeSummary, summary);
+    assert.deepEqual(completed.verificationResults, verification);
+    store.close();
+
+    store = new ExpertTaskStore(db);
+    assert.deepEqual(store.get(task.taskId, "alice", "tenant-a").workspaceChangeSummary, summary);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

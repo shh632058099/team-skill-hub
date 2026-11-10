@@ -199,3 +199,24 @@ export class PersistentWorkerRegistry {
     this.db.close();
   }
 }
+
+export function createWorkerAvailabilityProbe(
+  dbPath: string,
+  heartbeatTimeoutMs = 45_000,
+): (workerId: string, now: number) => boolean {
+  if (!dbPath.trim() || !Number.isFinite(heartbeatTimeoutMs) || heartbeatTimeoutMs <= 0) {
+    throw new Error("INVALID_WORKER_PRESENCE_WINDOW");
+  }
+  return (workerId: string, now: number): boolean => {
+    const registry = new PersistentWorkerRegistry(dbPath);
+    try {
+      const worker = registry.get(workerId, now, heartbeatTimeoutMs);
+      return worker.status === "active" && worker.connectionStatus === "online";
+    } catch (error) {
+      if (error instanceof Error && error.message === "WORKER_NOT_FOUND") return false;
+      throw error;
+    } finally {
+      registry.close();
+    }
+  };
+}

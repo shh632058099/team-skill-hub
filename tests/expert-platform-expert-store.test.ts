@@ -286,3 +286,87 @@ test("Expert store retains Anthropic Messages model configuration", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("repository publication policy persists only explicit safe permissions", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-publication-policy-"));
+  try {
+    const store = new ExpertStore(path.join(dir, "runtime.sqlite"));
+    store.putDefinition({ id: "ota", displayName: "OTA", capabilities: ["ota"], keywords: [], active: true });
+    const policy = {
+      version: 3,
+      permissions: ["prepare-commit", "push-work-branch"] as const,
+      branchPrefix: "skillhub/work/",
+      protectedBranches: ["main", "master"],
+      allowedPushRemote: "origin" as const,
+      credentialRef: "git-publish-ota",
+      allowForcePush: false as const,
+      allowDeleteRef: false as const,
+    };
+    store.putDeployment({
+      id: "ota-write",
+      expertId: "ota",
+      repositoryIds: ["repo"],
+      repositories: [
+        {
+          id: "repo",
+          url: "https://example.org/ota.git",
+          branch: "main",
+          credentialRef: "git-readonly",
+          publicationPolicy: policy,
+        } as any,
+      ],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
+      active: true,
+    });
+    const persisted = store.getDeployment("ota-write").repositories?.[0] as any;
+    assert.deepEqual(persisted.publicationPolicy, policy);
+    assert.equal(JSON.stringify(persisted).includes("super-secret"), false);
+
+    for (const publicationPolicy of [
+      { ...policy, version: 0 },
+      { ...policy, permissions: ["push-everything"] },
+      { ...policy, branchPrefix: "../main" },
+      { ...policy, branchPrefix: "refs/heads/main" },
+      { ...policy, allowedPushRemote: "upstream" },
+      { ...policy, allowForcePush: true },
+      { ...policy, allowDeleteRef: true },
+    ]) {
+      assert.throws(
+        () =>
+          store.putDeployment({
+            id: "bad",
+            expertId: "ota",
+            repositoryIds: ["repo"],
+            repositories: [
+              {
+                id: "repo",
+                url: "https://example.org/ota.git",
+                branch: "main",
+                publicationPolicy,
+              } as any,
+            ],
+            principals: ["alice"],
+            runtimeProfile: "codex-workspace-write",
+            active: true,
+          }),
+        /INVALID_EXPERT_DEPLOYMENT/,
+      );
+    }
+
+    assert.doesNotThrow(() =>
+      store.putDeployment({
+        id: "legacy-no-publication",
+        expertId: "ota",
+        repositoryIds: ["repo"],
+        repositories: [{ id: "repo", url: "https://example.org/ota.git", branch: "main" }],
+        principals: ["alice"],
+        runtimeProfile: "codex-readonly",
+        active: true,
+      }),
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
