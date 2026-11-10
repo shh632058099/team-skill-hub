@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ExpertModelConfig } from "./expert-store.js";
+import type { ExpertModelConfig, RepositoryPublicationPolicy } from "./expert-store.js";
 import {
   normalizeVerificationEvidenceResults,
   normalizeVerificationPolicy,
@@ -29,7 +29,14 @@ export type DeploymentTaskSnapshot = {
   deploymentId: string;
   configVersion: number;
   runtimeProfile: string;
-  repository: { id: string; url: string; branch: string; credentialRef?: string; gitProxyUrl?: string } | null;
+  repository: {
+    id: string;
+    url: string;
+    branch: string;
+    credentialRef?: string;
+    gitProxyUrl?: string;
+    publicationPolicy?: RepositoryPublicationPolicy;
+  } | null;
   executor: { backend: "claude" | "codex"; modelConfig: ExpertModelConfig };
   mcp?: {
     profileRef?: string;

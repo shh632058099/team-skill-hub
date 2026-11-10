@@ -28,12 +28,24 @@ export interface ExpertDefinition {
   modelConfig?: ExpertModelConfig;
 }
 
+export interface RepositoryPublicationPolicy {
+  version: number;
+  permissions: Array<"prepare-commit" | "push-work-branch" | "create-change-request">;
+  branchPrefix: string;
+  protectedBranches: string[];
+  allowedPushRemote: "origin";
+  credentialRef?: string;
+  allowForcePush: false;
+  allowDeleteRef: false;
+}
+
 export interface ExpertSourceRepository {
   id: string;
   url: string;
   branch: string;
   credentialRef?: string;
   gitProxyUrl?: string;
+  publicationPolicy?: RepositoryPublicationPolicy;
 }
 
 export interface ExpertDeploymentRecord {
@@ -272,13 +284,61 @@ export class ExpertStore {
       );
   }
 
+  private validPublicationPolicy(policy: RepositoryPublicationPolicy | undefined): boolean {
+    if (!policy) return true;
+    if (!Number.isSafeInteger(policy.version) || policy.version < 1) return false;
+    if (
+      !Array.isArray(policy.permissions) ||
+      policy.permissions.length === 0 ||
+      policy.permissions.some(
+        (permission) => !["prepare-commit", "push-work-branch", "create-change-request"].includes(permission),
+      )
+    )
+      return false;
+    if (
+      !policy.branchPrefix ||
+      policy.branchPrefix.length > 160 ||
+      policy.branchPrefix.startsWith("/") ||
+      policy.branchPrefix.startsWith("refs/") ||
+      policy.branchPrefix.includes("..") ||
+      /[\\ ~^:?*\[\]\x00-\x1f\x7f]/.test(policy.branchPrefix) ||
+      !policy.branchPrefix.endsWith("/")
+    )
+      return false;
+    if (
+      !Array.isArray(policy.protectedBranches) ||
+      policy.protectedBranches.some(
+        (branch) =>
+          !branch ||
+          branch.length > 200 ||
+          branch.startsWith("/") ||
+          branch.startsWith("refs/") ||
+          branch.endsWith("/") ||
+          branch.includes("..") ||
+          /[\\ ~^:?*\[\]\x00-\x1f\x7f]/.test(branch),
+      )
+    )
+      return false;
+    if (policy.allowedPushRemote !== "origin" || policy.allowForcePush !== false || policy.allowDeleteRef !== false)
+      return false;
+    if (policy.credentialRef !== undefined && (!policy.credentialRef.trim() || policy.credentialRef.length > 200))
+      return false;
+    return true;
+  }
+
   putDeployment(deployment: ExpertDeploymentRecord): void {
     if (
       !deployment.id.trim() ||
       !deployment.expertId.trim() ||
       ((deployment.repositories ?? []).length === 0 && deployment.repositoryIds.length === 0) ||
       deployment.repositoryIds.some((item) => !item.trim()) ||
-      (deployment.repositories ?? []).some((repo) => !repo.id.trim() || !repo.url.trim() || !repo.branch.trim()) ||
+      (deployment.repositories ?? []).some(
+        (repo) =>
+          !repo.id.trim() ||
+          !repo.url.trim() ||
+          !repo.branch.trim() ||
+          !this.validPublicationPolicy(repo.publicationPolicy),
+      ) ||
       deployment.principals.some((item) => !item.trim()) ||
       !deployment.runtimeProfile.trim() ||
       (deployment.executor !== undefined &&
