@@ -588,7 +588,9 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         );
         verificationResults = rawVerification.map((verification) => ({
           ...verification,
-          subjectRevision: preparedRepository.commitSha,
+          subjectRevision: workspaceChangeSummary
+            ? `workspace:${workspaceChangeSummary.contentRevision}`
+            : preparedRepository.commitSha,
           environmentIdentity: `worker:${claim.workerId}`,
           verifierIdentity: "team-skill-hub-worker",
         }));

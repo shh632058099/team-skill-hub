@@ -551,3 +551,106 @@ test("workspace-write executor captures deterministic change summary before veri
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("workspace-write verification observes mutated content and binds evidence to workspace revision", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, readFileSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-verification-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "fixture.txt"), "before\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+    const modelConfig = {
+      providerId: "router",
+      model: "test-model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    let verifiedWorkspace = "";
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      onStage: async () => undefined,
+      runProcess: async (options) => {
+        const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
+        assert.ok(mount);
+        const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+        writeFileSync(path.join(source, "fixture.txt"), "after\n");
+        return "changed";
+      },
+      runVerificationPolicy: async (workspace, policy) => {
+        verifiedWorkspace = workspace;
+        assert.equal(readFileSync(path.join(workspace, "fixture.txt"), "utf8"), "after\n");
+        return policy.map((step) => ({
+          stepId: step.id,
+          type: step.type,
+          evidenceType: step.evidenceType,
+          status: "passed" as const,
+          exitCode: 0,
+          durationMs: 1,
+          errorCode: null,
+        }));
+      },
+    });
+    const result = await executor(
+      {
+        ...claim,
+        repositoryId: "repo-write-verify",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-write-verify-a1",
+        validationSnapshot: [
+          {
+            id: "unit",
+            type: "command",
+            argv: ["node", "-e", "process.exit(0)"],
+            timeoutMs: 1000,
+            evidenceType: "unit_test",
+          },
+        ],
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "write",
+          configVersion: 1,
+          runtimeProfile: "codex-workspace-write",
+          repository: { id: "repo-write-verify", url: origin, branch: "main" },
+          executor: { backend: "codex", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.equal(typeof result, "object");
+    const typed = result as {
+      workspaceChangeSummary: { contentRevision: string };
+      verificationResults: Array<{ subjectRevision: string }>;
+    };
+    assert.ok(verifiedWorkspace.includes("work-write-verify-a1"));
+    assert.equal(
+      typed.verificationResults[0]!.subjectRevision,
+      "workspace:" + typed.workspaceChangeSummary.contentRevision,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
