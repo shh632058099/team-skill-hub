@@ -40,6 +40,24 @@ export function createExpertWorkerRuntime(
         supportedRuntimeProfiles: config.supportedRuntimeProfiles ?? [],
       },
     );
+  const onActivity: NonNullable<DockerCodexExecutorOptions["onActivity"]> = async (
+    claim,
+    stage,
+    sequence,
+    tool,
+    count,
+  ) => {
+    const activity =
+      stage === "tool.activity"
+        ? {
+            sequence,
+            ...(tool ? { tool } : {}),
+            ...(count === undefined ? {} : { count }),
+          }
+        : { sequence };
+    await client.reportTaskStage?.(claim, stage, "", activity);
+  };
+
   const executor =
     dependencies.createExecutor?.({
       image: config.dockerImage,
@@ -60,6 +78,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      onActivity,
       onStage: async (claim, stage, details) => {
         if (stage === "workspace.ready") {
           if (!client.reportTaskStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
@@ -92,9 +111,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
-      onActivity: async (claim, stage, sequence, tool, count) => {
-        await client.reportTaskStage?.(claim, stage, "", { sequence, tool, count });
-      },
+      onActivity,
       onStage: async (claim, stage, details) => {
         if (stage === "workspace.ready") {
           if (!client.reportTaskStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");

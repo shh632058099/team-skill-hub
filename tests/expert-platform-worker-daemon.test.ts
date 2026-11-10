@@ -106,6 +106,65 @@ test("daemon forwards executor verification results when completing a task", asy
   runtime.close();
 });
 
+test("daemon strips tool/count metadata from model activity before reporting to Hub", async () => {
+  const reports: Array<{ stage: string; activity?: { sequence: number; tool?: string; count?: number } }> = [];
+  let onActivity:
+    ((claim: any, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>) | undefined;
+  const runtime = createExpertWorkerRuntime(
+    {
+      hubAddress: "hub:7443",
+      workerId: "ota-worker-01",
+      workerCredential: "ewc_test",
+      capability: "ota",
+      sourcePath: "/srv/ota",
+      repositoryRoot: "/srv/expert-repositories",
+      sharedTempRoot: "/srv/expert-repositories/ota-worker-01/.runtime-tmp",
+      gitCredentialConfigs: {},
+      dockerImage: "expert-worker",
+      dockerNetwork: "expert-egress",
+      dockerSeccompProfile: "default",
+      modelEnvNames: [],
+      modelCredentialEnvNames: {},
+      heartbeatMs: 1000,
+      pollMs: 50,
+      taskTimeoutMs: 60_000,
+    },
+    {
+      createClient: () => ({
+        claimTask: async () => null,
+        renewLease: async () => undefined,
+        completeTask: async () => undefined,
+        failTask: async () => undefined,
+        reportTaskStage: async (
+          _claim,
+          stage,
+          _details,
+          activity?: { sequence: number; tool?: string; count?: number },
+        ) => {
+          reports.push({ stage, ...(activity ? { activity } : {}) });
+        },
+        close: () => undefined,
+      }),
+      createExecutor: (options) => {
+        onActivity = options.onActivity;
+        return async () => "unused";
+      },
+    },
+  );
+
+  assert.equal(typeof onActivity, "function");
+  const claim = { workerId: "ota-worker-01", taskId: "task-1", runId: "run-1", fencing: 1, problem: "x" };
+  await onActivity!(claim, "model.started", 1, undefined, 1);
+  await onActivity!(claim, "tool.activity", 2, "Read", 3);
+  await onActivity!(claim, "model.completed", 3, undefined, 1);
+  assert.deepEqual(reports, [
+    { stage: "model.started", activity: { sequence: 1 } },
+    { stage: "tool.activity", activity: { sequence: 2, tool: "Read", count: 3 } },
+    { stage: "model.completed", activity: { sequence: 3 } },
+  ]);
+  runtime.close();
+});
+
 test("daemon processes owner workspace cleanup before claiming another task", async () => {
   const { mkdtemp, mkdir, stat } = await import("node:fs/promises");
   const os = await import("node:os");
@@ -199,7 +258,7 @@ test("daemon forwards runtime configuration to Docker executor factory", () => {
     },
   );
   assert.equal(typeof (seen as { onStage?: unknown })?.onStage, "function");
-  const { onStage: _onStage, ...configuration } = seen as Record<string, unknown>;
+  const { onStage: _onStage, onActivity: _onActivity, ...configuration } = seen as Record<string, unknown>;
   assert.deepEqual(configuration, {
     image: "expert-worker",
     sourcePath: "/srv/ota",
