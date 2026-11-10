@@ -5,14 +5,22 @@ export type WorkerExecutionResult = {
   source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
 };
 
+export type WorkspaceCleanupLease = {
+  workspaceId: string;
+  workspaceKey: string;
+  ownerWorkerId: string;
+  fencing: number;
+};
+
 export interface RemoteWorkerClient {
+  claimWorkspaceCleanup?(workerId: string): Promise<WorkspaceCleanupLease | null>;
+  completeWorkspaceCleanup?(claim: WorkspaceCleanupLease, success: boolean, errorCode?: string): Promise<unknown>;
   claimTask(workerId: string, expertId: string, capability: string): Promise<Claim | null>;
   renewLease(claim: Claim): Promise<unknown>;
   completeTask(claim: Claim, result: string, source?: WorkerExecutionResult["source"]): Promise<unknown>;
   failTask(claim: Claim, reason: string): Promise<unknown>;
   reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
 }
-
 export interface RemoteWorkerOptions {
   heartbeatMs?: number;
   expertId?: string;

@@ -155,6 +155,65 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
   }
 });
 
+test("workspace cleanup RPC is owner-scoped and fenced", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-cleanup-"));
+  try {
+    const runtimeDb = path.join(dir, "runtime.sqlite");
+    const tasks = new ExpertTaskStore(runtimeDb);
+    const work = new WorkOrchestrationStore(runtimeDb);
+    const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+    for (const id of ["worker-a", "worker-b"]) {
+      workers.enroll(id, ["ota"]);
+      workers.approve(id);
+    }
+    const tokenA = workers.issueCredential("worker-a");
+    const tokenB = workers.issueCredential("worker-b");
+    const item = work.createOrReuseWork({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "grpc-cleanup",
+      sourceType: "mcp",
+      title: "cleanup",
+      description: "cleanup",
+    });
+    const attempt = work.createWorkAttempt(item.workItemId, "alice", "org", item.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = work.ensureWorkspace(item.workItemId, attempt.workAttemptId, {});
+    work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      100,
+      "a".repeat(40),
+    );
+    work.requestTerminalWorkspaceCleanup(item.workItemId, 200);
+
+    const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0", { workStore: work });
+    const clientB = new ExpertWorkerClient(server.address, { workerId: "worker-b", credential: tokenB });
+    assert.equal(await clientB.claimWorkspaceCleanup("worker-b"), null);
+
+    const clientA = new ExpertWorkerClient(server.address, { workerId: "worker-a", credential: tokenA });
+    const cleanup = await clientA.claimWorkspaceCleanup("worker-a");
+    assert.equal(cleanup?.workspaceId, workspace.workspaceId);
+    await clientA.completeWorkspaceCleanup(cleanup!, true);
+    assert.equal(work.getWorkspace(workspace.workspaceId).state, "removed");
+    await assert.rejects(() => clientA.completeWorkspaceCleanup(cleanup!, true), /STALE_WORKSPACE_CLEANUP/);
+
+    clientA.close();
+    clientB.close();
+    await server.close();
+    work.close();
+    tasks.close();
+    workers.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("unapproved worker is rejected before task claim", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-"));
   try {

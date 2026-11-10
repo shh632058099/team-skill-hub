@@ -42,6 +42,61 @@ test("daemon composes client, Docker executor and one worker iteration", async (
   assert.deepEqual(calls, ["claim", "close"]);
 });
 
+test("daemon processes owner workspace cleanup before claiming another task", async () => {
+  const { mkdtemp, mkdir, stat } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = await mkdtemp(path.join(os.tmpdir(), "worker-cleanup-"));
+  const workspaceKey = "work-11111111-a1";
+  await mkdir(path.join(root, workspaceKey));
+  const calls: string[] = [];
+  const runtime = createExpertWorkerRuntime(
+    {
+      hubAddress: "hub:7443",
+      workerId: "ota-worker-01",
+      workerCredential: "ewc_test",
+      capability: "ota",
+      sourcePath: "/srv/ota",
+      repositoryRoot: root,
+      sharedTempRoot: path.join(root, ".runtime-tmp"),
+      gitCredentialConfigs: {},
+      dockerImage: "expert-worker",
+      dockerNetwork: "expert-egress",
+      dockerSeccompProfile: "default",
+      modelEnvNames: [],
+      modelCredentialEnvNames: {},
+      heartbeatMs: 1000,
+      pollMs: 50,
+      taskTimeoutMs: 60_000,
+    },
+    {
+      createClient: () => ({
+        claimWorkspaceCleanup: async () => {
+          calls.push("cleanup-claim");
+          return { workspaceId: "workspace-1", workspaceKey, ownerWorkerId: "ota-worker-01", fencing: 1 };
+        },
+        completeWorkspaceCleanup: async (_claim, success) => {
+          calls.push("cleanup-complete:" + String(success));
+        },
+        claimTask: async () => {
+          calls.push("task-claim");
+          return null;
+        },
+        renewLease: async () => undefined,
+        completeTask: async () => undefined,
+        failTask: async () => undefined,
+        close: () => calls.push("close"),
+      }),
+      createExecutor: () => async () => "unused",
+    },
+  );
+
+  assert.equal(await runtime.runOnce(), true);
+  await assert.rejects(stat(path.join(root, workspaceKey)));
+  assert.deepEqual(calls, ["cleanup-claim", "cleanup-complete:true"]);
+  runtime.close();
+});
+
 test("daemon forwards runtime configuration to Docker executor factory", () => {
   let seen: unknown;
   const runtime = createExpertWorkerRuntime(

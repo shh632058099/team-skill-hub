@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 
 function withStore(run: (store: WorkOrchestrationStore, file: string) => void) {
@@ -90,6 +91,130 @@ test("workspace identity is deterministic and records owner affinity", () => {
     assert.equal(assigned.path, "/srv/work/a");
     assert.equal(store.getWorkAttempt(attempt.workAttemptId).workspaceId, first.workspaceId);
   });
+});
+
+test("terminal workspace cleanup is durable, owner-scoped and fenced", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-cleanup",
+      sourceType: "mcp",
+      title: "cleanup",
+      description: "cleanup",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+      cleanupPolicy: "on_terminal",
+    });
+    store.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      100,
+      "a".repeat(40),
+    );
+
+    store.requestTerminalWorkspaceCleanup(work.workItemId, 200);
+    assert.equal(store.getWorkspace(workspace.workspaceId).state, "cleaning");
+    assert.equal(store.claimWorkspaceCleanup("worker-b", 300, 30_000), null);
+    const cleanup = store.claimWorkspaceCleanup("worker-a", 300, 30_000)!;
+    assert.equal(cleanup.workspaceId, workspace.workspaceId);
+    assert.equal(cleanup.workspaceKey, workspace.workspaceKey);
+    assert.equal(cleanup.fencing, 1);
+
+    store.completeWorkspaceCleanup(cleanup.workspaceId, "worker-a", cleanup.fencing, true, null, 400);
+    assert.equal(store.getWorkspace(workspace.workspaceId).state, "removed");
+    assert.throws(
+      () => store.completeWorkspaceCleanup(cleanup.workspaceId, "worker-a", cleanup.fencing, true, null, 500),
+      /STALE_WORKSPACE_CLEANUP/,
+    );
+  });
+});
+
+test("retain workspace policy does not enqueue deletion", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-retain",
+      sourceType: "mcp",
+      title: "retain",
+      description: "retain",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      cleanupPolicy: "retain",
+    });
+    store.requestTerminalWorkspaceCleanup(work.workItemId, 200);
+    assert.equal(store.getWorkspace(workspace.workspaceId).state, "retained");
+    assert.equal(store.claimWorkspaceCleanup("worker-a", 300, 30_000), null);
+  });
+});
+
+test("workspace schema migrates old cleanup constraints without resetting the database", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-workspace-migration-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    initial.close();
+
+    const db = new DatabaseSync(file);
+    db.exec("PRAGMA foreign_keys=OFF");
+    db.exec("DROP TABLE IF EXISTS work_workspace_cleanup_requests");
+    db.exec("DROP TABLE work_workspaces");
+    db.exec(
+      [
+        "CREATE TABLE work_workspaces (",
+        " workspace_id TEXT PRIMARY KEY,",
+        " workspace_key TEXT NOT NULL UNIQUE,",
+        " work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        " work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+        " owner_worker_id TEXT, path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
+        " state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','removed','failed')),",
+        " cleanup_policy TEXT NOT NULL CHECK(cleanup_policy='on_terminal'),",
+        " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL",
+        ");",
+      ].join("\n"),
+    );
+    db.close();
+
+    const migrated = new WorkOrchestrationStore(file);
+    const work = migrated.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-migration",
+      sourceType: "mcp",
+      title: "migration",
+      description: "migration",
+    });
+    const attempt = migrated.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = migrated.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      cleanupPolicy: "retain",
+    });
+    migrated.requestTerminalWorkspaceCleanup(work.workItemId, 100);
+    assert.equal(migrated.getWorkspace(workspace.workspaceId).state, "retained");
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("evidence is revision-bound and becomes stale after the work subject changes", () => {

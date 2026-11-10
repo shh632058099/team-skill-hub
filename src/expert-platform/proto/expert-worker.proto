@@ -9,6 +9,8 @@ service ExpertWorkerService {
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
   rpc ReportTaskStage(TaskStageRequest) returns (Empty);
+  rpc ClaimWorkspaceCleanup(WorkspaceCleanupClaimRequest) returns (WorkspaceCleanupClaimResponse);
+  rpc CompleteWorkspaceCleanup(WorkspaceCleanupCompleteRequest) returns (Empty);
 }
 
 message RegisterWorkerRequest {
@@ -76,6 +78,26 @@ message TaskStageRequest {
   uint64 source_sequence = 4;
   string tool_code = 5;
   uint32 count = 6;
+}
+
+message WorkspaceCleanupClaimRequest {
+  string worker_id = 1;
+}
+
+message WorkspaceCleanupClaimResponse {
+  bool has_cleanup = 1;
+  string workspace_id = 2;
+  string workspace_key = 3;
+  uint64 fencing = 4;
+}
+
+message WorkspaceCleanupCompleteRequest {
+  string worker_id = 1;
+  string workspace_id = 2;
+  string workspace_key = 3;
+  uint64 fencing = 4;
+  bool success = 5;
+  string error_code = 6;
 }
 
 message Empty {}

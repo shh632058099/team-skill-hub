@@ -33,7 +33,7 @@ export interface WorkflowDefinition {
     workspace: {
       strategy: "isolated";
       reuseOnContinuation: boolean;
-      cleanup: "on_terminal";
+      cleanup: "on_terminal" | "retain";
     };
   };
   validation: { requiredEvidence: string[] };
@@ -143,10 +143,17 @@ export interface WorkspaceRecord {
   repositoryUrl: string | null;
   branch: string | null;
   baseCommit: string | null;
-  state: "ready" | "in_use" | "retained" | "removed" | "failed";
-  cleanupPolicy: "on_terminal";
+  state: "ready" | "in_use" | "retained" | "cleaning" | "removed" | "failed";
+  cleanupPolicy: "on_terminal" | "retain";
   createdAt: number;
   lastUsedAt: number;
+}
+
+export interface WorkspaceCleanupClaim {
+  workspaceId: string;
+  workspaceKey: string;
+  ownerWorkerId: string;
+  fencing: number;
 }
 
 export interface WorkEvidenceRecord {
@@ -382,8 +389,8 @@ export class WorkOrchestrationStore {
         "  repository_url TEXT,",
         "  branch TEXT,",
         "  base_commit TEXT,",
-        "  state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','removed','failed')),",
-        "  cleanup_policy TEXT NOT NULL CHECK(cleanup_policy='on_terminal'),",
+        "  state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','cleaning','removed','failed')),",
+        "  cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
         "  created_at INTEGER NOT NULL,",
         "  last_used_at INTEGER NOT NULL",
         ");",
@@ -438,6 +445,61 @@ export class WorkOrchestrationStore {
     if (!workColumns.has("next_action_context")) {
       this.db.exec("ALTER TABLE work_items ADD COLUMN next_action_context TEXT");
     }
+    this.migrateWorkspaceSchema();
+    this.ensureWorkspaceCleanupSchema();
+  }
+
+  private migrateWorkspaceSchema(): void {
+    const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_workspaces'").get() as
+      { sql?: string } | undefined;
+    const sql = row?.sql ?? "";
+    if (sql.includes("'cleaning'") && sql.includes("'retain'")) return;
+    this.db.exec("PRAGMA foreign_keys=OFF");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(
+        [
+          "CREATE TABLE work_workspaces_v2 (",
+          " workspace_id TEXT PRIMARY KEY,",
+          " workspace_key TEXT NOT NULL UNIQUE,",
+          " work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+          " work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+          " owner_worker_id TEXT, path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
+          " state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','cleaning','removed','failed')),",
+          " cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
+          " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL",
+          ");",
+          "INSERT INTO work_workspaces_v2 SELECT workspace_id,workspace_key,work_item_id,work_attempt_id,owner_worker_id,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at FROM work_workspaces;",
+          "DROP TABLE work_workspaces;",
+          "ALTER TABLE work_workspaces_v2 RENAME TO work_workspaces;",
+        ].join("\n"),
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.db.exec("PRAGMA foreign_keys=ON");
+    }
+  }
+
+  private ensureWorkspaceCleanupSchema(): void {
+    this.db.exec(
+      [
+        "CREATE TABLE IF NOT EXISTS work_workspace_cleanup_requests (",
+        " workspace_id TEXT PRIMARY KEY REFERENCES work_workspaces(workspace_id) ON DELETE CASCADE,",
+        " workspace_key TEXT NOT NULL,",
+        " owner_worker_id TEXT NOT NULL,",
+        " status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed')),",
+        " lease_until INTEGER,",
+        " fencing INTEGER NOT NULL DEFAULT 0,",
+        " error_code TEXT,",
+        " created_at INTEGER NOT NULL,",
+        " updated_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_workspace_cleanup_claim ON work_workspace_cleanup_requests(owner_worker_id,status,lease_until);",
+      ].join("\n"),
+    );
   }
 
   private ensureDefaultWorkflow(): void {
@@ -749,10 +811,11 @@ export class WorkOrchestrationStore {
   ensureWorkspace(
     workItemId: string,
     workAttemptId: string,
-    input: { repositoryUrl?: string; branch?: string; baseCommit?: string },
+    input: { repositoryUrl?: string; branch?: string; baseCommit?: string; cleanupPolicy?: "on_terminal" | "retain" },
     now = Date.now(),
   ): WorkspaceRecord {
     const attempt = this.getWorkAttempt(workAttemptId);
+    const cleanupPolicy = input.cleanupPolicy ?? "on_terminal";
     if (attempt.workItemId !== workItemId) throw new Error("WORKSPACE_ATTEMPT_MISMATCH");
     const existing = this.db.prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=?").get(workAttemptId) as
       Row | undefined;
@@ -760,7 +823,8 @@ export class WorkOrchestrationStore {
       if (
         (existing.repository_url ?? null) !== (input.repositoryUrl?.trim() || null) ||
         (existing.branch ?? null) !== (input.branch?.trim() || null) ||
-        (existing.base_commit ?? null) !== (input.baseCommit?.trim() || null)
+        (existing.base_commit ?? null) !== (input.baseCommit?.trim() || null) ||
+        String(existing.cleanup_policy) !== cleanupPolicy
       ) {
         throw new Error("WORKSPACE_IDENTITY_CONFLICT");
       }
@@ -773,7 +837,7 @@ export class WorkOrchestrationStore {
     try {
       this.db
         .prepare(
-          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,'ready','on_terminal',?,?)",
+          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,'ready',?,?,?)",
         )
         .run(
           workspaceId,
@@ -783,12 +847,131 @@ export class WorkOrchestrationStore {
           input.repositoryUrl?.trim() || null,
           input.branch?.trim() || null,
           input.baseCommit?.trim() || null,
+          cleanupPolicy,
           now,
           now,
         );
       this.db
         .prepare("UPDATE work_attempts SET workspace_id=? WHERE work_attempt_id=? AND work_item_id=?")
         .run(workspaceId, workAttemptId, workItemId);
+      const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkspaceRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  requestTerminalWorkspaceCleanup(workItemId: string, now = Date.now()): WorkspaceRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM work_workspaces WHERE work_item_id=? ORDER BY created_at")
+      .all(workItemId) as Row[];
+    const result: WorkspaceRecord[] = [];
+    for (const row of rows) {
+      const workspace = this.fromWorkspaceRow(row);
+      if (workspace.state === "removed") {
+        result.push(workspace);
+        continue;
+      }
+      if (workspace.cleanupPolicy === "retain") {
+        this.db
+          .prepare("UPDATE work_workspaces SET state='retained',last_used_at=? WHERE workspace_id=?")
+          .run(now, workspace.workspaceId);
+      } else if (workspace.ownerWorkerId && workspace.path) {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db
+            .prepare(
+              "INSERT INTO work_workspace_cleanup_requests(workspace_id,workspace_key,owner_worker_id,status,created_at,updated_at) VALUES(?,?,?,'pending',?,?) ON CONFLICT(workspace_id) DO UPDATE SET owner_worker_id=excluded.owner_worker_id,status=CASE WHEN work_workspace_cleanup_requests.status='succeeded' THEN 'succeeded' ELSE 'pending' END,lease_until=NULL,error_code=NULL,updated_at=excluded.updated_at",
+            )
+            .run(workspace.workspaceId, workspace.workspaceKey, workspace.ownerWorkerId, now, now);
+          this.db
+            .prepare(
+              "UPDATE work_workspaces SET state=CASE WHEN state='removed' THEN 'removed' ELSE 'cleaning' END,last_used_at=? WHERE workspace_id=?",
+            )
+            .run(now, workspace.workspaceId);
+          this.db.exec("COMMIT");
+        } catch (error) {
+          this.db.exec("ROLLBACK");
+          throw error;
+        }
+      } else {
+        this.db
+          .prepare("UPDATE work_workspaces SET state='failed',last_used_at=? WHERE workspace_id=?")
+          .run(now, workspace.workspaceId);
+      }
+      result.push(this.getWorkspace(workspace.workspaceId));
+    }
+    return result;
+  }
+
+  claimWorkspaceCleanup(workerId: string, now = Date.now(), leaseMs = 30_000): WorkspaceCleanupClaim | null {
+    const normalizedWorker = requiredText(workerId, 200);
+    if (!normalizedWorker || !Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error("INVALID_WORKSPACE_CLEANUP");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          "SELECT * FROM work_workspace_cleanup_requests WHERE owner_worker_id=? AND (status='pending' OR (status='running' AND lease_until<?)) ORDER BY created_at LIMIT 1",
+        )
+        .get(normalizedWorker, now) as Row | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const fencing = Number(row.fencing) + 1;
+      const changed = this.db
+        .prepare(
+          "UPDATE work_workspace_cleanup_requests SET status='running',lease_until=?,fencing=?,updated_at=? WHERE workspace_id=? AND owner_worker_id=? AND fencing=?",
+        )
+        .run(now + leaseMs, fencing, now, String(row.workspace_id), normalizedWorker, Number(row.fencing));
+      if (changed.changes !== 1) throw new Error("STALE_WORKSPACE_CLEANUP");
+      this.db.exec("COMMIT");
+      return {
+        workspaceId: String(row.workspace_id),
+        workspaceKey: String(row.workspace_key),
+        ownerWorkerId: normalizedWorker,
+        fencing,
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  completeWorkspaceCleanup(
+    workspaceId: string,
+    workerId: string,
+    fencing: number,
+    success: boolean,
+    errorCode: string | null,
+    now = Date.now(),
+  ): WorkspaceRecord {
+    const normalizedWorker = requiredText(workerId, 200);
+    const normalizedError = errorCode?.trim() || null;
+    if (!normalizedWorker || !Number.isSafeInteger(fencing) || fencing < 1)
+      throw new Error("INVALID_WORKSPACE_CLEANUP");
+    if (normalizedError && !/^[A-Z][A-Z0-9_]{0,79}$/.test(normalizedError))
+      throw new Error("INVALID_WORKSPACE_CLEANUP");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const changed = this.db
+        .prepare(
+          "UPDATE work_workspace_cleanup_requests SET status=?,lease_until=NULL,error_code=?,updated_at=? WHERE workspace_id=? AND owner_worker_id=? AND fencing=? AND status='running'",
+        )
+        .run(
+          success ? "succeeded" : "failed",
+          success ? null : (normalizedError ?? "WORKSPACE_CLEANUP_FAILED"),
+          now,
+          workspaceId,
+          normalizedWorker,
+          fencing,
+        );
+      if (changed.changes !== 1) throw new Error("STALE_WORKSPACE_CLEANUP");
+      this.db
+        .prepare("UPDATE work_workspaces SET state=?,last_used_at=? WHERE workspace_id=?")
+        .run(success ? "removed" : "failed", now, workspaceId);
       const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
       this.db.exec("COMMIT");
       return this.fromWorkspaceRow(row);
@@ -1359,7 +1542,7 @@ export class WorkOrchestrationStore {
       branch: row.branch == null ? null : String(row.branch),
       baseCommit: row.base_commit == null ? null : String(row.base_commit),
       state: String(row.state) as WorkspaceRecord["state"],
-      cleanupPolicy: "on_terminal",
+      cleanupPolicy: String(row.cleanup_policy) as WorkspaceRecord["cleanupPolicy"],
       createdAt: Number(row.created_at),
       lastUsedAt: Number(row.last_used_at),
     };

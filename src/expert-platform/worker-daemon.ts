@@ -3,6 +3,7 @@ import { createDockerCodexExecutor, type DockerCodexExecutorOptions } from "./do
 import { ExpertWorkerClient } from "./grpc-transport.js";
 import { runRemoteWorkerOnce, type RemoteWorkerClient } from "./remote-worker.js";
 import type { ExpertWorkerRuntimeConfig } from "./worker-runtime-config.js";
+import { removeWorkspaceDirectory } from "./workspace-cleanup.js";
 
 interface ClosableRemoteWorkerClient extends RemoteWorkerClient {
   close(): void;
@@ -60,6 +61,11 @@ export function createExpertWorkerRuntime(
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
       onStage: async (claim, stage, details) => {
+        if (stage === "workspace.ready") {
+          if (!client.reportTaskStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
+          await client.reportTaskStage(claim, stage, details);
+          return;
+        }
         try {
           await client.reportTaskStage?.(claim, stage, details);
         } catch {
@@ -90,6 +96,11 @@ export function createExpertWorkerRuntime(
         await client.reportTaskStage?.(claim, stage, "", { sequence, tool, count });
       },
       onStage: async (claim, stage, details) => {
+        if (stage === "workspace.ready") {
+          if (!client.reportTaskStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
+          await client.reportTaskStage(claim, stage, details);
+          return;
+        }
         try {
           await client.reportTaskStage?.(claim, stage, details);
         } catch {
@@ -99,11 +110,26 @@ export function createExpertWorkerRuntime(
     });
 
   return {
-    runOnce: () =>
-      runRemoteWorkerOnce(client, config.workerId, config.capability, executor, {
+    runOnce: async () => {
+      if (client.claimWorkspaceCleanup && client.completeWorkspaceCleanup) {
+        const cleanup = await client.claimWorkspaceCleanup(config.workerId);
+        if (cleanup) {
+          try {
+            await removeWorkspaceDirectory(config.repositoryRoot, cleanup.workspaceKey);
+            await client.completeWorkspaceCleanup(cleanup, true);
+          } catch (error) {
+            const raw = error instanceof Error ? error.message : "WORKSPACE_CLEANUP_FAILED";
+            const code = /^[A-Z][A-Z0-9_]{0,79}$/.test(raw) ? raw : "WORKSPACE_CLEANUP_FAILED";
+            await client.completeWorkspaceCleanup(cleanup, false, code);
+          }
+          return true;
+        }
+      }
+      return runRemoteWorkerOnce(client, config.workerId, config.capability, executor, {
         heartbeatMs: config.heartbeatMs,
         expertId: config.expertId ?? config.capability,
-      }),
+      });
+    },
     close: () => client.close(),
   };
 }

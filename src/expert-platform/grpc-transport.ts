@@ -70,6 +70,24 @@ interface LeaseResponse {
   cancellation_requested: boolean;
 }
 
+interface WorkspaceCleanupClaimRequest {
+  worker_id: string;
+}
+interface WorkspaceCleanupClaimResponse {
+  has_cleanup: boolean;
+  workspace_id?: string;
+  workspace_key?: string;
+  fencing?: string;
+}
+interface WorkspaceCleanupCompleteRequest {
+  worker_id: string;
+  workspace_id: string;
+  workspace_key: string;
+  fencing: string;
+  success: boolean;
+  error_code?: string;
+}
+
 type UnaryHandler<Request, Response> = (
   call: grpc.ServerUnaryCall<Request, Response>,
   callback: grpc.sendUnaryData<Response>,
@@ -104,6 +122,16 @@ interface WorkerServiceClient extends grpc.Client {
   ): grpc.ClientUnaryCall;
   FailTask(
     request: FailTaskRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+  ): grpc.ClientUnaryCall;
+  ClaimWorkspaceCleanup(
+    request: WorkspaceCleanupClaimRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: WorkspaceCleanupClaimResponse) => void,
+  ): grpc.ClientUnaryCall;
+  CompleteWorkspaceCleanup(
+    request: WorkspaceCleanupCompleteRequest,
     metadata: grpc.Metadata,
     callback: (error: grpc.ServiceError | null, response: Empty) => void,
   ): grpc.ClientUnaryCall;
@@ -473,6 +501,74 @@ export async function startExpertWorkerGrpcServer(
     }
   };
 
+  const claimWorkspaceCleanup: UnaryHandler<WorkspaceCleanupClaimRequest, WorkspaceCleanupClaimResponse> = (
+    call,
+    callback,
+  ) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.workStore) throw new Error("WORKSPACE_CLEANUP_UNAVAILABLE");
+      if (workers.get(authenticatedId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      workers.recordHeartbeat(authenticatedId);
+      const claim = options.workStore.claimWorkspaceCleanup(authenticatedId);
+      callback(
+        null,
+        claim
+          ? {
+              has_cleanup: true,
+              workspace_id: claim.workspaceId,
+              workspace_key: claim.workspaceKey,
+              fencing: String(claim.fencing),
+            }
+          : { has_cleanup: false },
+      );
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "WORKSPACE_CLEANUP_CLAIM_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
+  const completeWorkspaceCleanup: UnaryHandler<WorkspaceCleanupCompleteRequest, Empty> = (call, callback) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.workStore) throw new Error("WORKSPACE_CLEANUP_UNAVAILABLE");
+      const fencing = Number(call.request.fencing);
+      if (
+        !call.request.workspace_id ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(call.request.workspace_key) ||
+        !Number.isSafeInteger(fencing) ||
+        fencing < 1
+      ) {
+        throw new Error("INVALID_WORKSPACE_CLEANUP");
+      }
+      const workspace = options.workStore.getWorkspace(call.request.workspace_id);
+      if (workspace.workspaceKey !== call.request.workspace_key) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+      options.workStore.completeWorkspaceCleanup(
+        call.request.workspace_id,
+        authenticatedId,
+        fencing,
+        call.request.success,
+        call.request.error_code || null,
+      );
+      callback(null, {});
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "WORKSPACE_CLEANUP_COMPLETE_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
   server.addService(proto.expert.v1.ExpertWorkerService.service, {
     RegisterWorker: registerWorker,
     ClaimTask: claimTask,
@@ -480,6 +576,8 @@ export async function startExpertWorkerGrpcServer(
     CompleteTask: completeTask,
     FailTask: failTask,
     ReportTaskStage: reportTaskStage,
+    ClaimWorkspaceCleanup: claimWorkspaceCleanup,
+    CompleteWorkspaceCleanup: completeWorkspaceCleanup,
   });
 
   const serverCredentials = options.tls
@@ -653,6 +751,44 @@ export class ExpertWorkerClient {
         : {}),
       ...(response.workspace_key ? { workspaceKey: response.workspace_key } : {}),
     };
+  }
+
+  async claimWorkspaceCleanup(workerId: string): Promise<import("./remote-worker.js").WorkspaceCleanupLease | null> {
+    const response = await unary<WorkspaceCleanupClaimResponse>((callback) =>
+      this.client.ClaimWorkspaceCleanup({ worker_id: workerId }, this.metadata, callback),
+    );
+    if (!response.has_cleanup) return null;
+    const fencing = Number(response.fencing);
+    if (!response.workspace_id || !response.workspace_key || !Number.isSafeInteger(fencing) || fencing < 1) {
+      throw new Error("INVALID_WORKSPACE_CLEANUP_RESPONSE");
+    }
+    return {
+      workspaceId: response.workspace_id,
+      workspaceKey: response.workspace_key,
+      ownerWorkerId: workerId,
+      fencing,
+    };
+  }
+
+  completeWorkspaceCleanup(
+    claim: import("./remote-worker.js").WorkspaceCleanupLease,
+    success: boolean,
+    errorCode = "",
+  ): Promise<Empty> {
+    return unary((callback) =>
+      this.client.CompleteWorkspaceCleanup(
+        {
+          worker_id: claim.ownerWorkerId,
+          workspace_id: claim.workspaceId,
+          workspace_key: claim.workspaceKey,
+          fencing: String(claim.fencing),
+          success,
+          error_code: errorCode,
+        },
+        this.metadata,
+        callback,
+      ),
+    );
   }
 
   renewLease(claim: Claim): Promise<LeaseResponse> {

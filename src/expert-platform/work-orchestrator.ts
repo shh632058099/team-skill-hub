@@ -135,6 +135,31 @@ export class WorkOrchestrator {
     if (!attempt?.taskId) throw new Error("ACTIVE_WORK_ATTEMPT_REQUIRED");
     const task = this.tasks.get(attempt.taskId, principalId, scope);
     if (task.status !== "succeeded" || !task.runId) throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
+    if (!attempt.workspaceId) {
+      this.workStore.blockWork(
+        work.workItemId,
+        work.principalId,
+        work.scope,
+        work.stateRevision,
+        "workspace_unavailable",
+        "WORKSPACE_NOT_ALLOCATED",
+        now,
+      );
+      return this.detail(workItemId, principalId, scope);
+    }
+    const workspace = this.workStore.getWorkspace(attempt.workspaceId);
+    if (!workspace.ownerWorkerId || !workspace.path || ["removed", "failed"].includes(workspace.state)) {
+      this.workStore.blockWork(
+        work.workItemId,
+        work.principalId,
+        work.scope,
+        work.stateRevision,
+        "workspace_unavailable",
+        "WORKSPACE_OWNER_UNAVAILABLE",
+        now,
+      );
+      return this.detail(workItemId, principalId, scope);
+    }
     const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const consumedTurns = Math.max(
       task.continuationCount + 1,
@@ -192,7 +217,21 @@ export class WorkOrchestrator {
       const continuationReason = work.nextActionContext ?? "continuation";
       if (task.status === "succeeded") {
         if (!task.runId) throw new Error("TASK_RUN_REQUIRED");
-        this.tasks.scheduleContinuation(task.taskId, task.runId, continuationReason, now);
+        if (!attempt.workspaceId) throw new Error("WORKSPACE_NOT_FOUND");
+        const workspace = this.workStore.getWorkspace(attempt.workspaceId);
+        if (!workspace.ownerWorkerId || !workspace.path || ["removed", "failed"].includes(workspace.state)) {
+          this.workStore.blockWork(
+            work.workItemId,
+            work.principalId,
+            work.scope,
+            work.stateRevision,
+            "workspace_unavailable",
+            "WORKSPACE_OWNER_UNAVAILABLE",
+            now,
+          );
+          return this.detail(workItemId, principalId, scope);
+        }
+        this.tasks.scheduleContinuation(task.taskId, task.runId, continuationReason, now, workspace.ownerWorkerId);
       } else if (
         (task.status !== "queued" && task.status !== "running") ||
         task.continuationReason !== continuationReason
@@ -230,6 +269,7 @@ export class WorkOrchestrator {
           now,
         );
       }
+      this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
     }
     return this.detail(workItemId, principalId, scope);
   }
@@ -319,6 +359,10 @@ export class WorkOrchestrator {
       this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "failed", now);
     }
 
+    const terminalReviewWork = this.workStore.getWork(workItemId, principalId, scope);
+    if (TERMINAL_WORK.has(terminalReviewWork.status)) {
+      this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
+    }
     return this.detail(workItemId, principalId, scope);
   }
 
@@ -354,6 +398,7 @@ export class WorkOrchestrator {
     } else {
       this.workStore.transitionWork(workItemId, principalId, scope, current.stateRevision, "cancelled", now);
     }
+    this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
     return this.detail(workItemId, principalId, scope);
   }
 
@@ -397,6 +442,7 @@ export class WorkOrchestrator {
     resolved: ResolvedDispatch,
     now: number,
   ): WorkspaceRecord {
+    const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
     return this.workStore.ensureWorkspace(
       workItemId,
       attempt.workAttemptId,
@@ -407,6 +453,7 @@ export class WorkOrchestrator {
         ...(resolved.deploymentSnapshot?.repository?.branch
           ? { branch: resolved.deploymentSnapshot.repository.branch }
           : {}),
+        cleanupPolicy: workflow.definition.execution.workspace.cleanup,
       },
       now,
     );
@@ -592,6 +639,7 @@ export class WorkOrchestrator {
         "failed",
         now,
       );
+      this.workStore.requestTerminalWorkspaceCleanup(current.workItemId, now);
     }
     return this.detail(current.workItemId, current.principalId, current.scope);
   }

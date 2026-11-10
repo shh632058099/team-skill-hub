@@ -224,6 +224,14 @@ test("successful task becomes revision-bound evidence then accepted review compl
     assert.equal(waiting.evidence[0]!.type, "expert_result");
     assert.equal(waiting.evidence[0]!.subjectRevision, "a".repeat(40));
     assert.equal(waiting.gate.ready, false);
+    const workspace = f.work.getWorkspace(waiting.attempts[0]!.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      3_100,
+      "a".repeat(40),
+    );
 
     const completed = f.orchestrator.submitReview(detail.work.workItemId, "alice", "team-a", {
       expectedRevision: waiting.work.stateRevision,
@@ -232,6 +240,11 @@ test("successful task becomes revision-bound evidence then accepted review compl
     });
     assert.equal(completed.work.status, "completed");
     assert.equal(completed.gate.ready, true);
+    assert.equal(f.work.getWorkspace(workspace.workspaceId).state, "cleaning");
+    const cleanup = f.work.claimWorkspaceCleanup("worker-a", 4_000, 30_000)!;
+    f.work.completeWorkspaceCleanup(cleanup.workspaceId, "worker-a", cleanup.fencing, false, "DELETE_FAILED", 4_100);
+    assert.equal(f.work.getWorkspace(workspace.workspaceId).state, "failed");
+    assert.equal(f.work.getWork(detail.work.workItemId, "alice", "team-a").status, "completed");
   } finally {
     f.close();
   }
