@@ -8,6 +8,11 @@ import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-stor
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
 import type { WorkOrchestrationStore } from "./work-orchestration-store.js";
+import type {
+  PublicationOperationLease,
+  PublicationOperationResult,
+  WorkPublicationStore,
+} from "./work-publication-store.js";
 import {
   normalizeVerificationEvidenceResults,
   normalizeVerificationPolicy,
@@ -97,6 +102,42 @@ interface WorkspaceCleanupCompleteRequest {
   error_code?: string;
 }
 
+interface PublicationOperationClaimRequest {
+  worker_id: string;
+}
+interface PublicationOperationClaimResponse {
+  has_operation: boolean;
+  publication_id?: string;
+  operation?: string;
+  fencing?: string;
+  workspace_id?: string;
+  branch_name?: string;
+  source_subject_revision?: string;
+  base_commit?: string;
+  commit_sha?: string;
+  tree_sha?: string;
+  artifact_ref?: string;
+  push_refspec?: string;
+  commit_timestamp?: string;
+  commit_author_name?: string;
+  commit_author_email?: string;
+  commit_message?: string;
+  execution_snapshot_json?: string;
+}
+interface PublicationOperationCompleteRequest {
+  worker_id: string;
+  publication_id: string;
+  operation: string;
+  fencing: string;
+  success: boolean;
+  commit_sha?: string;
+  tree_sha?: string;
+  artifact_ref?: string;
+  push_refspec?: string;
+  error_code?: string;
+  error_context?: string;
+}
+
 type UnaryHandler<Request, Response> = (
   call: grpc.ServerUnaryCall<Request, Response>,
   callback: grpc.sendUnaryData<Response>,
@@ -141,6 +182,16 @@ interface WorkerServiceClient extends grpc.Client {
   ): grpc.ClientUnaryCall;
   CompleteWorkspaceCleanup(
     request: WorkspaceCleanupCompleteRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+  ): grpc.ClientUnaryCall;
+  ClaimPublicationOperation(
+    request: PublicationOperationClaimRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: PublicationOperationClaimResponse) => void,
+  ): grpc.ClientUnaryCall;
+  CompletePublicationOperation(
+    request: PublicationOperationCompleteRequest,
     metadata: grpc.Metadata,
     callback: (error: grpc.ServiceError | null, response: Empty) => void,
   ): grpc.ClientUnaryCall;
@@ -250,6 +301,7 @@ export interface GrpcServerOptions {
   bootstrapAutoApprove?: boolean;
   bootstrapAllowedCapabilities?: readonly string[];
   workStore?: WorkOrchestrationStore;
+  publicationStore?: WorkPublicationStore;
 }
 
 export interface GrpcClientOptions {
@@ -592,6 +644,112 @@ export async function startExpertWorkerGrpcServer(
     }
   };
 
+  const claimPublicationOperation: UnaryHandler<PublicationOperationClaimRequest, PublicationOperationClaimResponse> = (
+    call,
+    callback,
+  ) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.publicationStore) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+      if (workers.get(authenticatedId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      workers.recordHeartbeat(authenticatedId);
+      const claim = options.publicationStore.claimPublicationOperation(authenticatedId);
+      callback(
+        null,
+        claim
+          ? {
+              has_operation: true,
+              publication_id: claim.publicationId,
+              operation: claim.operation,
+              fencing: String(claim.fencing),
+              workspace_id: claim.workspaceId,
+              branch_name: claim.branchName,
+              source_subject_revision: claim.sourceSubjectRevision,
+              base_commit: claim.baseCommit,
+              commit_sha: claim.commitSha ?? "",
+              tree_sha: claim.treeSha ?? "",
+              artifact_ref: claim.artifactRef ?? "",
+              push_refspec: claim.pushRefspec ?? "",
+              commit_timestamp: String(claim.commitTimestamp),
+              commit_author_name: claim.commitAuthorName,
+              commit_author_email: claim.commitAuthorEmail,
+              commit_message: claim.commitMessage,
+              execution_snapshot_json: claim.executionSnapshot ? JSON.stringify(claim.executionSnapshot) : "",
+            }
+          : { has_operation: false },
+      );
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "PUBLICATION_OPERATION_CLAIM_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
+  const completePublicationOperation: UnaryHandler<PublicationOperationCompleteRequest, Empty> = (call, callback) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.publicationStore) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+      const fencing = Number(call.request.fencing);
+      if (
+        !call.request.publication_id ||
+        (call.request.operation !== "prepare" && call.request.operation !== "push") ||
+        !Number.isSafeInteger(fencing) ||
+        fencing < 1
+      ) {
+        throw new Error("INVALID_PUBLICATION_OPERATION");
+      }
+      const publication = options.publicationStore.getPublication(call.request.publication_id);
+      const claim: PublicationOperationLease = {
+        publicationId: publication.publicationId,
+        ownerWorkerId: authenticatedId,
+        operation: call.request.operation,
+        fencing,
+        workspaceId: publication.workspaceId,
+        branchName: publication.branchName,
+        sourceSubjectRevision: publication.sourceSubjectRevision,
+        baseCommit: publication.baseCommit,
+        commitSha: publication.commitSha,
+        treeSha: publication.treeSha,
+        artifactRef: publication.artifactRef,
+        pushRefspec: publication.pushRefspec,
+        commitTimestamp: publication.commitTimestamp,
+        commitAuthorName: publication.commitAuthorName,
+        commitAuthorEmail: publication.commitAuthorEmail,
+        commitMessage: publication.commitMessage,
+        executionSnapshot: publication.executionSnapshot,
+      };
+      const result: PublicationOperationResult = call.request.success
+        ? {
+            success: true,
+            ...(call.request.commit_sha ? { commitSha: call.request.commit_sha } : {}),
+            ...(call.request.tree_sha ? { treeSha: call.request.tree_sha } : {}),
+            ...(call.request.artifact_ref ? { artifactRef: call.request.artifact_ref } : {}),
+            ...(call.request.push_refspec ? { pushRefspec: call.request.push_refspec } : {}),
+          }
+        : {
+            success: false,
+            errorCode: call.request.error_code || "PUBLICATION_OPERATION_FAILED",
+            ...(call.request.error_context ? { errorContext: call.request.error_context } : {}),
+          };
+      options.publicationStore.completePublicationOperation(claim, result);
+      callback(null, {});
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "PUBLICATION_OPERATION_COMPLETE_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
   server.addService(proto.expert.v1.ExpertWorkerService.service, {
     RegisterWorker: registerWorker,
     ClaimTask: claimTask,
@@ -601,6 +759,8 @@ export async function startExpertWorkerGrpcServer(
     ReportTaskStage: reportTaskStage,
     ClaimWorkspaceCleanup: claimWorkspaceCleanup,
     CompleteWorkspaceCleanup: completeWorkspaceCleanup,
+    ClaimPublicationOperation: claimPublicationOperation,
+    CompletePublicationOperation: completePublicationOperation,
   });
 
   const serverCredentials = options.tls
@@ -777,6 +937,85 @@ export class ExpertWorkerClient {
         ? { validationSnapshot: normalizeVerificationPolicy(JSON.parse(response.validation_snapshot_json)) }
         : {}),
     };
+  }
+
+  async claimPublicationOperation(workerId: string): Promise<PublicationOperationLease | null> {
+    const response = await unary<PublicationOperationClaimResponse>((callback) =>
+      this.client.ClaimPublicationOperation({ worker_id: workerId }, this.metadata, callback),
+    );
+    if (!response.has_operation) return null;
+    const fencing = Number(response.fencing);
+    const commitTimestamp = Number(response.commit_timestamp);
+    if (
+      !response.publication_id ||
+      (response.operation !== "prepare" && response.operation !== "push") ||
+      !response.workspace_id ||
+      !response.branch_name ||
+      !response.source_subject_revision ||
+      !response.base_commit ||
+      !Number.isSafeInteger(fencing) ||
+      fencing < 1 ||
+      !Number.isSafeInteger(commitTimestamp) ||
+      commitTimestamp < 1
+    ) {
+      throw new Error("INVALID_PUBLICATION_OPERATION_RESPONSE");
+    }
+    let executionSnapshot: PublicationOperationLease["executionSnapshot"] = null;
+    if (response.execution_snapshot_json) {
+      try {
+        executionSnapshot = JSON.parse(
+          response.execution_snapshot_json,
+        ) as PublicationOperationLease["executionSnapshot"];
+      } catch {
+        throw new Error("INVALID_PUBLICATION_OPERATION_RESPONSE");
+      }
+    }
+    return {
+      publicationId: response.publication_id,
+      ownerWorkerId: workerId,
+      operation: response.operation,
+      fencing,
+      workspaceId: response.workspace_id,
+      branchName: response.branch_name,
+      sourceSubjectRevision: response.source_subject_revision,
+      baseCommit: response.base_commit,
+      commitSha: response.commit_sha || null,
+      treeSha: response.tree_sha || null,
+      artifactRef: response.artifact_ref || null,
+      pushRefspec: response.push_refspec || null,
+      commitTimestamp,
+      commitAuthorName: response.commit_author_name ?? "",
+      commitAuthorEmail: response.commit_author_email ?? "",
+      commitMessage: response.commit_message ?? "",
+      executionSnapshot,
+    };
+  }
+
+  completePublicationOperation(claim: PublicationOperationLease, result: PublicationOperationResult): Promise<Empty> {
+    return unary((callback) =>
+      this.client.CompletePublicationOperation(
+        {
+          worker_id: claim.ownerWorkerId,
+          publication_id: claim.publicationId,
+          operation: claim.operation,
+          fencing: String(claim.fencing),
+          success: result.success,
+          ...(result.success
+            ? {
+                commit_sha: result.commitSha ?? "",
+                tree_sha: result.treeSha ?? "",
+                artifact_ref: result.artifactRef ?? "",
+                push_refspec: result.pushRefspec ?? "",
+              }
+            : {
+                error_code: result.errorCode,
+                error_context: result.errorContext ?? "",
+              }),
+        },
+        this.metadata,
+        callback,
+      ),
+    );
   }
 
   async claimWorkspaceCleanup(workerId: string): Promise<import("./remote-worker.js").WorkspaceCleanupLease | null> {

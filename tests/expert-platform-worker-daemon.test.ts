@@ -287,3 +287,99 @@ test("daemon forwards runtime configuration to Docker executor factory", () => {
   });
   runtime.close();
 });
+
+test("daemon processes owner publication operation before claiming another task", async () => {
+  const calls: string[] = [];
+  const lease = {
+    publicationId: "pub-1",
+    ownerWorkerId: "ota-worker-01",
+    operation: "prepare" as const,
+    fencing: 3,
+    workspaceId: "workspace-1",
+    branchName: "skillhub/work/work1-a1",
+    sourceSubjectRevision: "workspace:" + "a".repeat(64),
+    baseCommit: "b".repeat(40),
+    commitSha: null,
+    treeSha: null,
+    artifactRef: null,
+    pushRefspec: null,
+    commitTimestamp: 1_800_000_000_000,
+    commitAuthorName: "Team Skill Hub",
+    commitAuthorEmail: "team-skill-hub@local.invalid",
+    commitMessage: "Fix\n",
+    executionSnapshot: {
+      workspacePath: "/srv/workspaces/work1",
+      repositoryUrl: "/srv/remotes/ota.git",
+      defaultBranch: "main",
+      branchPrefix: "skillhub/work/",
+      protectedBranches: ["main"],
+      allowedPushRemote: "origin" as const,
+      expectedContentRevision: "a".repeat(64),
+      approvedChangeSummary: {
+        baseCommit: "b".repeat(40),
+        changedFiles: ["README.md"],
+        addedFiles: [],
+        deletedFiles: [],
+        diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+        contentRevision: "a".repeat(64),
+      },
+    },
+  };
+  let completed: unknown;
+  const runtime = createExpertWorkerRuntime(
+    {
+      hubAddress: "hub:7443",
+      workerId: "ota-worker-01",
+      workerCredential: "ewc_test",
+      capability: "ota",
+      sourcePath: "/srv/ota",
+      repositoryRoot: "/srv/expert-repositories",
+      sharedTempRoot: "/srv/expert-repositories/ota-worker-01/.runtime-tmp",
+      gitCredentialConfigs: {},
+      dockerImage: "expert-worker",
+      dockerNetwork: "expert-egress",
+      dockerSeccompProfile: "default",
+      modelEnvNames: [],
+      modelCredentialEnvNames: {},
+      heartbeatMs: 1000,
+      pollMs: 50,
+      taskTimeoutMs: 60_000,
+    },
+    {
+      createClient: () => ({
+        claimPublicationOperation: async () => {
+          calls.push("publication-claim");
+          return lease;
+        },
+        completePublicationOperation: async (_claim: any, result: any) => {
+          calls.push("publication-complete");
+          completed = result;
+        },
+        claimTask: async () => {
+          calls.push("task-claim");
+          return null;
+        },
+        renewLease: async () => undefined,
+        completeTask: async () => undefined,
+        failTask: async () => undefined,
+        close: () => undefined,
+      }),
+      createExecutor: () => async () => "unused",
+      preparePublication: async (input: any) => {
+        calls.push("publication-prepare:" + input.workspacePath);
+        return { branchName: input.branchName, commitSha: "c".repeat(40), treeSha: "d".repeat(40) };
+      },
+    } as any,
+  );
+
+  assert.equal(await runtime.runOnce(), true);
+  assert.deepEqual(calls, ["publication-claim", "publication-prepare:/srv/workspaces/work1", "publication-complete"]);
+  assert.deepEqual(completed, {
+    success: true,
+    commitSha: "c".repeat(40),
+    treeSha: "d".repeat(40),
+    artifactRef: "publication:pub-1",
+    pushRefspec: "c".repeat(40) + ":refs/heads/skillhub/work/work1-a1",
+  });
+  runtime.close();
+});

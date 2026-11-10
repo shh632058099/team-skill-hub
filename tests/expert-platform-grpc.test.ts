@@ -352,3 +352,97 @@ test("gRPC completion transports workspace change summary durably", async () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("publication operation RPC is owner-scoped and fenced", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-publication-"));
+  try {
+    const runtimeDb = path.join(dir, "runtime.sqlite");
+    const tasks = new ExpertTaskStore(runtimeDb);
+    const work = new WorkOrchestrationStore(runtimeDb);
+    const { WorkPublicationStore } = await import("../src/expert-platform/work-publication-store.js");
+    const publications = new WorkPublicationStore(runtimeDb);
+    const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+    for (const id of ["worker-a", "worker-b"]) {
+      workers.enroll(id, ["ota"]);
+      workers.approve(id);
+    }
+    const tokenA = workers.issueCredential("worker-a");
+    const tokenB = workers.issueCredential("worker-b");
+    const publication = publications.createOrReusePublication({
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workspaceId: "workspace-1",
+      sourceSubjectRevision: "workspace:" + "a".repeat(64),
+      baseCommit: "b".repeat(40),
+      repositoryId: "repo-1",
+      repositoryIdentityRevision: 2,
+      publicationPolicyRevision: 3,
+      branchName: "skillhub/work/work1-a1",
+      pushRemoteName: "origin",
+      ownerWorkerId: "worker-a",
+      commitTimestamp: 1_800_000_000_000,
+      commitAuthorName: "Team Skill Hub",
+      commitAuthorEmail: "team-skill-hub@local.invalid",
+      commitMessage: "Fix\n",
+      executionSnapshot: {
+        workspacePath: "/srv/workspaces/work1",
+        repositoryUrl: "/srv/remotes/ota.git",
+        defaultBranch: "main",
+        branchPrefix: "skillhub/work/",
+        protectedBranches: ["main"],
+        allowedPushRemote: "origin",
+        expectedContentRevision: "a".repeat(64),
+        approvedChangeSummary: {
+          baseCommit: "b".repeat(40),
+          changedFiles: ["README.md"],
+          addedFiles: [],
+          deletedFiles: [],
+          diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+          contentRevision: "a".repeat(64),
+        },
+      },
+    } as any);
+
+    const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0", {
+      workStore: work,
+      publicationStore: publications,
+    } as any);
+    const clientB = new ExpertWorkerClient(server.address, { workerId: "worker-b", credential: tokenB });
+    assert.equal(await clientB.claimPublicationOperation("worker-b"), null);
+
+    const clientA = new ExpertWorkerClient(server.address, { workerId: "worker-a", credential: tokenA });
+    const claim = await clientA.claimPublicationOperation("worker-a");
+    assert.equal(claim?.publicationId, publication.publicationId);
+    assert.equal(claim?.operation, "prepare");
+    assert.equal(claim?.executionSnapshot?.workspacePath, "/srv/workspaces/work1");
+    await clientA.completePublicationOperation(claim!, {
+      success: true,
+      commitSha: "c".repeat(40),
+      treeSha: "d".repeat(40),
+      artifactRef: "publication:" + publication.publicationId,
+      pushRefspec: "c".repeat(40) + ":refs/heads/skillhub/work/work1-a1",
+    });
+    assert.equal(publications.getPublication(publication.publicationId).state, "prepared");
+    await assert.rejects(
+      () =>
+        clientA.completePublicationOperation(claim!, {
+          success: true,
+          commitSha: "c".repeat(40),
+          treeSha: "d".repeat(40),
+          artifactRef: "publication:" + publication.publicationId,
+          pushRefspec: "c".repeat(40) + ":refs/heads/skillhub/work/work1-a1",
+        }),
+      /STALE_PUBLICATION_OPERATION/,
+    );
+
+    clientA.close();
+    clientB.close();
+    await server.close();
+    publications.close();
+    work.close();
+    tasks.close();
+    workers.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

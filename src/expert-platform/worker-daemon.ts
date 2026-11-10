@@ -4,6 +4,14 @@ import { ExpertWorkerClient } from "./grpc-transport.js";
 import { runRemoteWorkerOnce, type RemoteWorkerClient } from "./remote-worker.js";
 import type { ExpertWorkerRuntimeConfig } from "./worker-runtime-config.js";
 import { removeWorkspaceDirectory } from "./workspace-cleanup.js";
+import {
+  prepareGitPublication,
+  pushGitPublication,
+  type PrepareGitPublicationInput,
+  type PreparedGitPublication,
+  type PushGitPublicationInput,
+  type PushGitPublicationResult,
+} from "./git-publication-executor.js";
 
 interface ClosableRemoteWorkerClient extends RemoteWorkerClient {
   close(): void;
@@ -12,6 +20,8 @@ interface ClosableRemoteWorkerClient extends RemoteWorkerClient {
 export interface ExpertWorkerRuntimeDependencies {
   createClient?: (config: ExpertWorkerRuntimeConfig) => ClosableRemoteWorkerClient;
   createExecutor?: (options: DockerCodexExecutorOptions) => ReturnType<typeof createDockerCodexExecutor>;
+  preparePublication?: (input: PrepareGitPublicationInput) => Promise<PreparedGitPublication>;
+  pushPublication?: (input: PushGitPublicationInput) => Promise<PushGitPublicationResult>;
 }
 
 export function createExpertWorkerRuntime(
@@ -126,8 +136,70 @@ export function createExpertWorkerRuntime(
       },
     });
 
+  const preparePublication = dependencies.preparePublication ?? prepareGitPublication;
+  const pushPublication = dependencies.pushPublication ?? pushGitPublication;
+
+  const runPublicationOperation = async (): Promise<boolean> => {
+    if (!client.claimPublicationOperation || !client.completePublicationOperation) return false;
+    const claim = await client.claimPublicationOperation(config.workerId);
+    if (!claim) return false;
+    try {
+      const snapshot = claim.executionSnapshot;
+      if (!snapshot) throw new Error("PUBLICATION_EXECUTION_SNAPSHOT_MISSING");
+      if (claim.operation === "prepare") {
+        const prepared = await preparePublication({
+          workspacePath: snapshot.workspacePath,
+          sourceSubjectRevision: claim.sourceSubjectRevision,
+          expectedContentRevision: snapshot.expectedContentRevision,
+          approvedChangeSummary: snapshot.approvedChangeSummary,
+          baseCommit: claim.baseCommit,
+          repositoryUrl: snapshot.repositoryUrl,
+          branchName: claim.branchName,
+          branchPrefix: snapshot.branchPrefix,
+          defaultBranch: snapshot.defaultBranch,
+          protectedBranches: snapshot.protectedBranches,
+          commitMetadata: {
+            authorName: claim.commitAuthorName,
+            authorEmail: claim.commitAuthorEmail,
+            message: claim.commitMessage,
+            timestamp: claim.commitTimestamp,
+          },
+        });
+        await client.completePublicationOperation(claim, {
+          success: true,
+          commitSha: prepared.commitSha,
+          treeSha: prepared.treeSha,
+          artifactRef: "publication:" + claim.publicationId,
+          pushRefspec: prepared.commitSha + ":refs/heads/" + claim.branchName,
+        });
+        return true;
+      }
+      if (!claim.commitSha || !claim.pushRefspec) throw new Error("PUBLICATION_ARTIFACT_NOT_PREPARED");
+      await pushPublication({
+        workspacePath: snapshot.workspacePath,
+        repositoryUrl: snapshot.repositoryUrl,
+        branchName: claim.branchName,
+        branchPrefix: snapshot.branchPrefix,
+        defaultBranch: snapshot.defaultBranch,
+        protectedBranches: snapshot.protectedBranches,
+        commitSha: claim.commitSha,
+        allowedPushRemote: snapshot.allowedPushRemote,
+        ...(snapshot.credentialRef ? { credentialRef: snapshot.credentialRef } : {}),
+        credentials: config.gitCredentialConfigs,
+      });
+      await client.completePublicationOperation(claim, { success: true });
+      return true;
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : "PUBLICATION_OPERATION_FAILED";
+      const errorCode = /^[A-Z][A-Z0-9_]{0,79}$/.test(raw) ? raw : "PUBLICATION_OPERATION_FAILED";
+      await client.completePublicationOperation(claim, { success: false, errorCode });
+      return true;
+    }
+  };
+
   return {
     runOnce: async () => {
+      if (await runPublicationOperation()) return true;
       if (client.claimWorkspaceCleanup && client.completeWorkspaceCleanup) {
         const cleanup = await client.claimWorkspaceCleanup(config.workerId);
         if (cleanup) {

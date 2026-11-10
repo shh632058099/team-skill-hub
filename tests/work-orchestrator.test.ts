@@ -957,3 +957,125 @@ test("publication approval validates the exact prepared artifact and does not ac
     f.close();
   }
 });
+
+test("ensurePublication creates an owner-affine prepared-work command only after accepted current review", () => {
+  const f = fixture();
+  try {
+    const modelConfig = {
+      providerId: "router",
+      model: "model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    f.experts.putDeployment({
+      id: "ota-publish",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://example.test/ota.git",
+          branch: "main",
+          publicationPolicy: {
+            version: 4,
+            permissions: ["prepare-commit", "push-work-branch"],
+            branchPrefix: "skillhub/work/",
+            protectedBranches: ["main"],
+            allowedPushRemote: "origin",
+            credentialRef: "publish-ref",
+            allowForcePush: false,
+            allowDeleteRef: false,
+          },
+        },
+      ],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
+      active: true,
+      executor: { backend: "codex", modelConfig },
+    });
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("publish-ready", 1, {
+      ...structuredClone(base),
+      execution: {
+        ...structuredClone(base.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      completion: {
+        require: [...base.completion.require, "required_approvals_approved"],
+        requiredApprovals: [{ scope: "work_completion", subjectType: "workspace_revision" }],
+      },
+    });
+
+    const submitted = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "ensure-publication",
+      workflowId: "publish-ready",
+      deploymentId: "ota-publish",
+    });
+    const attempt = submitted.attempts[0]!;
+    const workspace = f.work.getWorkspace(attempt.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      1100,
+      "b".repeat(40),
+    );
+    const claim = f.tasks.claim("worker-a", 1000, 30_000, "ota", {
+      backend: "codex",
+      runtimeProfiles: ["codex-workspace-write"],
+    })!;
+    const summary = {
+      baseCommit: "b".repeat(40),
+      changedFiles: ["README.md"],
+      addedFiles: [],
+      deletedFiles: [],
+      diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+      contentRevision: "a".repeat(64),
+    };
+    f.tasks.complete(claim, "changed", 2000, { commitSha: summary.baseCommit }, undefined, summary);
+    const waiting = f.orchestrator.reconcileWork(submitted.work.workItemId, "alice", "team-a", 2100);
+    assert.equal(waiting.work.status, "waiting_review");
+    assert.throws(
+      () => f.orchestrator.ensurePublication(waiting.work.workItemId, "alice", "team-a", 2200),
+      /PUBLICATION_REVIEW_REQUIRED/,
+    );
+    const reviewed = f.orchestrator.submitReview(waiting.work.workItemId, "alice", "team-a", {
+      expectedRevision: waiting.work.stateRevision,
+      subjectRevision: "workspace:" + summary.contentRevision,
+      decision: "accepted",
+    });
+    assert.equal(reviewed.work.status, "waiting_review");
+
+    const publication = f.orchestrator.ensurePublication(reviewed.work.workItemId, "alice", "team-a", 2300);
+    assert.equal(publication.state, "preparing");
+    assert.equal(publication.ownerWorkerId, "worker-a");
+    assert.equal(publication.branchName, "skillhub/work/" + reviewed.work.workItemId.split("-")[0] + "-a1");
+    assert.equal(publication.pushRefspec, null);
+    assert.equal(publication.executionSnapshot?.repositoryUrl, "https://example.test/ota.git");
+    assert.equal(publication.executionSnapshot?.credentialRef, "publish-ref");
+    assert.equal(publication.executionSnapshot?.expectedContentRevision, summary.contentRevision);
+    assert.deepEqual(publication.executionSnapshot?.approvedChangeSummary, summary);
+
+    f.experts.putDeployment({
+      ...f.experts.getDeployment("ota-publish"),
+      repositories: [
+        {
+          ...f.experts.getDeployment("ota-publish").repositories![0]!,
+          publicationPolicy: {
+            ...f.experts.getDeployment("ota-publish").repositories![0]!.publicationPolicy!,
+            version: 99,
+            branchPrefix: "changed/",
+          },
+        },
+      ],
+    });
+    const replay = f.orchestrator.ensurePublication(reviewed.work.workItemId, "alice", "team-a", 2400);
+    assert.equal(replay.publicationId, publication.publicationId);
+    assert.equal(replay.publicationPolicyRevision, 4);
+    assert.equal(replay.branchName, publication.branchName);
+  } finally {
+    f.close();
+  }
+});

@@ -14,7 +14,8 @@ import {
   type WorkspaceRecord,
   WorkOrchestrationStore,
 } from "./work-orchestration-store.js";
-import { WorkPublicationStore } from "./work-publication-store.js";
+import { WorkPublicationStore, type WorkPublicationRecord } from "./work-publication-store.js";
+import { buildPublicationCommitMetadata, buildWorkBranchName } from "./publication-policy.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -528,6 +529,110 @@ export class WorkOrchestrator {
   ): WorkDetail {
     this.workStore.recordEvidence(workItemId, principalId, scope, input, now);
     return this.detail(workItemId, principalId, scope);
+  }
+
+  ensurePublication(workItemId: string, principalId: string, scope: string, now = Date.now()): WorkPublicationRecord {
+    if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+    const work = this.workStore.getWork(workItemId, principalId, scope);
+    if (!work.currentSubjectRevision || !/^workspace:[a-f0-9]{64}$/i.test(work.currentSubjectRevision)) {
+      throw new Error("PUBLICATION_SOURCE_STALE");
+    }
+    const attempts = this.workStore.listAttempts(workItemId);
+    const attempt = attempts.at(-1);
+    if (!attempt || attempt.status !== "succeeded" || !attempt.taskId || !attempt.workspaceId) {
+      throw new Error("PUBLICATION_WORK_ATTEMPT_NOT_READY");
+    }
+    const acceptedReview = this.workStore
+      .listReviewDecisions(workItemId)
+      .some((review) => review.subjectRevision === work.currentSubjectRevision && review.decision === "accepted");
+    if (!acceptedReview) throw new Error("PUBLICATION_REVIEW_REQUIRED");
+
+    const workspace = this.workStore.getWorkspace(attempt.workspaceId);
+    if (
+      !workspace.ownerWorkerId ||
+      !workspace.path ||
+      !workspace.baseCommit ||
+      workspace.state === "removed" ||
+      workspace.state === "failed"
+    ) {
+      throw new Error("PUBLICATION_WORKSPACE_UNAVAILABLE");
+    }
+    if (!this.workerAvailable(workspace.ownerWorkerId, now)) {
+      throw new Error("PUBLICATION_WORKSPACE_UNAVAILABLE");
+    }
+
+    const task = this.tasks.get(attempt.taskId, principalId, scope);
+    const summary = task.workspaceChangeSummary;
+    if (
+      !summary ||
+      "workspace:" + summary.contentRevision !== work.currentSubjectRevision ||
+      summary.baseCommit !== workspace.baseCommit
+    ) {
+      throw new Error("PUBLICATION_SOURCE_STALE");
+    }
+
+    if (!attempt.dispatchBinding) throw new Error("PUBLICATION_POLICY_MISSING");
+    const resolved = asResolvedDispatch(attempt.dispatchBinding);
+    const repository = resolved.deploymentSnapshot?.repository;
+    const policy = repository?.publicationPolicy;
+    if (!repository || !policy) throw new Error("PUBLICATION_POLICY_MISSING");
+    if (!policy.permissions.includes("prepare-commit") || !policy.permissions.includes("push-work-branch")) {
+      throw new Error("PUBLICATION_NOT_ALLOWED");
+    }
+    if (repository.id !== task.repositoryId) throw new Error("PUBLICATION_REPOSITORY_MISMATCH");
+
+    const existingPublication = this.publications
+      .listPublications(workItemId)
+      .find(
+        (publication) =>
+          publication.workAttemptId === attempt.workAttemptId && publication.repositoryId === repository.id,
+      );
+    if (existingPublication) {
+      if (existingPublication.sourceSubjectRevision !== work.currentSubjectRevision) {
+        throw new Error("PUBLICATION_SOURCE_REVISION_CONFLICT");
+      }
+      return existingPublication;
+    }
+
+    const branchName = buildWorkBranchName(policy.branchPrefix, workItemId, attempt.sequence);
+    const commitMetadata = buildPublicationCommitMetadata({
+      title: work.title,
+      workItemId,
+      workAttemptId: attempt.workAttemptId,
+      sourceSubjectRevision: work.currentSubjectRevision,
+      timestamp: now,
+    });
+    return this.publications.createOrReusePublication(
+      {
+        workItemId,
+        workAttemptId: attempt.workAttemptId,
+        workspaceId: workspace.workspaceId,
+        sourceSubjectRevision: work.currentSubjectRevision,
+        baseCommit: workspace.baseCommit,
+        repositoryId: repository.id,
+        repositoryIdentityRevision: resolved.deploymentConfigVersion,
+        publicationPolicyRevision: policy.version,
+        branchName,
+        pushRemoteName: "origin",
+        ownerWorkerId: workspace.ownerWorkerId,
+        commitTimestamp: commitMetadata.timestamp,
+        commitAuthorName: commitMetadata.authorName,
+        commitAuthorEmail: commitMetadata.authorEmail,
+        commitMessage: commitMetadata.message,
+        executionSnapshot: {
+          workspacePath: workspace.path,
+          repositoryUrl: repository.url,
+          defaultBranch: repository.branch,
+          branchPrefix: policy.branchPrefix,
+          protectedBranches: [...policy.protectedBranches],
+          allowedPushRemote: policy.allowedPushRemote,
+          ...(policy.credentialRef ? { credentialRef: policy.credentialRef } : {}),
+          expectedContentRevision: summary.contentRevision,
+          approvedChangeSummary: summary,
+        },
+      },
+      now,
+    );
   }
 
   recordPreparedPublicationArtifact(

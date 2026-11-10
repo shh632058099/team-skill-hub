@@ -1,6 +1,7 @@
 import type { Claim } from "./task-store.js";
 import type { VerificationEvidenceResult } from "./verification-policy.js";
 import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
+import type { PublicationOperationLease, PublicationOperationResult } from "./work-publication-store.js";
 
 export type WorkerExecutionResult = {
   result: string;
@@ -17,6 +18,8 @@ export type WorkspaceCleanupLease = {
 };
 
 export interface RemoteWorkerClient {
+  claimPublicationOperation?(workerId: string): Promise<PublicationOperationLease | null>;
+  completePublicationOperation?(claim: PublicationOperationLease, result: PublicationOperationResult): Promise<unknown>;
   claimWorkspaceCleanup?(workerId: string): Promise<WorkspaceCleanupLease | null>;
   completeWorkspaceCleanup?(claim: WorkspaceCleanupLease, success: boolean, errorCode?: string): Promise<unknown>;
   claimTask(workerId: string, expertId: string, capability: string): Promise<Claim | null>;

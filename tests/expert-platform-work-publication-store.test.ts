@@ -55,6 +55,33 @@ test("publication state persists and idempotent create reuses the same identity"
   }
 });
 
+test("publication may persist before commit exists and pins refspec when prepared", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-refspec-"));
+  try {
+    const store = new WorkPublicationStore(path.join(dir, "runtime.sqlite"));
+    const input = { ...fixture(), pushRefspec: undefined };
+    const publication = store.createOrReusePublication(input);
+    assert.equal(publication.pushRefspec, null);
+    const prepared = store.transitionPublication(publication.publicationId, "prepared", {
+      commitSha: "c".repeat(40),
+      treeSha: "d".repeat(40),
+      artifactRef: "publication:" + publication.publicationId,
+      pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+    });
+    assert.equal(prepared.pushRefspec, "c".repeat(40) + ":refs/heads/" + publication.branchName);
+    assert.throws(
+      () =>
+        store.transitionPublication(prepared.publicationId, "approved", {
+          pushRefspec: "e".repeat(40) + ":refs/heads/" + publication.branchName,
+        }),
+      /PUBLICATION_IDENTITY_IMMUTABLE/,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("publication rejects revision reuse and invalid state transitions", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-invalid-"));
   try {
@@ -81,6 +108,64 @@ test("publication rejects revision reuse and invalid state transitions", () => {
         } as any),
       /PUBLICATION_IDENTITY_IMMUTABLE/,
     );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("publication operation claim is owner-affine and carries immutable execution snapshot", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-claim-"));
+  try {
+    const store = new WorkPublicationStore(path.join(dir, "runtime.sqlite"));
+    const publication = store.createOrReusePublication({
+      ...fixture(),
+      pushRefspec: undefined,
+      executionSnapshot: {
+        repositoryUrl: "https://example.org/ota.git",
+        defaultBranch: "main",
+        branchPrefix: "skillhub/work/",
+        protectedBranches: ["main"],
+        allowedPushRemote: "origin",
+        credentialRef: "publish-ref",
+        expectedContentRevision: "a".repeat(64),
+        approvedChangeSummary: {
+          baseCommit: "b".repeat(40),
+          changedFiles: ["README.md"],
+          addedFiles: [],
+          deletedFiles: [],
+          diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+          contentRevision: "a".repeat(64),
+        },
+      },
+    } as any);
+    assert.equal(store.claimPublicationOperation("other-worker", 1000, 30_000), null);
+    const prepare = store.claimPublicationOperation("worker-1", 1000, 30_000)!;
+    assert.equal(prepare.publicationId, publication.publicationId);
+    assert.equal(prepare.operation, "prepare");
+    assert.equal(prepare.executionSnapshot?.credentialRef, "publish-ref");
+    assert.equal(prepare.fencing, 1);
+
+    store.completePublicationOperation(
+      prepare,
+      {
+        success: true,
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      1100,
+    );
+    assert.equal(store.getPublication(publication.publicationId).state, "prepared");
+    store.transitionPublication(publication.publicationId, "approved", {}, 1200);
+
+    assert.equal(store.claimPublicationOperation("other-worker", 1200, 30_000), null);
+    const push = store.claimPublicationOperation("worker-1", 1200, 30_000)!;
+    assert.equal(push.operation, "push");
+    assert.equal(push.fencing, 2);
+    store.completePublicationOperation(push, { success: true }, 1300);
+    assert.equal(store.getPublication(publication.publicationId).state, "pushed");
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
