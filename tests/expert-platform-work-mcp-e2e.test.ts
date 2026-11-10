@@ -85,9 +85,13 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const { startServer } = await import("../src/server.js");
     const apiKey = "work-api-key";
     const otherKey = "other-work-api-key";
+    const adminKey = "admin-work-api-key";
+    const workerKey = "worker-work-api-key";
     const auth = new ApiKeyAuthenticationProvider({
       [apiKey]: { id: "alice", roles: ["developer", "internal"], tenantId: "team-a" },
       [otherKey]: { id: "bob", roles: ["developer", "internal"], tenantId: "team-a" },
+      [adminKey]: { id: "alice", roles: ["admin", "developer", "internal"], tenantId: "team-a" },
+      [workerKey]: { id: "worker", roles: ["worker-mcp-readonly"], tenantId: "team-a" },
     });
     const search = new SqliteFtsSearchBackend();
     const config: AppConfig = {
@@ -123,6 +127,13 @@ test("MCP Work API drives durable work through review, rework, authorization and
       keywords: ["ota", "upgrade", "rollback"],
       active: true,
     });
+    experts.putDefinition({
+      id: "ota-write",
+      displayName: "OTA Write Expert",
+      capabilities: ["ota-write"],
+      keywords: ["ota-write", "mutation"],
+      active: true,
+    });
     experts.putDeployment({
       id: "ota-default",
       expertId: "ota",
@@ -130,6 +141,15 @@ test("MCP Work API drives durable work through review, rework, authorization and
       repositories: [],
       principals: ["alice"],
       runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    experts.putDeployment({
+      id: "ota-write-default",
+      expertId: "ota-write",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
       active: true,
     });
     experts.close();
@@ -151,10 +171,29 @@ test("MCP Work API drives durable work through review, rework, authorization and
         ],
       },
     });
+    workflowSetup.putWorkflow("mcp-write-approval", 1, {
+      ...structuredClone(baseWorkflow),
+      execution: {
+        ...structuredClone(baseWorkflow.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      completion: {
+        require: [...baseWorkflow.completion.require, "required_approvals_approved"],
+        requiredApprovals: [{ scope: "work_completion", subjectType: "workspace_revision" }],
+      },
+    });
     workflowSetup.close();
 
     const tools = await listMcpTools(mcpUrl, apiKey);
-    for (const name of ["submit_work", "get_work", "wait_work", "review_work", "record_work_evidence", "cancel_work"]) {
+    for (const name of [
+      "submit_work",
+      "get_work",
+      "wait_work",
+      "review_work",
+      "approve_work",
+      "record_work_evidence",
+      "cancel_work",
+    ]) {
       assert.ok(
         tools.some((tool) => tool.name === name),
         `missing MCP tool ${name}`,
@@ -262,6 +301,151 @@ test("MCP Work API drives durable work through review, rework, authorization and
     await callMcp(mcpUrl, apiKey, 58, "cancel_work", {
       workItemId: workflowBound.work.workItemId,
     });
+
+    const approvalSubmission = await callMcp(mcpUrl, apiKey, 66, "submit_work", {
+      title: "Approval-gated workspace change",
+      description: "Modify a fixture and require explicit completion approval",
+      idempotencyKey: "mcp-work-approval",
+      workflowId: "mcp-write-approval",
+      expertId: "ota-write",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-write-default",
+    });
+    const approvalTaskId = String(approvalSubmission.currentTask.taskId);
+    const approvalClaim = tasks.claim("worker-a", 7_000, 30_000, "ota-write")!;
+    assert.equal(approvalClaim.taskId, approvalTaskId);
+    const approvalSummary = {
+      baseCommit: "c".repeat(40),
+      changedFiles: ["fixture.txt"],
+      addedFiles: [],
+      deletedFiles: [],
+      diffStat: { filesChanged: 1, insertions: 1, deletions: 1 },
+      contentRevision: "d".repeat(64),
+    };
+    const approvalSubject = "workspace:" + approvalSummary.contentRevision;
+    tasks.complete(
+      approvalClaim,
+      "workspace updated",
+      8_000,
+      { commitSha: approvalSummary.baseCommit },
+      undefined,
+      approvalSummary,
+    );
+    const approvalWaiting = await callMcp(mcpUrl, apiKey, 67, "get_work", {
+      workItemId: approvalSubmission.work.workItemId,
+    });
+    assert.equal(approvalWaiting.work.status, "waiting_review");
+    assert.equal(approvalWaiting.work.currentSubjectRevision, approvalSubject);
+    assert.ok(approvalWaiting.gate.missing.includes("review_accepted"));
+    assert.ok(approvalWaiting.gate.missing.includes("required_approval:work_completion"));
+
+    const approvalReviewed = await callMcp(mcpUrl, apiKey, 68, "review_work", {
+      workItemId: approvalSubmission.work.workItemId,
+      expectedRevision: approvalWaiting.work.stateRevision,
+      subjectRevision: approvalSubject,
+      decision: "accepted",
+    });
+    assert.equal(approvalReviewed.work.status, "waiting_review");
+    assert.deepEqual(approvalReviewed.gate.missing, ["required_approval:work_completion"]);
+
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, workerKey, 69, "approve_work", {
+          workItemId: approvalSubmission.work.workItemId,
+          expectedRevision: approvalReviewed.work.stateRevision,
+          subjectRevision: approvalSubject,
+          approvalScope: "work_completion",
+          decision: "approved",
+        }),
+      /MCP_TOOL_FORBIDDEN_FOR_PRINCIPAL|WORK_APPROVAL_FORBIDDEN/,
+    );
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 70, "approve_work", {
+          workItemId: approvalSubmission.work.workItemId,
+          expectedRevision: approvalReviewed.work.stateRevision - 1,
+          subjectRevision: approvalSubject,
+          approvalScope: "work_completion",
+          decision: "approved",
+        }),
+      /STALE_WORK_REVISION/,
+    );
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 71, "approve_work", {
+          workItemId: approvalSubmission.work.workItemId,
+          expectedRevision: approvalReviewed.work.stateRevision,
+          subjectRevision: "workspace:" + "e".repeat(64),
+          approvalScope: "work_completion",
+          decision: "approved",
+        }),
+      /STALE_WORK_SUBJECT/,
+    );
+
+    const approvalCompleted = await callMcp(mcpUrl, apiKey, 72, "approve_work", {
+      workItemId: approvalSubmission.work.workItemId,
+      expectedRevision: approvalReviewed.work.stateRevision,
+      subjectRevision: approvalSubject,
+      approvalScope: "work_completion",
+      decision: "approved",
+      actor: "mallory",
+      role: "admin",
+    });
+    assert.equal(approvalCompleted.work.status, "completed");
+    assert.equal(approvalCompleted.gate.ready, true);
+    const approvalStore = new WorkOrchestrationStore(runtimeDb);
+    const developerApproval = approvalStore.listApprovals(approvalSubmission.work.workItemId).at(-1)!;
+    assert.equal(developerApproval.actor, "alice");
+    assert.equal(developerApproval.role, "developer");
+    assert.equal(developerApproval.approvalScope, "work_completion");
+    assert.equal(developerApproval.subjectType, "workspace_revision");
+    assert.equal(developerApproval.subjectRevision, approvalSubject);
+    approvalStore.close();
+
+    const adminSubmission = await callMcp(mcpUrl, apiKey, 73, "submit_work", {
+      title: "Admin approval precedence",
+      description: "Verify admin role is recorded when principal has admin and developer",
+      idempotencyKey: "mcp-work-admin-approval",
+      workflowId: "mcp-write-approval",
+      expertId: "ota-write",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-write-default",
+    });
+    const adminClaim = tasks.claim("worker-a", 9_000, 30_000, "ota-write")!;
+    assert.equal(adminClaim.taskId, adminSubmission.currentTask.taskId);
+    const adminSummary = {
+      ...approvalSummary,
+      contentRevision: "f".repeat(64),
+    };
+    const adminSubject = "workspace:" + adminSummary.contentRevision;
+    tasks.complete(
+      adminClaim,
+      "admin workspace updated",
+      10_000,
+      { commitSha: adminSummary.baseCommit },
+      undefined,
+      adminSummary,
+    );
+    const adminWaiting = await callMcp(mcpUrl, apiKey, 74, "get_work", { workItemId: adminSubmission.work.workItemId });
+    const adminReviewed = await callMcp(mcpUrl, apiKey, 75, "review_work", {
+      workItemId: adminSubmission.work.workItemId,
+      expectedRevision: adminWaiting.work.stateRevision,
+      subjectRevision: adminSubject,
+      decision: "accepted",
+    });
+    const adminCompleted = await callMcp(mcpUrl, adminKey, 76, "approve_work", {
+      workItemId: adminSubmission.work.workItemId,
+      expectedRevision: adminReviewed.work.stateRevision,
+      subjectRevision: adminSubject,
+      approvalScope: "work_completion",
+      decision: "approved",
+    });
+    assert.equal(adminCompleted.work.status, "completed");
+    const adminStore = new WorkOrchestrationStore(runtimeDb);
+    assert.equal(adminStore.listApprovals(adminSubmission.work.workItemId).at(-1)!.role, "admin");
+    adminStore.close();
 
     const omittedRouteIds = await callMcp(mcpUrl, apiKey, 60, "submit_work", {
       title: "Auto route omitted identifiers",

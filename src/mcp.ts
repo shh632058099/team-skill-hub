@@ -1578,6 +1578,43 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         );
 
         registerTool(
+          "approve_work",
+          {
+            description:
+              "Record an explicit human authorization decision for the exact current writable Workspace revision. This never grants runtime write permission and must never be inferred or self-approved by an agent. Only authenticated admin/developer principals may approve.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+              subjectRevision: z.string().regex(/^workspace:[a-f0-9]{64}$/i),
+              approvalScope: z.literal("work_completion"),
+              decision: z.enum(["approved", "rejected"]),
+            }),
+          },
+          async ({ workItemId, expectedRevision, subjectRevision, approvalScope, decision }) => {
+            const approvalRole = principal.roles.includes("admin")
+              ? "admin"
+              : principal.roles.includes("developer")
+                ? "developer"
+                : null;
+            if (!approvalRole) throw new Error("WORK_APPROVAL_FORBIDDEN");
+            return toolResult(
+              workOrchestrator.submitApproval(
+                workItemId,
+                principal.id,
+                principal.tenantId,
+                {
+                  expectedRevision,
+                  subjectRevision,
+                  approvalScope,
+                  decision,
+                },
+                { actor: principal.id, role: approvalRole },
+              ),
+            );
+          },
+        );
+
+        registerTool(
           "record_work_evidence",
           {
             description:

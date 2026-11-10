@@ -43,6 +43,18 @@ export interface WorkReviewInput {
   reason?: string;
 }
 
+export interface WorkApprovalInput {
+  expectedRevision: number;
+  subjectRevision: string;
+  approvalScope: "work_completion";
+  decision: "approved" | "rejected";
+}
+
+export interface WorkApprovalActor {
+  actor: string;
+  role: "admin" | "developer";
+}
+
 const TERMINAL_WORK = new Set(["completed", "failed", "cancelled"]);
 
 function isBlocker(reason: string): string | null {
@@ -403,6 +415,50 @@ export class WorkOrchestrator {
 
     const terminalReviewWork = this.workStore.getWork(workItemId, principalId, scope);
     if (TERMINAL_WORK.has(terminalReviewWork.status)) {
+      this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
+    }
+    return this.detail(workItemId, principalId, scope);
+  }
+
+  submitApproval(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    input: WorkApprovalInput,
+    actor: WorkApprovalActor,
+    now = Date.now(),
+  ): WorkDetail {
+    if (
+      actor.actor !== principalId ||
+      (actor.role !== "admin" && actor.role !== "developer") ||
+      input.approvalScope !== "work_completion" ||
+      !/^workspace:[a-f0-9]{64}$/i.test(input.subjectRevision)
+    ) {
+      throw new Error("INVALID_WORK_APPROVAL");
+    }
+    this.workStore.recordApproval(
+      workItemId,
+      principalId,
+      scope,
+      {
+        expectedRevision: input.expectedRevision,
+        actor: actor.actor,
+        role: actor.role,
+        approvalScope: input.approvalScope,
+        subjectType: "workspace_revision",
+        subjectRevision: input.subjectRevision,
+        decision: input.decision,
+      },
+      now,
+    );
+    let work = this.workStore.getWork(workItemId, principalId, scope);
+    if (input.decision === "approved") {
+      const gate = this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
+      if (gate.ready && !TERMINAL_WORK.has(work.status)) {
+        work = this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "completed", now);
+      }
+    }
+    if (TERMINAL_WORK.has(work.status)) {
       this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
     }
     return this.detail(workItemId, principalId, scope);
