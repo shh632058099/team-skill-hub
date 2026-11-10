@@ -7,7 +7,7 @@ import type { Claim } from "./task-store.js";
 import type { ExpertModelConfig } from "./expert-store.js";
 import { prepareRepositoryWorkspace, type GitCredentialConfig } from "./repository-workspace.js";
 import { buildCodexArgs } from "./codex-runtime.js";
-import { parseClaudeResult, buildClaudeReadOnlyArgs } from "./claude-runtime.js";
+import { parseClaudeResult, buildClaudeArgs } from "./claude-runtime.js";
 import { buildCodexDockerArgs } from "./codex-container-executor.js";
 import { runCodexProcess, type CodexProcessOptions } from "./codex-process.js";
 import { runVerificationPolicy } from "./verification-runner.js";
@@ -243,7 +243,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         if (!(error instanceof Error) || error.message !== "UNKNOWN_RUNTIME_PROFILE") throw error;
       }
     }
-    const workspaceAccess = backend === "codex" ? runtimePolicy.workspaceAccess : "read-only";
+    const workspaceAccess = runtimePolicy.workspaceAccess;
     if (claim.deploymentSnapshot && claim.deploymentSnapshot.executor.backend !== backend)
       throw new Error("EXPERT_BACKEND_UNSUPPORTED");
     if (
@@ -255,11 +255,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     const streaming = process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0" && !options.runProcess;
     let codexArgs =
       backend === "claude"
-        ? buildClaudeReadOnlyArgs(
+        ? buildClaudeArgs(
             claim.problem,
             claim.deploymentSnapshot?.executor.modelConfig.model ?? options.claudeModel ?? "sonnet",
             streaming,
             options.claudeMaxTurns ?? 12,
+            runtimePolicy.agentPermissions,
           )
         : buildCodexArgs(claim.problem, runtimePolicy.agentPermissions);
     // URL-backed repository IDs are the new source-repository contract. If the
@@ -319,11 +320,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw new Error("EXPERT_MODEL_PROTOCOL_MISMATCH");
     }
     if (backend === "claude" && claim.modelConfig) {
-      codexArgs = buildClaudeReadOnlyArgs(
+      codexArgs = buildClaudeArgs(
         claim.problem,
         claim.modelConfig.model,
         streaming,
         options.claudeMaxTurns ?? 12,
+        runtimePolicy.agentPermissions,
       );
     }
     let claudeChildEnv: NodeJS.ProcessEnv | undefined;

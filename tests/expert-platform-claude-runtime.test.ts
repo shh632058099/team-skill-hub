@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildClaudeReadOnlyArgs, parseClaudeResult } from "../src/expert-platform/claude-runtime.js";
+import { buildClaudeArgs, buildClaudeReadOnlyArgs, parseClaudeResult } from "../src/expert-platform/claude-runtime.js";
 import { createDockerCodexExecutor } from "../src/expert-platform/docker-codex-executor.js";
 import type { Claim } from "../src/expert-platform/task-store.js";
 
@@ -204,5 +204,66 @@ test("Claude max turns is configurable and validated", () => {
   assert.equal(buildClaudeReadOnlyArgs("inspect", "sonnet", false, 5000)[5], "5000");
   for (const bad of [0, -1, 1.5, NaN, Infinity]) {
     assert.throws(() => buildClaudeReadOnlyArgs("inspect", "sonnet", false, bad), /INVALID_CLAUDE_MAX_TURNS/);
+  }
+});
+
+test("Claude workspace-write enables Edit and Write but never Bash or NotebookEdit", () => {
+  const args = buildClaudeArgs("modify fixture", "sonnet", false, 12, "workspace-write");
+  const tools = args[args.indexOf("--tools") + 1];
+  const allowed = args[args.indexOf("--allowedTools") + 1];
+  assert.equal(tools, "Read,Glob,Grep,Edit,Write");
+  assert.equal(allowed, "Read,Glob,Grep,Edit,Write");
+  for (const forbidden of ["Bash", "NotebookEdit", "Agent"]) {
+    assert.ok(!tools.includes(forbidden));
+    assert.ok(!allowed.includes(forbidden));
+  }
+});
+
+test("Claude workspace-write profile gets rw workspace while keeping container root read-only", async () => {
+  const previous = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "synthetic";
+  try {
+    let args: readonly string[] = [];
+    const modelConfig = {
+      providerId: "router",
+      model: "sonnet",
+      baseUrl: "https://router.example/anthropic",
+      wireApi: "anthropic-messages" as const,
+      allowedEnvNames: ["ANTHROPIC_API_KEY"],
+    };
+    const executor = createDockerCodexExecutor({
+      backend: "claude",
+      image: "expert-claude",
+      sourcePath: "/repo",
+      network: "bridge",
+      envNames: ["ANTHROPIC_API_KEY"],
+      timeoutMs: 1000,
+      runProcess: async (options) => {
+        args = options.args;
+        return "done";
+      },
+    });
+    await executor(
+      {
+        ...claim,
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "claude-write",
+          configVersion: 1,
+          runtimeProfile: "claude-workspace-write",
+          repository: { id: "repo", url: "https://example.org/repo.git", branch: "main" },
+          executor: { backend: "claude", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.ok(args.includes("--read-only"), "rootfs stays read-only");
+    assert.ok(args.includes("type=bind,src=/repo,dst=/workspace"));
+    assert.ok(!args.includes("type=bind,src=/repo,dst=/workspace,readonly"));
+    assert.ok(args.includes("Read,Glob,Grep,Edit,Write"));
+    assert.ok(!args.join(" ").includes("Bash"));
+  } finally {
+    if (previous === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previous;
   }
 });

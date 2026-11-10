@@ -1,7 +1,11 @@
-/** Claude Code worker uses a read-only bind mount plus an explicit read-only tool allowlist.
- * Bash, Write, Edit, NotebookEdit and agent tools are never available. Deployment-approved read-only MCP tools may be appended.
- */
-export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false, maxTurns = 12): string[] {
+/** Claude Code worker uses a constrained tool allowlist. Bash, NotebookEdit and agent tools are never available. */
+export function buildClaudeArgs(
+  problem: string,
+  model: string,
+  stream = false,
+  maxTurns = 12,
+  permissions: "read-only" | "workspace-write" = "read-only",
+): string[] {
   if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("INVALID_CLAUDE_MAX_TURNS");
   if (
     !problem.trim() ||
@@ -10,6 +14,7 @@ export function buildClaudeReadOnlyArgs(problem: string, model: string, stream =
     model.length > 200
   )
     throw new Error("INVALID_CLAUDE_REQUEST");
+  const tools = permissions === "workspace-write" ? "Read,Glob,Grep,Edit,Write" : "Read,Glob,Grep";
   return [
     "-p",
     "--no-session-persistence",
@@ -23,14 +28,17 @@ export function buildClaudeReadOnlyArgs(problem: string, model: string, stream =
     "--permission-mode",
     "dontAsk",
     "--tools",
-    "Read,Glob,Grep",
+    tools,
     "--allowedTools",
-    "Read,Glob,Grep",
+    tools,
     "--",
     problem,
   ];
 }
 
+export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false, maxTurns = 12): string[] {
+  return buildClaudeArgs(problem, model, stream, maxTurns, "read-only");
+}
 /** Only completed, successful Claude -p --output-format=json results are accepted. */
 export function parseClaudeResult(output: string): string {
   if (output.length > 4 * 1024 * 1024) throw new Error("CLAUDE_OUTPUT_LIMIT");
