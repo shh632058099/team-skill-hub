@@ -71,6 +71,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /工作项详情/);
     assert.match(html, /Verification/);
     assert.match(html, /Run \/ Turns/);
+    assert.match(html, /返工审计/);
     assert.match(html, /workVerification/);
     assert.match(html, /workTurnRows/);
     assert.match(html, /Continuation/);

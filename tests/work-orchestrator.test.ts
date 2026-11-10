@@ -490,11 +490,46 @@ test("rework feedback replay creates exactly one new WorkAttempt", () => {
     const reworked = f.orchestrator.handleTaskFeedback(taskId, "alice", "team-a", feedback, 4_000)!;
     assert.equal(reworked.attempts.length, 2);
     assert.equal(reworked.attempts[1]!.reason, "human_rework");
+    assert.equal(reworked.attempts[1]!.originWorkAttemptId, reworked.attempts[0]!.workAttemptId);
+    assert.match(reworked.attempts[1]!.reviewContext ?? "", /partially_adopted/);
+    assert.equal(reworked.attempts[1]!.whatShouldChange, "补验证");
+    assert.equal(reworked.attempts[1]!.createdBy, "alice");
     assert.equal(reworked.work.status, "running");
 
     const replay = f.orchestrator.handleTaskFeedback(taskId, "alice", "team-a", feedback, 5_000)!;
     assert.equal(replay.attempts.length, 2);
     assert.equal(replay.currentTask!.taskId, reworked.currentTask!.taskId);
+  } finally {
+    f.close();
+  }
+});
+
+test("review rework persists the review audit context on the new WorkAttempt", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "review-rework-audit" });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "result", 2_000, { commitSha: "c".repeat(40) });
+    const waiting = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    const reworked = f.orchestrator.submitReview(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: waiting.work.stateRevision,
+        subjectRevision: "c".repeat(40),
+        decision: "rework",
+        reason: "补充断电恢复测试",
+      },
+      4_000,
+    );
+    assert.equal(reworked.attempts.length, 2);
+    const audit = reworked.attempts[1]!;
+    assert.equal(audit.reason, "review_rework");
+    assert.equal(audit.originWorkAttemptId, reworked.attempts[0]!.workAttemptId);
+    assert.match(audit.reviewContext ?? "", /rework/);
+    assert.equal(audit.whatShouldChange, "补充断电恢复测试");
+    assert.equal(audit.createdBy, "alice");
   } finally {
     f.close();
   }

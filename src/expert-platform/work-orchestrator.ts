@@ -554,7 +554,11 @@ export class WorkOrchestrator {
     }
 
     work = this.workStore.transitionWork(work.workItemId, principalId, scope, work.stateRevision, "rework", now);
-    this.startAttempt(work, "human_rework", originAttempt.workAttemptId, now);
+    this.startAttempt(work, "human_rework", originAttempt.workAttemptId, now, {
+      reviewContext: JSON.stringify({ disposition: feedback.disposition, needsRework: feedback.needsRework === true }),
+      whatShouldChange: feedback.reason,
+      createdBy: principalId,
+    });
     return this.detail(work.workItemId, principalId, scope);
   }
 
@@ -581,7 +585,15 @@ export class WorkOrchestrator {
       const attempts = this.workStore.listAttempts(workItemId);
       const latest = attempts.at(-1);
       work = this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "rework", now);
-      this.startAttempt(work, "review_rework", latest?.workAttemptId ?? null, now);
+      this.startAttempt(work, "review_rework", latest?.workAttemptId ?? null, now, {
+        reviewContext: JSON.stringify({
+          decision: input.decision,
+          subjectRevision: input.subjectRevision,
+          reason: input.reason ?? null,
+        }),
+        whatShouldChange: input.reason,
+        createdBy: principalId,
+      });
     } else if (input.decision === "rejected" && !TERMINAL_WORK.has(work.status)) {
       this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "failed", now);
     }
@@ -871,6 +883,7 @@ export class WorkOrchestrator {
     reason: WorkAttemptReason,
     parentWorkAttemptId: string | null,
     now: number,
+    audit: { reviewContext?: string; whatShouldChange?: string; createdBy?: string } = {},
   ): WorkAttemptRecord {
     const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const resolved = this.dispatch.resolve({
@@ -894,6 +907,9 @@ export class WorkOrchestrator {
         deploymentId: resolved.deploymentId,
         deploymentConfigVersion: resolved.deploymentConfigVersion,
         ...(parentWorkAttemptId ? { parentWorkAttemptId } : {}),
+        ...(audit.reviewContext ? { reviewContext: audit.reviewContext } : {}),
+        ...(audit.whatShouldChange ? { whatShouldChange: audit.whatShouldChange } : {}),
+        ...(audit.createdBy ? { createdBy: audit.createdBy } : {}),
         dispatchBinding: resolved as unknown as Record<string, unknown>,
       },
       now,

@@ -138,6 +138,9 @@ export interface CreateWorkAttemptInput {
   deploymentId: string;
   deploymentConfigVersion: number;
   parentWorkAttemptId?: string;
+  reviewContext?: string;
+  whatShouldChange?: string;
+  createdBy?: string;
   dispatchBinding?: Record<string, unknown>;
 }
 
@@ -156,6 +159,10 @@ export interface WorkAttemptRecord {
   taskId: string | null;
   runCount: number;
   parentWorkAttemptId: string | null;
+  originWorkAttemptId: string | null;
+  reviewContext: string | null;
+  whatShouldChange: string | null;
+  createdBy: string | null;
   startedAt: number;
   finishedAt: number | null;
   dispatchBinding: Record<string, unknown> | null;
@@ -396,6 +403,9 @@ export class WorkOrchestrationStore {
         "  task_id TEXT,",
         "  run_count INTEGER NOT NULL DEFAULT 0,",
         "  parent_work_attempt_id TEXT,",
+        "  review_context TEXT,",
+        "  what_should_change TEXT,",
+        "  created_by TEXT,",
         "  started_at INTEGER NOT NULL,",
         "  finished_at INTEGER,",
         "  dispatch_binding_json TEXT,",
@@ -493,6 +503,15 @@ export class WorkOrchestrationStore {
     if (!workColumns.has("resume_condition")) this.db.exec("ALTER TABLE work_items ADD COLUMN resume_condition TEXT");
     if (!workColumns.has("blocked_by_type")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_by_type TEXT");
     if (!workColumns.has("blocked_by_ref")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_by_ref TEXT");
+    const attemptColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_attempts)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!attemptColumns.has("review_context")) this.db.exec("ALTER TABLE work_attempts ADD COLUMN review_context TEXT");
+    if (!attemptColumns.has("what_should_change"))
+      this.db.exec("ALTER TABLE work_attempts ADD COLUMN what_should_change TEXT");
+    if (!attemptColumns.has("created_by")) this.db.exec("ALTER TABLE work_attempts ADD COLUMN created_by TEXT");
     this.migrateWorkspaceSchema();
     this.ensureWorkspaceCleanupSchema();
   }
@@ -958,8 +977,8 @@ export class WorkOrchestrationStore {
           [
             "INSERT INTO work_attempts(",
             "work_attempt_id,work_item_id,sequence,reason,status,expert_id,deployment_id,deployment_config_version,",
-            "workflow_id,workflow_version,parent_work_attempt_id,started_at,dispatch_binding_json",
-            ") VALUES(?,?,?,?,'active',?,?,?,?,?,?,?,?)",
+            "workflow_id,workflow_version,parent_work_attempt_id,review_context,what_should_change,created_by,started_at,dispatch_binding_json",
+            ") VALUES(?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?)",
           ].join(" "),
         )
         .run(
@@ -973,6 +992,9 @@ export class WorkOrchestrationStore {
           workflow.workflowId,
           workflow.version,
           input.parentWorkAttemptId?.trim() || null,
+          optionalText(input.reviewContext, 4000),
+          optionalText(input.whatShouldChange, 4000),
+          optionalText(input.createdBy, 200),
           now,
           input.dispatchBinding ? JSON.stringify(input.dispatchBinding) : null,
         );
@@ -986,7 +1008,12 @@ export class WorkOrchestrationStore {
         workItemId,
         workAttemptId,
         "work_attempt.created",
-        JSON.stringify({ sequence, reason: input.reason }),
+        JSON.stringify({
+          sequence,
+          reason: input.reason,
+          originWorkAttemptId: input.parentWorkAttemptId?.trim() || null,
+          createdBy: optionalText(input.createdBy, 200),
+        }),
         now,
       );
       const row = this.db.prepare("SELECT * FROM work_attempts WHERE work_attempt_id=?").get(workAttemptId) as Row;
@@ -2047,6 +2074,10 @@ export class WorkOrchestrationStore {
       taskId: row.task_id == null ? null : String(row.task_id),
       runCount: Number(row.run_count),
       parentWorkAttemptId: row.parent_work_attempt_id == null ? null : String(row.parent_work_attempt_id),
+      originWorkAttemptId: row.parent_work_attempt_id == null ? null : String(row.parent_work_attempt_id),
+      reviewContext: row.review_context == null ? null : String(row.review_context),
+      whatShouldChange: row.what_should_change == null ? null : String(row.what_should_change),
+      createdBy: row.created_by == null ? null : String(row.created_by),
       startedAt: Number(row.started_at),
       finishedAt: row.finished_at == null ? null : Number(row.finished_at),
       dispatchBinding: row.dispatch_binding_json

@@ -710,6 +710,9 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(feedback.feedback.disposition, "partially_adopted");
     assert.equal(feedback.work.attempts.length, 2);
     assert.equal(feedback.work.work.status, "running");
+    assert.equal(feedback.work.attempts[1].originWorkAttemptId, feedback.work.attempts[0].workAttemptId);
+    assert.equal(feedback.work.attempts[1].whatShouldChange, "补验证");
+    assert.equal(feedback.work.attempts[1].createdBy, "alice");
 
     const cancellable = await callMcp(mcpUrl, apiKey, 10, "submit_work", {
       title: "Cancel OTA work",
