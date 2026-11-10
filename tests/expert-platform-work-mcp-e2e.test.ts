@@ -221,6 +221,22 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: omittedRouteIds.work.workItemId,
     });
 
+    const unspecifiedRouteIds = await callMcp(mcpUrl, apiKey, 62, "submit_work", {
+      title: "Auto route unspecified identifiers",
+      description: "Verify Claude unspecified routing placeholders are treated as omitted",
+      idempotencyKey: "mcp-work-unspecified-route-ids",
+      expertId: "ota",
+      repositoryId: "__UNSPECIFIED__",
+      deploymentId: "__UNSPECIFIED__",
+    });
+    assert.equal(unspecifiedRouteIds.work.status, "running");
+    assert.equal(unspecifiedRouteIds.work.repositoryId, null);
+    assert.equal(unspecifiedRouteIds.work.requestedDeploymentId, null);
+    assert.equal(unspecifiedRouteIds.currentTask.deploymentId, "ota-default");
+    await callMcp(mcpUrl, apiKey, 63, "cancel_work", {
+      workItemId: unspecifiedRouteIds.work.workItemId,
+    });
+
     const reworkSubmission = await callMcp(mcpUrl, apiKey, 7, "submit_work", {
       title: "Inspect OTA retry",
       description: "Inspect OTA retry path",

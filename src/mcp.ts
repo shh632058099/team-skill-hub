@@ -110,7 +110,7 @@ function toolResult(value: unknown) {
 }
 
 function normalizeOptionalMcpIdentifier(value: string | undefined): string | undefined {
-  if (value === undefined || value === ":omit:") return undefined;
+  if (value === undefined || value === ":omit:" || value === "__UNSPECIFIED__") return undefined;
   return value;
 }
 
