@@ -4,6 +4,8 @@ import type { ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord, TaskRunTurnR
 import {
   type CompletionGateResult,
   type ReviewDecision,
+  type ReviewDecisionRecord,
+  type WorkApprovalRecord,
   type WorkAttemptReason,
   type WorkAttemptRecord,
   type WorkEvidenceRecord,
@@ -34,6 +36,13 @@ export interface WorkDetail {
     failed: number;
   };
   gate: CompletionGateResult;
+  runtime: {
+    requiredProfile: string | null;
+    effectiveProfile: string | null;
+  };
+  workspaceChangeSummary: TaskRecord["workspaceChangeSummary"];
+  reviews: ReviewDecisionRecord[];
+  approvals: WorkApprovalRecord[];
 }
 
 export interface WorkReviewInput {
@@ -118,6 +127,7 @@ function asResolvedDispatch(binding: Record<string, unknown>): ResolvedDispatch 
   const deploymentId = typeof binding.deploymentId === "string" ? binding.deploymentId : "";
   const selectionMode = binding.selectionMode === "auto" ? "auto" : "explicit";
   const deploymentConfigVersion = Number(binding.deploymentConfigVersion);
+  const runtimeProfile = typeof binding.runtimeProfile === "string" ? binding.runtimeProfile : undefined;
   if (!expertId || !deploymentId || !Number.isSafeInteger(deploymentConfigVersion) || deploymentConfigVersion < 1) {
     throw new Error("INVALID_PINNED_DISPATCH_BINDING");
   }
@@ -127,6 +137,7 @@ function asResolvedDispatch(binding: Record<string, unknown>): ResolvedDispatch 
     ...(typeof binding.repositoryId === "string" && binding.repositoryId ? { repositoryId: binding.repositoryId } : {}),
     deploymentId,
     deploymentConfigVersion,
+    ...(runtimeProfile ? { runtimeProfile } : {}),
     ...(binding.deploymentSnapshot && typeof binding.deploymentSnapshot === "object"
       ? { deploymentSnapshot: binding.deploymentSnapshot as ResolvedDispatch["deploymentSnapshot"] }
       : {}),
@@ -808,6 +819,16 @@ export class WorkOrchestrator {
         failed: verificationResults.filter((item) => item.status === "failed").length,
       },
       gate: this.workStore.evaluateCompletionGate(workItemId, principalId, scope),
+      runtime: {
+        requiredProfile: workflow.definition.execution.requiredRuntimeProfile ?? null,
+        effectiveProfile:
+          (latest?.dispatchBinding && typeof latest.dispatchBinding.runtimeProfile === "string"
+            ? latest.dispatchBinding.runtimeProfile
+            : currentTask?.deploymentSnapshot?.runtimeProfile) ?? null,
+      },
+      workspaceChangeSummary: currentTask?.workspaceChangeSummary ?? null,
+      reviews: this.workStore.listReviewDecisions(workItemId),
+      approvals: this.workStore.listApprovals(workItemId),
     };
   }
 }

@@ -38,6 +38,7 @@ export interface ResolvedDispatch {
   repositoryId?: string;
   deploymentId: string;
   deploymentConfigVersion: number;
+  runtimeProfile?: string;
   deploymentSnapshot?: DeploymentTaskSnapshot;
 }
 
@@ -192,6 +193,7 @@ export class ExpertDispatchService {
       ...(configuredRepositoryId ? { repositoryId: configuredRepositoryId } : {}),
       deploymentId: selected.id,
       deploymentConfigVersion: selected.configVersion ?? 1,
+      runtimeProfile: selected.runtimeProfile,
       ...(deploymentSnapshot ? { deploymentSnapshot } : {}),
     };
   }

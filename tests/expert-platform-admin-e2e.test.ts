@@ -74,6 +74,9 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /workVerification/);
     assert.match(html, /workTurnRows/);
     assert.match(html, /Continuation/);
+    assert.match(html, /Runtime Profile/);
+    assert.match(html, /Workspace Changes/);
+    assert.match(html, /Changed Paths/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
@@ -513,6 +516,10 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.deepEqual(reconciledWork.verification.requiredEvidence, ["expert_result"]);
     assert.equal(Array.isArray(reconciledWork.verification.requiredSteps), true);
     assert.equal(Array.isArray(reconciledWork.verification.results), true);
+    assert.deepEqual(reconciledWork.runtime, { requiredProfile: null, effectiveProfile: "linux-ota" });
+    assert.equal(reconciledWork.workspaceChangeSummary, null);
+    assert.equal(Array.isArray(reconciledWork.reviews), true);
+    assert.equal(Array.isArray(reconciledWork.approvals), true);
 
     const workCancel = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/cancel", {
       method: "POST",

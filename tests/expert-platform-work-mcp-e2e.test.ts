@@ -339,6 +339,13 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(approvalWaiting.work.currentSubjectRevision, approvalSubject);
     assert.ok(approvalWaiting.gate.missing.includes("review_accepted"));
     assert.ok(approvalWaiting.gate.missing.includes("required_approval:work_completion"));
+    assert.deepEqual(approvalWaiting.runtime, {
+      requiredProfile: "codex-workspace-write",
+      effectiveProfile: "codex-workspace-write",
+    });
+    assert.deepEqual(approvalWaiting.workspaceChangeSummary, approvalSummary);
+    assert.equal(Array.isArray(approvalWaiting.reviews), true);
+    assert.equal(Array.isArray(approvalWaiting.approvals), true);
 
     const approvalReviewed = await callMcp(mcpUrl, apiKey, 68, "review_work", {
       workItemId: approvalSubmission.work.workItemId,
@@ -348,6 +355,8 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(approvalReviewed.work.status, "waiting_review");
     assert.deepEqual(approvalReviewed.gate.missing, ["required_approval:work_completion"]);
+    assert.equal(approvalReviewed.reviews.at(-1).decision, "accepted");
+    assert.equal(approvalReviewed.reviews.at(-1).subjectRevision, approvalSubject);
 
     await assert.rejects(
       () =>
@@ -394,6 +403,8 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(approvalCompleted.work.status, "completed");
     assert.equal(approvalCompleted.gate.ready, true);
+    assert.equal(approvalCompleted.approvals.at(-1).actor, "alice");
+    assert.equal(approvalCompleted.approvals.at(-1).role, "developer");
     const approvalStore = new WorkOrchestrationStore(runtimeDb);
     const developerApproval = approvalStore.listApprovals(approvalSubmission.work.workItemId).at(-1)!;
     assert.equal(developerApproval.actor, "alice");
