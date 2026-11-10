@@ -452,6 +452,14 @@ export class WorkOrchestrator {
         }
         this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
         this.tasks.scheduleContinuation(task.taskId, task.runId, continuationReason, now, workspace.ownerWorkerId);
+        this.workStore.recordRunContinued(
+          workItemId,
+          attempt.workAttemptId,
+          task.taskId,
+          task.runId,
+          continuationReason,
+          now,
+        );
       } else if (
         (task.status !== "queued" && task.status !== "running") ||
         task.continuationReason !== continuationReason

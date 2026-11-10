@@ -1016,6 +1016,19 @@ export class WorkOrchestrationStore {
         }),
         now,
       );
+      if (input.reason === "human_rework" || input.reason === "review_rework") {
+        this.event(
+          workItemId,
+          workAttemptId,
+          "rework.started",
+          JSON.stringify({
+            reason: input.reason,
+            originWorkAttemptId: input.parentWorkAttemptId?.trim() || null,
+            createdBy: optionalText(input.createdBy, 200),
+          }),
+          now,
+        );
+      }
       const row = this.db.prepare("SELECT * FROM work_attempts WHERE work_attempt_id=?").get(workAttemptId) as Row;
       this.db.exec("COMMIT");
       return this.fromAttemptRow(row);
@@ -1324,12 +1337,30 @@ export class WorkOrchestrationStore {
         )
         .run(revision, now, workItemId, expectedRevision);
       if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
-      this.db
+      const staleEvidence = this.db
         .prepare("UPDATE work_evidence SET stale=1 WHERE work_item_id=? AND subject_revision<>? AND stale=0")
         .run(workItemId, revision);
-      this.db
+      const staleApprovals = this.db
         .prepare("UPDATE work_approvals SET stale=1 WHERE work_item_id=? AND subject_revision<>? AND stale=0")
         .run(workItemId, revision);
+      if (staleEvidence.changes > 0) {
+        this.event(
+          workItemId,
+          work.activeWorkAttemptId,
+          "evidence.staled",
+          JSON.stringify({ count: staleEvidence.changes, subjectRevision: revision }),
+          now,
+        );
+      }
+      if (staleApprovals.changes > 0) {
+        this.event(
+          workItemId,
+          work.activeWorkAttemptId,
+          "approval.invalidated",
+          JSON.stringify({ count: staleApprovals.changes, subjectRevision: revision }),
+          now,
+        );
+      }
       this.event(
         workItemId,
         work.activeWorkAttemptId,
@@ -1601,6 +1632,15 @@ export class WorkOrchestrationStore {
         );
       if (changedWork.changes !== 1) throw new Error("STALE_WORK_REVISION");
       this.event(workItemId, workAttemptId, "work_attempt." + attemptStatus, null, now);
+      if (nextWorkStatus === "waiting_review") {
+        this.event(
+          workItemId,
+          workAttemptId,
+          "review.requested",
+          JSON.stringify({ subjectRevision: work.currentSubjectRevision }),
+          now,
+        );
+      }
       const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
       this.db.exec("COMMIT");
       return this.fromWorkRow(row);
@@ -1813,7 +1853,39 @@ export class WorkOrchestrationStore {
       )
       .run(actionType, dueAt, actionType === null ? null : normalizedContext, now, workItemId, expectedRevision);
     if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
-    return this.getWorkInternal(workItemId);
+    const updated = this.getWorkInternal(workItemId);
+    if (actionType === "failure_retry") {
+      this.event(
+        workItemId,
+        updated.activeWorkAttemptId,
+        "run.retry_scheduled",
+        JSON.stringify({ dueAt, reason: normalizedContext }),
+        now,
+      );
+    }
+    return updated;
+  }
+
+  recordRunContinued(
+    workItemId: string,
+    workAttemptId: string,
+    taskId: string,
+    previousRunId: string,
+    reason: string,
+    now = Date.now(),
+  ): void {
+    const attempt = this.getWorkAttempt(workAttemptId);
+    if (attempt.workItemId !== workItemId || attempt.taskId !== taskId) throw new Error("WORK_ATTEMPT_TASK_MISMATCH");
+    const boundedReason = requiredText(reason, 500);
+    const boundedRunId = requiredText(previousRunId, 200);
+    if (!boundedReason || !boundedRunId) throw new Error("INVALID_RUN_CONTINUATION_EVENT");
+    this.event(
+      workItemId,
+      workAttemptId,
+      "run.continued",
+      JSON.stringify({ taskId, previousRunId: boundedRunId, reason: boundedReason }),
+      now,
+    );
   }
 
   listDueWorkIds(now = Date.now(), limit = 100): string[] {

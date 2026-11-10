@@ -254,6 +254,11 @@ test("evidence is revision-bound and becomes stale after the work subject change
     assert.equal(stale.length, 1);
     assert.equal(stale[0]!.stale, true);
     assert.equal(current.currentSubjectRevision, "def456");
+    const staleEvents = store
+      .listEvents(work.workItemId)
+      .events.filter((event) => event.eventType === "evidence.staled");
+    assert.equal(staleEvents.length, 1);
+    assert.equal(staleEvents[0]!.details?.count, 1);
   });
 });
 
@@ -783,6 +788,11 @@ test("approval without review is insufficient and becomes stale after subject re
       "workspace:" + "b".repeat(64),
     );
     assert.equal(store.listApprovals(setup.workItemId).at(-1)!.stale, true);
+    const invalidatedEvents = store
+      .listEvents(setup.workItemId)
+      .events.filter((event) => event.eventType === "approval.invalidated");
+    assert.equal(invalidatedEvents.length, 1);
+    assert.equal(invalidatedEvents[0]!.details?.count, 1);
     gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
     assert.ok(gate.missing.includes("required_approval:work_completion"));
     assert.ok(gate.missing.includes("review_accepted"));

@@ -312,6 +312,10 @@ test("successful task becomes revision-bound evidence then accepted review compl
     assert.equal(waiting.evidence[0]!.type, "expert_result");
     assert.equal(waiting.evidence[0]!.subjectRevision, "a".repeat(40));
     assert.equal(waiting.gate.ready, false);
+    assert.equal(
+      f.work.listEvents(detail.work.workItemId).events.filter((event) => event.eventType === "review.requested").length,
+      1,
+    );
     const workspace = f.work.getWorkspace(waiting.attempts[0]!.workspaceId!);
     f.work.assignWorkspaceOwner(
       workspace.workspaceId,
@@ -499,6 +503,10 @@ test("rework feedback replay creates exactly one new WorkAttempt", () => {
     const replay = f.orchestrator.handleTaskFeedback(taskId, "alice", "team-a", feedback, 5_000)!;
     assert.equal(replay.attempts.length, 2);
     assert.equal(replay.currentTask!.taskId, reworked.currentTask!.taskId);
+    assert.equal(
+      f.work.listEvents(detail.work.workItemId).events.filter((event) => event.eventType === "rework.started").length,
+      1,
+    );
   } finally {
     f.close();
   }
@@ -680,6 +688,10 @@ test("durable continuation reuses the same WorkAttempt and ExpertTask but create
     assert.equal(requeued.currentTask!.taskId, taskId);
     assert.equal(requeued.currentTask!.status, "queued");
     assert.equal(requeued.currentTask!.continuationCount, 1);
+    assert.equal(
+      f.work.listEvents(detail.work.workItemId).events.filter((event) => event.eventType === "run.continued").length,
+      1,
+    );
 
     const secondClaim = f.tasks.claim("worker-a", 3_001, 30_000, "ota")!;
     assert.equal(secondClaim.taskId, taskId);
@@ -735,6 +747,17 @@ test("transient task failure schedules durable retry and reuses the same ExpertT
     assert.equal(scheduled.work.status, "running");
     assert.equal(scheduled.work.nextActionType, "failure_retry");
     assert.ok((scheduled.work.nextActionAt ?? 0) > 3_000);
+    assert.equal(
+      f.work.listEvents(detail.work.workItemId).events.filter((event) => event.eventType === "run.retry_scheduled")
+        .length,
+      1,
+    );
+    f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_001);
+    assert.equal(
+      f.work.listEvents(detail.work.workItemId).events.filter((event) => event.eventType === "run.retry_scheduled")
+        .length,
+      1,
+    );
 
     f.orchestrator.reconcileDue((scheduled.work.nextActionAt ?? 0) + 1);
     assert.equal(f.tasks.get(taskId, "alice", "team-a").status, "queued");
