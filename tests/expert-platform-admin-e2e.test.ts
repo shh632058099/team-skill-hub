@@ -74,6 +74,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /workVerification/);
     assert.match(html, /workTurnRows/);
     assert.match(html, /Continuation/);
+    assert.match(html, /id="workResume"/);
     assert.match(html, /Runtime Profile/);
     assert.match(html, /Workspace Changes/);
     assert.match(html, /Changed Paths/);
@@ -521,6 +522,29 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(Array.isArray(reconciledWork.reviews), true);
     assert.equal(Array.isArray(reconciledWork.approvals), true);
     assert.equal(reconciledWork.publication, null);
+
+    const blockedStore = new WorkOrchestrationStore(runtimeDb);
+    const latestAdminWork = blockedStore.getWork(adminWork.workItemId, "team-a", "org");
+    const blockedAdminWork = blockedStore.blockWork(
+      adminWork.workItemId,
+      "team-a",
+      "org",
+      latestAdminWork.stateRevision,
+      "operator_input",
+      "ADMIN_RESUME_TEST",
+      Date.now(),
+      { resumeCondition: "manual", blockedByType: "operator", blockedByRef: "admin" },
+    );
+    blockedStore.close();
+    assert.equal(blockedAdminWork.status, "blocked");
+
+    const workResume = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/resume", {
+      method: "POST",
+    });
+    assert.equal(workResume.status, 200);
+    const resumedAdminWork = await workResume.json();
+    assert.equal(resumedAdminWork.work.status, "running");
+    assert.equal(resumedAdminWork.work.blockedReason, null);
 
     const workCancel = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/cancel", {
       method: "POST",

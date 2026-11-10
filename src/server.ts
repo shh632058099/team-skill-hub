@@ -971,6 +971,19 @@ export async function startServer(
     }
   });
 
+  app.post<{ Params: { id: string } }>("/admin/api/work-items/:id/resume", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
+    try {
+      const runtime = requireWorkRuntime();
+      const owner = runtime.work.getWorkInternal(request.params.id);
+      runtime.orchestrator.resumeWork(request.params.id, owner.principalId, owner.scope, owner.stateRevision);
+      return adminWorkDetail(request.params.id);
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/admin/api/work-items/:id/cancel", async (request, reply) => {
     if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
     if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });

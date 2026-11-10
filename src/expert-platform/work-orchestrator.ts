@@ -123,6 +123,41 @@ function isBlocker(reason: string): string | null {
   return null;
 }
 
+function blockerMetadata(
+  blocker: string,
+  work: WorkItemRecord,
+): {
+  resumeCondition: string;
+  blockedByType: string;
+  blockedByRef?: string;
+} {
+  const blockedByType =
+    blocker === "missing_permission"
+      ? "permission"
+      : blocker === "missing_secret"
+        ? "secret"
+        : blocker === "missing_tool"
+          ? "tool"
+          : blocker === "approval_required"
+            ? "approval"
+            : blocker === "repository_access"
+              ? "repository"
+              : blocker === "operator_input"
+                ? "operator"
+                : blocker === "resource_unavailable"
+                  ? "resource"
+                  : blocker === "policy_blocked"
+                    ? "policy"
+                    : "condition";
+  const blockedByRef =
+    blockedByType === "repository"
+      ? (work.repositoryId ?? undefined)
+      : blockedByType === "policy" || blockedByType === "resource"
+        ? (work.requestedDeploymentId ?? work.requestedExpertId ?? undefined)
+        : undefined;
+  return { resumeCondition: "manual", blockedByType, ...(blockedByRef ? { blockedByRef } : {}) };
+}
+
 function isRetryable(reason: string): boolean {
   const normalized = reason.trim().toUpperCase();
   return ["TEMPORARY", "NETWORK", "TIMEOUT", "UNAVAILABLE", "EXECUTION_FAILED", "WORKER_LOST", "LEASE_EXPIRED"].some(
@@ -209,6 +244,7 @@ export class WorkOrchestrator {
         "workspace_unavailable",
         "WORKSPACE_NOT_ALLOCATED",
         now,
+        { resumeCondition: "manual", blockedByType: "workspace", blockedByRef: attempt.workAttemptId },
       );
       return this.detail(workItemId, principalId, scope);
     }
@@ -222,6 +258,11 @@ export class WorkOrchestrator {
         "workspace_unavailable",
         "WORKSPACE_OWNER_UNAVAILABLE",
         now,
+        {
+          resumeCondition: "manual",
+          blockedByType: "workspace",
+          blockedByRef: workspace.ownerWorkerId ?? workspace.workspaceId,
+        },
       );
       return this.detail(workItemId, principalId, scope);
     }
@@ -234,6 +275,7 @@ export class WorkOrchestrator {
         "workspace_unavailable",
         "WORKSPACE_OWNER_OFFLINE",
         now,
+        { resumeCondition: "manual", blockedByType: "workspace", blockedByRef: workspace.ownerWorkerId },
       );
       return this.detail(workItemId, principalId, scope);
     }
@@ -252,6 +294,64 @@ export class WorkOrchestrator {
     }
     this.workStore.scheduleNextAction(workItemId, work.stateRevision, "continuation", now, now, normalizedReason);
     return this.detail(workItemId, principalId, scope);
+  }
+
+  resumeWork(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedRevision: number,
+    now = Date.now(),
+  ): WorkDetail {
+    const current = this.workStore.getWork(workItemId, principalId, scope);
+    if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+    if (current.status !== "blocked") throw new Error("WORK_NOT_BLOCKED");
+    const claim = this.workStore.claimWorkForOrchestration(
+      workItemId,
+      this.orchestrationOwnerId,
+      now,
+      this.orchestrationLeaseMs,
+    );
+    try {
+      this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, claim.epoch, now);
+      const attempt = this.workStore.getActiveAttempt(workItemId);
+      let continuationRequired = false;
+      if (current.blockedByType === "workspace") {
+        if (!attempt?.workspaceId) throw new Error("WORKSPACE_NOT_ALLOCATED");
+        const workspace = this.workStore.getWorkspace(attempt.workspaceId);
+        if (!workspace.ownerWorkerId || !workspace.path || ["removed", "failed"].includes(workspace.state)) {
+          throw new Error("WORKSPACE_OWNER_UNAVAILABLE");
+        }
+        if (!this.workerAvailable(workspace.ownerWorkerId, now)) throw new Error("WORKSPACE_OWNER_OFFLINE");
+        if (attempt.taskId) {
+          const task = this.tasks.get(attempt.taskId, principalId, scope);
+          continuationRequired = task.status === "succeeded";
+        }
+      }
+      let resumed = this.workStore.resumeBlockedWork(
+        workItemId,
+        principalId,
+        scope,
+        expectedRevision,
+        attempt ? "running" : "queued",
+        now,
+      );
+      if (continuationRequired) {
+        this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, claim.epoch, now);
+        resumed = this.workStore.scheduleNextAction(
+          workItemId,
+          resumed.stateRevision,
+          "continuation",
+          now,
+          now,
+          "resumed_after_block",
+        );
+        return this.detail(workItemId, principalId, scope);
+      }
+      return this.reconcileWorkClaimed(workItemId, principalId, scope, now, claim.epoch);
+    } finally {
+      this.workStore.releaseWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, claim.epoch, now);
+    }
   }
 
   getEvents(workItemId: string, principalId: string, scope: string, afterEventId = 0, limit = 100) {
@@ -899,6 +999,7 @@ export class WorkOrchestrator {
         blocker,
         reason,
         now,
+        blockerMetadata(blocker, current),
       );
     }
     return this.detail(workItemId, principalId, scope);
@@ -939,6 +1040,7 @@ export class WorkOrchestrator {
             "publication_blocked",
             code,
             now,
+            { resumeCondition: "manual", blockedByType: "publication", blockedByRef: work.workItemId },
           );
         }
         throw error;
@@ -955,6 +1057,7 @@ export class WorkOrchestrator {
           "publication_blocked",
           publication.lastErrorCode ?? "PUBLICATION_FAILED",
           now,
+          { resumeCondition: "manual", blockedByType: "publication", blockedByRef: publication.publicationId },
         );
       }
       return work;
@@ -1141,6 +1244,7 @@ export class WorkOrchestrator {
           blocker,
           reason,
           now,
+          blockerMetadata(blocker, current),
         );
       }
       return this.detail(current.workItemId, current.principalId, current.scope);

@@ -1668,6 +1668,20 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         );
 
         registerTool(
+          "resume_work",
+          {
+            description:
+              "Explicitly resume a blocked WorkItem after its external blocker has been addressed. The current WorkItem revision is required; resume revalidates durable orchestration and Workspace ownership before any dispatch.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+            }),
+          },
+          async ({ workItemId, expectedRevision }) =>
+            toolResult(workOrchestrator.resumeWork(workItemId, principal.id, principal.tenantId, expectedRevision)),
+        );
+
+        registerTool(
           "cancel_work",
           {
             description:

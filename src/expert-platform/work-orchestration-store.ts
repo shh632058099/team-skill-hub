@@ -116,6 +116,10 @@ export interface WorkItemRecord {
   repositoryId: string | null;
   blockedReason: string | null;
   blockedContext: string | null;
+  blockedAt: number | null;
+  resumeCondition: string | null;
+  blockedByType: string | null;
+  blockedByRef: string | null;
   reusedExistingWork?: boolean;
   deduplicationReason?: "idempotency_key" | "source_identity";
 }
@@ -367,6 +371,10 @@ export class WorkOrchestrationStore {
         "  repository_id TEXT,",
         "  blocked_reason TEXT,",
         "  blocked_context TEXT,",
+        "  blocked_at INTEGER,",
+        "  resume_condition TEXT,",
+        "  blocked_by_type TEXT,",
+        "  blocked_by_ref TEXT,",
         "  UNIQUE(principal_id,scope,idempotency_key)",
         ");",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_source_identity",
@@ -481,6 +489,10 @@ export class WorkOrchestrationStore {
     if (!workColumns.has("orchestration_claimed_at")) {
       this.db.exec("ALTER TABLE work_items ADD COLUMN orchestration_claimed_at INTEGER");
     }
+    if (!workColumns.has("blocked_at")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_at INTEGER");
+    if (!workColumns.has("resume_condition")) this.db.exec("ALTER TABLE work_items ADD COLUMN resume_condition TEXT");
+    if (!workColumns.has("blocked_by_type")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_by_type TEXT");
+    if (!workColumns.has("blocked_by_ref")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_by_ref TEXT");
     this.migrateWorkspaceSchema();
     this.ensureWorkspaceCleanupSchema();
   }
@@ -1672,14 +1684,30 @@ export class WorkOrchestrationStore {
     reason: string,
     context: string | null,
     now = Date.now(),
+    metadata: { resumeCondition?: string; blockedByType?: string; blockedByRef?: string } = {},
   ): WorkItemRecord {
     const blockedReason = requiredText(reason, 200);
-    if (!blockedReason) throw new Error("INVALID_BLOCK_REASON");
+    const resumeCondition = requiredText(metadata.resumeCondition ?? "manual", 500);
+    const blockedByType = optionalText(metadata.blockedByType, 200);
+    const blockedByRef = optionalText(metadata.blockedByRef, 500);
+    if (!blockedReason || !resumeCondition) throw new Error("INVALID_BLOCK_REASON");
     const changed = this.db
       .prepare(
-        "UPDATE work_items SET status='blocked',blocked_reason=?,blocked_context=?,next_action_type=NULL,next_action_at=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
+        "UPDATE work_items SET status='blocked',blocked_reason=?,blocked_context=?,blocked_at=?,resume_condition=?,blocked_by_type=?,blocked_by_ref=?,next_action_type=NULL,next_action_at=NULL,next_action_context=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
       )
-      .run(blockedReason, context, now, workItemId, principalId, scope, expectedRevision);
+      .run(
+        blockedReason,
+        context,
+        now,
+        resumeCondition,
+        blockedByType,
+        blockedByRef,
+        now,
+        workItemId,
+        principalId,
+        scope,
+        expectedRevision,
+      );
     if (changed.changes !== 1) {
       this.getWork(workItemId, principalId, scope);
       throw new Error("STALE_WORK_REVISION");
@@ -1688,10 +1716,56 @@ export class WorkOrchestrationStore {
       workItemId,
       this.getWorkInternal(workItemId).activeWorkAttemptId,
       "work.blocked",
-      JSON.stringify({ reason: blockedReason }),
+      JSON.stringify({ reason: blockedReason, resumeCondition, blockedByType, blockedByRef }),
       now,
     );
     return this.getWork(workItemId, principalId, scope);
+  }
+
+  resumeBlockedWork(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedRevision: number,
+    nextStatus: "queued" | "running",
+    now = Date.now(),
+  ): WorkItemRecord {
+    if (
+      !Number.isSafeInteger(expectedRevision) ||
+      expectedRevision < 1 ||
+      !["queued", "running"].includes(nextStatus)
+    ) {
+      throw new Error("INVALID_WORK_RESUME");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getWork(workItemId, principalId, scope);
+      if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+      if (current.status !== "blocked") throw new Error("WORK_NOT_BLOCKED");
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET status=?,blocked_reason=NULL,blocked_context=NULL,blocked_at=NULL,resume_condition=NULL,blocked_by_type=NULL,blocked_by_ref=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND status='blocked'",
+        )
+        .run(nextStatus, now, workItemId, principalId, scope, expectedRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.event(
+        workItemId,
+        current.activeWorkAttemptId,
+        "work.resumed",
+        JSON.stringify({
+          previousReason: current.blockedReason,
+          previousBlockedByType: current.blockedByType,
+          previousBlockedByRef: current.blockedByRef,
+        }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   scheduleNextAction(
@@ -1950,6 +2024,10 @@ export class WorkOrchestrationStore {
       repositoryId: row.repository_id == null ? null : String(row.repository_id),
       blockedReason: row.blocked_reason == null ? null : String(row.blocked_reason),
       blockedContext: row.blocked_context == null ? null : String(row.blocked_context),
+      blockedAt: row.blocked_at == null ? null : Number(row.blocked_at),
+      resumeCondition: row.resume_condition == null ? null : String(row.resume_condition),
+      blockedByType: row.blocked_by_type == null ? null : String(row.blocked_by_type),
+      blockedByRef: row.blocked_by_ref == null ? null : String(row.blocked_by_ref),
     };
   }
 

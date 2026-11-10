@@ -554,6 +554,56 @@ test("continuation blocks when the workspace owner Worker heartbeat is unavailab
   }
 });
 
+test("explicit resume refuses an offline workspace owner and succeeds after owner recovery", () => {
+  let ownerOnline = false;
+  const f = fixture(() => ownerOnline);
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-explicit-resume-owner" });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "first result", 2_000, { commitSha: "f".repeat(40) });
+    const workspace = f.work.getWorkspace(detail.attempts[0]!.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      2_100,
+      "f".repeat(40),
+    );
+    const blocked = f.orchestrator.requestContinuation(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "verification_failed",
+      3_000,
+    );
+    assert.equal(blocked.work.status, "blocked");
+    assert.equal(blocked.work.blockedAt, 3_000);
+    assert.equal(blocked.work.resumeCondition, "manual");
+    assert.equal(blocked.work.blockedByType, "workspace");
+    assert.equal(blocked.work.blockedByRef, "worker-a");
+
+    assert.throws(
+      () => f.orchestrator.resumeWork(detail.work.workItemId, "alice", "team-a", blocked.work.stateRevision, 3_100),
+      /WORKSPACE_OWNER_OFFLINE/,
+    );
+    assert.equal(f.work.getWork(detail.work.workItemId, "alice", "team-a").status, "blocked");
+
+    ownerOnline = true;
+    const resumed = f.orchestrator.resumeWork(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      blocked.work.stateRevision,
+      3_200,
+    );
+    assert.equal(resumed.work.status, "running");
+    assert.equal(resumed.work.blockedReason, null);
+    assert.equal(resumed.work.nextActionType, "continuation");
+  } finally {
+    f.close();
+  }
+});
+
 test("durable continuation reuses the same WorkAttempt and ExpertTask but creates a new Run", () => {
   const f = fixture();
   try {

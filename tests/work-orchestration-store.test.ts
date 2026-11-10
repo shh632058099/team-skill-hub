@@ -1095,3 +1095,58 @@ test("durable orchestration claim is exclusive, fenced by epoch, and survives re
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("blocked work persists complete resume metadata and can be explicitly resumed", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-blocked-resume-"));
+  const file = path.join(dir, "runtime.db");
+  let store = new WorkOrchestrationStore(file);
+  try {
+    const work = store.createOrReuseWork(
+      {
+        principalId: "alice",
+        scope: "team-a",
+        idempotencyKey: "blocked-metadata",
+        sourceType: "mcp",
+        title: "Blocked",
+        description: "blocked",
+      },
+      100,
+    );
+    const blocked = store.blockWork(
+      work.workItemId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "missing_permission",
+      "MISSING_PERMISSION",
+      200,
+      { resumeCondition: "manual", blockedByType: "permission", blockedByRef: "repo:ota" },
+    );
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.blockedAt, 200);
+    assert.equal(blocked.resumeCondition, "manual");
+    assert.equal(blocked.blockedByType, "permission");
+    assert.equal(blocked.blockedByRef, "repo:ota");
+
+    store.close();
+    store = new WorkOrchestrationStore(file);
+    const reopened = store.getWork(work.workItemId, "alice", "team-a");
+    assert.equal(reopened.blockedAt, 200);
+    assert.equal(reopened.resumeCondition, "manual");
+    assert.equal(reopened.blockedByType, "permission");
+    assert.equal(reopened.blockedByRef, "repo:ota");
+
+    const resumed = store.resumeBlockedWork(work.workItemId, "alice", "team-a", reopened.stateRevision, "queued", 300);
+    assert.equal(resumed.status, "queued");
+    assert.equal(resumed.blockedReason, null);
+    assert.equal(resumed.blockedContext, null);
+    assert.equal(resumed.blockedAt, null);
+    assert.equal(resumed.resumeCondition, null);
+    assert.equal(resumed.blockedByType, null);
+    assert.equal(resumed.blockedByRef, null);
+    assert.ok(store.listEvents(work.workItemId).events.some((event) => event.eventType === "work.resumed"));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

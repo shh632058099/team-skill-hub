@@ -193,6 +193,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       "review_work",
       "approve_work",
       "record_work_evidence",
+      "resume_work",
       "cancel_work",
     ]) {
       assert.ok(
@@ -648,6 +649,39 @@ test("MCP Work API drives durable work through review, rework, authorization and
     await callMcp(mcpUrl, apiKey, 65, "cancel_work", {
       workItemId: autoRoutingIgnoresPlaceholders.work.workItemId,
     });
+
+    const blockedSubmission = await callMcp(mcpUrl, apiKey, 82, "submit_work", {
+      title: "Resume blocked OTA work",
+      description: "Block on a missing deployment and resume after it is configured",
+      idempotencyKey: "mcp-work-resume",
+      expertId: "ota",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-resume-default",
+    });
+    assert.equal(blockedSubmission.work.status, "blocked");
+    assert.equal(blockedSubmission.work.resumeCondition, "manual");
+    assert.ok(Number(blockedSubmission.work.blockedAt) > 0);
+
+    const resumeExperts = new ExpertStore(runtimeDb);
+    resumeExperts.putDeployment({
+      id: "ota-resume-default",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+    });
+    resumeExperts.close();
+    const resumedWork = await callMcp(mcpUrl, apiKey, 83, "resume_work", {
+      workItemId: blockedSubmission.work.workItemId,
+      expectedRevision: blockedSubmission.work.stateRevision,
+    });
+    assert.equal(resumedWork.work.status, "running");
+    assert.equal(resumedWork.work.blockedReason, null);
+    assert.ok(resumedWork.currentTask?.taskId);
+    await callMcp(mcpUrl, apiKey, 84, "cancel_work", { workItemId: blockedSubmission.work.workItemId });
 
     const reworkSubmission = await callMcp(mcpUrl, apiKey, 7, "submit_work", {
       title: "Inspect OTA retry",
