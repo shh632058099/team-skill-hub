@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 umask 077
 PROJECT_DIR=/mnt/d/wsl/.codex/workspace/skill-hub-workspace/team-skill-hub
+WORKER_CONTROL=/opt/team-skill-hub-worker/current/worker-control.sh
 LOG_FILE=/var/log/skillhub-expert-workers-startup.log
 exec >>"$LOG_FILE" 2>&1
 printf "\n[%s] Skill Hub worker startup requested\n" "$(date -Is)"
@@ -43,7 +44,9 @@ start_worker() {
     return 1
   fi
 }
-start_worker ota-expert-worker "/usr/bin/env EXPERT_EXECUTOR_BACKEND=codex /usr/local/bin/ota-expert-worker"
+if [ ! -x "$WORKER_CONTROL" ]; then echo "Installed Worker controller not found: $WORKER_CONTROL"; exit 1; fi
+echo "Starting managed OTA Worker instance codex-01."
+"$WORKER_CONTROL" codex-01 start
 start_worker code-review-expert-worker "/usr/bin/env EXPERT_EXECUTOR_BACKEND=codex /usr/local/bin/review-expert-worker"
 printf "[%s] Worker startup check finished.\n" "$(date -Is)"
 tmux -L skillhub list-sessions

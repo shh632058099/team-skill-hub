@@ -53,6 +53,14 @@ if [[ -z "$RUNUSER" ]]; then
   done
 fi
 
+SETSID=${WORKER_RUNTIME_SETSID:-}
+if [[ -z "$SETSID" ]]; then SETSID=$(command -v setsid || true); fi
+if [[ -z "$SETSID" ]]; then
+  for candidate in /usr/bin/setsid /bin/setsid; do
+    if [[ -x "$candidate" ]]; then SETSID="$candidate"; break; fi
+  done
+fi
+
 usage() {
   cat >&2 <<EOF
 Usage:
@@ -307,6 +315,7 @@ start_worker() {
   fi
   if pid=$(running_pid 2>/dev/null); then echo "Worker $INSTANCE already running (PID $pid)"; return; fi
   [[ -f "$WORKER_SCRIPT" && -n "$NODE" && -x "$NODE" ]] || { echo "Missing Node.js or installed Worker Runtime." >&2; return 1; }
+  [[ -n "$SETSID" && -x "$SETSID" ]] || { echo "Missing setsid for manual Worker supervision." >&2; return 1; }
   if [[ $USER_MODE -eq 0 ]]; then
     [[ -n "$RUNUSER" && -x "$RUNUSER" ]] || { echo "Missing runuser for system-mode Worker." >&2; return 1; }
   fi
@@ -320,9 +329,9 @@ start_worker() {
   fi
   chmod 0600 "$LOG_FILE"
   if [[ $USER_MODE -eq 1 ]]; then
-    "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+    nohup "$SETSID" "$NODE" "$WORKER_SCRIPT" </dev/null >> "$LOG_FILE" 2>&1 &
   else
-    "$RUNUSER" --user expert-worker --preserve-environment -- "$NODE" "$WORKER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+    nohup "$SETSID" "$RUNUSER" --user expert-worker --preserve-environment -- "$NODE" "$WORKER_SCRIPT" </dev/null >> "$LOG_FILE" 2>&1 &
   fi
   local supervisor=$! child=""
   for _ in $(seq 1 40); do

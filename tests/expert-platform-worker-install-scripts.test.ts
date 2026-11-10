@@ -46,6 +46,13 @@ function controllerFixture(options: { runtimeNode?: boolean } = {}) {
   };
 }
 
+test("WSL startup uses the installed multi-instance controller for the OTA Worker", () => {
+  const source = readFileSync(new URL("../scripts/start-skillhub-expert-workers.sh", import.meta.url), "utf8");
+  assert.match(source, /\/opt\/team-skill-hub-worker\/current\/worker-control\.sh/);
+  assert.match(source, /codex-01 start/);
+  assert.doesNotMatch(source, /\/usr\/local\/bin\/ota-expert-worker/);
+});
+
 test("Worker installation and manual lifecycle scripts are valid Bash and included in release archive", () => {
   for (const script of ["install-worker.sh", "worker-control.sh"]) {
     const filename = new URL(script, runtime).pathname;
@@ -102,6 +109,13 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
     manual.indexOf('-x "$HOST_ROOT/node"') < manual.indexOf("command -v node"),
     "controller should prefer the installer-pinned Node before PATH lookup",
   );
+});
+
+test("manual controller detaches background Worker from the invoking shell", () => {
+  const control = readFileSync(new URL("worker-control.sh", runtime), "utf8");
+  assert.match(control, /nohup/);
+  assert.match(control, /setsid/);
+  assert.match(control, /<\/dev\/null/);
 });
 
 test("systemd template loads one instance config and isolates writable state", () => {
