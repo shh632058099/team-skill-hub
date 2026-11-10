@@ -52,6 +52,10 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
   };
   const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "fake-test-model-key";
+  const savedNoProxy = process.env.NO_PROXY;
+  const savedLowerNoProxy = process.env.no_proxy;
+  process.env.NO_PROXY = "127.0.0.1,localhost";
+  process.env.no_proxy = "localhost";
   const originalUmask = process.umask(0o077);
   try {
     for (const backend of ["codex", "claude"] as const) {
@@ -68,6 +72,11 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
           const argv = options.args.join(" ");
           assert.ok(!argv.includes(key), "Docker arguments must not contain secrets");
           assert.ok(!argv.includes("--network host"));
+          assert.match(String(options.env?.NO_PROXY), /(?:^|,)hub\.internal(?:,|$)/);
+          assert.match(String(options.env?.no_proxy), /(?:^|,)hub\.internal(?:,|$)/);
+          assert.match(String(options.env?.NO_PROXY), /(?:^|,)localhost(?:,|$)/);
+          assert.ok(options.args.includes("NO_PROXY"));
+          assert.ok(options.args.includes("no_proxy"));
           const pathSuffix =
             backend === "codex" ? ",dst=/run/codex-config.toml,readonly" : ",dst=/run/expert-mcp.json,readonly";
           const mount = options.args.find((arg) => arg.endsWith(pathSuffix));
@@ -104,6 +113,10 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
     process.umask(originalUmask);
     if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+    if (savedNoProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = savedNoProxy;
+    if (savedLowerNoProxy === undefined) delete process.env.no_proxy;
+    else process.env.no_proxy = savedLowerNoProxy;
     rmSync(dir, { recursive: true, force: true });
   }
 });

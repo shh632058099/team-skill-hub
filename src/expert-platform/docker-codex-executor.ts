@@ -105,6 +105,15 @@ function validateMcpEndpoint(raw: string): void {
     throw new Error("WORKER_MCP_URL_INVALID");
 }
 
+function mergeNoProxyHost(current: string | undefined, host: string): string {
+  const values = (current ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!values.some((value) => value.toLowerCase() === host.toLowerCase())) values.push(host);
+  return values.join(",");
+}
+
 function readMcpWorkerKey(file: string | undefined): string {
   if (!file) throw new Error("WORKER_MCP_CREDENTIAL_NOT_CONFIGURED");
   const stat = lstatSync(file);
@@ -328,6 +337,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     }
     let mcpConfigFilePath: string | undefined;
     let mcpChildEnv: NodeJS.ProcessEnv | undefined;
+    let mcpProxyBypassEnv: NodeJS.ProcessEnv | undefined;
     try {
       const mcp = claim.deploymentSnapshot?.mcp;
       if (mcp) {
@@ -337,6 +347,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           url = mcp.urlOverride ?? options.mcpDefaultUrl;
           if (!url) throw new Error("WORKER_MCP_URL_NOT_CONFIGURED");
           validateMcpEndpoint(url);
+          const mcpHost = new URL(url).hostname;
+          mcpProxyBypassEnv = {
+            NO_PROXY: mergeNoProxyHost(process.env.NO_PROXY ?? process.env.no_proxy, mcpHost),
+            no_proxy: mergeNoProxyHost(process.env.no_proxy ?? process.env.NO_PROXY, mcpHost),
+          };
+          envNames = [...new Set([...envNames, "NO_PROXY", "no_proxy"])];
           if (
             !Array.isArray(mcp.allowedTools) ||
             mcp.allowedTools.length === 0 ||
@@ -461,8 +477,14 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           maxOutputBytes: options.maxOutputBytes ?? (streaming ? 64 * 1024 * 1024 : undefined),
           signal,
           onAbort: () => stopDockerContainer(containerName),
-          ...(claudeChildEnv || mcpChildEnv
-            ? { env: { ...(claudeChildEnv ?? process.env), ...(mcpChildEnv ?? {}) } }
+          ...(claudeChildEnv || mcpChildEnv || mcpProxyBypassEnv
+            ? {
+                env: {
+                  ...(claudeChildEnv ?? process.env),
+                  ...(mcpChildEnv ?? {}),
+                  ...(mcpProxyBypassEnv ?? {}),
+                },
+              }
             : {}),
           ...(streaming
             ? {
