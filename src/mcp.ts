@@ -1422,11 +1422,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
               idempotencyKey: z.string().trim().min(1).max(200),
+              workflowId: z.string().trim().min(1).max(200).optional(),
               routingMode: z
                 .enum(["auto", "explicit"])
                 .default("auto")
@@ -1444,6 +1445,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             description,
             idempotencyKey,
             routingMode,
+            workflowId,
             expertId,
             repositoryId,
             deploymentId,
@@ -1461,6 +1463,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 sourceType: "mcp",
                 title,
                 description,
+                ...(workflowId === undefined ? {} : { workflowId }),
                 ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
                 ...(explicitRouting && normalizedRepositoryId !== undefined
                   ? { repositoryId: normalizedRepositoryId }

@@ -134,6 +134,24 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     experts.close();
     tasks = new ExpertTaskStore(runtimeDb);
+    const workflowSetup = new WorkOrchestrationStore(runtimeDb);
+    const baseWorkflow = workflowSetup.getWorkflow("code-fix-default").definition;
+    workflowSetup.putWorkflow("mcp-verified", 1, {
+      ...baseWorkflow,
+      validation: {
+        requiredEvidence: ["expert_result", "readme_check"],
+        required: [
+          {
+            id: "readme-check",
+            type: "command",
+            argv: ["node", "-e", "require('fs').accessSync('tests/README.md')"],
+            timeoutMs: 30_000,
+            evidenceType: "readme_check",
+          },
+        ],
+      },
+    });
+    workflowSetup.close();
 
     const tools = await listMcpTools(mcpUrl, apiKey);
     for (const name of ["submit_work", "get_work", "wait_work", "review_work", "record_work_evidence", "cancel_work"]) {
@@ -219,6 +237,31 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(completed.work.status, "completed");
     assert.equal(completed.gate.ready, true);
+
+    const workflowBound = await callMcp(mcpUrl, apiKey, 59, "submit_work", {
+      title: "Workflow-bound MCP work",
+      description: "Verify MCP can select a registered workflow",
+      idempotencyKey: "mcp-work-workflow-id",
+      workflowId: "mcp-verified",
+      expertId: "ota",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-default",
+    });
+    assert.equal(workflowBound.work.workflowId, "mcp-verified");
+    assert.equal(workflowBound.work.workflowVersion, 1);
+    assert.deepEqual(workflowBound.currentTask.validationSnapshot, [
+      {
+        id: "readme-check",
+        type: "command",
+        argv: ["node", "-e", "require('fs').accessSync('tests/README.md')"],
+        timeoutMs: 30_000,
+        evidenceType: "readme_check",
+      },
+    ]);
+    await callMcp(mcpUrl, apiKey, 58, "cancel_work", {
+      workItemId: workflowBound.work.workItemId,
+    });
 
     const omittedRouteIds = await callMcp(mcpUrl, apiKey, 60, "submit_work", {
       title: "Auto route omitted identifiers",
