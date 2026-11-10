@@ -28,6 +28,14 @@ export interface ExpertDefinition {
   modelConfig?: ExpertModelConfig;
 }
 
+function hasForbiddenGitRefChar(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127 || "\\ ~^:?*[]".includes(character)) return true;
+  }
+  return false;
+}
+
 export interface RepositoryPublicationPolicy {
   version: number;
   permissions: Array<"prepare-commit" | "push-work-branch" | "create-change-request">;
@@ -301,7 +309,7 @@ export class ExpertStore {
       policy.branchPrefix.startsWith("/") ||
       policy.branchPrefix.startsWith("refs/") ||
       policy.branchPrefix.includes("..") ||
-      /[\\ ~^:?*\[\]\x00-\x1f\x7f]/.test(policy.branchPrefix) ||
+      hasForbiddenGitRefChar(policy.branchPrefix) ||
       !policy.branchPrefix.endsWith("/")
     )
       return false;
@@ -315,7 +323,7 @@ export class ExpertStore {
           branch.startsWith("refs/") ||
           branch.endsWith("/") ||
           branch.includes("..") ||
-          /[\\ ~^:?*\[\]\x00-\x1f\x7f]/.test(branch),
+          hasForbiddenGitRefChar(branch),
       )
     )
       return false;

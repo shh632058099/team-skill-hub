@@ -1,3 +1,20 @@
+function hasForbiddenGitRefChar(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127 || "\\ ~^:?*[]".includes(character)) return true;
+  }
+  return false;
+}
+
+function replaceControlCharacters(value: string): string {
+  return [...value]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127 ? " " : character;
+    })
+    .join("");
+}
+
 function safeRefPart(value: string): boolean {
   return (
     value.length > 0 &&
@@ -8,7 +25,7 @@ function safeRefPart(value: string): boolean {
     !value.endsWith(".") &&
     !value.includes("..") &&
     !value.includes("@{") &&
-    !/[\\ ~^:?*\[\]\x00-\x1f\x7f]/.test(value)
+    !hasForbiddenGitRefChar(value)
   );
 }
 
@@ -20,7 +37,7 @@ function safePrefix(prefix: string): boolean {
     !prefix.startsWith("/") &&
     !prefix.startsWith("refs/") &&
     !prefix.includes("..") &&
-    !/[\\ ~^:?*\[\]\x00-\x1f\x7f]/.test(prefix)
+    !hasForbiddenGitRefChar(prefix)
   );
 }
 
@@ -73,10 +90,7 @@ export function buildPublicationCommitMetadata(input: {
 } {
   if (!Number.isSafeInteger(input.timestamp) || input.timestamp <= 0) throw new Error("INVALID_PUBLICATION_METADATA");
   const clean = (value: string, max: number): string => {
-    const result = value
-      .replace(/[\x00-\x1f\x7f]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const result = replaceControlCharacters(value).replace(/\s+/g, " ").trim();
     if (!result || result.length > max) throw new Error("INVALID_PUBLICATION_METADATA");
     return result;
   };
