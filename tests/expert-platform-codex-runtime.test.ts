@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCodexReadOnlyArgs, parseCodexJsonlResult } from "../src/expert-platform/codex-runtime.js";
+import { buildCodexArgs, buildCodexReadOnlyArgs, parseCodexJsonlResult } from "../src/expert-platform/codex-runtime.js";
 
 test("Codex invocation enforces read-only sandbox and ephemeral JSON output", () => {
   const args = buildCodexReadOnlyArgs("Investigate OTA");
@@ -17,4 +17,10 @@ test("Codex result requires successful turn and bounded assistant content", () =
   assert.equal(parseCodexJsonlResult(stream), "Likely OTA state mismatch");
   assert.throws(() => parseCodexJsonlResult(stream.replace("turn.completed", "turn.failed")), /CODEX_TURN_FAILED/);
   assert.throws(() => parseCodexJsonlResult("{}"), /CODEX_RESULT_MISSING/);
+});
+
+test("Codex invocation uses workspace-write sandbox only for write policy", () => {
+  const args = buildCodexArgs("Modify fixture", "workspace-write");
+  assert.deepEqual(args.slice(0, 5), ["exec", "--sandbox", "workspace-write", "--ephemeral", "--json"]);
+  assert.ok(!args.includes("danger-full-access"));
 });

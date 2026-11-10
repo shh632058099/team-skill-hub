@@ -423,3 +423,52 @@ test("Docker executor emits generic failure codes, not raw process stderr", asyn
   assert.ok(stages.includes("container.failed:EXECUTION_FAILED"));
   assert.doesNotMatch(stages.join(" "), /never-log-this-secret/);
 });
+
+test("Docker executor resolves platform runtime profile to Codex workspace access while legacy profiles remain read-only", async () => {
+  const modelConfig = {
+    providerId: "router",
+    model: "test-model",
+    baseUrl: "https://router.example/v1",
+    wireApi: "responses" as const,
+    allowedEnvNames: ["OPENAI_API_KEY"],
+  };
+  const run = async (runtimeProfile: string) => {
+    let args: readonly string[] = [];
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "worker",
+      sourcePath: "/work/repo",
+      network: "expert-egress",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      runProcess: async (options) => {
+        args = options.args;
+        return "done";
+      },
+    });
+    await executor(
+      {
+        ...claim,
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "deployment",
+          configVersion: 1,
+          runtimeProfile,
+          repository: { id: "repo", url: "https://example.org/repo.git", branch: "main" },
+          executor: { backend: "codex", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    return args;
+  };
+
+  const writable = await run("codex-workspace-write");
+  assert.ok(writable.includes("type=bind,src=/work/repo,dst=/workspace"));
+  assert.ok(writable.includes("workspace-write"));
+  assert.ok(writable.includes("--read-only"), "container root remains read-only");
+
+  const legacy = await run("legacy-custom");
+  assert.ok(legacy.includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
+  assert.ok(legacy.includes("read-only"));
+});

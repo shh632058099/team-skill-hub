@@ -6,11 +6,12 @@ import { spawn } from "node:child_process";
 import type { Claim } from "./task-store.js";
 import type { ExpertModelConfig } from "./expert-store.js";
 import { prepareRepositoryWorkspace, type GitCredentialConfig } from "./repository-workspace.js";
-import { buildCodexReadOnlyArgs } from "./codex-runtime.js";
+import { buildCodexArgs } from "./codex-runtime.js";
 import { parseClaudeResult, buildClaudeReadOnlyArgs } from "./claude-runtime.js";
 import { buildCodexDockerArgs } from "./codex-container-executor.js";
 import { runCodexProcess, type CodexProcessOptions } from "./codex-process.js";
 import { runVerificationPolicy } from "./verification-runner.js";
+import { assertRuntimeProfileBackend } from "./runtime-profile-policy.js";
 
 export interface DockerCodexExecutorOptions {
   image: string;
@@ -230,6 +231,19 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
   > => {
     const backend = options.backend ?? "claude";
     if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
+    let runtimePolicy: {
+      workspaceAccess: "read-only" | "read-write";
+      agentPermissions: "read-only" | "workspace-write";
+    } = { workspaceAccess: "read-only", agentPermissions: "read-only" };
+    const runtimeProfile = claim.deploymentSnapshot?.runtimeProfile;
+    if (runtimeProfile) {
+      try {
+        runtimePolicy = assertRuntimeProfileBackend(runtimeProfile, backend);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "UNKNOWN_RUNTIME_PROFILE") throw error;
+      }
+    }
+    const workspaceAccess = backend === "codex" ? runtimePolicy.workspaceAccess : "read-only";
     if (claim.deploymentSnapshot && claim.deploymentSnapshot.executor.backend !== backend)
       throw new Error("EXPERT_BACKEND_UNSUPPORTED");
     if (
@@ -247,7 +261,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
             streaming,
             options.claudeMaxTurns ?? 12,
           )
-        : buildCodexReadOnlyArgs(claim.problem);
+        : buildCodexArgs(claim.problem, runtimePolicy.agentPermissions);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
     // worker's unrelated default sourcePath. Legacy IDs retain compatibility.
@@ -447,6 +461,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           ? { taskLabels: { taskId: claim.taskId, runId: claim.runId, fencing: claim.fencing } }
           : {}),
         sourcePath,
+        workspaceAccess,
         network: options.network,
         seccompProfile: options.seccompProfile,
         ...(workerGroupId !== undefined ? { supplementalGroupId: workerGroupId } : {}),

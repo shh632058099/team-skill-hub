@@ -106,3 +106,23 @@ test("Docker executor rejects unsafe per-task container names", () => {
     /INVALID_CONTAINER_NAME/,
   );
 });
+
+test("Docker Codex executor makes only workspace writable while root and config mounts remain read-only", () => {
+  const args = buildCodexDockerArgs({
+    image: "worker",
+    sourcePath: "/work/repo",
+    workspaceAccess: "read-write",
+    network: "expert-egress",
+    envNames: [],
+    authFilePath: "/etc/expert/auth.json",
+    configFilePath: "/etc/expert/config.toml",
+    mcpConfigFilePath: "/etc/expert/mcp.json",
+    codexArgs: ["exec", "--sandbox", "workspace-write", "--json", "edit"],
+  });
+  assert.ok(args.includes("--read-only"), "container rootfs must remain read-only");
+  assert.ok(args.includes("type=bind,src=/work/repo,dst=/workspace"));
+  assert.ok(!args.includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
+  assert.ok(args.includes("type=bind,src=/etc/expert/auth.json,dst=/run/codex-auth.json,readonly"));
+  assert.ok(args.includes("type=bind,src=/etc/expert/config.toml,dst=/run/codex-config.toml,readonly"));
+  assert.ok(args.includes("type=bind,src=/etc/expert/mcp.json,dst=/run/expert-mcp.json,readonly"));
+});
