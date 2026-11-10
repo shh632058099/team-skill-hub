@@ -34,6 +34,7 @@ export interface DockerCodexExecutorOptions {
   onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
   onActivity?: (claim: Claim, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>;
   runProcess?: (options: CodexProcessOptions) => Promise<string>;
+  runVerificationPolicy?: typeof runVerificationPolicy;
 }
 
 const PROXY_ENV_NAMES = new Set([
@@ -545,10 +546,16 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       let verificationResults: import("./verification-policy.js").VerificationEvidenceResult[] | undefined;
       if ((claim.validationSnapshot?.length ?? 0) > 0) {
         if (!preparedRepository) throw new Error("VERIFICATION_WORKSPACE_UNAVAILABLE");
-        const rawVerification = await runVerificationPolicy(
+        const verificationRunner = options.runVerificationPolicy ?? runVerificationPolicy;
+        const rawVerification = await verificationRunner(
           preparedRepository.path,
           claim.validationSnapshot ?? [],
           signal,
+          {
+            image: options.image,
+            containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
+            ...(workerGroupId !== undefined ? { supplementalGroupId: workerGroupId } : {}),
+          },
         );
         verificationResults = rawVerification.map((verification) => ({
           ...verification,

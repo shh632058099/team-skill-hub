@@ -10,6 +10,7 @@ import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-service.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
+import { PersistentWorkerRegistry } from "../src/expert-platform/persistent-worker-registry.js";
 import { MemoryRegistryStore } from "../src/registry.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
 import { ApiKeyAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
@@ -509,6 +510,12 @@ test("server restart resumes one durable verification continuation and preserves
     work.close();
     tasks.close();
     experts.close();
+
+    const registry = new PersistentWorkerRegistry(path.join(root, "expert-workers.sqlite"));
+    registry.enroll("worker-a", ["ota"]);
+    registry.approve("worker-a");
+    registry.recordHeartbeat("worker-a", Date.now());
+    registry.close();
 
     const auth = new ApiKeyAuthenticationProvider({
       "work-restart-key": { id: "alice", roles: ["developer", "internal"], tenantId: "team-a" },

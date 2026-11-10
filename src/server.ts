@@ -34,7 +34,10 @@ import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service
 import { WorkOrchestrationStore, type WorkStatus } from "./expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
-import { PersistentWorkerRegistry } from "./expert-platform/persistent-worker-registry.js";
+import {
+  createWorkerAvailabilityProbe,
+  PersistentWorkerRegistry,
+} from "./expert-platform/persistent-worker-registry.js";
 import {
   applyAdminConfig,
   editableConfigFromApp,
@@ -230,7 +233,14 @@ export async function startServer(
     const work = new WorkOrchestrationStore(workRuntimeDb);
     const tasks = new ExpertTaskStore(workRuntimeDb);
     const experts = new ExpertStore(workRuntimeDb);
-    const orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
+    const registryDb =
+      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() || path.join(path.dirname(workRuntimeDb), "expert-workers.sqlite");
+    const orchestrator = new WorkOrchestrator(
+      work,
+      tasks,
+      new ExpertDispatchService(experts, tasks),
+      createWorkerAvailabilityProbe(registryDb),
+    );
     workRuntimeResources = { work, tasks, experts, orchestrator };
     app.addHook("onClose", async () => {
       if (workReconcileTimer) clearInterval(workReconcileTimer);

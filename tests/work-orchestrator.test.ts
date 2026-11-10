@@ -9,7 +9,7 @@ import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
 
-function fixture() {
+function fixture(workerAvailable?: (workerId: string, now: number) => boolean) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-"));
   const db = path.join(dir, "runtime.sqlite");
   const experts = new ExpertStore(db);
@@ -33,7 +33,7 @@ function fixture() {
     active: true,
   });
   const dispatch = new ExpertDispatchService(experts, tasks);
-  const orchestrator = new WorkOrchestrator(work, tasks, dispatch);
+  const orchestrator = new WorkOrchestrator(work, tasks, dispatch, workerAvailable);
   return {
     dir,
     experts,
@@ -493,6 +493,37 @@ test("continuation fails closed when the workspace owner is unavailable", () => 
     assert.equal(blocked.work.blockedReason, "workspace_unavailable");
     assert.equal(blocked.work.nextActionType, null);
     assert.equal(blocked.currentTask!.status, "succeeded");
+  } finally {
+    f.close();
+  }
+});
+
+test("continuation blocks when the workspace owner Worker heartbeat is unavailable", () => {
+  const f = fixture(() => false);
+  try {
+    const detail = f.orchestrator.submitWork({ ...submission, idempotencyKey: "work-continuation-offline-owner" });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(claim, "first result", 2_000, { commitSha: "f".repeat(40) });
+    const workspace = f.work.getWorkspace(detail.attempts[0]!.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      2_100,
+      "f".repeat(40),
+    );
+
+    const blocked = f.orchestrator.requestContinuation(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "verification_failed",
+      3_000,
+    );
+    assert.equal(blocked.work.status, "blocked");
+    assert.equal(blocked.work.blockedReason, "workspace_unavailable");
+    assert.equal(blocked.work.blockedContext, "WORKSPACE_OWNER_OFFLINE");
+    assert.equal(blocked.work.nextActionType, null);
   } finally {
     f.close();
   }

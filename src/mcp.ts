@@ -1,4 +1,5 @@
 import { verifyClientSessionProof } from "./expert-platform/session-proof.js";
+import path from "node:path";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { observeReuse } from "./reuse-observability.js";
 import * as z from "zod/v4";
@@ -9,20 +10,25 @@ import { ExpertStore } from "./expert-platform/expert-store.js";
 import { ExpertTaskStore } from "./expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "./expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
+import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
 
 // The experimental task API is opt-in until an isolated Worker runtime is provisioned.
-const expertTaskStore = process.env.EXPERT_RUNTIME_DB ? new ExpertTaskStore(process.env.EXPERT_RUNTIME_DB) : null;
-const expertStore = process.env.EXPERT_RUNTIME_DB ? new ExpertStore(process.env.EXPERT_RUNTIME_DB) : null;
+const expertRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+const expertTaskStore = expertRuntimeDb ? new ExpertTaskStore(expertRuntimeDb) : null;
+const expertStore = expertRuntimeDb ? new ExpertStore(expertRuntimeDb) : null;
 const expertDispatchService =
   expertTaskStore && expertStore ? new ExpertDispatchService(expertStore, expertTaskStore) : null;
-const workOrchestrationStore = process.env.EXPERT_RUNTIME_DB
-  ? new WorkOrchestrationStore(process.env.EXPERT_RUNTIME_DB)
-  : null;
+const workOrchestrationStore = expertRuntimeDb ? new WorkOrchestrationStore(expertRuntimeDb) : null;
+const workerAvailability = expertRuntimeDb
+  ? createWorkerAvailabilityProbe(
+      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
+        path.join(path.dirname(expertRuntimeDb), "expert-workers.sqlite"),
+    )
+  : undefined;
 const workOrchestrator =
   workOrchestrationStore && expertTaskStore && expertDispatchService
-    ? new WorkOrchestrator(workOrchestrationStore, expertTaskStore, expertDispatchService)
+    ? new WorkOrchestrator(workOrchestrationStore, expertTaskStore, expertDispatchService, workerAvailability)
     : null;
-
 const filterSchema = {
   repositories: z.array(z.string()).optional(),
   domain: z.string().optional(),

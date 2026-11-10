@@ -118,6 +118,7 @@ export class WorkOrchestrator {
     private readonly workStore: WorkOrchestrationStore,
     private readonly tasks: ExpertTaskStore,
     private readonly dispatch: ExpertDispatchService,
+    private readonly workerAvailable: (workerId: string, now: number) => boolean = () => true,
   ) {}
 
   submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
@@ -165,6 +166,18 @@ export class WorkOrchestrator {
         work.stateRevision,
         "workspace_unavailable",
         "WORKSPACE_OWNER_UNAVAILABLE",
+        now,
+      );
+      return this.detail(workItemId, principalId, scope);
+    }
+    if (!this.workerAvailable(workspace.ownerWorkerId, now)) {
+      this.workStore.blockWork(
+        work.workItemId,
+        work.principalId,
+        work.scope,
+        work.stateRevision,
+        "workspace_unavailable",
+        "WORKSPACE_OWNER_OFFLINE",
         now,
       );
       return this.detail(workItemId, principalId, scope);
@@ -236,6 +249,18 @@ export class WorkOrchestrator {
             work.stateRevision,
             "workspace_unavailable",
             "WORKSPACE_OWNER_UNAVAILABLE",
+            now,
+          );
+          return this.detail(workItemId, principalId, scope);
+        }
+        if (!this.workerAvailable(workspace.ownerWorkerId, now)) {
+          this.workStore.blockWork(
+            work.workItemId,
+            work.principalId,
+            work.scope,
+            work.stateRevision,
+            "workspace_unavailable",
+            "WORKSPACE_OWNER_OFFLINE",
             now,
           );
           return this.detail(workItemId, principalId, scope);

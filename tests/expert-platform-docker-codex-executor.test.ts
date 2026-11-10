@@ -180,6 +180,16 @@ test("Docker executor runs pinned verification in the prepared workspace and ret
       envNames: [],
       timeoutMs: 1_000,
       runProcess: async () => "agent result",
+      runVerificationPolicy: async (_workspace, policy) =>
+        policy.map((step) => ({
+          stepId: step.id,
+          type: step.type,
+          evidenceType: step.evidenceType,
+          status: "passed" as const,
+          exitCode: 0,
+          durationMs: 1,
+          errorCode: null,
+        })),
       onStage: async () => undefined,
     });
     const result = await executor(
