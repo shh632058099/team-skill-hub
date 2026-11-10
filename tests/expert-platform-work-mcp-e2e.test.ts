@@ -10,6 +10,7 @@ import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-service.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
+import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
 import { PersistentWorkerRegistry } from "../src/expert-platform/persistent-worker-registry.js";
 import { MemoryRegistryStore } from "../src/registry.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
@@ -457,6 +458,110 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const adminStore = new WorkOrchestrationStore(runtimeDb);
     assert.equal(adminStore.listApprovals(adminSubmission.work.workItemId).at(-1)!.role, "admin");
     adminStore.close();
+
+    const publicationSubmission = await callMcp(mcpUrl, apiKey, 77, "submit_work", {
+      title: "Publication approval via MCP",
+      description: "Prepare a publication artifact and approve only its exact commit",
+      idempotencyKey: "mcp-work-publication-approval",
+      workflowId: "mcp-write-approval",
+      expertId: "ota-write",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-write-default",
+    });
+    const publicationClaim = tasks.claim("worker-a", 11_000, 30_000, "ota-write")!;
+    assert.equal(publicationClaim.taskId, publicationSubmission.currentTask.taskId);
+    const publicationSummary = {
+      ...approvalSummary,
+      contentRevision: "1".repeat(64),
+    };
+    const publicationWorkspaceSubject = "workspace:" + publicationSummary.contentRevision;
+    tasks.complete(
+      publicationClaim,
+      "publication workspace updated",
+      12_000,
+      { commitSha: publicationSummary.baseCommit },
+      undefined,
+      publicationSummary,
+    );
+    const publicationWaiting = await callMcp(mcpUrl, apiKey, 78, "get_work", {
+      workItemId: publicationSubmission.work.workItemId,
+    });
+    const publicationReviewed = await callMcp(mcpUrl, apiKey, 79, "review_work", {
+      workItemId: publicationSubmission.work.workItemId,
+      expectedRevision: publicationWaiting.work.stateRevision,
+      subjectRevision: publicationWorkspaceSubject,
+      decision: "accepted",
+    });
+    const publicationStore = new WorkPublicationStore(runtimeDb);
+    const publication = publicationStore.createOrReusePublication(
+      {
+        workItemId: publicationSubmission.work.workItemId,
+        workAttemptId: publicationReviewed.attempts.at(-1).workAttemptId,
+        workspaceId: publicationReviewed.workspace.workspaceId,
+        sourceSubjectRevision: publicationWorkspaceSubject,
+        baseCommit: publicationSummary.baseCommit,
+        repositoryId: "ota-repo",
+        repositoryIdentityRevision: 1,
+        publicationPolicyRevision: 1,
+        branchName: "skillhub/work/mcp-publication-a1",
+        pushRemoteName: "origin",
+        pushRefspec: "2".repeat(40) + ":refs/heads/skillhub/work/mcp-publication-a1",
+        ownerWorkerId: "worker-a",
+        commitTimestamp: 1_800_000_000_000,
+        commitAuthorName: "Team Skill Hub",
+        commitAuthorEmail: "team-skill-hub@local.invalid",
+        commitMessage: "Publication approval MCP\n",
+      },
+      13_000,
+    );
+    const preparedPublication = publicationStore.transitionPublication(
+      publication.publicationId,
+      "prepared",
+      {
+        commitSha: "2".repeat(40),
+        treeSha: "3".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+      },
+      13_100,
+    );
+    publicationStore.close();
+    const publicationSubject = "publication:" + preparedPublication.publicationId + ":" + preparedPublication.commitSha;
+
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, workerKey, 80, "approve_work", {
+          workItemId: publicationSubmission.work.workItemId,
+          expectedRevision: publicationReviewed.work.stateRevision,
+          subjectRevision: publicationSubject,
+          approvalScope: "publish_work_branch",
+          decision: "approved",
+        }),
+      /MCP_TOOL_FORBIDDEN_FOR_PRINCIPAL|WORK_APPROVAL_FORBIDDEN/,
+    );
+    const publicationApproved = await callMcp(mcpUrl, apiKey, 81, "approve_work", {
+      workItemId: publicationSubmission.work.workItemId,
+      expectedRevision: publicationReviewed.work.stateRevision,
+      subjectRevision: publicationSubject,
+      approvalScope: "publish_work_branch",
+      decision: "approved",
+      actor: "mallory",
+      role: "admin",
+    });
+    assert.equal(publicationApproved.work.status, "waiting_review");
+    const publicationCheck = new WorkPublicationStore(runtimeDb);
+    assert.equal(publicationCheck.getPublication(preparedPublication.publicationId).state, "approved");
+    publicationCheck.close();
+    const publicationApprovalStore = new WorkOrchestrationStore(runtimeDb);
+    const storedPublicationApproval = publicationApprovalStore
+      .listApprovals(publicationSubmission.work.workItemId)
+      .at(-1)!;
+    assert.equal(storedPublicationApproval.actor, "alice");
+    assert.equal(storedPublicationApproval.role, "developer");
+    assert.equal(storedPublicationApproval.approvalScope, "publish_work_branch");
+    assert.equal(storedPublicationApproval.subjectType, "publication_artifact");
+    assert.equal(storedPublicationApproval.subjectRevision, publicationSubject);
+    publicationApprovalStore.close();
 
     const omittedRouteIds = await callMcp(mcpUrl, apiKey, 60, "submit_work", {
       title: "Auto route omitted identifiers",

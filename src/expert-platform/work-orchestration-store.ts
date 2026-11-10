@@ -1320,12 +1320,16 @@ export class WorkOrchestrationStore {
     const approvalScope = requiredText(input.approvalScope, 200);
     const subjectType = requiredText(input.subjectType, 200);
     const subjectRevision = requiredText(input.subjectRevision, 500);
+    const validPair =
+      (approvalScope === "work_completion" && subjectType === "workspace_revision") ||
+      (approvalScope === "publish_work_branch" && subjectType === "publication_artifact");
     if (
       !actor ||
       !role ||
       !approvalScope ||
       !subjectType ||
       !subjectRevision ||
+      !validPair ||
       !["approved", "rejected"].includes(input.decision)
     ) {
       throw new Error("INVALID_WORK_APPROVAL");
@@ -1334,7 +1338,8 @@ export class WorkOrchestrationStore {
     try {
       const work = this.getWork(workItemId, principalId, scope);
       if (work.stateRevision !== input.expectedRevision) throw new Error("STALE_WORK_REVISION");
-      if (work.currentSubjectRevision !== subjectRevision) throw new Error("STALE_WORK_SUBJECT");
+      if (approvalScope === "work_completion" && work.currentSubjectRevision !== subjectRevision)
+        throw new Error("STALE_WORK_SUBJECT");
       const approvalId = randomUUID();
       this.db
         .prepare(

@@ -33,6 +33,7 @@ import { ExpertTaskStore } from "./expert-platform/task-store.js";
 import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service.js";
 import { WorkOrchestrationStore, type WorkStatus } from "./expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
+import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import {
   createWorkerAvailabilityProbe,
@@ -227,10 +228,17 @@ export async function startServer(
   const workRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
   let workReconcileTimer: ReturnType<typeof setInterval> | undefined;
   let workRuntimeResources:
-    | { work: WorkOrchestrationStore; tasks: ExpertTaskStore; experts: ExpertStore; orchestrator: WorkOrchestrator }
+    | {
+        work: WorkOrchestrationStore;
+        publications: WorkPublicationStore;
+        tasks: ExpertTaskStore;
+        experts: ExpertStore;
+        orchestrator: WorkOrchestrator;
+      }
     | undefined;
   if (workRuntimeDb) {
     const work = new WorkOrchestrationStore(workRuntimeDb);
+    const publications = new WorkPublicationStore(workRuntimeDb);
     const tasks = new ExpertTaskStore(workRuntimeDb);
     const experts = new ExpertStore(workRuntimeDb);
     const registryDb =
@@ -240,11 +248,13 @@ export async function startServer(
       tasks,
       new ExpertDispatchService(experts, tasks),
       createWorkerAvailabilityProbe(registryDb),
+      publications,
     );
-    workRuntimeResources = { work, tasks, experts, orchestrator };
+    workRuntimeResources = { work, publications, tasks, experts, orchestrator };
     app.addHook("onClose", async () => {
       if (workReconcileTimer) clearInterval(workReconcileTimer);
       work.close();
+      publications.close();
       tasks.close();
       experts.close();
     });

@@ -286,7 +286,7 @@ test("review and approval reject stale subject revisions", () => {
           subjectRevision: "old-revision",
           decision: "approved",
         }),
-      /STALE_WORK_SUBJECT/,
+      /INVALID_WORK_APPROVAL/,
     );
   });
 });
@@ -726,18 +726,21 @@ test("completion gate requires current work_completion approval after accepted r
     assert.deepEqual(gate.missing, ["required_approval:work_completion"]);
 
     let current = store.getWork(setup.workItemId, "alice", "team-a");
-    store.recordApproval(setup.workItemId, "alice", "team-a", {
-      expectedRevision: current.stateRevision,
-      actor: "alice",
-      role: "developer",
-      approvalScope: "merge",
-      subjectType: "workspace_revision",
-      subjectRevision: setup.subject,
-      decision: "approved",
-    });
+    assert.throws(
+      () =>
+        store.recordApproval(setup.workItemId, "alice", "team-a", {
+          expectedRevision: current.stateRevision,
+          actor: "alice",
+          role: "developer",
+          approvalScope: "merge",
+          subjectType: "workspace_revision",
+          subjectRevision: setup.subject,
+          decision: "approved",
+        }),
+      /INVALID_WORK_APPROVAL/,
+    );
     gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
     assert.deepEqual(gate.missing, ["required_approval:work_completion"]);
-
     current = store.getWork(setup.workItemId, "alice", "team-a");
     store.recordApproval(setup.workItemId, "alice", "team-a", {
       expectedRevision: current.stateRevision,
@@ -782,5 +785,53 @@ test("approval without review is insufficient and becomes stale after subject re
     gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
     assert.ok(gate.missing.includes("required_approval:work_completion"));
     assert.ok(gate.missing.includes("review_accepted"));
+  });
+});
+
+test("approval store accepts only platform-defined subject/scope pairs", () => {
+  withStore((store) => {
+    let work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "publication-approval-store",
+      sourceType: "mcp",
+      title: "Publication approval",
+      description: "approve exact prepared commit",
+    });
+    work = store.setCurrentSubjectRevision(
+      work.workItemId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "workspace:" + "a".repeat(64),
+    );
+    const publicationSubject = "publication:11111111-1111-4111-8111-111111111111:" + "c".repeat(40);
+    const approval = store.recordApproval(work.workItemId, "alice", "team-a", {
+      expectedRevision: work.stateRevision,
+      actor: "alice",
+      role: "developer",
+      approvalScope: "publish_work_branch",
+      subjectType: "publication_artifact",
+      subjectRevision: publicationSubject,
+      decision: "approved",
+    });
+    assert.equal(approval.approvalScope, "publish_work_branch");
+    assert.equal(approval.subjectType, "publication_artifact");
+    assert.equal(approval.subjectRevision, publicationSubject);
+
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    assert.throws(
+      () =>
+        store.recordApproval(work.workItemId, "alice", "team-a", {
+          expectedRevision: work.stateRevision,
+          actor: "alice",
+          role: "developer",
+          approvalScope: "work_completion",
+          subjectType: "publication_artifact",
+          subjectRevision: publicationSubject,
+          decision: "approved",
+        }),
+      /INVALID_WORK_APPROVAL/,
+    );
   });
 });

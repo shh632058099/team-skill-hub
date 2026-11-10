@@ -10,6 +10,7 @@ import { ExpertStore } from "./expert-platform/expert-store.js";
 import { ExpertTaskStore } from "./expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "./expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
+import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
 
 // The experimental task API is opt-in until an isolated Worker runtime is provisioned.
@@ -19,6 +20,7 @@ const expertStore = expertRuntimeDb ? new ExpertStore(expertRuntimeDb) : null;
 const expertDispatchService =
   expertTaskStore && expertStore ? new ExpertDispatchService(expertStore, expertTaskStore) : null;
 const workOrchestrationStore = expertRuntimeDb ? new WorkOrchestrationStore(expertRuntimeDb) : null;
+const workPublicationStore = expertRuntimeDb ? new WorkPublicationStore(expertRuntimeDb) : null;
 const workerAvailability = expertRuntimeDb
   ? createWorkerAvailabilityProbe(
       process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
@@ -27,7 +29,13 @@ const workerAvailability = expertRuntimeDb
   : undefined;
 const workOrchestrator =
   workOrchestrationStore && expertTaskStore && expertDispatchService
-    ? new WorkOrchestrator(workOrchestrationStore, expertTaskStore, expertDispatchService, workerAvailability)
+    ? new WorkOrchestrator(
+        workOrchestrationStore,
+        expertTaskStore,
+        expertDispatchService,
+        workerAvailability,
+        workPublicationStore ?? undefined,
+      )
     : null;
 const filterSchema = {
   repositories: z.array(z.string()).optional(),
@@ -1581,12 +1589,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "approve_work",
           {
             description:
-              "Record an explicit human authorization decision for the exact current writable Workspace revision. This never grants runtime write permission and must never be inferred or self-approved by an agent. Only authenticated admin/developer principals may approve.",
+              "Record an explicit human authorization decision for either the exact current writable Workspace revision or an exact prepared Publication Artifact. This never grants runtime write permission, push permission is artifact-specific, and approval must never be inferred or self-approved by an agent. Only authenticated admin/developer principals may approve.",
             inputSchema: z.object({
               workItemId: z.string().uuid(),
               expectedRevision: z.number().int().min(1),
-              subjectRevision: z.string().regex(/^workspace:[a-f0-9]{64}$/i),
-              approvalScope: z.literal("work_completion"),
+              subjectRevision: z.string().trim().min(1).max(500),
+              approvalScope: z.enum(["work_completion", "publish_work_branch"]),
               decision: z.enum(["approved", "rejected"]),
             }),
           },

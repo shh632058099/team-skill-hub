@@ -56,7 +56,7 @@ export interface WorkReviewInput {
 export interface WorkApprovalInput {
   expectedRevision: number;
   subjectRevision: string;
-  approvalScope: "work_completion";
+  approvalScope: "work_completion" | "publish_work_branch";
   decision: "approved" | "rejected";
 }
 
@@ -441,13 +441,55 @@ export class WorkOrchestrator {
     actor: WorkApprovalActor,
     now = Date.now(),
   ): WorkDetail {
-    if (
-      actor.actor !== principalId ||
-      (actor.role !== "admin" && actor.role !== "developer") ||
-      input.approvalScope !== "work_completion" ||
-      !/^workspace:[a-f0-9]{64}$/i.test(input.subjectRevision)
-    ) {
+    if (actor.actor !== principalId || (actor.role !== "admin" && actor.role !== "developer")) {
       throw new Error("INVALID_WORK_APPROVAL");
+    }
+
+    if (input.approvalScope === "work_completion") {
+      if (!/^workspace:[a-f0-9]{64}$/i.test(input.subjectRevision)) throw new Error("INVALID_WORK_APPROVAL");
+      this.workStore.recordApproval(
+        workItemId,
+        principalId,
+        scope,
+        {
+          expectedRevision: input.expectedRevision,
+          actor: actor.actor,
+          role: actor.role,
+          approvalScope: "work_completion",
+          subjectType: "workspace_revision",
+          subjectRevision: input.subjectRevision,
+          decision: input.decision,
+        },
+        now,
+      );
+      let work = this.workStore.getWork(workItemId, principalId, scope);
+      if (input.decision === "approved") {
+        const gate = this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
+        if (gate.ready && !TERMINAL_WORK.has(work.status)) {
+          work = this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "completed", now);
+        }
+      }
+      if (TERMINAL_WORK.has(work.status)) this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
+      return this.detail(workItemId, principalId, scope);
+    }
+
+    if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
+    const match = /^publication:([0-9a-f-]{36}):([a-f0-9]{40,64})$/i.exec(input.subjectRevision);
+    if (!match) throw new Error("INVALID_WORK_APPROVAL");
+    const publicationId = match[1]!;
+    const commitSha = match[2]!.toLowerCase();
+    const publication = this.publications.getPublication(publicationId);
+    const work = this.workStore.getWork(workItemId, principalId, scope);
+    const artifact = this.publications.getPublicationArtifact(publicationId);
+    if (
+      publication.workItemId !== workItemId ||
+      publication.state !== "prepared" ||
+      !artifact ||
+      publication.commitSha?.toLowerCase() !== commitSha ||
+      artifact.commitSha.toLowerCase() !== commitSha ||
+      publication.sourceSubjectRevision !== work.currentSubjectRevision
+    ) {
+      throw new Error("PUBLICATION_APPROVAL_STALE");
     }
     this.workStore.recordApproval(
       workItemId,
@@ -457,22 +499,22 @@ export class WorkOrchestrator {
         expectedRevision: input.expectedRevision,
         actor: actor.actor,
         role: actor.role,
-        approvalScope: input.approvalScope,
-        subjectType: "workspace_revision",
+        approvalScope: "publish_work_branch",
+        subjectType: "publication_artifact",
         subjectRevision: input.subjectRevision,
         decision: input.decision,
       },
       now,
     );
-    let work = this.workStore.getWork(workItemId, principalId, scope);
     if (input.decision === "approved") {
-      const gate = this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
-      if (gate.ready && !TERMINAL_WORK.has(work.status)) {
-        work = this.workStore.transitionWork(workItemId, principalId, scope, work.stateRevision, "completed", now);
-      }
-    }
-    if (TERMINAL_WORK.has(work.status)) {
-      this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
+      this.publications.transitionPublication(publicationId, "approved", {}, now);
+    } else {
+      this.publications.transitionPublication(
+        publicationId,
+        "blocked",
+        { lastErrorCode: "PUBLICATION_APPROVAL_REJECTED", lastErrorContext: input.subjectRevision },
+        now,
+      );
     }
     return this.detail(workItemId, principalId, scope);
   }

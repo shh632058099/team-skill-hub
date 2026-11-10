@@ -856,3 +856,104 @@ test("prepared publication artifact binds current workspace revision and blocks 
     f.close();
   }
 });
+
+test("publication approval validates the exact prepared artifact and does not act like work_completion", () => {
+  const f = fixture();
+  try {
+    let work = f.work.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "publication-approval",
+      sourceType: "mcp",
+      title: "Publication approval",
+      description: "approve exact publication artifact",
+    });
+    const attempt = f.work.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = f.work.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+      baseCommit: "b".repeat(40),
+    });
+    work = f.work.getWork(work.workItemId, "alice", "team-a");
+    const source = "workspace:" + "a".repeat(64);
+    work = f.work.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, source, 100);
+    const publication = f.publications.createOrReusePublication(
+      {
+        workItemId: work.workItemId,
+        workAttemptId: attempt.workAttemptId,
+        workspaceId: workspace.workspaceId,
+        sourceSubjectRevision: source,
+        baseCommit: "b".repeat(40),
+        repositoryId: "ota-repo",
+        repositoryIdentityRevision: 1,
+        publicationPolicyRevision: 1,
+        branchName: "skillhub/work/work-a1",
+        pushRemoteName: "origin",
+        pushRefspec: "c".repeat(40) + ":refs/heads/skillhub/work/work-a1",
+        ownerWorkerId: "worker-a",
+        commitTimestamp: 1_800_000_000_000,
+        commitAuthorName: "Team Skill Hub",
+        commitAuthorEmail: "team-skill-hub@local.invalid",
+        commitMessage: "Publish\n",
+      },
+      110,
+    );
+    const prepared = f.publications.transitionPublication(
+      publication.publicationId,
+      "prepared",
+      {
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+      },
+      120,
+    );
+    const publicationSubject = "publication:" + prepared.publicationId + ":" + prepared.commitSha;
+    work = f.work.getWork(work.workItemId, "alice", "team-a");
+
+    const detail = f.orchestrator.submitApproval(
+      work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: work.stateRevision,
+        subjectRevision: publicationSubject,
+        approvalScope: "publish_work_branch",
+        decision: "approved",
+      },
+      { actor: "alice", role: "developer" },
+      130,
+    );
+    assert.equal(f.publications.getPublication(publication.publicationId).state, "approved");
+    assert.equal(detail.work.status, work.status, "publication approval must not complete Work by itself");
+    const stored = f.work.listApprovals(work.workItemId).at(-1)!;
+    assert.equal(stored.approvalScope, "publish_work_branch");
+    assert.equal(stored.subjectType, "publication_artifact");
+
+    const current = f.work.getWork(work.workItemId, "alice", "team-a");
+    assert.throws(
+      () =>
+        f.orchestrator.submitApproval(
+          work.workItemId,
+          "alice",
+          "team-a",
+          {
+            expectedRevision: current.stateRevision,
+            subjectRevision: "publication:" + publication.publicationId + ":" + "e".repeat(40),
+            approvalScope: "publish_work_branch",
+            decision: "approved",
+          },
+          { actor: "alice", role: "developer" },
+          140,
+        ),
+      /PUBLICATION_APPROVAL_STALE|INVALID_WORK_APPROVAL/,
+    );
+  } finally {
+    f.close();
+  }
+});
