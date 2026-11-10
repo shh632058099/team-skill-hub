@@ -50,6 +50,19 @@ function isBlocker(reason: string): string | null {
     return "repository_access";
   }
   if (normalized.includes("OPERATOR_INPUT")) return "operator_input";
+  if (normalized.includes("SOURCE_REPOSITORY_UNAVAILABLE")) return "repository_access";
+  if (normalized.includes("DEPLOYMENT_REQUIRED") || normalized.includes("REPOSITORY_REQUIRED")) return "operator_input";
+  if (normalized.includes("EXPERT_NOT_FOUND") || normalized.includes("EXPERT_UNAVAILABLE"))
+    return "resource_unavailable";
+  if (
+    normalized.includes("DEPLOYMENT_FORBIDDEN") ||
+    normalized.includes("EXPERT_FORBIDDEN") ||
+    normalized.includes("MCP_PROFILE_TOOL_NOT_ALLOWED") ||
+    normalized.includes("STALE_DEPLOYMENT_CONFIG") ||
+    normalized.includes("INVALID_PINNED_DISPATCH_BINDING")
+  ) {
+    return "policy_blocked";
+  }
   return null;
 }
 
@@ -118,15 +131,27 @@ export class WorkOrchestrator {
     let attempt = this.workStore.getActiveAttempt(workItemId);
     if (!attempt) {
       if (work.status === "queued") {
-        attempt = this.startAttempt(work, "initial", null, now);
-        work = this.workStore.getWork(workItemId, principalId, scope);
+        try {
+          attempt = this.startAttempt(work, "initial", null, now);
+          work = this.workStore.getWork(workItemId, principalId, scope);
+        } catch (error) {
+          const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now);
+          if (blocked) return blocked;
+          throw error;
+        }
       } else {
         return this.detail(workItemId, principalId, scope);
       }
     }
 
     if (!attempt.taskId) {
-      attempt = this.dispatchAttempt(work, attempt);
+      try {
+        attempt = this.dispatchAttempt(work, attempt);
+      } catch (error) {
+        const blocked = this.handleDispatchFailure(workItemId, principalId, scope, error, now);
+        if (blocked) return blocked;
+        throw error;
+      }
     }
 
     const task = this.tasks.get(attempt.taskId!, principalId, scope);
@@ -383,6 +408,31 @@ export class WorkOrchestrator {
       resolved,
     );
     return this.workStore.linkAttemptTask(attempt.workAttemptId, task.taskId);
+  }
+
+  private handleDispatchFailure(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    error: unknown,
+    now: number,
+  ): WorkDetail | null {
+    const reason = error instanceof Error ? error.message : String(error);
+    const blocker = isBlocker(reason);
+    if (!blocker) return null;
+    const current = this.workStore.getWork(workItemId, principalId, scope);
+    if (current.status !== "blocked") {
+      this.workStore.blockWork(
+        current.workItemId,
+        current.principalId,
+        current.scope,
+        current.stateRevision,
+        blocker,
+        reason,
+        now,
+      );
+    }
+    return this.detail(workItemId, principalId, scope);
   }
 
   private reconcileSucceeded(

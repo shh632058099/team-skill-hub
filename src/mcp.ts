@@ -1411,7 +1411,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission.",
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. Jira/GitHub/GitLab tracker ingestion is not part of this Phase 1 tool; MCP-created WorkItems use sourceType=mcp. Reuse the same idempotencyKey when retrying an uncertain submission. Do not invent deploymentId or repositoryId: omit them for Hub routing unless the user supplied an exact ID or an exact currently-active ID was just returned by Team Skill Hub.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),

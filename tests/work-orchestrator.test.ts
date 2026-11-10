@@ -22,6 +22,7 @@ function fixture() {
     keywords: ["ota", "upgrade"],
     active: true,
   });
+
   experts.putDeployment({
     id: "ota-default",
     expertId: "ota",
@@ -59,6 +60,26 @@ const submission = {
   deploymentId: "ota-default",
   repositoryId: "ota-repo",
 } as const;
+
+test("deterministic dispatch rejection becomes durable blocked work instead of retrying forever", () => {
+  const f = fixture();
+  try {
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "work-forbidden-deployment",
+      deploymentId: "disabled-or-missing-deployment",
+    });
+
+    assert.equal(detail.work.status, "blocked");
+    assert.equal(detail.work.blockedReason, "policy_blocked");
+    assert.match(detail.work.blockedContext ?? "", /DEPLOYMENT_FORBIDDEN/);
+    assert.equal(detail.attempts.length, 0);
+    assert.equal(detail.currentTask, null);
+    assert.deepEqual(f.orchestrator.reconcileActive(Date.now() + 10_000, 100), []);
+  } finally {
+    f.close();
+  }
+});
 
 test("submitWork creates one WorkAttempt and one linked ExpertTask and reuses them idempotently", () => {
   const f = fixture();
