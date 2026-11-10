@@ -1255,6 +1255,68 @@ export class WorkOrchestrationStore {
     };
   }
 
+  adminListWorkItems(input: { limit?: number; offset?: number; status?: WorkStatus; q?: string } = {}): {
+    items: WorkItemRecord[];
+    total: number;
+    limit: number;
+    offset: number;
+  } {
+    const limit = Math.max(1, Math.min(100, Math.floor(input.limit ?? 20)));
+    const offset = Math.max(0, Math.floor(input.offset ?? 0));
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (input.status) {
+      if (!WORK_STATUSES.has(input.status)) throw new Error("INVALID_WORK_STATUS");
+      where.push("status=?");
+      params.push(input.status);
+    }
+    const q = input.q?.trim();
+    if (q) {
+      where.push(
+        "(work_item_id LIKE ? OR title LIKE ? OR source_ref LIKE ? OR requested_expert_id LIKE ? OR requested_deployment_id LIKE ?)",
+      );
+      const like = `%${q}%`;
+      params.push(like, like, like, like, like);
+    }
+    const clause = where.length ? " WHERE " + where.join(" AND ") : "";
+    const totalRow = this.db.prepare("SELECT COUNT(*) AS total FROM work_items" + clause).get(...params) as {
+      total: number;
+    };
+    const rows = this.db
+      .prepare("SELECT * FROM work_items" + clause + " ORDER BY updated_at DESC, work_item_id LIMIT ? OFFSET ?")
+      .all(...params, limit, offset) as Row[];
+    return {
+      items: rows.map((row) => this.fromWorkRow(row)),
+      total: Number(totalRow.total),
+      limit,
+      offset,
+    };
+  }
+
+  listWorkspaces(workItemId: string): WorkspaceRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_workspaces WHERE work_item_id=? ORDER BY created_at,workspace_id")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromWorkspaceRow(row));
+  }
+
+  listReviewDecisions(workItemId: string): ReviewDecisionRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_review_decisions WHERE work_item_id=? ORDER BY created_at,review_decision_id")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromReviewRow(row));
+  }
+
+  listApprovals(workItemId: string): WorkApprovalRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_approvals WHERE work_item_id=? ORDER BY created_at,approval_id")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromApprovalRow(row));
+  }
+
   close(): void {
     this.db.close();
   }
