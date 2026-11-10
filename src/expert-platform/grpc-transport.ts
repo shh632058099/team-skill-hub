@@ -8,7 +8,11 @@ import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-stor
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
 import type { WorkOrchestrationStore } from "./work-orchestration-store.js";
-import { normalizeVerificationPolicy } from "./verification-policy.js";
+import {
+  normalizeVerificationEvidenceResults,
+  normalizeVerificationPolicy,
+  type VerificationEvidenceResult,
+} from "./verification-policy.js";
 
 interface RegisterWorkerRequest {
   worker_id: string;
@@ -54,6 +58,7 @@ interface CompleteTaskRequest {
   repository_url?: string;
   repository_branch?: string;
   commit_sha?: string;
+  verification_results_json?: string;
 }
 interface FailTaskRequest {
   claim?: LeaseRequest;
@@ -408,7 +413,16 @@ export async function startExpertWorkerGrpcServer(
         ...(call.request.repository_branch ? { repositoryBranch: call.request.repository_branch } : {}),
         ...(call.request.commit_sha ? { commitSha: call.request.commit_sha } : {}),
       };
-      tasks.complete(claim, call.request.result, Date.now(), Object.keys(source).length ? source : undefined);
+      const verificationResults = call.request.verification_results_json
+        ? normalizeVerificationEvidenceResults(JSON.parse(call.request.verification_results_json))
+        : [];
+      tasks.complete(
+        claim,
+        call.request.result,
+        Date.now(),
+        Object.keys(source).length ? source : undefined,
+        verificationResults,
+      );
       callback(null, {});
     } catch (error) {
       callback(
@@ -805,6 +819,7 @@ export class ExpertWorkerClient {
     claim: Claim,
     result: string,
     source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string },
+    verificationResults?: VerificationEvidenceResult[],
   ): Promise<Empty> {
     return unary((callback) =>
       this.client.CompleteTask(
@@ -814,6 +829,7 @@ export class ExpertWorkerClient {
           repository_url: source?.repositoryUrl ?? "",
           repository_branch: source?.repositoryBranch ?? "",
           commit_sha: source?.commitSha ?? "",
+          verification_results_json: verificationResults?.length ? JSON.stringify(verificationResults) : "",
         },
         this.metadata,
         callback,

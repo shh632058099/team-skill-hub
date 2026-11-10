@@ -10,6 +10,7 @@ import { buildCodexReadOnlyArgs } from "./codex-runtime.js";
 import { parseClaudeResult, buildClaudeReadOnlyArgs } from "./claude-runtime.js";
 import { buildCodexDockerArgs } from "./codex-container-executor.js";
 import { runCodexProcess, type CodexProcessOptions } from "./codex-process.js";
+import { runVerificationPolicy } from "./verification-runner.js";
 
 export interface DockerCodexExecutorOptions {
   image: string;
@@ -219,7 +220,12 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     claim: Claim,
     signal: AbortSignal,
   ): Promise<
-    string | { result: string; source: { repositoryUrl?: string; repositoryBranch?: string; commitSha: string } }
+    | string
+    | {
+        result: string;
+        source: { repositoryUrl?: string; repositoryBranch?: string; commitSha: string };
+        verificationResults?: import("./verification-policy.js").VerificationEvidenceResult[];
+      }
   > => {
     const backend = options.backend ?? "claude";
     if (backend !== "codex" && backend !== "claude") throw new Error("INVALID_EXECUTOR_BACKEND");
@@ -536,6 +542,21 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         }
       }
       await report(`${backend}.completed`);
+      let verificationResults: import("./verification-policy.js").VerificationEvidenceResult[] | undefined;
+      if ((claim.validationSnapshot?.length ?? 0) > 0) {
+        if (!preparedRepository) throw new Error("VERIFICATION_WORKSPACE_UNAVAILABLE");
+        const rawVerification = await runVerificationPolicy(
+          preparedRepository.path,
+          claim.validationSnapshot ?? [],
+          signal,
+        );
+        verificationResults = rawVerification.map((verification) => ({
+          ...verification,
+          subjectRevision: preparedRepository.commitSha,
+          environmentIdentity: `worker:${claim.workerId}`,
+          verifierIdentity: "team-skill-hub-worker",
+        }));
+      }
       await report("container.completed");
       return preparedRepository
         ? {
@@ -545,6 +566,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
               repositoryBranch: claim.repositoryBranch,
               commitSha: preparedRepository.commitSha,
             },
+            ...(verificationResults ? { verificationResults } : {}),
           }
         : result;
     } finally {

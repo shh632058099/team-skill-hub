@@ -146,6 +146,84 @@ test("Docker Codex executor runs codex JSONL through docker with read-only sourc
   assert.equal(seen?.signal, signal);
 });
 
+test("Docker executor runs pinned verification in the prepared workspace and returns revision-bound results", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-verification-integration-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "marker.txt"), "verified\n");
+    execFileSync("git", ["-C", origin, "add", "marker.txt"]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "init",
+    ]);
+    const commitSha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: [],
+      timeoutMs: 1_000,
+      runProcess: async () => "agent result",
+      onStage: async () => undefined,
+    });
+    const result = await executor(
+      {
+        ...claim,
+        repositoryId: "repo-test",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-1-a1",
+        validationSnapshot: [
+          {
+            id: "marker",
+            type: "command",
+            argv: [process.execPath, "-e", "require('fs').accessSync('marker.txt')"],
+            timeoutMs: 2_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+      new AbortController().signal,
+    );
+
+    assert.equal(typeof result, "object");
+    assert.equal((result as { source?: { commitSha?: string } }).source?.commitSha, commitSha);
+    assert.deepEqual((result as { verificationResults?: unknown[] }).verificationResults, [
+      {
+        stepId: "marker",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed",
+        exitCode: 0,
+        errorCode: null,
+        subjectRevision: commitSha,
+        environmentIdentity: "worker:worker-1",
+        verifierIdentity: "team-skill-hub-worker",
+        durationMs: (result as { verificationResults: Array<{ durationMs: number }> }).verificationResults[0]!
+          .durationMs,
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Docker Codex executor mounts an isolated per-expert provider config", async () => {
   let seen: { executable: string; args: readonly string[] } | undefined;
   let generatedPath = "";

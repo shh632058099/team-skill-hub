@@ -3,7 +3,12 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ExpertModelConfig } from "./expert-store.js";
-import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
+import {
+  normalizeVerificationEvidenceResults,
+  normalizeVerificationPolicy,
+  type VerificationEvidenceResult,
+  type VerificationPolicyStep,
+} from "./verification-policy.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type ExpertTaskFeedbackDisposition = "adopted" | "partially_adopted" | "not_adopted";
@@ -80,6 +85,7 @@ export type TaskRecord = {
   workflowVersion: number | null;
   workspaceKey: string | null;
   validationSnapshot: VerificationPolicyStep[];
+  verificationResults: VerificationEvidenceResult[];
   requiredWorkerId: string | null;
   continuationCount: number;
   continuationReason: string | null;
@@ -217,6 +223,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("workflow_version", "INTEGER");
     this.ensureTaskColumn("workspace_key", "TEXT");
     this.ensureTaskColumn("validation_snapshot_json", "TEXT");
+    this.ensureTaskColumn("verification_results_json", "TEXT");
     this.ensureTaskColumn("required_worker_id", "TEXT");
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
@@ -507,6 +514,7 @@ export class ExpertTaskStore {
         workflowVersion: input.workflowVersion ?? null,
         workspaceKey: input.workspaceKey?.trim() || null,
         validationSnapshot,
+        verificationResults: [],
         requiredWorkerId: null,
         reusedExistingTask: false,
         continuationCount: 0,
@@ -617,19 +625,33 @@ export class ExpertTaskStore {
     }
   }
 
-  complete(claim: Claim, result: string, now = Date.now(), sourceMetadata?: TaskSourceMetadata): void {
+  complete(
+    claim: Claim,
+    result: string,
+    now = Date.now(),
+    sourceMetadata?: TaskSourceMetadata,
+    verificationResultsInput?: VerificationEvidenceResult[],
+  ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const source = sourceMetadata ?? parseSourceMetadata(result) ?? undefined;
+      const verificationResults = normalizeVerificationEvidenceResults(verificationResultsInput);
+      if (
+        verificationResults.length > 0 &&
+        (!source?.commitSha || verificationResults.some((item) => item.subjectRevision !== source.commitSha))
+      ) {
+        throw new Error("VERIFICATION_SUBJECT_MISMATCH");
+      }
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
+          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),verification_results_json=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
         )
         .run(
           result,
           source?.repositoryUrl ?? null,
           source?.repositoryBranch ?? null,
           source?.commitSha ?? null,
+          JSON.stringify(verificationResults),
           claim.taskId,
           claim.runId,
           claim.workerId,
@@ -1313,6 +1335,9 @@ export class ExpertTaskStore {
       workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
       validationSnapshot: normalizeVerificationPolicy(
         row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
+      ),
+      verificationResults: normalizeVerificationEvidenceResults(
+        row.verification_results_json ? JSON.parse(String(row.verification_results_json)) : [],
       ),
       requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
       continuationCount: Number(row.continuation_count ?? 0),

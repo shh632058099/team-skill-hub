@@ -65,6 +65,7 @@ message CompleteTaskRequest {
   string repository_url = 3;
   string repository_branch = 4;
   string commit_sha = 5;
+  string verification_results_json = 6;
 }
 
 message FailTaskRequest {

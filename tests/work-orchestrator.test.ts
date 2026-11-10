@@ -313,6 +313,144 @@ test("successful task becomes revision-bound evidence then accepted review compl
   }
 });
 
+test("worker verification results become revision-bound evidence before review", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow(
+      "verified",
+      1,
+      {
+        ...base,
+        validation: {
+          requiredEvidence: ["expert_result", "unit_test"],
+          required: [
+            {
+              id: "unit",
+              type: "command",
+              argv: ["npm", "test"],
+              timeoutMs: 60_000,
+              evidenceType: "unit_test",
+            },
+          ],
+        },
+      },
+      100,
+    );
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "work-verified-evidence",
+      workflowId: "verified",
+    });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    const revision = "e".repeat(40);
+    f.tasks.complete(claim, "verified result", 2_000, { commitSha: revision }, [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "passed",
+        exitCode: 0,
+        durationMs: 10,
+        errorCode: null,
+        subjectRevision: revision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ]);
+
+    const waiting = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(waiting.work.status, "waiting_review");
+    assert.deepEqual(
+      waiting.evidence
+        .map((item) => [item.type, item.status, item.source, item.subjectRevision])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      [
+        ["expert_result", "passed", "worker_verified", revision],
+        ["unit_test", "passed", "worker_verified", revision],
+      ],
+    );
+    assert.deepEqual(waiting.gate.missing, ["review_accepted"]);
+  } finally {
+    f.close();
+  }
+});
+
+test("failed required verification schedules continuation on the same WorkAttempt", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow(
+      "verified-continuation",
+      1,
+      {
+        ...base,
+        lifecycle: {
+          ...base.lifecycle,
+          continuation: { maxTurnsPerRun: 2 },
+        },
+        validation: {
+          requiredEvidence: ["expert_result", "unit_test"],
+          required: [
+            {
+              id: "unit",
+              type: "command",
+              argv: ["npm", "test"],
+              timeoutMs: 60_000,
+              evidenceType: "unit_test",
+            },
+          ],
+        },
+      },
+      100,
+    );
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "work-verification-continuation",
+      workflowId: "verified-continuation",
+    });
+    const attempt = detail.attempts[0]!;
+    const workspace = f.work.getWorkspace(attempt.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      1_100,
+      "f".repeat(40),
+    );
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    const revision = "f".repeat(40);
+    f.tasks.complete(claim, "needs another turn", 2_000, { commitSha: revision }, [
+      {
+        stepId: "unit",
+        type: "command",
+        evidenceType: "unit_test",
+        status: "failed",
+        exitCode: 1,
+        durationMs: 10,
+        errorCode: "VERIFICATION_EXIT_NONZERO",
+        subjectRevision: revision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker",
+      },
+    ]);
+
+    const scheduled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(scheduled.work.status, "running");
+    assert.equal(scheduled.work.nextActionType, "continuation");
+    assert.equal(scheduled.attempts.length, 1);
+    assert.equal(scheduled.currentTask!.taskId, detail.currentTask!.taskId);
+    assert.equal(scheduled.evidence.find((item) => item.type === "unit_test")?.status, "failed");
+
+    const continued = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_001);
+    assert.equal(continued.currentTask!.status, "queued");
+    assert.equal(continued.currentTask!.continuationCount, 1);
+    assert.equal(continued.attempts.length, 1);
+  } finally {
+    f.close();
+  }
+});
+
 test("rework feedback replay creates exactly one new WorkAttempt", () => {
   const f = fixture();
   try {

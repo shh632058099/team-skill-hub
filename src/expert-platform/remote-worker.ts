@@ -1,8 +1,10 @@
 import type { Claim } from "./task-store.js";
+import type { VerificationEvidenceResult } from "./verification-policy.js";
 
 export type WorkerExecutionResult = {
   result: string;
   source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
+  verificationResults?: VerificationEvidenceResult[];
 };
 
 export type WorkspaceCleanupLease = {
@@ -17,7 +19,12 @@ export interface RemoteWorkerClient {
   completeWorkspaceCleanup?(claim: WorkspaceCleanupLease, success: boolean, errorCode?: string): Promise<unknown>;
   claimTask(workerId: string, expertId: string, capability: string): Promise<Claim | null>;
   renewLease(claim: Claim): Promise<unknown>;
-  completeTask(claim: Claim, result: string, source?: WorkerExecutionResult["source"]): Promise<unknown>;
+  completeTask(
+    claim: Claim,
+    result: string,
+    source?: WorkerExecutionResult["source"],
+    verificationResults?: VerificationEvidenceResult[],
+  ): Promise<unknown>;
   failTask(claim: Claim, reason: string): Promise<unknown>;
   reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
 }
@@ -113,7 +120,8 @@ export async function runRemoteWorkerOnce(
     }
     const result = typeof execution === "string" ? execution : execution.result;
     const source = typeof execution === "string" ? undefined : execution.source;
-    await client.completeTask(claim, result, source);
+    const verificationResults = typeof execution === "string" ? undefined : execution.verificationResults;
+    await client.completeTask(claim, result, source, verificationResults);
     return true;
   } finally {
     clearInterval(heartbeat);

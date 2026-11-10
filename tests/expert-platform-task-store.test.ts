@@ -778,6 +778,52 @@ test("standalone expert tasks keep null work linkage", () => {
   }
 });
 
+test("task completion persists revision-bound verification results and rejects mismatched subjects", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-verification-results-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    let store = new ExpertTaskStore(db);
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant-a",
+      idempotencyKey: "verification-results",
+      problem: "verify",
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      workflowId: "verified",
+      workflowVersion: 1,
+    });
+    const first = store.claim("worker-a", 1_000, 30_000)!;
+    const result = {
+      stepId: "unit",
+      type: "command",
+      evidenceType: "unit_test",
+      status: "passed" as const,
+      exitCode: 0,
+      durationMs: 25,
+      errorCode: null,
+      subjectRevision: "a".repeat(40),
+      environmentIdentity: "worker:worker-a",
+      verifierIdentity: "team-skill-hub-worker",
+    };
+    assert.throws(
+      () => store.complete(first, "done", 2_000, { commitSha: "b".repeat(40) }, [result]),
+      /VERIFICATION_SUBJECT_MISMATCH/,
+    );
+
+    const second = store.claim("worker-a", 40_000, 30_000)!;
+    store.complete(second, "done", 41_000, { commitSha: "a".repeat(40) }, [result]);
+    assert.deepEqual(store.get(task.taskId, "alice", "tenant-a").verificationResults, [result]);
+    store.close();
+
+    store = new ExpertTaskStore(db);
+    assert.deepEqual(store.get(task.taskId, "alice", "tenant-a").verificationResults, [result]);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("expert task feedback is owner-scoped, success-only, replaceable, and nullable", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-feedback-"));
   const file = path.join(dir, "runtime.sqlite");

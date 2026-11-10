@@ -575,6 +575,42 @@ export class WorkOrchestrator {
       now,
     );
 
+    for (const verification of task.verificationResults) {
+      this.workStore.recordEvidence(
+        current.workItemId,
+        current.principalId,
+        current.scope,
+        {
+          workAttemptId: attempt.workAttemptId,
+          taskId: task.taskId,
+          ...(task.runId ? { runId: task.runId } : {}),
+          type: verification.evidenceType,
+          status: verification.status,
+          source: "worker_verified",
+          subjectRevision: verification.subjectRevision,
+          environmentIdentity: verification.environmentIdentity,
+          verifierIdentity: verification.verifierIdentity,
+          summary: verification.errorCode ? `${verification.stepId}:${verification.errorCode}` : verification.stepId,
+        },
+        now,
+      );
+    }
+
+    const verificationByStep = new Map(task.verificationResults.map((item) => [item.stepId, item]));
+    const requiredVerificationFailed = task.validationSnapshot.some((step) => {
+      const verification = verificationByStep.get(step.id);
+      return !verification || verification.status !== "passed";
+    });
+    if (requiredVerificationFailed) {
+      return this.requestContinuation(
+        current.workItemId,
+        current.principalId,
+        current.scope,
+        "verification_failed",
+        now,
+      );
+    }
+
     current = this.workStore.getWork(current.workItemId, current.principalId, current.scope);
     if (current.activeWorkAttemptId === attempt.workAttemptId) {
       this.workStore.finishWorkAttempt(

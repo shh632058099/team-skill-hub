@@ -42,6 +42,70 @@ test("daemon composes client, Docker executor and one worker iteration", async (
   assert.deepEqual(calls, ["claim", "close"]);
 });
 
+test("daemon forwards executor verification results when completing a task", async () => {
+  const verification = [
+    {
+      stepId: "unit",
+      type: "command",
+      evidenceType: "unit_test",
+      status: "passed" as const,
+      exitCode: 0,
+      durationMs: 10,
+      errorCode: null,
+      subjectRevision: "a".repeat(40),
+      environmentIdentity: "worker:ota-worker-01",
+      verifierIdentity: "team-skill-hub-worker",
+    },
+  ];
+  let completedVerification: unknown;
+  const runtime = createExpertWorkerRuntime(
+    {
+      hubAddress: "hub:7443",
+      workerId: "ota-worker-01",
+      workerCredential: "ewc_test",
+      capability: "ota",
+      sourcePath: "/srv/ota",
+      repositoryRoot: "/srv/expert-repositories",
+      sharedTempRoot: "/srv/expert-repositories/ota-worker-01/.runtime-tmp",
+      gitCredentialConfigs: {},
+      dockerImage: "expert-worker",
+      dockerNetwork: "expert-egress",
+      dockerSeccompProfile: "default",
+      modelEnvNames: [],
+      modelCredentialEnvNames: {},
+      heartbeatMs: 1000,
+      pollMs: 50,
+      taskTimeoutMs: 60_000,
+    },
+    {
+      createClient: () => ({
+        claimTask: async () => ({
+          workerId: "ota-worker-01",
+          taskId: "task-1",
+          runId: "run-1",
+          fencing: 1,
+          problem: "verify",
+        }),
+        renewLease: async () => undefined,
+        completeTask: async (_claim, _result, _source, verificationResults) => {
+          completedVerification = verificationResults;
+        },
+        failTask: async () => undefined,
+        close: () => undefined,
+      }),
+      createExecutor: () => async () => ({
+        result: "done",
+        source: { commitSha: "a".repeat(40) },
+        verificationResults: verification,
+      }),
+    },
+  );
+
+  assert.equal(await runtime.runOnce(), true);
+  assert.deepEqual(completedVerification, verification);
+  runtime.close();
+});
+
 test("daemon processes owner workspace cleanup before claiming another task", async () => {
   const { mkdtemp, mkdir, stat } = await import("node:fs/promises");
   const os = await import("node:os");
