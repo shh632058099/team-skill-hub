@@ -109,6 +109,11 @@ function toolResult(value: unknown) {
   };
 }
 
+function normalizeOptionalMcpIdentifier(value: string | undefined): string | undefined {
+  if (value === undefined || value === ":omit:") return undefined;
+  return value;
+}
+
 const WORKER_MCP_READ_ONLY_TOOLS = new Set([
   "get_server_info",
   "discover",
@@ -1422,8 +1427,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               priority: z.number().int().optional(),
             }),
           },
-          async ({ title, description, idempotencyKey, expertId, repositoryId, deploymentId, priority }) =>
-            toolResult(
+          async ({ title, description, idempotencyKey, expertId, repositoryId, deploymentId, priority }) => {
+            const normalizedExpertId = normalizeOptionalMcpIdentifier(expertId);
+            const normalizedRepositoryId = normalizeOptionalMcpIdentifier(repositoryId);
+            const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
+            return toolResult(
               workOrchestrator.submitWork({
                 principalId: principal.id,
                 scope: principal.tenantId,
@@ -1431,14 +1439,15 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 sourceType: "mcp",
                 title,
                 description,
-                ...(expertId === undefined ? {} : { expertId }),
-                ...(repositoryId === undefined ? {} : { repositoryId }),
-                ...(deploymentId === undefined ? {} : { deploymentId }),
+                ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
+                ...(normalizedRepositoryId === undefined ? {} : { repositoryId: normalizedRepositoryId }),
+                ...(normalizedDeploymentId === undefined ? {} : { deploymentId: normalizedDeploymentId }),
                 ...(priority === undefined ? {} : { priority }),
                 sourceSessionId: sessionId ?? transportSessionId,
                 sourceClient: client?.slice(0, 200) || "mcp",
               }),
-            ),
+            );
+          },
         );
 
         registerTool(
