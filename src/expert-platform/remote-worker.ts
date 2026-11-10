@@ -1,10 +1,12 @@
 import type { Claim } from "./task-store.js";
 import type { VerificationEvidenceResult } from "./verification-policy.js";
+import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 export type WorkerExecutionResult = {
   result: string;
   source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
   verificationResults?: VerificationEvidenceResult[];
+  workspaceChangeSummary?: WorkspaceChangeSummary;
 };
 
 export type WorkspaceCleanupLease = {

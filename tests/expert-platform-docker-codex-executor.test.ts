@@ -424,7 +424,7 @@ test("Docker executor emits generic failure codes, not raw process stderr", asyn
   assert.doesNotMatch(stages.join(" "), /never-log-this-secret/);
 });
 
-test("Docker executor resolves platform runtime profile to Codex workspace access while legacy profiles remain read-only", async () => {
+test("Docker executor keeps legacy profiles read-only and rejects write profile without prepared workspace before launch", async () => {
   const modelConfig = {
     providerId: "router",
     model: "test-model",
@@ -432,7 +432,8 @@ test("Docker executor resolves platform runtime profile to Codex workspace acces
     wireApi: "responses" as const,
     allowedEnvNames: ["OPENAI_API_KEY"],
   };
-  const run = async (runtimeProfile: string) => {
+  const makeExecutor = () => {
+    let launched = false;
     let args: readonly string[] = [];
     const executor = createDockerCodexExecutor({
       backend: "codex",
@@ -442,33 +443,111 @@ test("Docker executor resolves platform runtime profile to Codex workspace acces
       envNames: ["OPENAI_API_KEY"],
       timeoutMs: 1000,
       runProcess: async (options) => {
+        launched = true;
         args = options.args;
         return "done";
       },
     });
-    await executor(
+    return { executor, launched: () => launched, args: () => args };
+  };
+  const claimFor = (runtimeProfile: string) => ({
+    ...claim,
+    modelConfig,
+    deploymentSnapshot: {
+      deploymentId: "deployment",
+      configVersion: 1,
+      runtimeProfile,
+      repository: { id: "repo", url: "https://example.org/repo.git", branch: "main" },
+      executor: { backend: "codex" as const, modelConfig },
+    },
+  });
+
+  const writable = makeExecutor();
+  await assert.rejects(
+    () => writable.executor(claimFor("codex-workspace-write"), new AbortController().signal),
+    /WORKSPACE_WRITE_REPOSITORY_REQUIRED/,
+  );
+  assert.equal(writable.launched(), false, "write profile must fail before Docker launch without a prepared workspace");
+
+  const legacy = makeExecutor();
+  await legacy.executor(claimFor("legacy-custom"), new AbortController().signal);
+  assert.equal(legacy.launched(), true);
+  assert.ok(legacy.args().includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
+  assert.ok(legacy.args().includes("read-only"));
+});
+test("workspace-write executor captures deterministic change summary before verification", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-summary-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "fixture.txt"), "before\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+    const modelConfig = {
+      providerId: "router",
+      model: "test-model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      onStage: async () => undefined,
+      runProcess: async (options) => {
+        const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
+        assert.ok(mount);
+        const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+        writeFileSync(path.join(source, "fixture.txt"), "after\n");
+        writeFileSync(path.join(source, "added.txt"), "new\n");
+        return "changed";
+      },
+    });
+    const result = await executor(
       {
         ...claim,
+        repositoryId: "repo-write",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-write-a1",
         modelConfig,
         deploymentSnapshot: {
-          deploymentId: "deployment",
+          deploymentId: "write",
           configVersion: 1,
-          runtimeProfile,
-          repository: { id: "repo", url: "https://example.org/repo.git", branch: "main" },
+          runtimeProfile: "codex-workspace-write",
+          repository: { id: "repo-write", url: origin, branch: "main" },
           executor: { backend: "codex", modelConfig },
         },
       },
       new AbortController().signal,
     );
-    return args;
-  };
-
-  const writable = await run("codex-workspace-write");
-  assert.ok(writable.includes("type=bind,src=/work/repo,dst=/workspace"));
-  assert.ok(writable.includes("workspace-write"));
-  assert.ok(writable.includes("--read-only"), "container root remains read-only");
-
-  const legacy = await run("legacy-custom");
-  assert.ok(legacy.includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
-  assert.ok(legacy.includes("read-only"));
+    assert.equal(typeof result, "object");
+    const summary = (result as { workspaceChangeSummary?: any }).workspaceChangeSummary;
+    assert.deepEqual(summary.changedFiles, ["fixture.txt"]);
+    assert.deepEqual(summary.addedFiles, ["added.txt"]);
+    assert.deepEqual(summary.deletedFiles, []);
+    assert.match(summary.contentRevision, /^[a-f0-9]{64}$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

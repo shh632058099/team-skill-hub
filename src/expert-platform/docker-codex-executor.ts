@@ -12,6 +12,7 @@ import { buildCodexDockerArgs } from "./codex-container-executor.js";
 import { runCodexProcess, type CodexProcessOptions } from "./codex-process.js";
 import { runVerificationPolicy } from "./verification-runner.js";
 import { assertRuntimeProfileBackend } from "./runtime-profile-policy.js";
+import { computeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
 
 export interface DockerCodexExecutorOptions {
   image: string;
@@ -227,6 +228,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         result: string;
         source: { repositoryUrl?: string; repositoryBranch?: string; commitSha: string };
         verificationResults?: import("./verification-policy.js").VerificationEvidenceResult[];
+        workspaceChangeSummary?: WorkspaceChangeSummary;
       }
   > => {
     const backend = options.backend ?? "claude";
@@ -297,6 +299,9 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       throw error;
     }
     await report("repository.completed");
+    if (workspaceAccess === "read-write" && !preparedRepository) {
+      throw new Error("WORKSPACE_WRITE_REPOSITORY_REQUIRED");
+    }
     if (preparedRepository && claim.workspaceKey) {
       if (!options.onStage) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
       await options.onStage(
@@ -560,6 +565,13 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         }
       }
       await report(`${backend}.completed`);
+      let workspaceChangeSummary: WorkspaceChangeSummary | undefined;
+      if (workspaceAccess === "read-write") {
+        workspaceChangeSummary = await computeWorkspaceChangeSummary(
+          preparedRepository!.path,
+          preparedRepository!.commitSha,
+        );
+      }
       let verificationResults: import("./verification-policy.js").VerificationEvidenceResult[] | undefined;
       if ((claim.validationSnapshot?.length ?? 0) > 0) {
         if (!preparedRepository) throw new Error("VERIFICATION_WORKSPACE_UNAVAILABLE");
@@ -591,6 +603,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
               commitSha: preparedRepository.commitSha,
             },
             ...(verificationResults ? { verificationResults } : {}),
+            ...(workspaceChangeSummary ? { workspaceChangeSummary } : {}),
           }
         : result;
     } finally {
