@@ -518,6 +518,7 @@ test("workspace-write executor captures deterministic change summary before veri
         const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
         assert.ok(mount);
         const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+        assert.notEqual(statSync(source).mode & 0o020, 0, "workspace-write checkout must be group-writable");
         writeFileSync(path.join(source, "fixture.txt"), "after\n");
         writeFileSync(path.join(source, "added.txt"), "new\n");
         return "changed";
@@ -554,7 +555,7 @@ test("workspace-write executor captures deterministic change summary before veri
 
 test("workspace-write verification observes mutated content and binds evidence to workspace revision", async () => {
   const { execFileSync } = await import("node:child_process");
-  const { mkdtempSync, readFileSync, writeFileSync, rmSync } = await import("node:fs");
+  const { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } = await import("node:fs");
   const os = await import("node:os");
   const path = await import("node:path");
   const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-verification-"));
@@ -597,11 +598,19 @@ test("workspace-write verification observes mutated content and binds evidence t
         assert.ok(mount);
         const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
         writeFileSync(path.join(source, "fixture.txt"), "after\n");
+        chmodSync(path.join(source, ".git", "index"), 0o600);
         return "changed";
       },
-      runVerificationPolicy: async (workspace, policy) => {
+      runVerificationPolicy: async (workspace, policy, _signal, options) => {
         verifiedWorkspace = workspace;
+        assert.equal(options.supplementalGroupId, 10001);
         assert.equal(readFileSync(path.join(workspace, "fixture.txt"), "utf8"), "after\n");
+        assert.notEqual(
+          statSync(path.join(workspace, ".git", "index")).mode & 0o040,
+          0,
+          "verifier must be able to read Git index",
+        );
+        assert.equal(statSync(workspace).mode & 0o020, 0, "workspace must be frozen read-only before verification");
         return policy.map((step) => ({
           stepId: step.id,
           type: step.type,

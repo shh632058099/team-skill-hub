@@ -231,3 +231,53 @@ test("repository proxy is passed only to Git process configuration and is not pe
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("re-preparing the same WorkAttempt workspace preserves uncommitted changes across continuation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "expert-workspace-continuation-"));
+  try {
+    const seed = path.join(root, "seed");
+    const bare = path.join(root, "origin.git");
+    const workspaceRoot = path.join(root, "workspaces");
+    await mkdir(seed);
+    git(["init", "-b", "main"], seed);
+    git(["config", "user.email", "test@example.invalid"], seed);
+    git(["config", "user.name", "Expert Test"], seed);
+    await writeFile(path.join(seed, "README.md"), "base\n");
+    git(["add", "README.md"], seed);
+    git(["commit", "-m", "initial"], seed);
+    git(["init", "--bare", bare]);
+    git(["remote", "add", "origin", bare], seed);
+    git(["push", "-u", "origin", "main"], seed);
+
+    const input = {
+      id: "repo-continuation",
+      url: bare,
+      branch: "main",
+      root: workspaceRoot,
+      workspaceKey: "work-continuation-a1",
+      workspaceAccess: "read-write" as const,
+    };
+    const first = await prepareRepositoryWorkspace(input);
+    await writeFile(path.join(first.path, "README.md"), "modified in attempt\n");
+    await writeFile(path.join(first.path, "new.txt"), "new\n");
+
+    await writeFile(path.join(seed, "README.md"), "new upstream\n");
+    git(["add", "README.md"], seed);
+    git(["commit", "-m", "upstream"], seed);
+    git(["push", "origin", "main"], seed);
+
+    const continued = await prepareRepositoryWorkspace(input);
+    assert.equal(continued.path, first.path);
+    assert.equal(continued.commitSha, first.commitSha, "WorkAttempt base revision must stay pinned");
+    assert.equal(
+      await import("node:fs/promises").then(({ readFile }) => readFile(path.join(first.path, "README.md"), "utf8")),
+      "modified in attempt\n",
+    );
+    assert.equal(
+      await import("node:fs/promises").then(({ readFile }) => readFile(path.join(first.path, "new.txt"), "utf8")),
+      "new\n",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

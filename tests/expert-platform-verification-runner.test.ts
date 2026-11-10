@@ -53,6 +53,9 @@ test("verification runner executes steps only through an isolated read-only Dock
       const mount = args[args.indexOf("--mount") + 1]!;
       assert.match(mount, /dst=\/workspace,readonly$/);
       assert.equal(args[args.indexOf("--entrypoint") + 1], "node");
+      assert.ok(args.includes("GIT_CONFIG_COUNT=1"));
+      assert.ok(args.includes("GIT_CONFIG_KEY_0=safe.directory"));
+      assert.ok(args.includes("GIT_CONFIG_VALUE_0=/workspace"));
       const imageIndex = args.indexOf("expert-worker:test");
       assert.ok(imageIndex > 0);
       assert.equal(args[imageIndex + 1], "-e");

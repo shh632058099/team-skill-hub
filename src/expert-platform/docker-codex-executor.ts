@@ -5,7 +5,11 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { Claim } from "./task-store.js";
 import type { ExpertModelConfig } from "./expert-store.js";
-import { prepareRepositoryWorkspace, type GitCredentialConfig } from "./repository-workspace.js";
+import {
+  grantExecutionContainerAccess,
+  prepareRepositoryWorkspace,
+  type GitCredentialConfig,
+} from "./repository-workspace.js";
 import { buildCodexArgs } from "./codex-runtime.js";
 import { parseClaudeResult, buildClaudeArgs } from "./claude-runtime.js";
 import { buildCodexDockerArgs } from "./codex-container-executor.js";
@@ -287,6 +291,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
               id: claim.repositoryId,
               url: claim.repositoryUrl,
               branch: claim.repositoryBranch,
+              workspaceAccess,
               ...(claim.repositoryGitProxyUrl ? { gitProxyUrl: claim.repositoryGitProxyUrl } : {}),
               root: options.repositoryRoot ?? `${options.sourcePath.replace(/\/[^/]+$/, "")}/expert-repositories`,
               ...(claim.workspaceKey ? { workspaceKey: claim.workspaceKey } : {}),
@@ -460,7 +465,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       }
       const containerName = `expert-${createHash("sha256").update(`${claim.taskId}:${claim.runId}:${claim.fencing}`).digest("hex").slice(0, 24)}`;
 
-      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : undefined;
+      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
       const args = buildCodexDockerArgs({
         image: options.image,
         containerName,
@@ -471,7 +476,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         workspaceAccess,
         network: options.network,
         seccompProfile: options.seccompProfile,
-        ...(workerGroupId !== undefined ? { supplementalGroupId: workerGroupId } : {}),
+        supplementalGroupId: workerGroupId,
         envNames,
         authFilePath: options.authFilePath,
         configFilePath,
@@ -571,6 +576,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           preparedRepository!.path,
           preparedRepository!.commitSha,
         );
+        grantExecutionContainerAccess(preparedRepository!.path, "read-only");
       }
       let verificationResults: import("./verification-policy.js").VerificationEvidenceResult[] | undefined;
       if ((claim.validationSnapshot?.length ?? 0) > 0) {
@@ -583,7 +589,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           {
             image: options.image,
             containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
-            ...(workerGroupId !== undefined ? { supplementalGroupId: workerGroupId } : {}),
+            supplementalGroupId: workerGroupId,
           },
         );
         verificationResults = rawVerification.map((verification) => ({

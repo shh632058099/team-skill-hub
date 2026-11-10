@@ -39,3 +39,30 @@ test("execution checkout is group-readable without exposing world permissions or
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("workspace-write grants group write only to the working tree and keeps git metadata read-only", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-permissions-"));
+  try {
+    const outside = path.join(root, "outside");
+    const source = path.join(root, "source");
+    mkdirSync(source, { mode: 0o700 });
+    mkdirSync(path.join(source, ".git"), { mode: 0o700 });
+    const file = path.join(source, "README.md");
+    const gitFile = path.join(source, ".git", "config");
+    writeFileSync(file, "hello", { mode: 0o600 });
+    writeFileSync(gitFile, "git", { mode: 0o600 });
+    writeFileSync(outside, "private", { mode: 0o600 });
+    symlinkSync(outside, path.join(source, "external"));
+
+    const { grantExecutionContainerAccess } = await import("../src/expert-platform/repository-workspace.js");
+    grantExecutionContainerAccess(source, "read-write", process.getgid!());
+
+    assert.equal(lstatSync(source).mode & 0o777, 0o770);
+    assert.equal(lstatSync(file).mode & 0o777, 0o660);
+    assert.equal(lstatSync(path.join(source, ".git")).mode & 0o777, 0o750);
+    assert.equal(lstatSync(gitFile).mode & 0o777, 0o640);
+    assert.equal(lstatSync(outside).mode & 0o777, 0o600);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

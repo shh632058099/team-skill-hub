@@ -458,3 +458,21 @@ test("user-mode controller derives etc template from install root, not a stale e
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(path.join(etc, "workers", "user-01.env")), true);
 });
+
+test("worker documentation makes workspace-write profiles an explicit operator opt-in", () => {
+  const envExample = readFileSync(new URL("worker.env.example", runtime), "utf8");
+  const readme = readFileSync(new URL("README.md", runtime), "utf8");
+  const addExpert = readFileSync(new URL("../docs/expert-platform/add-expert.md", import.meta.url), "utf8");
+
+  assert.match(envExample, /codex-readonly,codex-workspace-write/);
+  assert.match(envExample, /claude-readonly,claude-workspace-write/);
+  assert.match(envExample, /workspace-write.*explicit|explicit.*workspace-write/i);
+  assert.doesNotMatch(envExample, /^EXPERT_RUNTIME_PROFILES=.*workspace-write/m);
+
+  for (const source of [readme, addExpert]) {
+    assert.match(source, /codex-workspace-write/);
+    assert.match(source, /claude-workspace-write/);
+    assert.match(source, /EXPERT_RUNTIME_PROFILES=.*readonly.*workspace-write/);
+    assert.match(source, /不会|不会自动|explicit|显式/i);
+  }
+});

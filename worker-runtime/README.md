@@ -215,6 +215,34 @@ Put MCP/Git credential files under:
 
 Never share repository checkouts between Worker instances.
 
+## Workspace-write Runtime Profiles
+
+Runtime Profile advertisement is an explicit security boundary. Upgrading or reinstalling the Worker does **not** automatically add write capability.
+
+A read-only Worker remains:
+
+```dotenv
+EXPERT_RUNTIME_PROFILES=claude-readonly
+```
+
+or:
+
+```dotenv
+EXPERT_RUNTIME_PROFILES=codex-readonly
+```
+
+To intentionally allow an instance to execute both read-only and isolated workspace-write Deployments, the operator must explicitly opt in:
+
+```dotenv
+# Claude instance
+EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
+
+# Codex instance
+EXPERT_RUNTIME_PROFILES=codex-readonly,codex-workspace-write
+```
+
+`*-workspace-write` allows only the assigned WorkAttempt Workspace to be mounted read-write. The task container root filesystem and credential/config mounts remain read-only. Claude write mode allows `Read,Glob,Grep,Edit,Write` but not Bash; Codex uses `--sandbox workspace-write`. Verification still runs in a separate read-only/no-network container.
+
 ## Claude and Codex on one host
 
 A typical host may run:
