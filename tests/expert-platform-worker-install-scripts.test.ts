@@ -144,6 +144,28 @@ test("worker env example documents instance-derived paths instead of runnable si
 
 test("manual controller initializes isolated worker instances and rejects unsafe names", () => {
   const fx = controllerFixture();
+  const configured = fx.run([
+    "init",
+    "ota-codex-01",
+    "--backend",
+    "codex",
+    "--runtime-profile",
+    "codex-readonly",
+    "--docker-network",
+    "team-skill-hub_default",
+    "--mcp-credential-ref",
+    "skillhub-readonly",
+  ]);
+  assert.equal(configured.status, 0, configured.stderr);
+  const configuredEnv = readFileSync(path.join(fx.etc, "workers", "ota-codex-01.env"), "utf8");
+  assert.match(configuredEnv, /^EXPERT_EXECUTOR_BACKEND=codex$/m);
+  assert.match(configuredEnv, /^EXPERT_RUNTIME_PROFILES=codex-readonly$/m);
+  assert.match(configuredEnv, /^EXPERT_DOCKER_NETWORK=team-skill-hub_default$/m);
+  assert.match(
+    configuredEnv,
+    /EXPERT_MCP_CREDENTIAL_FILES_JSON='\{"skillhub-readonly":".*instances\/ota-codex-01\/keys\/skillhub-readonly"\}'/,
+  );
+
   const created = fx.run(["init", "claude-01"]);
   assert.equal(created.status, 0, created.stderr);
   assert.match(readFileSync(path.join(fx.etc, "workers", "claude-01.env"), "utf8"), /EXPERT_WORKER_ID=/);

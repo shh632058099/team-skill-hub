@@ -56,7 +56,7 @@ fi
 usage() {
   cat >&2 <<EOF
 Usage:
-  $0 init <instance>
+  $0 init <instance> [--backend claude|codex] [--runtime-profile PROFILE] [--docker-network NETWORK] [--mcp-credential-ref REF]
   $0 list [--json]
   $0 <instance> {start|stop|restart|status|logs}
 EOF
@@ -144,22 +144,64 @@ env_value() {
   printf '%s' "$value"
 }
 
+
+set_env_value() {
+  local file=$1 key=$2 value=$3 tmp
+  tmp=$(mktemp "${file}.XXXXXX")
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced=0 }
+    $0 ~ "^[[:space:]]*" key "=" && replaced == 0 { print key "=" value; replaced=1; next }
+    { print }
+    END { if (replaced == 0) print key "=" value }
+  ' "$file" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$file"
+}
+
 init_instance() {
   local instance=$1
+  shift
+  local backend="" runtime_profile="" docker_network="" mcp_credential_ref=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --backend)
+        [[ $# -ge 2 && "$2" =~ ^(claude|codex)$ ]] || { echo "--backend requires claude or codex" >&2; return 2; }
+        backend=$2; shift 2 ;;
+      --runtime-profile)
+        [[ $# -ge 2 && -n "$2" ]] || { echo "--runtime-profile requires a value" >&2; return 2; }
+        runtime_profile=$2; shift 2 ;;
+      --docker-network)
+        [[ $# -ge 2 && -n "$2" ]] || { echo "--docker-network requires a value" >&2; return 2; }
+        docker_network=$2; shift 2 ;;
+      --mcp-credential-ref)
+        [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo "--mcp-credential-ref requires a safe reference name" >&2; return 2; }
+        mcp_credential_ref=$2; shift 2 ;;
+      *) echo "Unknown init option: $1" >&2; return 2 ;;
+    esac
+  done
   load_instance_context "$instance"
   [[ -f "$TEMPLATE" ]] || { echo "Missing Worker template: $TEMPLATE" >&2; return 1; }
   [[ ! -e "$CONFIG" ]] || { echo "Worker instance already exists: $instance" >&2; return 1; }
   install -d -m 0750 "$WORKERS_DIR" "$INSTANCES_DIR/$instance/keys" "$DATA"
   install -m 0600 "$TEMPLATE" "$CONFIG"
+  [[ -z "$backend" ]] || set_env_value "$CONFIG" EXPERT_EXECUTOR_BACKEND "$backend"
+  [[ -z "$runtime_profile" ]] || set_env_value "$CONFIG" EXPERT_RUNTIME_PROFILES "$runtime_profile"
+  [[ -z "$docker_network" ]] || set_env_value "$CONFIG" EXPERT_DOCKER_NETWORK "$docker_network"
+  if [[ -n "$mcp_credential_ref" ]]; then
+    local mcp_key_file="$INSTANCES_DIR/$instance/keys/$mcp_credential_ref"
+    set_env_value "$CONFIG" EXPERT_MCP_CREDENTIAL_FILES_JSON "'{\"$mcp_credential_ref\":\"$mcp_key_file\"}'"
+  fi
   if [[ $USER_MODE -eq 0 && "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
     chown root:root "$CONFIG"
     chown -R root:expert-worker "$INSTANCES_DIR/$instance"
     chown -R expert-worker:expert-worker "$DATA"
   fi
   echo "Created Worker instance $instance: $CONFIG"
+  if [[ -n "$mcp_credential_ref" ]]; then
+    echo "MCP key target: $INSTANCES_DIR/$instance/keys/$mcp_credential_ref (create with mode 0600; secret is never written by init)"
+  fi
   echo "Edit the config, then run: $0 $instance start"
 }
-
 list_instances() {
   local format=$1 file instance worker_id backend capability profiles state pid
   if [[ "$format" == "json" && ( -z "$NODE" || ! -x "$NODE" ) ]]; then
@@ -327,8 +369,10 @@ stop_worker() {
 require_root
 
 if [[ $# -ge 1 && "$1" == "init" ]]; then
-  [[ $# -eq 2 ]] || usage
-  init_instance "$2"
+  [[ $# -ge 2 ]] || usage
+  instance=$2
+  shift 2
+  init_instance "$instance" "$@"
   exit
 fi
 if [[ $# -ge 1 && "$1" == "list" ]]; then
