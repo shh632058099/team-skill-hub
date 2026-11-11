@@ -236,6 +236,7 @@ export interface ReviewDecisionRecord {
 export interface WorkApprovalRecord {
   approvalId: string;
   workItemId: string;
+  workAttemptId: string | null;
   actor: string;
   role: string;
   approvalScope: string;
@@ -484,6 +485,7 @@ export class WorkOrchestrationStore {
         "CREATE TABLE IF NOT EXISTS work_approvals (",
         "  approval_id TEXT PRIMARY KEY,",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  work_attempt_id TEXT,",
         "  actor TEXT NOT NULL,",
         "  role TEXT NOT NULL,",
         "  approval_scope TEXT NOT NULL,",
@@ -526,6 +528,13 @@ export class WorkOrchestrationStore {
     if (!attemptColumns.has("what_should_change"))
       this.db.exec("ALTER TABLE work_attempts ADD COLUMN what_should_change TEXT");
     if (!attemptColumns.has("created_by")) this.db.exec("ALTER TABLE work_attempts ADD COLUMN created_by TEXT");
+    const approvalColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_approvals)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!approvalColumns.has("work_attempt_id"))
+      this.db.exec("ALTER TABLE work_approvals ADD COLUMN work_attempt_id TEXT");
     this.migrateWorkspaceSchema();
     this.ensureWorkspaceCleanupSchema();
   }
@@ -1040,6 +1049,33 @@ export class WorkOrchestrationStore {
       const sequence = Number(sequenceRow.n);
       if (sequence > workflow.definition.lifecycle.attempt.maxWorkAttempts) {
         throw new Error("WORK_ATTEMPT_LIMIT_REACHED");
+      }
+
+      const staleEvidence = this.db
+        .prepare("UPDATE work_evidence SET stale=1 WHERE work_item_id=? AND stale=0")
+        .run(workItemId);
+      const staleApprovals = this.db
+        .prepare(
+          "UPDATE work_approvals SET stale=1 WHERE work_item_id=? AND approval_scope='work_completion' AND stale=0",
+        )
+        .run(workItemId);
+      if (staleEvidence.changes > 0) {
+        this.event(
+          workItemId,
+          null,
+          "evidence.staled",
+          JSON.stringify({ count: staleEvidence.changes, reason: "new_work_attempt" }),
+          now,
+        );
+      }
+      if (staleApprovals.changes > 0) {
+        this.event(
+          workItemId,
+          null,
+          "approval.invalidated",
+          JSON.stringify({ count: staleApprovals.changes, reason: "new_work_attempt" }),
+          now,
+        );
       }
 
       const workAttemptId = randomUUID();
@@ -1647,12 +1683,33 @@ export class WorkOrchestrationStore {
       if (work.stateRevision !== input.expectedRevision) throw new Error("STALE_WORK_REVISION");
       if (approvalScope === "work_completion" && work.currentSubjectRevision !== subjectRevision)
         throw new Error("STALE_WORK_SUBJECT");
+      const latestSucceededAttempt =
+        approvalScope === "work_completion"
+          ? (this.db
+              .prepare(
+                "SELECT work_attempt_id FROM work_attempts WHERE work_item_id=? AND status='succeeded' ORDER BY sequence DESC LIMIT 1",
+              )
+              .get(workItemId) as Row | undefined)
+          : undefined;
+      if (approvalScope === "work_completion" && !latestSucceededAttempt)
+        throw new Error("WORK_APPROVAL_ATTEMPT_REQUIRED");
       const approvalId = randomUUID();
       this.db
         .prepare(
-          "INSERT INTO work_approvals(approval_id,work_item_id,actor,role,approval_scope,subject_type,subject_revision,decision,stale,created_at) VALUES(?,?,?,?,?,?,?,?,0,?)",
+          "INSERT INTO work_approvals(approval_id,work_item_id,work_attempt_id,actor,role,approval_scope,subject_type,subject_revision,decision,stale,created_at) VALUES(?,?,?,?,?,?,?,?,?,0,?)",
         )
-        .run(approvalId, workItemId, actor, role, approvalScope, subjectType, subjectRevision, input.decision, now);
+        .run(
+          approvalId,
+          workItemId,
+          latestSucceededAttempt?.work_attempt_id == null ? null : String(latestSucceededAttempt.work_attempt_id),
+          actor,
+          role,
+          approvalScope,
+          subjectType,
+          subjectRevision,
+          input.decision,
+          now,
+        );
       const changed = this.db
         .prepare(
           "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
@@ -1740,9 +1797,14 @@ export class WorkOrchestrationStore {
         const evidence = work.currentSubjectRevision
           ? (this.db
               .prepare(
-                "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type=? AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC LIMIT 1",
+                "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC LIMIT 1",
               )
-              .get(workItemId, requiredType, work.currentSubjectRevision) as Row | undefined)
+              .get(
+                workItemId,
+                String(latestAttempt?.work_attempt_id ?? ""),
+                requiredType,
+                work.currentSubjectRevision,
+              ) as Row | undefined)
           : undefined;
         if (!evidence) missing.push("required_evidence:" + requiredType);
       }
@@ -1777,11 +1839,23 @@ export class WorkOrchestrationStore {
               : null;
         }
         const approval = requiredSubject
-          ? (this.db
-              .prepare(
-                "SELECT decision FROM work_approvals WHERE work_item_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
-              )
-              .get(workItemId, required.scope, required.subjectType, requiredSubject) as Row | undefined)
+          ? required.scope === "work_completion"
+            ? (this.db
+                .prepare(
+                  "SELECT decision FROM work_approvals WHERE work_item_id=? AND work_attempt_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                )
+                .get(
+                  workItemId,
+                  String(latestAttempt?.work_attempt_id ?? ""),
+                  required.scope,
+                  required.subjectType,
+                  requiredSubject,
+                ) as Row | undefined)
+            : (this.db
+                .prepare(
+                  "SELECT decision FROM work_approvals WHERE work_item_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                )
+                .get(workItemId, required.scope, required.subjectType, requiredSubject) as Row | undefined)
           : undefined;
         if (!approval || approval.decision !== "approved") {
           missing.push("required_approval:" + required.scope);
@@ -2203,6 +2277,7 @@ export class WorkOrchestrationStore {
     return {
       approvalId: String(row.approval_id),
       workItemId: String(row.work_item_id),
+      workAttemptId: row.work_attempt_id == null ? null : String(row.work_attempt_id),
       actor: String(row.actor),
       role: String(row.role),
       approvalScope: String(row.approval_scope),

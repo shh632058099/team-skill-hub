@@ -165,6 +165,42 @@ test("retain workspace policy does not enqueue deletion", () => {
   });
 });
 
+test("approval schema migrates legacy databases with attempt binding column", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-approval-migration-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    initial.close();
+    const legacy = new DatabaseSync(file);
+    try {
+      legacy.exec(
+        [
+          "DROP TABLE work_approvals;",
+          "CREATE TABLE work_approvals (",
+          " approval_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL, actor TEXT NOT NULL, role TEXT NOT NULL,",
+          " approval_scope TEXT NOT NULL, subject_type TEXT NOT NULL, subject_revision TEXT NOT NULL,",
+          " decision TEXT NOT NULL CHECK(decision IN ('approved','rejected')), stale INTEGER NOT NULL DEFAULT 0 CHECK(stale IN (0,1)), created_at INTEGER NOT NULL",
+          ");",
+        ].join("\n"),
+      );
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = new WorkOrchestrationStore(file);
+    const db = new DatabaseSync(file);
+    try {
+      const columns = db.prepare("PRAGMA table_info(work_approvals)").all() as Array<{ name: string }>;
+      assert.ok(columns.some((column) => column.name === "work_attempt_id"));
+    } finally {
+      db.close();
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("workspace schema migrates old cleanup constraints without resetting the database", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-workspace-migration-"));
   const file = path.join(dir, "runtime.db");
@@ -796,6 +832,127 @@ test("approval without review is insufficient and becomes stale after subject re
     gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
     assert.ok(gate.missing.includes("required_approval:work_completion"));
     assert.ok(gate.missing.includes("review_accepted"));
+  });
+});
+
+test("new WorkAttempt invalidates prior attempt evidence even when subject revision is unchanged", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    store.putWorkflow("attempt-bound-evidence", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: ["unit_test"], required: [] },
+      review: { humanReview: false },
+      completion: {
+        require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
+      },
+    });
+    let work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "attempt-bound-evidence",
+      sourceType: "mcp",
+      title: "Attempt evidence",
+      description: "evidence must belong to latest attempt",
+      workflowId: "attempt-bound-evidence",
+    });
+    const first = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-a",
+      deploymentConfigVersion: 1,
+    });
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    const subject = "workspace:" + "a".repeat(64);
+    work = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, subject);
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: first.workAttemptId,
+      type: "unit_test",
+      status: "passed",
+      source: "worker_verified",
+      subjectRevision: subject,
+      environmentIdentity: "ota-a@1",
+      verifierIdentity: "team-skill-hub",
+    });
+    work = store.finishWorkAttempt(
+      work.workItemId,
+      first.workAttemptId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    assert.equal(store.evaluateCompletionGate(work.workItemId, "alice", "team-a").ready, true);
+
+    const second = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "review_rework",
+      expertId: "ota",
+      deploymentId: "ota-b",
+      deploymentConfigVersion: 2,
+      parentWorkAttemptId: first.workAttemptId,
+    });
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    work = store.finishWorkAttempt(
+      work.workItemId,
+      second.workAttemptId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+
+    const evidence = store.listEvidence(work.workItemId);
+    assert.equal(evidence[0]!.stale, true);
+    const gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.ok(gate.missing.includes("required_evidence:unit_test"));
+  });
+});
+
+test("work completion approval is bound to the latest succeeded WorkAttempt", () => {
+  withStore((store) => {
+    const setup = createApprovalGatedWork(store, "approval-attempt-binding");
+    store.submitReviewDecision(setup.workItemId, "alice", "team-a", {
+      expectedRevision: setup.current.stateRevision,
+      subjectRevision: setup.subject,
+      decision: "accepted",
+    });
+    let current = store.getWork(setup.workItemId, "alice", "team-a");
+    const approval = store.recordApproval(setup.workItemId, "alice", "team-a", {
+      expectedRevision: current.stateRevision,
+      actor: "alice",
+      role: "developer",
+      approvalScope: "work_completion",
+      subjectType: "workspace_revision",
+      subjectRevision: setup.subject,
+      decision: "approved",
+    });
+    assert.ok(approval.workAttemptId);
+    assert.equal(store.evaluateCompletionGate(setup.workItemId, "alice", "team-a").ready, true);
+
+    current = store.getWork(setup.workItemId, "alice", "team-a");
+    const firstAttempt = store.listAttempts(setup.workItemId)[0]!;
+    const second = store.createWorkAttempt(setup.workItemId, "alice", "team-a", current.stateRevision, {
+      reason: "review_rework",
+      expertId: "ota",
+      deploymentId: "ota-write-v2",
+      deploymentConfigVersion: 2,
+      parentWorkAttemptId: firstAttempt.workAttemptId,
+    });
+    current = store.getWork(setup.workItemId, "alice", "team-a");
+    current = store.finishWorkAttempt(
+      setup.workItemId,
+      second.workAttemptId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+
+    assert.equal(store.listApprovals(setup.workItemId).at(-1)!.stale, true);
+    const gate = store.evaluateCompletionGate(setup.workItemId, "alice", "team-a");
+    assert.ok(gate.missing.includes("required_approval:work_completion"));
   });
 });
 
