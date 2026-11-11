@@ -67,6 +67,24 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /任务运行记录/);
     assert.match(html, /Work Items/);
     assert.match(html, /id="workItems"/);
+    assert.match(html, /Workflows/);
+    assert.match(html, /id="workflows"/);
+    assert.match(html, /\/admin\/api\/workflows/);
+    const workflowsResponse = await fetch(base + "/admin/api/workflows");
+    assert.equal(workflowsResponse.status, 200);
+    const workflowsBody = (await workflowsResponse.json()) as {
+      workflows: Array<{ workflowId: string; version: number }>;
+    };
+    assert.ok(
+      workflowsBody.workflows.some((workflow) => workflow.workflowId === "code-fix-default" && workflow.version === 1),
+    );
+    const workflowDetailResponse = await fetch(base + "/admin/api/workflows/code-fix-default/1");
+    assert.equal(workflowDetailResponse.status, 200);
+    const workflowDetailBody = (await workflowDetailResponse.json()) as {
+      workflow: { workflowId: string; version: number };
+    };
+    assert.equal(workflowDetailBody.workflow.workflowId, "code-fix-default");
+    assert.equal(workflowDetailBody.workflow.version, 1);
     assert.match(html, /id="workPage"/);
     assert.match(html, /工作项详情/);
     assert.match(html, /Verification/);

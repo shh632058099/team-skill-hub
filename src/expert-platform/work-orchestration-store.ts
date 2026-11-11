@@ -728,6 +728,17 @@ export class WorkOrchestrationStore {
     };
   }
 
+  listWorkflows(): WorkflowDefinitionRecord[] {
+    return (this.db.prepare("SELECT * FROM work_workflows ORDER BY workflow_id,version DESC").all() as Row[]).map(
+      (row) => ({
+        workflowId: String(row.workflow_id),
+        version: Number(row.version),
+        definition: this.normalizeWorkflowDefinition(JSON.parse(String(row.definition_json))),
+        createdAt: Number(row.created_at),
+      }),
+    );
+  }
+
   createOrReuseWork(input: WorkSubmission, now = Date.now()): WorkItemRecord {
     const principalId = requiredText(input.principalId, 200);
     const scope = requiredText(input.scope, 200);

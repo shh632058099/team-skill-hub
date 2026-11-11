@@ -948,6 +948,29 @@ export async function startServer(
     }
   });
 
+  app.get("/admin/api/workflows", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    try {
+      return { workflows: requireWorkRuntime().work.listWorkflows() };
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.get<{ Params: { id: string; version: string } }>("/admin/api/workflows/:id/:version", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(request.params.id))
+      return reply.code(400).send({ error: "invalid Workflow ID" });
+    const version = Number(request.params.version);
+    if (!Number.isSafeInteger(version) || version < 1)
+      return reply.code(400).send({ error: "invalid Workflow version" });
+    try {
+      return { workflow: requireWorkRuntime().work.getWorkflow(request.params.id, version) };
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
   app.get<{ Params: { id: string } }>("/admin/api/work-items/:id", async (request, reply) => {
     if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
     if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });

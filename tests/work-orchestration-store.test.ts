@@ -19,6 +19,19 @@ function withStore(run: (store: WorkOrchestrationStore, file: string) => void) {
   }
 }
 
+test("workflow list exposes all versioned definitions in stable order", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    store.putWorkflow("z-workflow", 1, structuredClone(base));
+    store.putWorkflow("z-workflow", 2, structuredClone(base));
+    const rows = store.listWorkflows().filter((item) => item.workflowId === "z-workflow");
+    assert.deepEqual(
+      rows.map((item) => item.version),
+      [2, 1],
+    );
+  });
+});
+
 test("work submission is idempotent and conflicting reuse fails closed", () => {
   withStore((store) => {
     const first = store.createOrReuseWork({
