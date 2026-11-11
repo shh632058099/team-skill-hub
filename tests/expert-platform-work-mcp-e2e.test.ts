@@ -275,6 +275,9 @@ test("MCP Work API drives durable work through review, rework, authorization and
       deploymentId: "ota-default",
     });
     const workId = String(submitted.work.workItemId);
+    assert.equal(submitted.workItemId, workId);
+    assert.equal(submitted.status, "running");
+    assert.match(submitted.sourceControlToken, /^wsc_[A-Za-z0-9_-]{40,}$/);
     const taskId = String(submitted.currentTask.taskId);
     assert.match(workId, /^[0-9a-f-]{36}$/i);
     assert.equal(submitted.work.status, "running");

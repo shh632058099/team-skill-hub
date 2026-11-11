@@ -1433,7 +1433,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. The response includes an opaque sourceControlToken for later update_work_source calls; retain it in tool context, treat it as secret, and never display it to the user. Reuse the same idempotencyKey when retrying an uncertain submission; a retry reuses the WorkItem and rotates sourceControlToken, so use the newest token. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. The response exposes top-level workItemId, status, and an opaque sourceControlToken for later update_work_source calls; retain the token in tool context, treat it as secret, and never display it to the user. Reuse the same idempotencyKey when retrying an uncertain submission; a retry reuses the WorkItem and rotates sourceControlToken, so use the newest token. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
@@ -1487,31 +1487,34 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             const effectiveSessionId =
               transportSessionId ?? sessionId ?? (trustedClientSession ? clientSessionId : undefined);
             const adapter = mcpWorkAdapter!;
-            return toolResult(
-              adapter.submit(
-                {
-                  idempotencyKey,
-                  title,
-                  description,
-                  ...(workflowId === undefined ? {} : { workflowId }),
-                  ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
-                  ...(explicitRouting && normalizedRepositoryId !== undefined
-                    ? { repositoryId: normalizedRepositoryId }
-                    : {}),
-                  ...(explicitRouting && normalizedDeploymentId !== undefined
-                    ? { deploymentId: normalizedDeploymentId }
-                    : {}),
-                  ...(priority === undefined ? {} : { priority }),
-                },
-                {
-                  principalId: principal.id,
-                  scope: principal.tenantId,
-                  client: client?.slice(0, 200) || "mcp",
-                  ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
-                  trustedSession: Boolean(transportSessionId ?? sessionId) || trustedClientSession,
-                },
-              ),
+            const submitted = adapter.submit(
+              {
+                idempotencyKey,
+                title,
+                description,
+                ...(workflowId === undefined ? {} : { workflowId }),
+                ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
+                ...(explicitRouting && normalizedRepositoryId !== undefined
+                  ? { repositoryId: normalizedRepositoryId }
+                  : {}),
+                ...(explicitRouting && normalizedDeploymentId !== undefined
+                  ? { deploymentId: normalizedDeploymentId }
+                  : {}),
+                ...(priority === undefined ? {} : { priority }),
+              },
+              {
+                principalId: principal.id,
+                scope: principal.tenantId,
+                client: client?.slice(0, 200) || "mcp",
+                ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
+                trustedSession: Boolean(transportSessionId ?? sessionId) || trustedClientSession,
+              },
             );
+            return toolResult({
+              ...submitted,
+              workItemId: submitted.work.workItemId,
+              status: submitted.work.status,
+            });
           },
         );
 
