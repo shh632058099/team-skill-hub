@@ -52,11 +52,26 @@ export class StreamResultCollector {
   private completed = false;
   private failed = false;
   private results = 0;
+  private runtimeSessionId: string | undefined;
   constructor(private readonly backend: "claude" | "codex") {}
 
   accept(raw: unknown): void {
     const event = object(raw);
     if (!event) throw new Error("EXPERT_INVALID_STREAM_EVENT");
+    const candidate =
+      this.backend === "claude"
+        ? typeof event.session_id === "string"
+          ? event.session_id
+          : undefined
+        : event.type === "thread.started" && typeof event.thread_id === "string"
+          ? event.thread_id
+          : undefined;
+    if (candidate !== undefined) {
+      const normalized = candidate.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(normalized)) throw new Error("INVALID_RUNTIME_SESSION_ID");
+      if (this.runtimeSessionId && this.runtimeSessionId !== normalized) throw new Error("RUNTIME_SESSION_MISMATCH");
+      this.runtimeSessionId = normalized;
+    }
     if (this.backend === "claude") {
       if (event.type !== "result") return;
       this.results++;
@@ -87,6 +102,10 @@ export class StreamResultCollector {
       )
         this.lastReport = item.text;
     }
+  }
+
+  sessionId(): string | null {
+    return this.runtimeSessionId ?? null;
   }
 
   result(): string {

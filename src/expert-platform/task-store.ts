@@ -98,6 +98,7 @@ export type TaskRecord = {
   requiredWorkerId: string | null;
   continuationCount: number;
   continuationReason: string | null;
+  runtimeSessionId: string | null;
   runId: string | null;
   /** True when this submission reused a task created by an earlier submission. */
   reusedExistingTask?: boolean;
@@ -134,9 +135,9 @@ export type Claim = {
   deploymentSnapshot?: DeploymentTaskSnapshot;
   workspaceKey?: string | null;
   validationSnapshot?: VerificationPolicyStep[];
+  runtimeSessionId?: string | null;
 };
 type Row = Record<string, unknown>;
-
 export class ExpertTaskStore {
   private readonly db: DatabaseSync;
 
@@ -237,6 +238,7 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("required_worker_id", "TEXT");
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
+    this.ensureTaskColumn("runtime_session_id", "TEXT");
     // Older tasks already have a queued lifecycle event created at submission time.
     // Backfill from that event so the new history column remains useful after upgrade.
     this.db.exec(
@@ -530,6 +532,7 @@ export class ExpertTaskStore {
         reusedExistingTask: false,
         continuationCount: 0,
         continuationReason: null,
+        runtimeSessionId: null,
         runId: null,
         ...sessionTask,
       };
@@ -626,6 +629,7 @@ export class ExpertTaskStore {
         validationSnapshot: normalizeVerificationPolicy(
           row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
         ),
+        runtimeSessionId: row.runtime_session_id == null ? null : String(row.runtime_session_id),
         ...(row.deployment_snapshot_json
           ? { deploymentSnapshot: JSON.parse(String(row.deployment_snapshot_json)) as DeploymentTaskSnapshot }
           : {}),
@@ -643,6 +647,7 @@ export class ExpertTaskStore {
     sourceMetadata?: TaskSourceMetadata,
     verificationResultsInput?: VerificationEvidenceResult[],
     workspaceChangeSummaryInput?: WorkspaceChangeSummary,
+    runtimeSessionIdInput?: string,
   ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -650,6 +655,27 @@ export class ExpertTaskStore {
       const verificationResults = normalizeVerificationEvidenceResults(verificationResultsInput);
       const workspaceChangeSummary =
         workspaceChangeSummaryInput === undefined ? null : normalizeWorkspaceChangeSummary(workspaceChangeSummaryInput);
+      const runtimeSessionId =
+        runtimeSessionIdInput === undefined
+          ? null
+          : /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(runtimeSessionIdInput.trim())
+            ? runtimeSessionIdInput.trim()
+            : (() => {
+                throw new Error("INVALID_RUNTIME_SESSION_ID");
+              })();
+      const currentSession = this.db
+        .prepare(
+          "SELECT runtime_session_id FROM expert_tasks WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running'",
+        )
+        .get(claim.taskId, claim.runId, claim.workerId, claim.fencing) as Row | undefined;
+      if (!currentSession) throw new Error("STALE_ATTEMPT");
+      if (
+        runtimeSessionId &&
+        currentSession.runtime_session_id != null &&
+        String(currentSession.runtime_session_id) !== runtimeSessionId
+      ) {
+        throw new Error("RUNTIME_SESSION_MISMATCH");
+      }
       if (workspaceChangeSummary && (!source?.commitSha || workspaceChangeSummary.baseCommit !== source.commitSha)) {
         throw new Error("WORKSPACE_CHANGE_BASE_MISMATCH");
       }
@@ -665,7 +691,7 @@ export class ExpertTaskStore {
       }
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),verification_results_json=?,workspace_change_summary_json=?,lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
+          "UPDATE expert_tasks SET status='succeeded',result=?,repository_url=COALESCE(?,repository_url),repository_branch=COALESCE(?,repository_branch),commit_sha=COALESCE(?,commit_sha),verification_results_json=?,workspace_change_summary_json=?,runtime_session_id=COALESCE(?,runtime_session_id),lease_until=NULL WHERE task_id=? AND run_id=? AND worker_id=? AND fencing=? AND status='running' AND cancellation_requested=0 AND lease_until>=?",
         )
         .run(
           result,
@@ -674,6 +700,7 @@ export class ExpertTaskStore {
           source?.commitSha ?? null,
           JSON.stringify(verificationResults),
           workspaceChangeSummary ? JSON.stringify(workspaceChangeSummary) : null,
+          runtimeSessionId,
           claim.taskId,
           claim.runId,
           claim.workerId,
@@ -1367,6 +1394,7 @@ export class ExpertTaskStore {
       requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
       continuationCount: Number(row.continuation_count ?? 0),
       continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
+      runtimeSessionId: row.runtime_session_id == null ? null : String(row.runtime_session_id),
       runId: row.run_id == null ? null : String(row.run_id),
     };
   }

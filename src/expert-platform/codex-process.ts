@@ -99,6 +99,7 @@ export interface CodexProcessOptions {
   /** Opt-in: consume JSONL incrementally without retaining the complete stdout. */
   streamingBackend?: "claude" | "codex";
   onActivity?: (activity: ExecutionActivity) => void;
+  onRuntimeSessionId?: (sessionId: string) => void;
 }
 /** Low-level subprocess transport; caller must enforce container isolation. */
 export async function runCodexProcess(options: CodexProcessOptions): Promise<string> {
@@ -159,6 +160,8 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
       else {
         try {
           if (reader) reader.finish();
+          const sessionId = collector?.sessionId();
+          if (sessionId) options.onRuntimeSessionId?.(sessionId);
           resolve(collector ? collector.result() : (options.parseResult ?? parseCodexJsonlResult)(output));
         } catch (parseError) {
           reject(parseError);

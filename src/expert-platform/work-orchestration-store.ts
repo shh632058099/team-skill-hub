@@ -193,7 +193,7 @@ export interface WorkspaceRecord {
   repositoryUrl: string | null;
   branch: string | null;
   baseCommit: string | null;
-  state: "ready" | "in_use" | "retained" | "cleaning" | "removed" | "failed";
+  state: "allocating" | "ready" | "in_use" | "retained" | "cleaning" | "removed" | "failed";
   cleanupPolicy: "on_terminal" | "retain";
   createdAt: number;
   lastUsedAt: number;
@@ -469,7 +469,7 @@ export class WorkOrchestrationStore {
         "  repository_url TEXT,",
         "  branch TEXT,",
         "  base_commit TEXT,",
-        "  state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','cleaning','removed','failed')),",
+        "  state TEXT NOT NULL CHECK(state IN ('allocating','ready','in_use','retained','cleaning','removed','failed')),",
         "  cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
         "  created_at INTEGER NOT NULL,",
         "  last_used_at INTEGER NOT NULL",
@@ -588,7 +588,7 @@ export class WorkOrchestrationStore {
     const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_workspaces'").get() as
       { sql?: string } | undefined;
     const sql = row?.sql ?? "";
-    if (sql.includes("'cleaning'") && sql.includes("'retain'")) return;
+    if (sql.includes("'allocating'") && sql.includes("'cleaning'") && sql.includes("'retain'")) return;
     this.db.exec("PRAGMA foreign_keys=OFF");
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -600,7 +600,7 @@ export class WorkOrchestrationStore {
           " work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
           " work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
           " owner_worker_id TEXT, path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
-          " state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','cleaning','removed','failed')),",
+          " state TEXT NOT NULL CHECK(state IN ('allocating','ready','in_use','retained','cleaning','removed','failed')),",
           " cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
           " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL",
           ");",
@@ -1459,7 +1459,7 @@ export class WorkOrchestrationStore {
     try {
       this.db
         .prepare(
-          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,'ready',?,?,?)",
+          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,'allocating',?,?,?)",
         )
         .run(
           workspaceId,
@@ -1730,9 +1730,6 @@ export class WorkOrchestrationStore {
     },
     now = Date.now(),
   ): WorkEvidenceRecord {
-    const work = this.getWork(workItemId, principalId, scope);
-    const attempt = this.getWorkAttempt(input.workAttemptId);
-    if (attempt.workItemId !== workItemId) throw new Error("EVIDENCE_ATTEMPT_MISMATCH");
     const type = requiredText(input.type, 200);
     const subjectRevision = requiredText(input.subjectRevision, 500);
     if (
@@ -1745,67 +1742,105 @@ export class WorkOrchestrationStore {
     ) {
       throw new Error("INVALID_WORK_EVIDENCE");
     }
-    if (!work.currentSubjectRevision || work.currentSubjectRevision !== subjectRevision) {
-      const publicationMatch =
-        type === "publication" ? /^publication:([0-9a-f-]{36}):([a-f0-9]{40,64})$/i.exec(subjectRevision) : null;
-      const publication = publicationMatch
-        ? (this.db
-            .prepare(
-              "SELECT publication_id,commit_sha,state,source_subject_revision,artifact_ref FROM work_publications WHERE publication_id=? AND work_item_id=?",
-            )
-            .get(publicationMatch[1]!, workItemId) as Row | undefined)
-        : undefined;
-      if (
-        !publication ||
-        publication.state !== "pushed" ||
-        String(publication.commit_sha ?? "").toLowerCase() !== publicationMatch![2]!.toLowerCase() ||
-        String(publication.source_subject_revision ?? "") !== work.currentSubjectRevision ||
-        String(publication.artifact_ref ?? "") !== (input.artifactRef?.trim() || "")
-      ) {
-        throw new Error("STALE_WORK_SUBJECT");
+
+    const taskId = input.taskId?.trim() || null;
+    const runId = input.runId?.trim() || null;
+    const summary = input.summary?.trim() || null;
+    const artifactRef = input.artifactRef?.trim() || null;
+    const environmentIdentity = input.environmentIdentity?.trim() || null;
+    const verifierIdentity = input.verifierIdentity?.trim() || null;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      const attempt = this.getWorkAttempt(input.workAttemptId);
+      if (attempt.workItemId !== workItemId) throw new Error("EVIDENCE_ATTEMPT_MISMATCH");
+
+      if (!work.currentSubjectRevision || work.currentSubjectRevision !== subjectRevision) {
+        const publicationMatch =
+          type === "publication" ? /^publication:([0-9a-f-]{36}):([a-f0-9]{40,64})$/i.exec(subjectRevision) : null;
+        const publication = publicationMatch
+          ? (this.db
+              .prepare(
+                "SELECT publication_id,commit_sha,state,source_subject_revision,artifact_ref FROM work_publications WHERE publication_id=? AND work_item_id=?",
+              )
+              .get(publicationMatch[1]!, workItemId) as Row | undefined)
+          : undefined;
+        if (
+          !publication ||
+          publication.state !== "pushed" ||
+          String(publication.commit_sha ?? "").toLowerCase() !== publicationMatch![2]!.toLowerCase() ||
+          String(publication.source_subject_revision ?? "") !== work.currentSubjectRevision ||
+          String(publication.artifact_ref ?? "") !== artifactRef
+        ) {
+          throw new Error("STALE_WORK_SUBJECT");
+        }
       }
+
+      const existing = this.db
+        .prepare(
+          "SELECT * FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND source=? AND subject_revision=? AND task_id IS ? AND run_id IS ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(workItemId, input.workAttemptId, type, input.source, subjectRevision, taskId, runId) as Row | undefined;
+      if (existing) {
+        this.db.exec("COMMIT");
+        return this.fromEvidenceRow(existing);
+      }
+
+      let staleCount = 0;
+      if (input.source !== "agent_reported") {
+        const stale = this.db
+          .prepare(
+            "UPDATE work_evidence SET stale=1 WHERE work_item_id=? AND work_attempt_id=? AND type=? AND subject_revision=? AND source<>'agent_reported' AND stale=0",
+          )
+          .run(workItemId, input.workAttemptId, type, subjectRevision);
+        staleCount = Number(stale.changes);
+      }
+
+      const evidenceId = randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO work_evidence(evidence_id,work_item_id,work_attempt_id,task_id,run_id,type,status,source,summary,artifact_ref,subject_revision,environment_identity,verifier_identity,stale,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+        )
+        .run(
+          evidenceId,
+          workItemId,
+          input.workAttemptId,
+          taskId,
+          runId,
+          type,
+          input.status,
+          input.source,
+          summary,
+          artifactRef,
+          subjectRevision,
+          environmentIdentity,
+          verifierIdentity,
+          now,
+        );
+      if (staleCount > 0) {
+        this.event(
+          workItemId,
+          input.workAttemptId,
+          "evidence.staled",
+          JSON.stringify({
+            count: staleCount,
+            reason: "verification_binding_superseded",
+            type,
+            subjectRevision,
+          }),
+          now,
+        );
+      }
+      this.event(workItemId, input.workAttemptId, "evidence.recorded", JSON.stringify({ evidenceId, type }), now);
+      const row = this.db.prepare("SELECT * FROM work_evidence WHERE evidence_id=?").get(evidenceId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromEvidenceRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-
-    const existing = this.db
-      .prepare(
-        "SELECT * FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND source=? AND subject_revision=? AND task_id IS ? AND run_id IS ? ORDER BY created_at DESC LIMIT 1",
-      )
-      .get(
-        workItemId,
-        input.workAttemptId,
-        type,
-        input.source,
-        subjectRevision,
-        input.taskId?.trim() || null,
-        input.runId?.trim() || null,
-      ) as Row | undefined;
-    if (existing) return this.fromEvidenceRow(existing);
-    const evidenceId = randomUUID();
-    this.db
-      .prepare(
-        "INSERT INTO work_evidence(evidence_id,work_item_id,work_attempt_id,task_id,run_id,type,status,source,summary,artifact_ref,subject_revision,environment_identity,verifier_identity,stale,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
-      )
-      .run(
-        evidenceId,
-        workItemId,
-        input.workAttemptId,
-        input.taskId?.trim() || null,
-        input.runId?.trim() || null,
-        type,
-        input.status,
-        input.source,
-        input.summary?.trim() || null,
-        input.artifactRef?.trim() || null,
-        subjectRevision,
-        input.environmentIdentity?.trim() || null,
-        input.verifierIdentity?.trim() || null,
-        now,
-      );
-    this.event(workItemId, input.workAttemptId, "evidence.recorded", JSON.stringify({ evidenceId, type }), now);
-    const row = this.db.prepare("SELECT * FROM work_evidence WHERE evidence_id=?").get(evidenceId) as Row;
-    return this.fromEvidenceRow(row);
   }
-
   listEvidence(workItemId: string): WorkEvidenceRecord[] {
     return (
       this.db

@@ -233,3 +233,16 @@ The next numbered items in the approved spec are external/provider work and rema
 - 18. External CI / Human Review / Merge gate automation.
 
 Do not start these provider-specific items until explicitly requested. Future work should continue from the provider-neutral source boundary rather than adding provider fields to WorkItem/ExpertTask.
+
+### 2026-11-11 strict spec review follow-up
+
+A second implementation-level review closed the remaining internal Phase 1 gaps without starting provider adapters:
+
+- Verification Evidence now supersedes older authoritative Evidence for the same WorkAttempt / subject revision / evidence type. The stale transition and replacement Evidence insert are one SQLite transaction, so an old PASS cannot remain Completion-Gate-valid after a newer authoritative FAIL for the same verified subject.
+- Worker verification binding now includes Worker identity, executor backend, runtime profile, configured execution image, and a hash of the pinned validation policy. The verifier identity is versioned, so environment/policy changes produce a distinct verification binding rather than silently reusing an old proof.
+- Workspace logical identity now starts in `allocating`; only the Worker `workspace.ready` report assigns owner/path and moves it to `ready`. Existing workspace tables migrate in place.
+- Source identity was clarified in the approved spec as unique inside the Work authorization/tenant boundary (`principal_id + scope` in the current model). Global source-tuple uniqueness would conflict with the existing Work authorization boundary and is intentionally not used.
+
+Process-level continuation now also preserves the Agent runtime session identity. Claude/Codex sessions are persisted inside the Work workspace, their bounded runtime session id is returned through the Worker protocol, stored on ExpertTask, and reused on the next Run via Claude `--resume` / Codex `exec resume`. The durable hierarchy therefore remains same WorkAttempt + same ExpertTask + same Workspace, while a process-exit continuation creates a new Run that resumes the same Agent session. A truly interactive continuation inside an already-live Run is still not claimed because the current subprocess transport is non-interactive; this is the spec-compliant fallback when the prior process has exited.
+
+Validation after the source changes: runtime-session focused tests passed 74/74; final `npm run check` passed with **751/751 tests**, 0 failures, including formatting, ESLint, TypeScript build, and tests.

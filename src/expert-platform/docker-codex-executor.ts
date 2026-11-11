@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -261,7 +270,11 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         JSON.stringify(claim.modelConfig) !== JSON.stringify(claim.deploymentSnapshot.executor.modelConfig))
     )
       throw new Error("INVALID_DEPLOYMENT_SNAPSHOT");
-    const streaming = process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0" && !options.runProcess;
+    const streaming =
+      !options.runProcess && (Boolean(claim.workspaceKey) || process.env.EXPERT_ACTIVITY_STREAM_ENABLED !== "0");
+    const runtimeSession = claim.workspaceKey
+      ? { persist: true, ...(claim.runtimeSessionId ? { resumeId: claim.runtimeSessionId } : {}) }
+      : undefined;
     let codexArgs =
       backend === "claude"
         ? buildClaudeArgs(
@@ -270,8 +283,9 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
             streaming,
             options.claudeMaxTurns ?? 12,
             runtimePolicy.agentPermissions,
+            runtimeSession,
           )
-        : buildCodexArgs(claim.problem, runtimePolicy.agentPermissions);
+        : buildCodexArgs(claim.problem, runtimePolicy.agentPermissions, runtimeSession);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
     // worker's unrelated default sourcePath. Legacy IDs retain compatibility.
@@ -323,6 +337,15 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       );
     }
     const sourcePath = preparedRepository?.path ?? options.sourcePath;
+    let runtimeStatePath: string | undefined;
+    let runtimeStateTarget: "/home/expert/.codex" | "/home/expert/.claude" | undefined;
+    if (preparedRepository && claim.workspaceKey) {
+      runtimeStatePath = path.join(path.dirname(preparedRepository.path), ".runtime-session", backend);
+      mkdirSync(runtimeStatePath, { recursive: true });
+      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
+      grantExecutionContainerAccess(runtimeStatePath, "read-write", workerGroupId);
+      runtimeStateTarget = backend === "claude" ? "/home/expert/.claude" : "/home/expert/.codex";
+    }
     let generatedConfigDir: string | undefined;
     let configFilePath = options.configFilePath;
     let envNames = options.envNames;
@@ -339,6 +362,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         streaming,
         options.claudeMaxTurns ?? 12,
         runtimePolicy.agentPermissions,
+        runtimeSession,
       );
     }
     let claudeChildEnv: NodeJS.ProcessEnv | undefined;
@@ -485,6 +509,8 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         configFilePath,
         mcpConfigFilePath,
         codexArgs,
+        runtimeStatePath,
+        runtimeStateTarget,
       });
       if (backend === "claude") {
         // Docker entrypoint is the Claude CLI for Claude-specific images.
@@ -519,6 +545,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
             });
         }
       };
+      let runtimeSessionId = claim.runtimeSessionId ?? undefined;
       try {
         result = await runProcess({
           executable: "docker",
@@ -528,6 +555,10 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           maxOutputBytes: options.maxOutputBytes ?? (streaming ? 64 * 1024 * 1024 : undefined),
           signal,
           onAbort: () => stopDockerContainer(containerName),
+          onRuntimeSessionId: (sessionId) => {
+            if (runtimeSessionId && runtimeSessionId !== sessionId) throw new Error("RUNTIME_SESSION_MISMATCH");
+            runtimeSessionId = sessionId;
+          },
           ...(claudeChildEnv || mcpChildEnv || mcpProxyBypassEnv
             ? {
                 env: {
@@ -596,13 +627,24 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
             supplementalGroupId: workerGroupId,
           },
         );
+        const validationPolicyHash = createHash("sha256")
+          .update(JSON.stringify(claim.validationSnapshot ?? []))
+          .digest("hex")
+          .slice(0, 16);
+        const verificationEnvironmentIdentity = [
+          `worker:${claim.workerId}`,
+          `backend:${backend}`,
+          `profile:${runtimeProfile ?? "legacy"}`,
+          `image:${options.image}`,
+        ].join("|");
+        const verifierIdentity = `team-skill-hub-worker@1|policy:${validationPolicyHash}`;
         verificationResults = rawVerification.map((verification) => ({
           ...verification,
           subjectRevision: workspaceChangeSummary
             ? `workspace:${workspaceChangeSummary.contentRevision}`
             : preparedRepository.commitSha,
-          environmentIdentity: `worker:${claim.workerId}`,
-          verifierIdentity: "team-skill-hub-worker",
+          environmentIdentity: verificationEnvironmentIdentity,
+          verifierIdentity,
         }));
       }
       await report("container.completed");
@@ -616,6 +658,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
             },
             ...(verificationResults ? { verificationResults } : {}),
             ...(workspaceChangeSummary ? { workspaceChangeSummary } : {}),
+            ...(runtimeSessionId ? { runtimeSessionId } : {}),
           }
         : result;
     } finally {

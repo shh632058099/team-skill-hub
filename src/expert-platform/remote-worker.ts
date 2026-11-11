@@ -8,6 +8,7 @@ export type WorkerExecutionResult = {
   source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string };
   verificationResults?: VerificationEvidenceResult[];
   workspaceChangeSummary?: WorkspaceChangeSummary;
+  runtimeSessionId?: string;
 };
 
 export type WorkspaceCleanupLease = {
@@ -30,6 +31,7 @@ export interface RemoteWorkerClient {
     source?: WorkerExecutionResult["source"],
     verificationResults?: VerificationEvidenceResult[],
     workspaceChangeSummary?: WorkspaceChangeSummary,
+    runtimeSessionId?: string,
   ): Promise<unknown>;
   failTask(claim: Claim, reason: string): Promise<unknown>;
   reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
@@ -128,7 +130,8 @@ export async function runRemoteWorkerOnce(
     const source = typeof execution === "string" ? undefined : execution.source;
     const verificationResults = typeof execution === "string" ? undefined : execution.verificationResults;
     const workspaceChangeSummary = typeof execution === "string" ? undefined : execution.workspaceChangeSummary;
-    await client.completeTask(claim, result, source, verificationResults, workspaceChangeSummary);
+    const runtimeSessionId = typeof execution === "string" ? undefined : execution.runtimeSessionId;
+    await client.completeTask(claim, result, source, verificationResults, workspaceChangeSummary, runtimeSessionId);
     return true;
   } finally {
     clearInterval(heartbeat);

@@ -126,3 +126,42 @@ test("Docker Codex executor makes only workspace writable while root and config 
   assert.ok(args.includes("type=bind,src=/etc/expert/config.toml,dst=/run/codex-config.toml,readonly"));
   assert.ok(args.includes("type=bind,src=/etc/expert/mcp.json,dst=/run/expert-mcp.json,readonly"));
 });
+
+test("Docker executor bind-mounts only an explicit runtime session directory", () => {
+  const args = buildCodexDockerArgs({
+    image: "worker",
+    sourcePath: "/work/repo",
+    network: "expert-egress",
+    envNames: [],
+    runtimeStatePath: "/work/work-1/.runtime-session/codex",
+    runtimeStateTarget: "/home/expert/.codex",
+    codexArgs: ["exec", "--json", "inspect"],
+  });
+  assert.ok(args.includes("type=bind,src=/work/work-1/.runtime-session/codex,dst=/home/expert/.codex"));
+  assert.throws(
+    () =>
+      buildCodexDockerArgs({
+        image: "worker",
+        sourcePath: "/work/repo",
+        network: "expert-egress",
+        envNames: [],
+        runtimeStatePath: "../escape",
+        runtimeStateTarget: "/home/expert/.codex",
+        codexArgs: ["exec", "inspect"],
+      }),
+    /INVALID_RUNTIME_STATE_PATH/,
+  );
+  assert.throws(
+    () =>
+      buildCodexDockerArgs({
+        image: "worker",
+        sourcePath: "/work/repo",
+        network: "expert-egress",
+        envNames: [],
+        runtimeStatePath: "/work/runtime",
+        runtimeStateTarget: "/etc",
+        codexArgs: ["exec", "inspect"],
+      }),
+    /INVALID_RUNTIME_STATE_TARGET/,
+  );
+});

@@ -398,7 +398,7 @@ completed_at
 - 生命周期可跨多个 ExpertTask。
 - 可来自 Tracker，也可来自 MCP / Admin。
 - WorkItem 自己拥有最终状态。
-- `source_type + source_scope + source_ref` 对 Tracker 类来源形成稳定外部身份；同一 source tuple 不能创建多个有效 WorkItem。
+- `source_type + source_scope + source_ref` 对 Tracker 类来源形成稳定外部身份；去重边界必须与 Work 的授权/租户边界一致，因此同一 `principal_id + scope` 内同一 source tuple 不能创建多个有效 WorkItem，不跨授权边界复用 WorkItem。
 - `idempotency_key` 用于 MCP / Admin / Automation 创建请求的重试去重。
 - `state_revision + orchestration_epoch` 用于 CAS / fencing；`active_work_attempt_id` 是当前方案级执行的 durable pointer。
 
@@ -1561,11 +1561,13 @@ source_scope
 source_ref
 ```
 
-Tracker 类 WorkItem 应满足等价于：
+Tracker 类 WorkItem 的 source tuple 在当前 Work 授权/租户边界内必须唯一。当前模型中该边界由 `principal_id + scope` 表达，因此持久化约束应满足等价于：
 
 ```text
-UNIQUE(source_type, source_scope, source_ref)
+UNIQUE(principal_id, scope, source_type, source_scope, source_ref)
 ```
+
+如果未来引入独立的 tenant/workspace 主键，应以该稳定租户边界替代 `principal_id + scope`，但不得因为全局 source tuple 去重而跨授权边界复用或暴露 WorkItem。
 
 MCP / Admin / Automation 创建 WorkItem 使用 idempotency key，避免重试、客户端断线或 webhook + polling 并发导致重复 WorkItem。
 
@@ -1958,7 +1960,7 @@ Phase 1 continuation / retry 优先回到 Workspace owner Worker；无法核验�
 
 ### D-17：Source Identity Is Idempotent
 
-Tracker Work 使用稳定 source tuple 去重；MCP / Admin / Automation 创建 Work 使用 idempotency key，Work 层不能重新引入 ExpertTask 已解决过的重复提交问题。
+Tracker Work 使用稳定 source tuple 在 Work 的授权/租户边界内去重；MCP / Admin / Automation 创建 Work 使用 idempotency key。source 去重不得跨授权边界复用 WorkItem，Work 层也不能重新引入 ExpertTask 已解决过的重复提交问题。
 
 ---
 

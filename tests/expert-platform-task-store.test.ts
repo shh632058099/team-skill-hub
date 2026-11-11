@@ -758,6 +758,48 @@ test("continuation can be pinned to its workspace owner worker", () => {
   }
 });
 
+test("runtime session identity survives process-level continuation and is fenced", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-continuation-session-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      idempotencyKey: "continuation-session",
+      problem: "inspect",
+      workItemId: "work-session",
+      workAttemptId: "attempt-session",
+      workflowId: "work-default",
+      workflowVersion: 1,
+      workspaceKey: "work-session-a1",
+    });
+    const sessionId = "55555555-5555-4555-8555-555555555555";
+    const first = store.claim("worker-a", 100, 10_000)!;
+    assert.equal(first.runtimeSessionId ?? null, null);
+    store.complete(first, "first result", 200, undefined, undefined, undefined, sessionId);
+    assert.equal(store.get(task.taskId, "alice", "tenant").runtimeSessionId, sessionId);
+
+    store.scheduleContinuation(task.taskId, first.runId, "continue", 300, "worker-a");
+    const second = store.claim("worker-a", 400, 10_000)!;
+    assert.equal(second.runtimeSessionId, sessionId);
+    assert.throws(
+      () =>
+        store.complete(
+          second,
+          "second result",
+          500,
+          undefined,
+          undefined,
+          undefined,
+          "66666666-6666-4666-8666-666666666666",
+        ),
+      /RUNTIME_SESSION_MISMATCH/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("standalone expert tasks keep null work linkage", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-standalone-link-"));
   try {

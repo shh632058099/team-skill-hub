@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { test } from "node:test";
 import { createDockerCodexExecutor } from "../src/expert-platform/docker-codex-executor.js";
@@ -179,7 +180,19 @@ test("Docker executor runs pinned verification in the prepared workspace and ret
       network: "bridge",
       envNames: [],
       timeoutMs: 1_000,
-      runProcess: async () => "agent result",
+      runProcess: async (options) => {
+        assert.ok(!options.args.includes("--ephemeral"));
+        assert.ok(
+          options.args.some(
+            (arg) =>
+              arg.startsWith("type=bind,src=") &&
+              arg.includes("/work-1-a1/.runtime-session/codex") &&
+              arg.endsWith(",dst=/home/expert/.codex"),
+          ),
+        );
+        options.onRuntimeSessionId?.("88888888-8888-4888-8888-888888888888");
+        return "agent result";
+      },
       runVerificationPolicy: async (_workspace, policy) =>
         policy.map((step) => ({
           stepId: step.id,
@@ -214,6 +227,17 @@ test("Docker executor runs pinned verification in the prepared workspace and ret
 
     assert.equal(typeof result, "object");
     assert.equal((result as { source?: { commitSha?: string } }).source?.commitSha, commitSha);
+    assert.equal((result as { runtimeSessionId?: string }).runtimeSessionId, "88888888-8888-4888-8888-888888888888");
+    const validationSnapshot = [
+      {
+        id: "marker",
+        type: "command" as const,
+        argv: [process.execPath, "-e", "require('fs').accessSync('marker.txt')"],
+        timeoutMs: 2_000,
+        evidenceType: "unit_test",
+      },
+    ];
+    const policyHash = createHash("sha256").update(JSON.stringify(validationSnapshot)).digest("hex").slice(0, 16);
     assert.deepEqual((result as { verificationResults?: unknown[] }).verificationResults, [
       {
         stepId: "marker",
@@ -223,8 +247,8 @@ test("Docker executor runs pinned verification in the prepared workspace and ret
         exitCode: 0,
         errorCode: null,
         subjectRevision: commitSha,
-        environmentIdentity: "worker:worker-1",
-        verifierIdentity: "team-skill-hub-worker",
+        environmentIdentity: "worker:worker-1|backend:codex|profile:legacy|image:expert-worker",
+        verifierIdentity: `team-skill-hub-worker@1|policy:${policyHash}`,
         durationMs: (result as { verificationResults: Array<{ durationMs: number }> }).verificationResults[0]!
           .durationMs,
       },

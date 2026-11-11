@@ -99,10 +99,12 @@ test("workspace identity is deterministic and records owner affinity", () => {
     assert.equal(again.workspaceId, first.workspaceId);
     assert.equal(again.workspaceKey, first.workspaceKey);
     assert.match(first.workspaceKey, /^work-[a-f0-9-]+-a1$/);
+    assert.equal(first.state, "allocating");
 
     const assigned = store.assignWorkspaceOwner(first.workspaceId, "worker-a", "/srv/work/a");
     assert.equal(assigned.ownerWorkerId, "worker-a");
     assert.equal(assigned.path, "/srv/work/a");
+    assert.equal(assigned.state, "ready");
     assert.equal(store.getWorkAttempt(attempt.workAttemptId).workspaceId, first.workspaceId);
   });
 });
@@ -548,6 +550,84 @@ test("completion gate rejects failed and stale required verification evidence", 
     assert.ok(
       store.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("required_evidence:unit_test"),
     );
+  });
+});
+
+test("new authoritative verification binding stales older evidence for the same subject", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default", 1).definition;
+    store.putWorkflow("binding-stale", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: ["unit_test"], required: [] },
+      review: { humanReview: false },
+      completion: {
+        require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
+      },
+    });
+
+    let work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "binding-stale",
+      sourceType: "mcp",
+      title: "Verification binding",
+      description: "latest authoritative verification context must win",
+      workflowId: "binding-stale",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 1,
+    });
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    const subject = "workspace:" + "a".repeat(64);
+    work = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, subject);
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      runId: "run-a",
+      type: "unit_test",
+      status: "passed",
+      source: "worker_verified",
+      subjectRevision: subject,
+      environmentIdentity: "worker:one|toolchain:v1",
+      verifierIdentity: "team-skill-hub-verifier@1",
+    });
+    work = store.finishWorkAttempt(
+      work.workItemId,
+      attempt.workAttemptId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    assert.equal(store.evaluateCompletionGate(work.workItemId, "alice", "team-a").ready, true);
+
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      runId: "run-b",
+      type: "unit_test",
+      status: "failed",
+      source: "worker_verified",
+      subjectRevision: subject,
+      environmentIdentity: "worker:two|toolchain:v2",
+      verifierIdentity: "team-skill-hub-verifier@2",
+    });
+
+    const evidence = store.listEvidence(work.workItemId);
+    assert.equal(evidence.length, 2);
+    assert.equal(evidence[0]!.status, "passed");
+    assert.equal(evidence[0]!.stale, true);
+    assert.equal(evidence[1]!.status, "failed");
+    assert.equal(evidence[1]!.stale, false);
+    assert.ok(
+      store.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("required_evidence:unit_test"),
+    );
+    const staleEvents = store
+      .listEvents(work.workItemId)
+      .events.filter((event) => event.eventType === "evidence.staled");
+    assert.equal(staleEvents.at(-1)?.details?.reason, "verification_binding_superseded");
   });
 });
 

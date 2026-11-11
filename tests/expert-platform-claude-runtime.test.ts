@@ -33,6 +33,21 @@ test("Claude streaming args preserve sandbox and read-only tool restriction", ()
   assert.ok(args.includes("dontAsk"));
 });
 
+test("Claude Work session persists and resumes without weakening tool policy", () => {
+  const initial = buildClaudeArgs("Inspect OTA", "sonnet", true, 12, "read-only", { persist: true });
+  assert.ok(!initial.includes("--no-session-persistence"));
+  assert.equal(initial[initial.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
+
+  const resumed = buildClaudeArgs("Continue OTA", "sonnet", true, 12, "workspace-write", {
+    persist: true,
+    resumeId: "22222222-2222-4222-8222-222222222222",
+  });
+  assert.ok(!resumed.includes("--no-session-persistence"));
+  assert.equal(resumed[resumed.indexOf("--resume") + 1], "22222222-2222-4222-8222-222222222222");
+  assert.equal(resumed[resumed.indexOf("--allowedTools") + 1], "Read,Glob,Grep,Edit,Write");
+  assert.ok(!resumed.includes("Bash"));
+});
+
 test("Claude output accepts successful structured response and rejects failure or malformed response", () => {
   assert.equal(
     parseClaudeResult(

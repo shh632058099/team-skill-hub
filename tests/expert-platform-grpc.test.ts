@@ -22,6 +22,7 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
       idempotencyKey: "grpc",
       problem: "investigate OTA failure",
       expertId: "ota",
+      workspaceKey: "grpc-work-a1",
     });
 
     const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0");
@@ -42,11 +43,18 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     assert.equal(observed.events.filter((event) => event.type === "tool.activity").length, 1);
 
     await assert.rejects(() => client.reportTaskStage(claim!, "codex.started", "Bearer secret"), /INVALID_STAGE_EVENT/);
-    await client.completeTask(claim!, "verified root cause", {
-      repositoryUrl: "https://github.com/example/ota.git",
-      repositoryBranch: "release",
-      commitSha: "abcdef0123456789abcdef0123456789abcdef01",
-    });
+    await client.completeTask(
+      claim!,
+      "verified root cause",
+      {
+        repositoryUrl: "https://github.com/example/ota.git",
+        repositoryBranch: "release",
+        commitSha: "abcdef0123456789abcdef0123456789abcdef01",
+      },
+      undefined,
+      undefined,
+      "99999999-9999-4999-8999-999999999999",
+    );
     const completed = tasks.get(submitted.taskId, "alice", "org");
     assert.equal(completed.result, "verified root cause");
     assert.ok(
@@ -57,6 +65,7 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     assert.equal(completed.repositoryUrl, "https://github.com/example/ota.git");
     assert.equal(completed.repositoryBranch, "release");
     assert.equal(completed.commitSha, "abcdef0123456789abcdef0123456789abcdef01");
+    assert.equal(completed.runtimeSessionId, "99999999-9999-4999-8999-999999999999");
 
     client.close();
     await server.close();

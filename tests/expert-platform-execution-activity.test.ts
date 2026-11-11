@@ -75,14 +75,39 @@ test("Codex adapter yields safe activity and validates completed final message",
   assert.throws(() => failure.result(), /CODEX_TURN_FAILED/);
 });
 
+test("stream collectors capture bounded runtime session identity", () => {
+  const claude = new StreamResultCollector("claude");
+  claude.accept({ type: "system", subtype: "init", session_id: "33333333-3333-4333-8333-333333333333" });
+  claude.accept({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "done",
+    session_id: "33333333-3333-4333-8333-333333333333",
+  });
+  assert.equal(claude.sessionId(), "33333333-3333-4333-8333-333333333333");
+
+  const codex = new StreamResultCollector("codex");
+  codex.accept({ type: "thread.started", thread_id: "44444444-4444-4444-8444-444444444444" });
+  codex.accept({ type: "item.completed", item: { type: "agent_message", text: "done" } });
+  codex.accept({ type: "turn.completed" });
+  assert.equal(codex.sessionId(), "44444444-4444-4444-8444-444444444444");
+
+  assert.throws(
+    () => codex.accept({ type: "thread.started", thread_id: "x".repeat(201) }),
+    /INVALID_RUNTIME_SESSION_ID/,
+  );
+});
+
 test("opt-in subprocess streaming produces activities and report before legacy buffer limit", async () => {
   const { runCodexProcess } = await import("../src/expert-platform/codex-process.js");
   const events = [
-    { type: "system", subtype: "init" },
+    { type: "system", subtype: "init", session_id: "77777777-7777-4777-8777-777777777777" },
     { type: "assistant", message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "secret" } }] } },
     { type: "result", subtype: "success", is_error: false, result: "done" },
   ];
   const activities: string[] = [];
+  let runtimeSessionId = "";
   const report = await runCodexProcess({
     executable: process.execPath,
     args: [
@@ -92,8 +117,12 @@ test("opt-in subprocess streaming produces activities and report before legacy b
     timeoutMs: 5000,
     streamingBackend: "claude",
     onActivity: (activity) => activities.push(activity.kind),
+    onRuntimeSessionId: (sessionId) => {
+      runtimeSessionId = sessionId;
+    },
   });
   assert.equal(report, "done");
+  assert.equal(runtimeSessionId, "77777777-7777-4777-8777-777777777777");
   assert.deepEqual(activities, ["model.started", "tool.activity", "model.completed"]);
 });
 

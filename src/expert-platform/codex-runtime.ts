@@ -1,12 +1,45 @@
-export function buildCodexArgs(problem: string, permissions: "read-only" | "workspace-write"): string[] {
+export type RuntimeSessionOptions = { persist: boolean; resumeId?: string };
+
+function validateRuntimeSessionId(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(normalized)) throw new Error("INVALID_RUNTIME_SESSION_ID");
+  return normalized;
+}
+
+export function buildCodexArgs(
+  problem: string,
+  permissions: "read-only" | "workspace-write",
+  session?: RuntimeSessionOptions,
+): string[] {
   if (!problem.trim() || problem.length > 10_000) throw new Error("INVALID_REQUEST");
-  return ["exec", "--sandbox", permissions, "--ephemeral", "--json", "--skip-git-repo-check", problem];
+  const resumeId = session?.resumeId ? validateRuntimeSessionId(session.resumeId) : undefined;
+  if (resumeId && session?.persist !== true) throw new Error("INVALID_RUNTIME_SESSION");
+  if (resumeId) {
+    return [
+      "exec",
+      "resume",
+      "-c",
+      `sandbox_mode="${permissions}"`,
+      "--json",
+      "--skip-git-repo-check",
+      resumeId,
+      problem,
+    ];
+  }
+  return [
+    "exec",
+    "--sandbox",
+    permissions,
+    ...(session?.persist ? [] : ["--ephemeral"]),
+    "--json",
+    "--skip-git-repo-check",
+    problem,
+  ];
 }
 
 export function buildCodexReadOnlyArgs(problem: string): string[] {
   return buildCodexArgs(problem, "read-only");
 }
-
 export function parseCodexJsonlResult(jsonl: string): string {
   if (jsonl.length > 4 * 1024 * 1024) throw new Error("CODEX_OUTPUT_LIMIT");
   let succeeded = false;

@@ -24,3 +24,21 @@ test("Codex invocation uses workspace-write sandbox only for write policy", () =
   assert.deepEqual(args.slice(0, 5), ["exec", "--sandbox", "workspace-write", "--ephemeral", "--json"]);
   assert.ok(!args.includes("danger-full-access"));
 });
+
+test("Codex Work session persists initially and resumes with the same sandbox policy", () => {
+  const initial = buildCodexArgs("Inspect OTA", "read-only", { persist: true });
+  assert.deepEqual(initial.slice(0, 4), ["exec", "--sandbox", "read-only", "--json"]);
+  assert.ok(!initial.includes("--ephemeral"));
+
+  const resumed = buildCodexArgs("Continue OTA", "workspace-write", {
+    persist: true,
+    resumeId: "11111111-1111-4111-8111-111111111111",
+  });
+  assert.deepEqual(resumed.slice(0, 2), ["exec", "resume"]);
+  assert.ok(resumed.includes('sandbox_mode="workspace-write"'));
+  assert.ok(resumed.includes("--json"));
+  assert.ok(!resumed.includes("--ephemeral"));
+  assert.ok(!resumed.includes("--sandbox"));
+  assert.equal(resumed.at(-2), "11111111-1111-4111-8111-111111111111");
+  assert.equal(resumed.at(-1), "Continue OTA");
+});

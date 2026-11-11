@@ -51,6 +51,7 @@ interface ClaimTaskResponse {
   deployment_snapshot_json?: string;
   workspace_key?: string;
   validation_snapshot_json?: string;
+  runtime_session_id?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -66,6 +67,7 @@ interface CompleteTaskRequest {
   commit_sha?: string;
   verification_results_json?: string;
   workspace_change_summary_json?: string;
+  runtime_session_id?: string;
 }
 interface FailTaskRequest {
   claim?: LeaseRequest;
@@ -420,6 +422,7 @@ export async function startExpertWorkerGrpcServer(
                 deployment_snapshot_json: claim.deploymentSnapshot ? JSON.stringify(claim.deploymentSnapshot) : "",
                 workspace_key: claim.workspaceKey ?? "",
                 validation_snapshot_json: JSON.stringify(claim.validationSnapshot ?? []),
+                runtime_session_id: claim.runtimeSessionId ?? "",
               };
             })()
           : { has_task: false },
@@ -480,6 +483,7 @@ export async function startExpertWorkerGrpcServer(
         Object.keys(source).length ? source : undefined,
         verificationResults,
         workspaceChangeSummary,
+        call.request.runtime_session_id || undefined,
       );
       callback(null, {});
     } catch (error) {
@@ -936,6 +940,7 @@ export class ExpertWorkerClient {
       ...(response.validation_snapshot_json
         ? { validationSnapshot: normalizeVerificationPolicy(JSON.parse(response.validation_snapshot_json)) }
         : {}),
+      ...(response.runtime_session_id ? { runtimeSessionId: response.runtime_session_id } : {}),
     };
   }
 
@@ -1066,6 +1071,7 @@ export class ExpertWorkerClient {
     source?: { repositoryUrl?: string; repositoryBranch?: string; commitSha?: string },
     verificationResults?: VerificationEvidenceResult[],
     workspaceChangeSummary?: WorkspaceChangeSummary,
+    runtimeSessionId?: string,
   ): Promise<Empty> {
     return unary((callback) =>
       this.client.CompleteTask(
@@ -1077,6 +1083,7 @@ export class ExpertWorkerClient {
           commit_sha: source?.commitSha ?? "",
           verification_results_json: verificationResults?.length ? JSON.stringify(verificationResults) : "",
           workspace_change_summary_json: workspaceChangeSummary ? JSON.stringify(workspaceChangeSummary) : "",
+          runtime_session_id: runtimeSessionId ?? "",
         },
         this.metadata,
         callback,

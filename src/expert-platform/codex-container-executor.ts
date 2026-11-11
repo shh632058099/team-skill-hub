@@ -46,6 +46,8 @@ export interface CodexDockerConfig {
   authFilePath?: string;
   configFilePath?: string;
   mcpConfigFilePath?: string;
+  runtimeStatePath?: string;
+  runtimeStateTarget?: string;
   codexArgs: readonly string[];
 }
 
@@ -89,6 +91,19 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
   }
   if (config.mcpConfigFilePath && (!path.isAbsolute(config.mcpConfigFilePath) || config.mcpConfigFilePath === "/"))
     throw new Error("INVALID_MCP_CONFIG_FILE_PATH");
+  if (
+    config.runtimeStatePath !== undefined &&
+    (!path.isAbsolute(config.runtimeStatePath) || config.runtimeStatePath === path.parse(config.runtimeStatePath).root)
+  )
+    throw new Error("INVALID_RUNTIME_STATE_PATH");
+  if (
+    config.runtimeStateTarget !== undefined &&
+    config.runtimeStateTarget !== "/home/expert/.codex" &&
+    config.runtimeStateTarget !== "/home/expert/.claude"
+  )
+    throw new Error("INVALID_RUNTIME_STATE_TARGET");
+  if ((config.runtimeStatePath === undefined) !== (config.runtimeStateTarget === undefined))
+    throw new Error("INVALID_RUNTIME_STATE_MOUNT");
   if (config.envNames.some((name) => !isAllowedEnvName(name))) {
     throw new Error("INVALID_ENV_NAME");
   }
@@ -133,6 +148,9 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     "type=tmpfs,dst=/tmp,tmpfs-size=33554432",
     "--tmpfs",
     "/home/expert:rw,uid=10001,gid=10001,size=64m",
+    ...(config.runtimeStatePath && config.runtimeStateTarget
+      ? ["--mount", `type=bind,src=${config.runtimeStatePath},dst=${config.runtimeStateTarget}`]
+      : []),
     "--env",
     "HOME=/home/expert",
     "--env",
