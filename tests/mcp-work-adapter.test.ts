@@ -44,7 +44,13 @@ function fixture() {
   };
 }
 
-const context = { principalId: "alice", scope: "team-a", client: "claude-code", sessionId: "sess-1" } as const;
+const context = {
+  principalId: "alice",
+  scope: "team-a",
+  client: "claude-code",
+  sessionId: "sess-1",
+  trustedSession: true,
+} as const;
 
 function input(idempotencyKey: string) {
   return {
@@ -92,6 +98,30 @@ test("MCP terminal source signal safely cancels active work through orchestrator
     const obs = f.work.listSourceObservations(detail.work.workItemId).at(-1)!;
     assert.equal(obs.state, "terminal");
     assert.equal(obs.reconciliationAction, "cancel");
+  } finally {
+    f.close();
+  }
+});
+
+test("MCP source signal fails closed without a trusted session", () => {
+  const f = fixture();
+  try {
+    const detail = f.adapter.submit(
+      input("work-untrusted"),
+      { ...context, sessionId: undefined, trustedSession: false },
+      1000,
+    );
+    assert.match(detail.work.sourceScope ?? "", /unbound$/);
+    assert.throws(
+      () =>
+        f.adapter.updateSource(
+          detail.work.workItemId,
+          { state: "terminal" },
+          { ...context, sessionId: undefined, trustedSession: false },
+          2000,
+        ),
+      /MCP_SOURCE_SESSION_UNTRUSTED/,
+    );
   } finally {
     f.close();
   }

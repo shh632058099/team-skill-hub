@@ -1449,6 +1449,16 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               repositoryId: z.string().trim().min(1).max(200).optional(),
               deploymentId: z.string().trim().min(1).max(200).optional(),
               priority: z.number().int().optional(),
+              clientSessionId: z
+                .string()
+                .uuid()
+                .optional()
+                .describe("Trusted client hook session UUID; do not fabricate."),
+              clientSessionProof: z
+                .string()
+                .max(100)
+                .optional()
+                .describe("Trusted client hook proof; do not fabricate."),
             }),
           },
           async ({
@@ -1461,11 +1471,21 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             repositoryId,
             deploymentId,
             priority,
+            clientSessionId,
+            clientSessionProof,
           }) => {
             const normalizedExpertId = normalizeOptionalMcpIdentifier(expertId);
             const normalizedRepositoryId = normalizeOptionalMcpIdentifier(repositoryId);
             const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
             const explicitRouting = routingMode === "explicit";
+            const trustedClientSession = verifyClientSessionProof(
+              credential,
+              clientSessionId,
+              idempotencyKey,
+              clientSessionProof,
+            );
+            const effectiveSessionId =
+              transportSessionId ?? sessionId ?? (trustedClientSession ? clientSessionId : undefined);
             const adapter = mcpWorkAdapter!;
             return toolResult(
               adapter.submit(
@@ -1487,7 +1507,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                   principalId: principal.id,
                   scope: principal.tenantId,
                   client: client?.slice(0, 200) || "mcp",
-                  sessionId: transportSessionId ?? sessionId ?? "unknown-session",
+                  ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
+                  trustedSession: Boolean(transportSessionId ?? sessionId) || trustedClientSession,
                 },
               ),
             );
@@ -1503,10 +1524,28 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               workItemId: z.string().uuid(),
               state: z.enum(["active", "terminal"]),
               detail: z.string().trim().max(4000).optional(),
+              clientSessionId: z
+                .string()
+                .uuid()
+                .optional()
+                .describe("Trusted client hook session UUID; do not fabricate."),
+              clientSessionProof: z
+                .string()
+                .max(100)
+                .optional()
+                .describe("Trusted client hook proof; do not fabricate."),
             }),
           },
-          async ({ workItemId, state, detail }) =>
-            toolResult(
+          async ({ workItemId, state, detail, clientSessionId, clientSessionProof }) => {
+            const trustedClientSession = verifyClientSessionProof(
+              credential,
+              clientSessionId,
+              workItemId,
+              clientSessionProof,
+            );
+            const effectiveSessionId =
+              transportSessionId ?? sessionId ?? (trustedClientSession ? clientSessionId : undefined);
+            return toolResult(
               mcpWorkAdapter!.updateSource(
                 workItemId,
                 { state, ...(detail === undefined ? {} : { detail }) },
@@ -1514,10 +1553,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                   principalId: principal.id,
                   scope: principal.tenantId,
                   client: client?.slice(0, 200) || "mcp",
-                  sessionId: transportSessionId ?? sessionId ?? "unknown-session",
+                  ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
+                  trustedSession: Boolean(transportSessionId ?? sessionId) || trustedClientSession,
                 },
               ),
-            ),
+            );
+          },
         );
 
         registerTool(

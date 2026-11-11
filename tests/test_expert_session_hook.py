@@ -66,6 +66,21 @@ class SessionHookTests(unittest.TestCase):
                 self.assertEqual(updated['idempotencyKey'], 'k')
                 self.assertNotIn('permissionDecision', result['hookSpecificOutput'])
 
+    def test_work_tools_get_native_session_and_proof_bound_to_correct_key(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            env = dict(os.environ, TEAM_SKILL_HUB_REQUEST_STATE_DIR=state_dir, TEAM_SKILL_HUB_API_KEY='hook-secret')
+            for tool_name, tool_input in (
+                ('submit_work', {'title': 'x', 'description': 'y', 'idempotencyKey': 'work-key'}),
+                ('update_work_source', {'workItemId': '11111111-1111-4111-8111-111111111111', 'state': 'terminal'}),
+            ):
+                payload = {'hook_event_name': 'PreToolUse', 'tool_name': f'mcp__teamSkillHub__{tool_name}',
+                           'session_id': SESSION, 'tool_input': tool_input}
+                p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), text=True,
+                                   capture_output=True, check=True, env=env)
+                updated = json.loads(p.stdout)['hookSpecificOutput']['updatedInput']
+                self.assertEqual(updated['clientSessionId'], SESSION)
+                self.assertRegex(updated['clientSessionProof'], r'^\d{13}\.[a-f0-9]{64}$')
+
     def test_other_tools_and_invalid_session_are_untouched(self):
         for tool in ('Bash', 'mcp__teamSkillHub__wait_expert_task', 'mcp__other__submit_expert_task_auto'):
             self.assertIsNone(apply({'hook_event_name':'PreToolUse','tool_name': tool,

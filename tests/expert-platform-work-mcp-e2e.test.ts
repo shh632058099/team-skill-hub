@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -46,6 +47,33 @@ async function callMcp(
     body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
   });
 
+  assert.equal(response.status, 200);
+  const body = await response.text();
+  const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
+  const rpc = JSON.parse(dataLine ? dataLine.slice(6) : body) as McpResponse;
+  if (rpc.error) throw new Error(rpc.error.message ?? "MCP_REQUEST_FAILED");
+  const text = rpc.result?.content?.find((item) => item.type === "text")?.text;
+  if (!text || rpc.result?.isError) throw new Error(text ?? "MCP_TOOL_FAILED");
+  return JSON.parse(text) as Record<string, any>;
+}
+
+async function callMcpWithoutSessionHeader(
+  url: string,
+  apiKey: string,
+  id: number,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, any>> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "x-skill-hub-api-key": apiKey,
+      "x-skill-hub-client": "codex-proof-test",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
+  });
   assert.equal(response.status, 200);
   const body = await response.text();
   const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
@@ -203,6 +231,38 @@ test("MCP Work API drives durable work through review, rework, authorization and
         `missing MCP tool ${name}`,
       );
     }
+
+    const signedSessionId = "11111111-1111-4111-8111-111111111111";
+    const signedIdempotencyKey = "mcp-signed-session-work";
+    const signedAt = Date.now();
+    const signedProof = `${signedAt}.${createHmac("sha256", apiKey)
+      .update(`team-skill-hub/client-session/v1\n${signedSessionId}\n${signedIdempotencyKey}\n${signedAt}`)
+      .digest("hex")}`;
+    const signedSubmission = await callMcpWithoutSessionHeader(mcpUrl, apiKey, 901, "submit_work", {
+      title: "Signed native MCP session",
+      description: "Verify stateless MCP can bind native client session",
+      idempotencyKey: signedIdempotencyKey,
+      expertId: "ota",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-default",
+      clientSessionId: signedSessionId,
+      clientSessionProof: signedProof,
+    });
+    assert.equal(signedSubmission.work.sourceScope, `codex-proof-test/${signedSessionId}`);
+    const signedWorkId = String(signedSubmission.work.workItemId);
+    const updateAt = Date.now();
+    const updateProof = `${updateAt}.${createHmac("sha256", apiKey)
+      .update(`team-skill-hub/client-session/v1\n${signedSessionId}\n${signedWorkId}\n${updateAt}`)
+      .digest("hex")}`;
+    const signedTerminal = await callMcpWithoutSessionHeader(mcpUrl, apiKey, 902, "update_work_source", {
+      workItemId: signedWorkId,
+      state: "terminal",
+      clientSessionId: signedSessionId,
+      clientSessionProof: updateProof,
+    });
+    assert.equal(signedTerminal.work.status, "cancelled");
+    assert.equal(signedTerminal.sourceObservations.at(-1).reconciliationAction, "cancel");
 
     const submitted = await callMcp(mcpUrl, apiKey, 1, "submit_work", {
       title: "Inspect OTA rollback",

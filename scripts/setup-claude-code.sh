@@ -144,7 +144,7 @@ kept.append({"hooks":[{"type":"command","command":'bash "$HOME/.claude/hooks/tea
 hooks["Stop"]=kept
 if os.environ["SERVER_NAME"] == "teamSkillHub":
     # Preserve all unrelated PreToolUse handlers, replace only our managed hook.
-    matcher=r"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$"
+    matcher=r"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$"
     kept=[]
     for group in hooks.get("PreToolUse",[]) or []:
         handlers=[h for h in (group.get("hooks",[]) or []) if "expert-session-hook" not in str(h.get("command","")) and "team-skill-hub-expert-session" not in str(h.get("command",""))]
@@ -183,7 +183,7 @@ for(const event of ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"
 const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-claude-stop"));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[{type:"command",command:'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',timeout:4}]});root.hooks.Stop=kept;
 if(server==="teamSkillHub"){
  const groups=[];for(const group of (root.hooks.PreToolUse||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.command||"").includes("team-skill-hub-expert-session"));if(hs.length)groups.push({...group,hooks:hs})}
- groups.push({matcher:"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$",hooks:[{type:"command",command:`python3 "${process.env.HOOKS_DIR.replaceAll("\\","/")}/team-skill-hub-expert-session.py"`,timeout:5}]});root.hooks.PreToolUse=groups;
+ groups.push({matcher:"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$",hooks:[{type:"command",command:`python3 "${process.env.HOOKS_DIR.replaceAll("\\","/")}/team-skill-hub-expert-session.py"`,timeout:5}]});root.hooks.PreToolUse=groups;
 }
 const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});sk.push({hooks:[{type:"command",command:`"${client}" session-start-display --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");

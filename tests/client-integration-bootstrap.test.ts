@@ -53,7 +53,8 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
   await stat(path.join(codex, "hooks", "expert-session-hook.py"));
   const codexHooks = JSON.parse(await readFile(path.join(codex, "hooks.json"), "utf8"));
   const codexSessionHook = codexHooks.hooks.PreToolUse.find(
-    (group: { matcher?: string }) => group.matcher === "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$",
+    (group: { matcher?: string }) =>
+      group.matcher === "^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$",
   );
   assert.ok(codexSessionHook);
   assert.equal(codexSessionHook.hooks[0].async, false);
@@ -84,7 +85,8 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     await readFile(sessionHookFile, "utf8"),
     await readFile("scripts/claude/expert-session-hook.py", "utf8"),
   );
-  const sessionMatcher = "^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$";
+  const sessionMatcher =
+    "^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$";
   let groups = JSON.parse(claudeSettings).hooks.PreToolUse as Array<{
     matcher?: string;
     hooks?: Array<{ command?: string }>;

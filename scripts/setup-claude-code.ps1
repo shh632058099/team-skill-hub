@@ -215,7 +215,7 @@ if ($ServerName -eq 'teamSkillHub') {
     }
   }
   $sessionCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionGate + '"'
-  $kept += ,@{ matcher='^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto)$'; hooks=@(@{type='command';command=$sessionCommand;timeout=5}) }
+  $kept += ,@{ matcher='^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$'; hooks=@(@{type='command';command=$sessionCommand;timeout=5}) }
   $root['hooks']['PreToolUse'] = @($kept)
   $promptKept = @()
   foreach ($groupValue in @($root['hooks']['UserPromptSubmit'])) {

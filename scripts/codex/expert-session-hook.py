@@ -77,6 +77,8 @@ def main() -> None:
         allowed_tools = {
             f"mcp__{server_name}__submit_expert_task",
             f"mcp__{server_name}__submit_expert_task_auto",
+            f"mcp__{server_name}__submit_work",
+            f"mcp__{server_name}__update_work_source",
         }
         if tool_name not in allowed_tools:
             return
@@ -85,9 +87,11 @@ def main() -> None:
         if not isinstance(tool_input, dict):
             emit("deny", "Team Skill Hub cannot attach the native Codex session identity; submission was blocked.")
             return
-        idempotency_key = tool_input.get("idempotencyKey")
-        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
-            emit("deny", "Team Skill Hub requires an idempotencyKey before session identity can be attached.")
+        is_update_work_source = tool_name == f"mcp__{server_name}__update_work_source"
+        is_expert_submit = tool_name in {f"mcp__{server_name}__submit_expert_task", f"mcp__{server_name}__submit_expert_task_auto"}
+        binding_key = tool_input.get("workItemId") if is_update_work_source else tool_input.get("idempotencyKey")
+        if not isinstance(binding_key, str) or not binding_key.strip():
+            emit("deny", "Team Skill Hub requires a stable binding key before session identity can be attached.")
             return
 
         credential = os.environ.get(key_env, "")
@@ -112,14 +116,14 @@ def main() -> None:
                     source_request_id = state.get("source_request_id")
             except (OSError, ValueError, TypeError):
                 pass
-        if isinstance(source_request_id, str) and re.fullmatch(r"srq_[a-f0-9]{64}", source_request_id):
+        if isinstance(source_request_id, str) and re.fullmatch(r"srq_[a-f0-9]{64}", source_request_id) and is_expert_submit:
             updated["sourceRequestId"] = source_request_id
         else:
             source_request_id = None
-        if source_request_id:
-            message = f"team-skill-hub/client-session/v2\n{session_id}\n{source_request_id}\n{idempotency_key}\n{timestamp}"
+        if source_request_id and is_expert_submit:
+            message = f"team-skill-hub/client-session/v2\n{session_id}\n{source_request_id}\n{binding_key}\n{timestamp}"
         else:
-            message = f"team-skill-hub/client-session/v1\n{session_id}\n{idempotency_key}\n{timestamp}"
+            message = f"team-skill-hub/client-session/v1\n{session_id}\n{binding_key}\n{timestamp}"
         signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
         updated["clientSessionProof"] = f"{timestamp}.{signature}"
         emit("allow", updated=updated)
@@ -127,7 +131,7 @@ def main() -> None:
         # Never allow a target submission through without a verified session proof.
         if isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse":
             tool_name = payload.get("tool_name")
-            if isinstance(tool_name, str) and tool_name.endswith(("__submit_expert_task", "__submit_expert_task_auto")):
+            if isinstance(tool_name, str) and tool_name.endswith(("__submit_expert_task", "__submit_expert_task_auto", "__submit_work", "__update_work_source")):
                 emit("deny", "Team Skill Hub could not safely attach the native Codex session identity; submission was blocked.")
         # A malformed hook event must not interrupt unrelated Codex operations.
         return

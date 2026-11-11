@@ -280,7 +280,7 @@ const fs = require("fs");
 const file = process.env.HOOKS_JSON;
 const root = JSON.parse(fs.readFileSync(file, "utf8"));
 root.hooks ||= {};
-const matcher = "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$";
+const matcher = "^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$";
 const groups = [];
 for (const group of root.hooks.PreToolUse || []) {
   const handlers = (group.hooks || []).filter((handler) =>
@@ -300,7 +300,7 @@ file = os.environ["HOOKS_JSON"]
 with open(file, encoding="utf-8") as stream:
     root = json.load(stream)
 root.setdefault("hooks", {})
-matcher = r"^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$"
+matcher = r"^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$"
 groups = []
 for group in root["hooks"].get("PreToolUse", []) or []:
     handlers = [h for h in (group.get("hooks", []) or []) if "expert-session-hook" not in str(h.get("command", "")) and "expert-session-hook" not in str(h.get("commandWindows", ""))]

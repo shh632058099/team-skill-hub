@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     hooks[event] = [{ matcher: "^__team_skill_hub_reserved__$", hooks: [handler] }];
     if (event === "PreToolUse") {
       hooks[event].push({
-        matcher: "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$",
+        matcher: "^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$",
         hooks: [
           {
             type: "command",

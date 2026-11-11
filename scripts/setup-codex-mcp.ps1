@@ -235,7 +235,7 @@ foreach ($Event in $Events) {
     $Kept += [pscustomobject]$TeamGroup
     if ($Event -eq "PreToolUse") {
         $SessionHandler = [pscustomobject]@{ type="command"; command=('python3 "' + $SessionHookPy + '"'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionHookPs + '"'); async=$false; timeout=2 }
-        $Kept += [pscustomobject]@{ matcher='^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$'; hooks=@($SessionHandler) }
+        $Kept += [pscustomobject]@{ matcher='^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$'; hooks=@($SessionHandler) }
     }
     if ($Event -eq "UserPromptSubmit") {
         $PromptSessionHandler = [pscustomobject]@{ type="command"; command=('python3 "' + $SessionHookPy + '"'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionHookPs + '"'); async=$false; timeout=2 }

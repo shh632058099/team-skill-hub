@@ -118,3 +118,38 @@ test("Codex prompt without turn_id clears prior request state", async () => {
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test("Codex hook signs submit_work and update_work_source with the native session", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "codex-work-hook-"));
+  const session = "01a18fc5-3678-7ac2-920f-de4a707e5a1b";
+  const env = { ...process.env, TEAM_SKILL_HUB_REQUEST_STATE_DIR: temp, TEAM_SKILL_HUB_API_KEY: "test-secret" };
+  const runHook = async (tool_name: string, tool_input: object) => {
+    const child = spawn("python3", ["scripts/codex/expert-session-hook.py"], { env, stdio: ["pipe", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => (output += chunk));
+    const code = await new Promise<number>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", resolve);
+      child.stdin.end(JSON.stringify({ hook_event_name: "PreToolUse", session_id: session, tool_name, tool_input }));
+    });
+    assert.equal(code, 0);
+    return JSON.parse(output).hookSpecificOutput;
+  };
+  try {
+    for (const [tool, input] of [
+      ["mcp__teamSkillHub__submit_work", { title: "x", description: "y", idempotencyKey: "work-key" }],
+      [
+        "mcp__teamSkillHub__update_work_source",
+        { workItemId: "11111111-1111-4111-8111-111111111111", state: "terminal" },
+      ],
+    ] as const) {
+      const result = await runHook(tool, input);
+      assert.equal(result.permissionDecision, "allow");
+      assert.equal(result.updatedInput.clientSessionId, session);
+      assert.match(result.updatedInput.clientSessionProof, /^\d{13}\.[a-f0-9]{64}$/);
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});

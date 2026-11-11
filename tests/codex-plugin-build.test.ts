@@ -55,7 +55,10 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /PLUGIN_ROOT/);
     assert.match(hooks.hooks.SessionStart[0].hooks[0].commandWindows, /PLUGIN_ROOT/);
     assert.equal(hooks.hooks.PreToolUse[0].matcher, "^__team_skill_hub_reserved__$");
-    assert.equal(hooks.hooks.PreToolUse[1].matcher, "^mcp__[A-Za-z0-9_-]+__submit_expert_task(_auto)?$");
+    assert.equal(
+      hooks.hooks.PreToolUse[1].matcher,
+      "^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$",
+    );
     assert.equal(hooks.hooks.PreToolUse[1].hooks[0].async, false);
     assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /codex\/expert-session-hook\.py/);
     await stat(path.join(out, "hooks", "codex", "expert-session-hook.py"));

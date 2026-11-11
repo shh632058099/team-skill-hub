@@ -23,7 +23,7 @@ try {
         exit 0
     }
     if ($event.hook_event_name -ne 'PreToolUse') { exit 0 }
-    if ([string]$event.tool_name -notmatch '^mcp__teamSkillHub__(submit_expert_task_auto|submit_expert_task)$') { exit 0 }
+    if ([string]$event.tool_name -notmatch '^mcp__teamSkillHub__(submit_expert_task_auto|submit_expert_task|submit_work|update_work_source)$') { exit 0 }
     if ($null -eq $event.tool_input -or $event.tool_input -isnot [pscustomobject]) { exit 0 }
     $inputData = @{}
     foreach ($property in $event.tool_input.PSObject.Properties) { $inputData[$property.Name] = $property.Value }

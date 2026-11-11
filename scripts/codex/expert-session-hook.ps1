@@ -23,7 +23,7 @@ try {
         exit 0
     }
     if ($event.hook_event_name -ne 'PreToolUse') { exit 0 }
-    $isSubmissionTool = [string]$event.tool_name -match '__submit_expert_task(_auto)?$'
+    $isSubmissionTool = [string]$event.tool_name -match '__(submit_expert_task(_auto)?|submit_work|update_work_source)$'
 
     $codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
     $configPath = if ($env:TEAM_SKILL_HUB_HOOK_CONFIG) { $env:TEAM_SKILL_HUB_HOOK_CONFIG } else { Join-Path $codexDir 'hooks\team-skill-hub.conf' }
@@ -35,7 +35,7 @@ try {
             if ($line -match '^api_key_env=([A-Za-z_][A-Za-z0-9_]*)$') { $keyEnv = $Matches[1] }
         }
     }
-    $expectedTools = @("mcp__${serverName}__submit_expert_task", "mcp__${serverName}__submit_expert_task_auto")
+    $expectedTools = @("mcp__${serverName}__submit_expert_task", "mcp__${serverName}__submit_expert_task_auto", "mcp__${serverName}__submit_work", "mcp__${serverName}__update_work_source")
     if ([string]$event.tool_name -notin $expectedTools) { exit 0 }
 
     $session = [guid]::Empty

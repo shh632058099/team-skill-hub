@@ -10,7 +10,7 @@ import sys
 import time
 import uuid
 
-TOOL = re.compile(r"^mcp__teamSkillHub__(?:submit_expert_task_auto|submit_expert_task)$")
+TOOL = re.compile(r"^mcp__teamSkillHub__(?:submit_expert_task_auto|submit_expert_task|submit_work|update_work_source)$")
 DOMAIN = "team-skill-hub/source-request/v1"
 
 
@@ -65,6 +65,8 @@ def main() -> None:
         updated["clientSessionId"] = session_id
         updated.pop("clientSessionProof", None)
         updated.pop("sourceRequestId", None)
+        is_expert_submit = payload["tool_name"].endswith(("__submit_expert_task", "__submit_expert_task_auto"))
+        binding_key = tool_input.get("idempotencyKey") if not payload["tool_name"].endswith("__update_work_source") else tool_input.get("workItemId")
         request_id = None
         # Prefer an event-local native turn ID when supplied; otherwise use the
         # latest UserPromptSubmit state for this exact native session.
@@ -89,14 +91,14 @@ def main() -> None:
                         key_env = candidate
         credential = os.environ.get(key_env, "")
         key = tool_input.get("idempotencyKey")
-        if request_id:
+        if request_id and is_expert_submit:
             updated["sourceRequestId"] = request_id
-        if credential and isinstance(key, str):
+        if credential and isinstance(binding_key, str):
             timestamp = str(int(time.time() * 1000))
-            if request_id:
-                message = f"team-skill-hub/client-session/v2\n{session_id}\n{request_id}\n{key}\n{timestamp}"
+            if request_id and is_expert_submit:
+                message = f"team-skill-hub/client-session/v2\n{session_id}\n{request_id}\n{binding_key}\n{timestamp}"
             else:
-                message = f"team-skill-hub/client-session/v1\n{session_id}\n{key}\n{timestamp}"
+                message = f"team-skill-hub/client-session/v1\n{session_id}\n{binding_key}\n{timestamp}"
             signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
             updated["clientSessionProof"] = f"{timestamp}.{signature}"
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}, ensure_ascii=False))

@@ -6,7 +6,8 @@ export interface McpWorkContext {
   principalId: string;
   scope: string;
   client: string;
-  sessionId: string;
+  sessionId?: string;
+  trustedSession: boolean;
 }
 
 export interface McpWorkSubmitInput extends Omit<
@@ -31,7 +32,7 @@ export class McpWorkAdapter {
   ) {}
 
   private sourceScope(context: McpWorkContext): string {
-    return `${cleanSegment(context.client, "mcp")}/${cleanSegment(context.sessionId, "unknown-session")}`;
+    return `${cleanSegment(context.client, "mcp")}/${cleanSegment(context.sessionId ?? "unbound", "unbound")}`;
   }
 
   submit(input: McpWorkSubmitInput, context: McpWorkContext, now = Date.now()): WorkDetail {
@@ -45,7 +46,7 @@ export class McpWorkAdapter {
         sourceType: "mcp",
         sourceScope,
         sourceRef,
-        sourceSessionId: context.sessionId,
+        sourceSessionId: context.trustedSession ? context.sessionId : undefined,
         sourceClient: context.client,
       },
       now,
@@ -82,6 +83,7 @@ export class McpWorkAdapter {
   }
 
   updateSource(workItemId: string, input: McpSourceUpdateInput, context: McpWorkContext, now = Date.now()): WorkDetail {
+    if (!context.trustedSession || !context.sessionId) throw new Error("MCP_SOURCE_SESSION_UNTRUSTED");
     const work = this.store.getWork(workItemId, context.principalId, context.scope);
     const sourceScope = this.sourceScope(context);
     if (work.sourceType !== "mcp" || work.sourceScope !== sourceScope) throw new Error("MCP_SOURCE_SCOPE_MISMATCH");
