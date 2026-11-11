@@ -53,9 +53,11 @@ try {
     foreach ($property in $event.tool_input.PSObject.Properties) { $inputData[$property.Name] = $property.Value }
     $inputData.Remove('sourceRequestId')
     $inputData.Remove('clientSessionProof')
-    $idempotencyKey = $inputData['idempotencyKey']
-    if ($idempotencyKey -isnot [string] -or [string]::IsNullOrWhiteSpace($idempotencyKey)) {
-        $result = @{ hookSpecificOutput = @{ hookEventName='PreToolUse'; permissionDecision='deny'; permissionDecisionReason='Team Skill Hub requires an idempotencyKey before session identity can be attached.' } }
+    $isUpdateWorkSource = [string]$event.tool_name -eq "mcp__${serverName}__update_work_source"
+    $isExpertSubmit = [string]$event.tool_name -in @("mcp__${serverName}__submit_expert_task", "mcp__${serverName}__submit_expert_task_auto")
+    $bindingKey = if ($isUpdateWorkSource) { $inputData['workItemId'] } else { $inputData['idempotencyKey'] }
+    if ($bindingKey -isnot [string] -or [string]::IsNullOrWhiteSpace($bindingKey)) {
+        $result = @{ hookSpecificOutput = @{ hookEventName='PreToolUse'; permissionDecision='deny'; permissionDecisionReason='Team Skill Hub requires a stable binding key before session identity can be attached.' } }
         [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 20 -Compress))
         exit 0
     }
@@ -77,10 +79,10 @@ try {
     } elseif (Test-Path -LiteralPath $statePath) {
         try { $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json; if ($state.session_id -eq $sessionId) { $requestId = [string]$state.source_request_id } } catch { }
     }
-    if ($requestId -match '^srq_[a-f0-9]{64}$') { $inputData['sourceRequestId'] = $requestId } else { $requestId = $null }
+    if ($requestId -match '^srq_[a-f0-9]{64}$' -and $isExpertSubmit) { $inputData['sourceRequestId'] = $requestId } else { $requestId = $null }
     $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()
-    if ($requestId) { $message = "team-skill-hub/client-session/v2`n$sessionId`n$requestId`n$idempotencyKey`n$timestamp" }
-    else { $message = "team-skill-hub/client-session/v1`n$sessionId`n$idempotencyKey`n$timestamp" }
+    if ($requestId -and $isExpertSubmit) { $message = "team-skill-hub/client-session/v2`n$sessionId`n$requestId`n$bindingKey`n$timestamp" }
+    else { $message = "team-skill-hub/client-session/v1`n$sessionId`n$bindingKey`n$timestamp" }
     $mac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($credential))
     try { $signature = [BitConverter]::ToString($mac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($message))).Replace('-', '').ToLowerInvariant() }
     finally { $mac.Dispose() }

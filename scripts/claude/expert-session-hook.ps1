@@ -41,15 +41,17 @@ try {
     } elseif (Test-Path -LiteralPath $statePath) {
         try { $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json; if ($state.session_id -eq $sessionId) { $requestId = [string]$state.source_request_id } } catch { }
     }
-    if ($requestId -notmatch '^srq_[a-f0-9]{64}$') { $requestId = $null } else { $inputData['sourceRequestId'] = $requestId }
+    $isExpertSubmit = [string]$event.tool_name -match '__(submit_expert_task|submit_expert_task_auto)$'
+    $bindingKey = if ([string]$event.tool_name -match '__update_work_source$') { $inputData['workItemId'] } else { $inputData['idempotencyKey'] }
+    if ($requestId -notmatch '^srq_[a-f0-9]{64}$') { $requestId = $null } elseif ($isExpertSubmit) { $inputData['sourceRequestId'] = $requestId }
     $configPath = if ($env:TEAM_SKILL_HUB_HOOK_CONFIG) { $env:TEAM_SKILL_HUB_HOOK_CONFIG } else { Join-Path $PSScriptRoot 'team-skill-hub.conf' }
     $keyEnv = 'TEAM_SKILL_HUB_API_KEY'
     if (Test-Path -LiteralPath $configPath) { foreach ($line in [System.IO.File]::ReadAllLines($configPath)) { if ($line -match '^api_key_env=([A-Za-z_][A-Za-z0-9_]*)$') { $keyEnv = $Matches[1] } } }
     $credential = [Environment]::GetEnvironmentVariable($keyEnv)
-    if ($credential -and $inputData['idempotencyKey'] -is [string]) {
+    if ($credential -and $bindingKey -is [string]) {
         $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()
-        if ($requestId) { $message = "team-skill-hub/client-session/v2`n$sessionId`n$requestId`n$($inputData['idempotencyKey'])`n$timestamp" }
-        else { $message = "team-skill-hub/client-session/v1`n$sessionId`n$($inputData['idempotencyKey'])`n$timestamp" }
+        if ($requestId -and $isExpertSubmit) { $message = "team-skill-hub/client-session/v2`n$sessionId`n$requestId`n$bindingKey`n$timestamp" }
+        else { $message = "team-skill-hub/client-session/v1`n$sessionId`n$bindingKey`n$timestamp" }
         $mac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($credential))
         try { $signature = [BitConverter]::ToString($mac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($message))).Replace('-', '').ToLowerInvariant() }
         finally { $mac.Dispose() }
