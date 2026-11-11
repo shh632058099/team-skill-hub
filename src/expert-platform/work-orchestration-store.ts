@@ -41,6 +41,7 @@ export interface WorkflowDefinition {
   };
   validation: { requiredEvidence: string[]; required: VerificationPolicyStep[] };
   review: { humanReview: boolean };
+  source?: { terminal: { active: "cancel"; waitingReview: "retain_review" } };
   publication?: { required: boolean; mode: "work_branch" };
   completion: {
     require: Array<
@@ -244,6 +245,25 @@ export interface WorkApprovalRecord {
   subjectRevision: string;
   decision: ApprovalDecision;
   stale: boolean;
+  createdAt: number;
+}
+
+export interface WorkSourceObservationInput {
+  workItemId: string;
+  sourceType: string;
+  sourceScope: string;
+  sourceRef: string;
+  state: "active" | "terminal";
+  detail?: string;
+  fingerprint: string;
+  observedAt: number;
+}
+
+export interface WorkSourceObservationRecord extends Omit<WorkSourceObservationInput, "detail"> {
+  observationId: string;
+  detail: string | null;
+  reconciliationAction: "cancel" | "retain_review" | "noop" | null;
+  reconciledAt: number | null;
   createdAt: number;
 }
 
@@ -482,6 +502,16 @@ export class WorkOrchestrationStore {
         "  created_at INTEGER NOT NULL",
         ");",
         "CREATE INDEX IF NOT EXISTS idx_work_review_item ON work_review_decisions(work_item_id,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_source_observations (",
+        "  observation_id TEXT PRIMARY KEY,",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  source_type TEXT NOT NULL, source_scope TEXT NOT NULL, source_ref TEXT NOT NULL,",
+        "  state TEXT NOT NULL CHECK(state IN ('active','terminal')), detail TEXT, fingerprint TEXT NOT NULL,",
+        "  reconciliation_action TEXT CHECK(reconciliation_action IN ('cancel','retain_review','noop')), reconciled_at INTEGER,",
+        "  observed_at INTEGER NOT NULL, created_at INTEGER NOT NULL,",
+        "  UNIQUE(work_item_id,fingerprint)",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_source_observation_item ON work_source_observations(work_item_id,observed_at);",
         "CREATE TABLE IF NOT EXISTS work_approvals (",
         "  approval_id TEXT PRIMARY KEY,",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
@@ -613,6 +643,20 @@ export class WorkOrchestrationStore {
     definition.validation.required = normalizeVerificationPolicy(
       (definition.validation as { required?: unknown }).required,
     );
+    const source = (definition as { source?: unknown }).source;
+    if (source !== undefined) {
+      if (!source || typeof source !== "object" || Array.isArray(source)) throw new Error("INVALID_WORKFLOW");
+      const terminal = (source as { terminal?: unknown }).terminal;
+      if (
+        !terminal ||
+        typeof terminal !== "object" ||
+        Array.isArray(terminal) ||
+        (terminal as { active?: unknown }).active !== "cancel" ||
+        (terminal as { waitingReview?: unknown }).waitingReview !== "retain_review"
+      )
+        throw new Error("INVALID_WORKFLOW");
+      definition.source = { terminal: { active: "cancel", waitingReview: "retain_review" } };
+    }
     const publication = (definition as { publication?: unknown }).publication;
     if (publication !== undefined) {
       if (
@@ -737,6 +781,90 @@ export class WorkOrchestrationStore {
         createdAt: Number(row.created_at),
       }),
     );
+  }
+
+  recordSourceObservation(input: WorkSourceObservationInput, now = Date.now()): WorkSourceObservationRecord {
+    const workItemId = requiredText(input.workItemId, 100);
+    const sourceType = requiredText(input.sourceType, 100);
+    const sourceScope = requiredText(input.sourceScope, 500);
+    const sourceRef = requiredText(input.sourceRef, 500);
+    const fingerprint = requiredText(input.fingerprint, 128);
+    const detail = optionalText(input.detail, 4000);
+    if (
+      !workItemId ||
+      !sourceType ||
+      !sourceScope ||
+      !sourceRef ||
+      !fingerprint ||
+      !["active", "terminal"].includes(input.state) ||
+      !Number.isFinite(input.observedAt)
+    )
+      throw new Error("INVALID_SOURCE_OBSERVATION");
+    const work = this.getWorkInternal(workItemId);
+    if (work.sourceType !== sourceType || work.sourceScope !== sourceScope || work.sourceRef !== sourceRef)
+      throw new Error("SOURCE_OBSERVATION_WORK_MISMATCH");
+    const existing = this.db
+      .prepare("SELECT * FROM work_source_observations WHERE work_item_id=? AND fingerprint=?")
+      .get(workItemId, fingerprint) as Row | undefined;
+    if (existing) return this.fromSourceObservationRow(existing);
+    const observationId = randomUUID();
+    this.db
+      .prepare(
+        "INSERT INTO work_source_observations(observation_id,work_item_id,source_type,source_scope,source_ref,state,detail,fingerprint,reconciliation_action,reconciled_at,observed_at,created_at) VALUES(?,?,?,?,?,?,?,?,NULL,NULL,?,?)",
+      )
+      .run(
+        observationId,
+        workItemId,
+        sourceType,
+        sourceScope,
+        sourceRef,
+        input.state,
+        detail,
+        fingerprint,
+        input.observedAt,
+        now,
+      );
+    return this.getSourceObservation(observationId);
+  }
+
+  getSourceObservation(observationId: string): WorkSourceObservationRecord {
+    const id = requiredText(observationId, 100);
+    if (!id) throw new Error("INVALID_SOURCE_OBSERVATION");
+    const row = this.db.prepare("SELECT * FROM work_source_observations WHERE observation_id=?").get(id) as
+      Row | undefined;
+    if (!row) throw new Error("SOURCE_OBSERVATION_NOT_FOUND");
+    return this.fromSourceObservationRow(row);
+  }
+
+  listSourceObservations(workItemId: string): WorkSourceObservationRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_source_observations WHERE work_item_id=? ORDER BY observed_at,created_at")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromSourceObservationRow(row));
+  }
+
+  markSourceObservationReconciled(
+    observationId: string,
+    action: "cancel" | "retain_review" | "noop",
+    now = Date.now(),
+  ): WorkSourceObservationRecord {
+    const current = this.getSourceObservation(observationId);
+    if (current.reconciledAt !== null) return current;
+    this.db
+      .prepare(
+        "UPDATE work_source_observations SET reconciliation_action=?,reconciled_at=? WHERE observation_id=? AND reconciled_at IS NULL",
+      )
+      .run(action, now, observationId);
+    const updated = this.getSourceObservation(observationId);
+    this.event(
+      updated.workItemId,
+      null,
+      "source.reconciled",
+      JSON.stringify({ observationId, state: updated.state, action }),
+      now,
+    );
+    return updated;
   }
 
   createOrReuseWork(input: WorkSubmission, now = Date.now()): WorkItemRecord {
@@ -2280,6 +2408,26 @@ export class WorkOrchestrationStore {
       decision: String(row.decision) as ReviewDecision,
       reason: row.reason == null ? null : String(row.reason),
       actorPrincipalId: String(row.actor_principal_id),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private fromSourceObservationRow(row: Row): WorkSourceObservationRecord {
+    return {
+      observationId: String(row.observation_id),
+      workItemId: String(row.work_item_id),
+      sourceType: String(row.source_type),
+      sourceScope: String(row.source_scope),
+      sourceRef: String(row.source_ref),
+      state: String(row.state) as WorkSourceObservationRecord["state"],
+      detail: row.detail == null ? null : String(row.detail),
+      fingerprint: String(row.fingerprint),
+      reconciliationAction:
+        row.reconciliation_action == null
+          ? null
+          : (String(row.reconciliation_action) as WorkSourceObservationRecord["reconciliationAction"]),
+      reconciledAt: row.reconciled_at == null ? null : Number(row.reconciled_at),
+      observedAt: Number(row.observed_at),
       createdAt: Number(row.created_at),
     };
   }

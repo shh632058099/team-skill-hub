@@ -12,6 +12,7 @@ import {
   type WorkItemRecord,
   type WorkOrchestrationFence,
   type WorkReworkRequest,
+  type WorkSourceObservationRecord,
   type WorkSubmission,
   type WorkspaceRecord,
   WorkOrchestrationStore,
@@ -29,6 +30,7 @@ export interface WorkDetail {
   work: WorkItemRecord;
   attempts: WorkAttemptRecord[];
   evidence: WorkEvidenceRecord[];
+  sourceObservations: WorkSourceObservationRecord[];
   currentTask: TaskRecord | null;
   turns: TaskRunTurnRecord[];
   workspace: WorkspaceRecord | null;
@@ -246,6 +248,32 @@ export class WorkOrchestrator {
 
   getWork(workItemId: string, principalId: string, scope: string): WorkDetail {
     return this.detail(workItemId, principalId, scope);
+  }
+
+  reconcileSourceObservation(observationId: string, principalId: string, scope: string, now = Date.now()): WorkDetail {
+    const observation = this.workStore.getSourceObservation(observationId);
+    const work = this.workStore.getWork(observation.workItemId, principalId, scope);
+    if (observation.reconciledAt !== null) return this.detail(work.workItemId, principalId, scope);
+    if (observation.state === "active") {
+      this.workStore.markSourceObservationReconciled(observationId, "noop", now);
+      return this.detail(work.workItemId, principalId, scope);
+    }
+    if (TERMINAL_WORK.has(work.status)) {
+      this.workStore.markSourceObservationReconciled(observationId, "noop", now);
+      return this.detail(work.workItemId, principalId, scope);
+    }
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+    const policy = workflow.definition.source?.terminal ?? {
+      active: "cancel",
+      waitingReview: "retain_review" as const,
+    };
+    if (work.status === "waiting_review" && policy.waitingReview === "retain_review") {
+      this.workStore.markSourceObservationReconciled(observationId, "retain_review", now);
+      return this.detail(work.workItemId, principalId, scope);
+    }
+    this.cancelWork(work.workItemId, principalId, scope, now);
+    this.workStore.markSourceObservationReconciled(observationId, "cancel", now);
+    return this.detail(work.workItemId, principalId, scope);
   }
 
   requestContinuation(
@@ -1508,6 +1536,7 @@ export class WorkOrchestrator {
       work,
       attempts,
       evidence: this.workStore.listEvidence(workItemId),
+      sourceObservations: this.workStore.listSourceObservations(workItemId),
       currentTask,
       turns,
       workspace,

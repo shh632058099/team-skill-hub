@@ -214,6 +214,48 @@ test("approval schema migrates legacy databases with attempt binding column", ()
   }
 });
 
+test("source observation schema is added to existing runtime databases without reset", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "source-observation-schema-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    initial.close();
+    const legacy = new DatabaseSync(file);
+    try {
+      legacy.exec("DROP TABLE work_source_observations;");
+    } finally {
+      legacy.close();
+    }
+    const reopened = new WorkOrchestrationStore(file);
+    const db = new DatabaseSync(file);
+    try {
+      const tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_source_observations'")
+        .all();
+      assert.equal(tables.length, 1);
+      const columns = db.prepare("PRAGMA table_info(work_source_observations)").all() as Array<{ name: string }>;
+      for (const name of [
+        "observation_id",
+        "work_item_id",
+        "state",
+        "fingerprint",
+        "reconciliation_action",
+        "reconciled_at",
+      ]) {
+        assert.ok(
+          columns.some((column) => column.name === name),
+          `missing source observation column ${name}`,
+        );
+      }
+    } finally {
+      db.close();
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("workspace schema migrates old cleanup constraints without resetting the database", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-workspace-migration-"));
   const file = path.join(dir, "runtime.db");

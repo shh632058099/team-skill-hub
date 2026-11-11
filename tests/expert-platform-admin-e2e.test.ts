@@ -67,6 +67,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /任务运行记录/);
     assert.match(html, /Work Items/);
     assert.match(html, /id="workItems"/);
+    assert.match(html, /Source Observations/);
     assert.match(html, /Workflows/);
     assert.match(html, /id="workflows"/);
     assert.match(html, /\/admin\/api\/workflows/);

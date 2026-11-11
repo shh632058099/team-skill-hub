@@ -41,6 +41,7 @@ async function callMcp(
       accept: "application/json, text/event-stream",
       "x-skill-hub-api-key": apiKey,
       "x-skill-hub-client": "claude-code-test",
+      "x-skill-hub-session-id": "mcp-e2e-session",
     },
     body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
   });
@@ -188,6 +189,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const tools = await listMcpTools(mcpUrl, apiKey);
     for (const name of [
       "submit_work",
+      "update_work_source",
       "get_work",
       "wait_work",
       "review_work",
@@ -215,6 +217,12 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const taskId = String(submitted.currentTask.taskId);
     assert.match(workId, /^[0-9a-f-]{36}$/i);
     assert.equal(submitted.work.status, "running");
+    assert.equal(submitted.work.sourceType, "mcp");
+    assert.equal(submitted.work.sourceScope, "claude-code-test/mcp-e2e-session");
+    assert.equal(submitted.work.sourceRef, "mcp-work-1");
+    assert.equal(submitted.sourceObservations.length, 1);
+    assert.equal(submitted.sourceObservations[0].state, "active");
+    assert.equal(submitted.sourceObservations[0].reconciliationAction, "noop");
     assert.equal(submitted.attempts.length, 1);
 
     const replay = await callMcp(mcpUrl, apiKey, 2, "submit_work", {
@@ -649,6 +657,28 @@ test("MCP Work API drives durable work through review, rework, authorization and
     await callMcp(mcpUrl, apiKey, 65, "cancel_work", {
       workItemId: autoRoutingIgnoresPlaceholders.work.workItemId,
     });
+
+    const sourceTerminalSubmission = await callMcp(mcpUrl, apiKey, 801, "submit_work", {
+      title: "MCP source terminal",
+      description: "validate source terminal cancellation",
+      idempotencyKey: "mcp-source-terminal",
+      expertId: "ota",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-default",
+    });
+    const sourceTerminalClaim = tasks.claim("worker-source-terminal", 10_000, 30_000, "ota")!;
+    assert.equal(sourceTerminalClaim.taskId, sourceTerminalSubmission.currentTask.taskId);
+    const sourceTerminal = await callMcp(mcpUrl, apiKey, 802, "update_work_source", {
+      workItemId: sourceTerminalSubmission.work.workItemId,
+      state: "terminal",
+      detail: "source lifecycle ended",
+    });
+    assert.equal(sourceTerminal.work.status, "cancelled");
+    assert.equal(sourceTerminal.currentTask.status, "running");
+    assert.equal(sourceTerminal.currentTask.cancellationRequested, true);
+    assert.equal(sourceTerminal.sourceObservations.at(-1).state, "terminal");
+    assert.equal(sourceTerminal.sourceObservations.at(-1).reconciliationAction, "cancel");
 
     const blockedSubmission = await callMcp(mcpUrl, apiKey, 82, "submit_work", {
       title: "Resume blocked OTA work",
