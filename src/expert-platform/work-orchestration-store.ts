@@ -2285,6 +2285,19 @@ export class WorkOrchestrationStore {
         .all(now, now, boundedLimit) as Row[]
     ).map((row) => String(row.work_item_id));
   }
+  listPendingSourceObservationIdsForWork(workItemId: string, limit = 100): string[] {
+    const id = requiredText(workItemId, 100);
+    if (!id) throw new Error("INVALID_WORK_ITEM_ID");
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    return (
+      this.db
+        .prepare(
+          "SELECT observation_id FROM work_source_observations WHERE work_item_id=? AND reconciled_at IS NULL ORDER BY observed_at,created_at,observation_id LIMIT ?",
+        )
+        .all(id, boundedLimit) as Row[]
+    ).map((row) => String(row.observation_id));
+  }
+
   listPendingSourceObservationIds(limit = 100): string[] {
     const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
     return (

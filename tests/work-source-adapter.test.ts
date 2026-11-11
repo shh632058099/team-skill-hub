@@ -328,3 +328,78 @@ test("source observation is durable and reconciled before any initial dispatch",
     f.close();
   }
 });
+
+test("direct Work reconciliation fences pending terminal source before execution advances", () => {
+  const f = fixture();
+  try {
+    const detail = f.ingestion.submit(
+      adapter,
+      { key: "pending-before-reconcile" },
+      { sourceScope: "scope-a" },
+      { principalId: "alice", scope: "team-a" },
+      1000,
+    );
+    const terminal = f.work.recordSourceObservation(
+      {
+        workItemId: detail.work.workItemId,
+        sourceType: "demo",
+        sourceScope: "scope-a",
+        sourceRef: "pending-before-reconcile",
+        state: "terminal",
+        fingerprint: "terminal:pending-before-reconcile",
+        observedAt: 1500,
+      },
+      1500,
+    );
+    assert.equal(terminal.reconciledAt, null);
+
+    const reconciled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 2000);
+    assert.equal(reconciled.work.status, "cancelled");
+    assert.equal(reconciled.currentTask!.status, "cancelled");
+    assert.equal(f.work.getSourceObservation(terminal.observationId).reconciliationAction, "cancel");
+  } finally {
+    f.close();
+  }
+});
+
+test("resume fences pending terminal source before a blocked Work can resume", () => {
+  const f = fixture();
+  try {
+    const detail = f.ingestion.submit(
+      adapter,
+      { key: "pending-before-resume" },
+      { sourceScope: "scope-a" },
+      { principalId: "alice", scope: "team-a" },
+      1000,
+    );
+    let work = f.work.getWork(detail.work.workItemId, "alice", "team-a");
+    work = f.work.blockWork(
+      work.workItemId,
+      work.principalId,
+      work.scope,
+      work.stateRevision,
+      "permission_required",
+      "TEST_BLOCK",
+      1200,
+      { resumeCondition: "manual", blockedByType: "permission", blockedByRef: "test" },
+    );
+    const terminal = f.work.recordSourceObservation(
+      {
+        workItemId: work.workItemId,
+        sourceType: "demo",
+        sourceScope: "scope-a",
+        sourceRef: "pending-before-resume",
+        state: "terminal",
+        fingerprint: "terminal:pending-before-resume",
+        observedAt: 1500,
+      },
+      1500,
+    );
+
+    const resumed = f.orchestrator.resumeWork(work.workItemId, "alice", "team-a", work.stateRevision, 2000);
+    assert.equal(resumed.work.status, "cancelled");
+    assert.equal(f.work.getSourceObservation(terminal.observationId).reconciliationAction, "cancel");
+  } finally {
+    f.close();
+  }
+});
