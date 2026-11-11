@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { WorkItemRecord, WorkOrchestrationStore } from "./work-orchestration-store.js";
 import type { SubmitWorkInput, WorkDetail, WorkOrchestrator } from "./work-orchestrator.js";
 import {
@@ -24,6 +24,11 @@ export interface McpWorkSubmitInput extends Omit<
 export interface McpSourceUpdateInput {
   state: "active" | "terminal";
   detail?: string;
+  sourceControlToken: string;
+}
+
+export interface McpWorkSubmissionResult extends WorkDetail {
+  sourceControlToken: string;
 }
 
 type McpAdapterContext = Omit<McpWorkContext, "principalId" | "scope">;
@@ -40,7 +45,10 @@ function fingerprint(value: unknown): string {
 export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, McpSourceUpdateInput, McpAdapterContext> {
   private readonly ingestion: WorkSourceIngestion;
 
-  constructor(store: WorkOrchestrationStore, orchestrator: WorkOrchestrator) {
+  constructor(
+    private readonly store: WorkOrchestrationStore,
+    orchestrator: WorkOrchestrator,
+  ) {
     this.ingestion = new WorkSourceIngestion(store, orchestrator);
   }
 
@@ -79,10 +87,23 @@ export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, Mcp
     context: McpAdapterContext,
     _now: number,
   ): NormalizedWorkSourceSignal {
-    if (!context.trustedSession || !context.sessionId) throw new Error("MCP_SOURCE_SESSION_UNTRUSTED");
-    const sourceScope = this.sourceScope(context);
-    if (work.sourceType !== "mcp" || work.sourceScope !== sourceScope) throw new Error("MCP_SOURCE_SCOPE_MISMATCH");
-    if (!work.sourceRef) throw new Error("MCP_SOURCE_IDENTITY_MISSING");
+    if (work.sourceType !== "mcp" || !work.sourceScope || !work.sourceRef)
+      throw new Error("MCP_SOURCE_IDENTITY_MISSING");
+    const token = input.sourceControlToken?.trim();
+    if (!token || !/^wsc_[A-Za-z0-9_-]{40,}$/.test(token)) throw new Error("MCP_SOURCE_CONTROL_DENIED");
+    const expectedHash = this.store.getSourceControlTokenHash(work.workItemId);
+    const actualHash = createHash("sha256").update(token).digest("hex");
+    if (
+      !expectedHash ||
+      expectedHash.length !== actualHash.length ||
+      !timingSafeEqual(Buffer.from(expectedHash, "hex"), Buffer.from(actualHash, "hex"))
+    )
+      throw new Error("MCP_SOURCE_CONTROL_DENIED");
+    if (context.trustedSession && context.sessionId) {
+      const expectedScope = this.sourceScope(context);
+      if (work.sourceScope !== expectedScope) throw new Error("MCP_SOURCE_SCOPE_MISMATCH");
+    }
+    const sourceScope = work.sourceScope;
     const detail = input.detail?.trim() || undefined;
     return {
       identity: { sourceType: "mcp", sourceScope, sourceRef: work.sourceRef },
@@ -92,14 +113,21 @@ export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, Mcp
     };
   }
 
-  submit(input: McpWorkSubmitInput, context: McpWorkContext, now = Date.now()): WorkDetail {
-    return this.ingestion.submit(
+  submit(input: McpWorkSubmitInput, context: McpWorkContext, now = Date.now()): McpWorkSubmissionResult {
+    const detail = this.ingestion.submit(
       this,
       input,
       { client: context.client, sessionId: context.sessionId, trustedSession: context.trustedSession },
       { principalId: context.principalId, scope: context.scope },
       now,
     );
+    const sourceControlToken = `wsc_${randomBytes(32).toString("base64url")}`;
+    this.store.rotateSourceControlTokenHash(
+      detail.work.workItemId,
+      createHash("sha256").update(sourceControlToken).digest("hex"),
+      now,
+    );
+    return { ...detail, sourceControlToken };
   }
 
   updateSource(workItemId: string, input: McpSourceUpdateInput, context: McpWorkContext, now = Date.now()): WorkDetail {

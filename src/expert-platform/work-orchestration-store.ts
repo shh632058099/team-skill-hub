@@ -512,6 +512,11 @@ export class WorkOrchestrationStore {
         "  UNIQUE(work_item_id,fingerprint)",
         ");",
         "CREATE INDEX IF NOT EXISTS idx_work_source_observation_item ON work_source_observations(work_item_id,observed_at);",
+        "CREATE TABLE IF NOT EXISTS work_source_controls (",
+        "  work_item_id TEXT PRIMARY KEY REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  token_hash TEXT NOT NULL,",
+        "  rotated_at INTEGER NOT NULL",
+        ");",
         "CREATE TABLE IF NOT EXISTS work_approvals (",
         "  approval_id TEXT PRIMARY KEY,",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
@@ -781,6 +786,28 @@ export class WorkOrchestrationStore {
         createdAt: Number(row.created_at),
       }),
     );
+  }
+
+  rotateSourceControlTokenHash(workItemId: string, tokenHash: string, now = Date.now()): void {
+    const id = requiredText(workItemId, 100);
+    const hash = requiredText(tokenHash, 64);
+    if (!id || !hash || !/^[a-f0-9]{64}$/.test(hash) || !Number.isFinite(now))
+      throw new Error("INVALID_SOURCE_CONTROL_TOKEN");
+    const work = this.getWorkInternal(id);
+    this.db
+      .prepare(
+        "INSERT INTO work_source_controls(work_item_id,token_hash,rotated_at) VALUES(?,?,?) ON CONFLICT(work_item_id) DO UPDATE SET token_hash=excluded.token_hash,rotated_at=excluded.rotated_at",
+      )
+      .run(id, hash, now);
+    this.event(id, work.activeWorkAttemptId, "source.control_rotated", JSON.stringify({ workItemId: id }), now);
+  }
+
+  getSourceControlTokenHash(workItemId: string): string | null {
+    const id = requiredText(workItemId, 100);
+    if (!id) throw new Error("INVALID_WORK_ITEM_ID");
+    const row = this.db.prepare("SELECT token_hash FROM work_source_controls WHERE work_item_id=?").get(id) as
+      Row | undefined;
+    return row?.token_hash == null ? null : String(row.token_hash);
   }
 
   recordSourceObservation(input: WorkSourceObservationInput, now = Date.now()): WorkSourceObservationRecord {

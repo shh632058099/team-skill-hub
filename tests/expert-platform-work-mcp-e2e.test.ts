@@ -257,6 +257,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       .digest("hex")}`;
     const signedTerminal = await callMcpWithoutSessionHeader(mcpUrl, apiKey, 902, "update_work_source", {
       workItemId: signedWorkId,
+      sourceControlToken: signedSubmission.sourceControlToken,
       state: "terminal",
       clientSessionId: signedSessionId,
       clientSessionProof: updateProof,
@@ -731,6 +732,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(sourceTerminalClaim.taskId, sourceTerminalSubmission.currentTask.taskId);
     const sourceTerminal = await callMcp(mcpUrl, apiKey, 802, "update_work_source", {
       workItemId: sourceTerminalSubmission.work.workItemId,
+      sourceControlToken: sourceTerminalSubmission.sourceControlToken,
       state: "terminal",
       detail: "source lifecycle ended",
     });

@@ -22,6 +22,7 @@ test("MCP observability redacts secrets and summarizes calls", async () => {
         query:
           "contact user@example.com Bearer super-secret-token eyJabcde.abcdefgh.ijklmnop https://user:pass@example.com postgres://dbuser:dbpass@db.example.com/app AKIAABCDEFGHIJKLMNOP password=hunter2 token=plain-token secret:plain-secret api_key=plain-api-key authorization=plain-auth",
         apiKey: "skh_this_should_never_be_persisted",
+        sourceControlToken: "wsc_this_should_never_be_persisted_abcdefghijklmnopqrstuvwxyz012345",
       },
       latencyMs: 12,
       success: true,
@@ -39,6 +40,7 @@ test("MCP observability redacts secrets and summarizes calls", async () => {
 
     const persisted = await readFile(path.join(root, "observability", "mcp-calls.jsonl"), "utf8");
     assert.doesNotMatch(persisted, /skh_this_should_never_be_persisted/);
+    assert.doesNotMatch(persisted, /wsc_this_should_never_be_persisted/);
     assert.doesNotMatch(persisted, /user@example\.com/);
     assert.doesNotMatch(persisted, /super-secret-token|eyJabcde|user:pass|dbuser:dbpass|AKIAABCDEFGHIJKLMNOP/);
     assert.match(persisted, /\[redacted-token\]|\[redacted\]/);

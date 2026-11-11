@@ -74,6 +74,9 @@ test("MCP adapter uses session scope plus idempotency key as stable source ident
     assert.equal(first.work.sourceType, "mcp");
     assert.equal(first.work.sourceScope, "claude-code/sess-1");
     assert.equal(first.work.sourceRef, "work-a");
+    assert.match(first.sourceControlToken, /^wsc_[A-Za-z0-9_-]{40,}$/);
+    assert.match(retry.sourceControlToken, /^wsc_[A-Za-z0-9_-]{40,}$/);
+    assert.notEqual(retry.sourceControlToken, first.sourceControlToken, "retry rotates the source control capability");
     assert.equal(f.work.listSourceObservations(first.work.workItemId).length, 1);
   } finally {
     f.close();
@@ -88,7 +91,7 @@ test("MCP terminal source signal safely cancels active work through orchestrator
     assert.equal(claim.taskId, detail.currentTask!.taskId);
     const cancelled = f.adapter.updateSource(
       detail.work.workItemId,
-      { state: "terminal", detail: "user closed source" },
+      { state: "terminal", detail: "user closed source", sourceControlToken: detail.sourceControlToken },
       context,
       2000,
     );
@@ -103,25 +106,55 @@ test("MCP terminal source signal safely cancels active work through orchestrator
   }
 });
 
-test("MCP source signal fails closed without a trusted session", () => {
+test("MCP source control token authorizes an unbound client and rejects an invalid token", () => {
   const f = fixture();
   try {
-    const detail = f.adapter.submit(
-      input("work-untrusted"),
-      { ...context, sessionId: undefined, trustedSession: false },
-      1000,
-    );
-    assert.match(detail.work.sourceScope ?? "", /unbound$/);
+    const unbound = { ...context, sessionId: undefined, trustedSession: false };
+    const detail = f.adapter.submit(input("work-untrusted"), unbound, 1000);
     assert.throws(
       () =>
         f.adapter.updateSource(
           detail.work.workItemId,
-          { state: "terminal" },
-          { ...context, sessionId: undefined, trustedSession: false },
-          2000,
+          { state: "terminal", sourceControlToken: "wsc_invalid" },
+          unbound,
+          1500,
         ),
-      /MCP_SOURCE_SESSION_UNTRUSTED/,
+      /MCP_SOURCE_CONTROL_DENIED/,
     );
+    const cancelled = f.adapter.updateSource(
+      detail.work.workItemId,
+      { state: "terminal", sourceControlToken: detail.sourceControlToken },
+      unbound,
+      2000,
+    );
+    assert.equal(cancelled.work.status, "cancelled");
+  } finally {
+    f.close();
+  }
+});
+
+test("rotated MCP source control token invalidates the previous capability", () => {
+  const f = fixture();
+  try {
+    const first = f.adapter.submit(input("work-rotate"), context, 1000);
+    const retry = f.adapter.submit(input("work-rotate"), context, 1100);
+    assert.throws(
+      () =>
+        f.adapter.updateSource(
+          first.work.workItemId,
+          { state: "terminal", sourceControlToken: first.sourceControlToken },
+          context,
+          1200,
+        ),
+      /MCP_SOURCE_CONTROL_DENIED/,
+    );
+    const updated = f.adapter.updateSource(
+      retry.work.workItemId,
+      { state: "terminal", sourceControlToken: retry.sourceControlToken },
+      context,
+      1300,
+    );
+    assert.equal(updated.work.status, "cancelled");
   } finally {
     f.close();
   }
@@ -135,7 +168,7 @@ test("MCP source signal is session-bound even for the same principal", () => {
       () =>
         f.adapter.updateSource(
           detail.work.workItemId,
-          { state: "terminal" },
+          { state: "terminal", sourceControlToken: detail.sourceControlToken },
           { ...context, sessionId: "sess-2" },
           2000,
         ),

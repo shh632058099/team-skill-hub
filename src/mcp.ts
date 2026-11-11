@@ -1433,7 +1433,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. Reuse the same idempotencyKey when retrying an uncertain submission. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. The response includes an opaque sourceControlToken for later update_work_source calls; retain it in tool context, treat it as secret, and never display it to the user. Reuse the same idempotencyKey when retrying an uncertain submission; a retry reuses the WorkItem and rotates sourceControlToken, so use the newest token. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
@@ -1519,9 +1519,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "update_work_source",
           {
             description:
-              "Update the lifecycle state of the MCP source that created a WorkItem. This is session-bound: only the same MCP source session may signal active or terminal. A terminal signal is reconciled by WorkOrchestrator; running execution is cancelled safely, while waiting_review is retained for human review by the default source policy.",
+              "Update the lifecycle state of the MCP source that created a WorkItem. Requires the opaque sourceControlToken returned by submit_work; treat it as a secret capability and do not display it to the user. Trusted native session identity is checked as an additional constraint when available. A terminal signal is reconciled by WorkOrchestrator; running execution is cancelled safely, while waiting_review is retained for human review by the default source policy.",
             inputSchema: z.object({
               workItemId: z.string().uuid(),
+              sourceControlToken: z
+                .string()
+                .regex(/^wsc_[A-Za-z0-9_-]{40,}$/)
+                .describe("Opaque Work source capability returned by submit_work. Do not display it to the user."),
               state: z.enum(["active", "terminal"]),
               detail: z.string().trim().max(4000).optional(),
               clientSessionId: z
@@ -1536,7 +1540,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 .describe("Trusted client hook proof; do not fabricate."),
             }),
           },
-          async ({ workItemId, state, detail, clientSessionId, clientSessionProof }) => {
+          async ({ workItemId, sourceControlToken, state, detail, clientSessionId, clientSessionProof }) => {
             const trustedClientSession = verifyClientSessionProof(
               credential,
               clientSessionId,
@@ -1548,7 +1552,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             return toolResult(
               mcpWorkAdapter!.updateSource(
                 workItemId,
-                { state, ...(detail === undefined ? {} : { detail }) },
+                { state, sourceControlToken, ...(detail === undefined ? {} : { detail }) },
                 {
                   principalId: principal.id,
                   scope: principal.tenantId,
