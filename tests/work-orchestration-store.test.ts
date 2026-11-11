@@ -256,6 +256,49 @@ test("source observation schema is added to existing runtime databases without r
   }
 });
 
+test("legacy single source control capability migrates into multi-token storage", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "source-control-migration-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    const work = initial.createOrReuseWork(
+      {
+        principalId: "alice",
+        scope: "team-a",
+        idempotencyKey: "source-control-migration",
+        sourceType: "mcp",
+        title: "migration",
+        description: "migration",
+      },
+      1000,
+    );
+    initial.close();
+
+    const legacy = new DatabaseSync(file);
+    try {
+      legacy.exec("DROP TABLE IF EXISTS work_source_control_tokens;");
+      legacy
+        .prepare("INSERT OR REPLACE INTO work_source_controls(work_item_id,token_hash,rotated_at) VALUES(?,?,?)")
+        .run(work.workItemId, "a".repeat(64), 2000);
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = new WorkOrchestrationStore(file);
+    try {
+      assert.equal(reopened.hasSourceControlTokenHash(work.workItemId, "a".repeat(64), 2001), true);
+      assert.equal(
+        reopened.hasSourceControlTokenHash(work.workItemId, "a".repeat(64), 2000 + 30 * 24 * 60 * 60 * 1000 + 1),
+        false,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("workspace schema migrates old cleanup constraints without resetting the database", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-workspace-migration-"));
   const file = path.join(dir, "runtime.db");

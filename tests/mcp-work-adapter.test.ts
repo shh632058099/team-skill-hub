@@ -133,28 +133,55 @@ test("MCP source control token authorizes an unbound client and rejects an inval
   }
 });
 
-test("rotated MCP source control token invalidates the previous capability", () => {
+test("idempotent MCP submit retries keep a bounded set of source control capabilities valid", () => {
   const f = fixture();
   try {
-    const first = f.adapter.submit(input("work-rotate"), context, 1000);
-    const retry = f.adapter.submit(input("work-rotate"), context, 1100);
+    const unbound = { ...context, sessionId: undefined, trustedSession: false };
+    const first = f.adapter.submit(input("work-retry-capability"), unbound, 1000);
+    const retry = f.adapter.submit(input("work-retry-capability"), unbound, 1100);
+    assert.notEqual(first.sourceControlToken, retry.sourceControlToken);
+    const active = f.adapter.updateSource(
+      first.work.workItemId,
+      { state: "active", detail: "first retry response still usable", sourceControlToken: first.sourceControlToken },
+      unbound,
+      1200,
+    );
+    assert.equal(active.work.status, "running");
+    const cancelled = f.adapter.updateSource(
+      retry.work.workItemId,
+      { state: "terminal", sourceControlToken: retry.sourceControlToken },
+      unbound,
+      1300,
+    );
+    assert.equal(cancelled.work.status, "cancelled");
+  } finally {
+    f.close();
+  }
+});
+
+test("expired MCP source control capability is rejected while a refreshed capability remains valid", () => {
+  const f = fixture();
+  try {
+    const unbound = { ...context, sessionId: undefined, trustedSession: false };
+    const first = f.adapter.submit(input("work-expiring-capability"), unbound, 1000);
+    const refreshed = f.adapter.submit(input("work-expiring-capability"), unbound, 1000 + 30 * 24 * 60 * 60 * 1000);
     assert.throws(
       () =>
         f.adapter.updateSource(
           first.work.workItemId,
           { state: "terminal", sourceControlToken: first.sourceControlToken },
-          context,
-          1200,
+          unbound,
+          1001 + 30 * 24 * 60 * 60 * 1000,
         ),
       /MCP_SOURCE_CONTROL_DENIED/,
     );
-    const updated = f.adapter.updateSource(
-      retry.work.workItemId,
-      { state: "terminal", sourceControlToken: retry.sourceControlToken },
-      context,
-      1300,
+    const cancelled = f.adapter.updateSource(
+      refreshed.work.workItemId,
+      { state: "terminal", sourceControlToken: refreshed.sourceControlToken },
+      unbound,
+      1001 + 30 * 24 * 60 * 60 * 1000,
     );
-    assert.equal(updated.work.status, "cancelled");
+    assert.equal(cancelled.work.status, "cancelled");
   } finally {
     f.close();
   }

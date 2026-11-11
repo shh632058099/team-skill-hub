@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { WorkItemRecord, WorkOrchestrationStore } from "./work-orchestration-store.js";
 import type { SubmitWorkInput, WorkDetail, WorkOrchestrator } from "./work-orchestrator.js";
 import {
@@ -91,14 +91,9 @@ export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, Mcp
       throw new Error("MCP_SOURCE_IDENTITY_MISSING");
     const token = input.sourceControlToken?.trim();
     if (!token || !/^wsc_[A-Za-z0-9_-]{40,}$/.test(token)) throw new Error("MCP_SOURCE_CONTROL_DENIED");
-    const expectedHash = this.store.getSourceControlTokenHash(work.workItemId);
     const actualHash = createHash("sha256").update(token).digest("hex");
-    if (
-      !expectedHash ||
-      expectedHash.length !== actualHash.length ||
-      !timingSafeEqual(Buffer.from(expectedHash, "hex"), Buffer.from(actualHash, "hex"))
-    )
-      throw new Error("MCP_SOURCE_CONTROL_DENIED");
+    const authorized = this.store.hasSourceControlTokenHash(work.workItemId, actualHash, _now);
+    if (!authorized) throw new Error("MCP_SOURCE_CONTROL_DENIED");
     if (context.trustedSession && context.sessionId) {
       const expectedScope = this.sourceScope(context);
       if (work.sourceScope !== expectedScope) throw new Error("MCP_SOURCE_SCOPE_MISMATCH");
@@ -122,7 +117,7 @@ export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, Mcp
       now,
     );
     const sourceControlToken = `wsc_${randomBytes(32).toString("base64url")}`;
-    this.store.rotateSourceControlTokenHash(
+    this.store.issueSourceControlTokenHash(
       detail.work.workItemId,
       createHash("sha256").update(sourceControlToken).digest("hex"),
       now,

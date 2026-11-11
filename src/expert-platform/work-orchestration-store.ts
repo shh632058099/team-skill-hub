@@ -517,6 +517,12 @@ export class WorkOrchestrationStore {
         "  token_hash TEXT NOT NULL,",
         "  rotated_at INTEGER NOT NULL",
         ");",
+        "CREATE TABLE IF NOT EXISTS work_source_control_tokens (",
+        "  token_hash TEXT PRIMARY KEY,",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_source_control_tokens_item ON work_source_control_tokens(work_item_id,created_at DESC);",
         "CREATE TABLE IF NOT EXISTS work_approvals (",
         "  approval_id TEXT PRIMARY KEY,",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
@@ -535,6 +541,10 @@ export class WorkOrchestrationStore {
       ].join("\n"),
     );
     this.ensureDefaultWorkflow();
+    this.db.exec(
+      "INSERT OR IGNORE INTO work_source_control_tokens(token_hash,work_item_id,created_at,expires_at) " +
+        "SELECT token_hash,work_item_id,rotated_at,rotated_at+2592000000 FROM work_source_controls",
+    );
     const workColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).map((column) => column.name),
     );
@@ -788,26 +798,68 @@ export class WorkOrchestrationStore {
     );
   }
 
-  rotateSourceControlTokenHash(workItemId: string, tokenHash: string, now = Date.now()): void {
+  issueSourceControlTokenHash(
+    workItemId: string,
+    tokenHash: string,
+    now = Date.now(),
+    ttlMs = 30 * 24 * 60 * 60 * 1000,
+    maxActive = 4,
+  ): void {
     const id = requiredText(workItemId, 100);
     const hash = requiredText(tokenHash, 64);
-    if (!id || !hash || !/^[a-f0-9]{64}$/.test(hash) || !Number.isFinite(now))
+    if (
+      !id ||
+      !hash ||
+      !/^[a-f0-9]{64}$/.test(hash) ||
+      !Number.isFinite(now) ||
+      !Number.isSafeInteger(ttlMs) ||
+      ttlMs <= 0 ||
+      !Number.isSafeInteger(maxActive) ||
+      maxActive < 1
+    )
       throw new Error("INVALID_SOURCE_CONTROL_TOKEN");
     const work = this.getWorkInternal(id);
-    this.db
-      .prepare(
-        "INSERT INTO work_source_controls(work_item_id,token_hash,rotated_at) VALUES(?,?,?) ON CONFLICT(work_item_id) DO UPDATE SET token_hash=excluded.token_hash,rotated_at=excluded.rotated_at",
-      )
-      .run(id, hash, now);
-    this.event(id, work.activeWorkAttemptId, "source.control_rotated", JSON.stringify({ workItemId: id }), now);
+    const expiresAt = now + ttlMs;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM work_source_control_tokens WHERE work_item_id=? AND expires_at<=?").run(id, now);
+      this.db
+        .prepare(
+          "INSERT OR REPLACE INTO work_source_control_tokens(token_hash,work_item_id,created_at,expires_at) VALUES(?,?,?,?)",
+        )
+        .run(hash, id, now, expiresAt);
+      const stale = this.db
+        .prepare(
+          "SELECT token_hash FROM work_source_control_tokens WHERE work_item_id=? ORDER BY created_at DESC, token_hash DESC LIMIT -1 OFFSET ?",
+        )
+        .all(id, maxActive) as Array<{ token_hash: string }>;
+      const remove = this.db.prepare("DELETE FROM work_source_control_tokens WHERE token_hash=?");
+      for (const row of stale) remove.run(row.token_hash);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+    this.event(
+      id,
+      work.activeWorkAttemptId,
+      "source.control_issued",
+      JSON.stringify({ workItemId: id, expiresAt }),
+      now,
+    );
   }
 
-  getSourceControlTokenHash(workItemId: string): string | null {
+  hasSourceControlTokenHash(workItemId: string, tokenHash: string, now = Date.now()): boolean {
     const id = requiredText(workItemId, 100);
-    if (!id) throw new Error("INVALID_WORK_ITEM_ID");
-    const row = this.db.prepare("SELECT token_hash FROM work_source_controls WHERE work_item_id=?").get(id) as
-      Row | undefined;
-    return row?.token_hash == null ? null : String(row.token_hash);
+    const hash = requiredText(tokenHash, 64);
+    if (!id || !hash || !/^[a-f0-9]{64}$/.test(hash) || !Number.isFinite(now)) return false;
+    this.db.prepare("DELETE FROM work_source_control_tokens WHERE work_item_id=? AND expires_at<=?").run(id, now);
+    const row = this.db
+      .prepare("SELECT 1 AS ok FROM work_source_control_tokens WHERE work_item_id=? AND token_hash=? AND expires_at>?")
+      .get(id, hash, now) as Row | undefined;
+    return row !== undefined;
   }
 
   recordSourceObservation(input: WorkSourceObservationInput, now = Date.now()): WorkSourceObservationRecord {
