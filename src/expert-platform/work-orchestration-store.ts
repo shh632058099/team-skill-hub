@@ -824,6 +824,13 @@ export class WorkOrchestrationStore {
         input.observedAt,
         now,
       );
+    this.event(
+      workItemId,
+      work.activeWorkAttemptId,
+      "source.observed",
+      JSON.stringify({ observationId, sourceType, sourceScope, sourceRef, state: input.state }),
+      now,
+    );
     return this.getSourceObservation(observationId);
   }
 
@@ -2251,6 +2258,17 @@ export class WorkOrchestrationStore {
         .all(now, now, boundedLimit) as Row[]
     ).map((row) => String(row.work_item_id));
   }
+  listPendingSourceObservationIds(limit = 100): string[] {
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    return (
+      this.db
+        .prepare(
+          "SELECT observation_id FROM work_source_observations WHERE reconciled_at IS NULL ORDER BY observed_at,created_at,observation_id LIMIT ?",
+        )
+        .all(boundedLimit) as Row[]
+    ).map((row) => String(row.observation_id));
+  }
+
   listEvents(workItemId: string, afterEventId = 0, limit = 100): { events: WorkEventRecord[]; nextEventId: number } {
     const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
     const rows = this.db

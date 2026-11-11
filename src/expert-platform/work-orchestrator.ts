@@ -252,28 +252,42 @@ export class WorkOrchestrator {
 
   reconcileSourceObservation(observationId: string, principalId: string, scope: string, now = Date.now()): WorkDetail {
     const observation = this.workStore.getSourceObservation(observationId);
-    const work = this.workStore.getWork(observation.workItemId, principalId, scope);
-    if (observation.reconciledAt !== null) return this.detail(work.workItemId, principalId, scope);
-    if (observation.state === "active") {
-      this.workStore.markSourceObservationReconciled(observationId, "noop", now);
+    const initialWork = this.workStore.getWork(observation.workItemId, principalId, scope);
+    if (observation.reconciledAt !== null) return this.detail(initialWork.workItemId, principalId, scope);
+    const claim = this.workStore.claimWorkForOrchestration(
+      initialWork.workItemId,
+      this.orchestrationOwnerId,
+      now,
+      this.orchestrationLeaseMs,
+    );
+    try {
+      this.workStore.assertWorkOrchestrationClaim(initialWork.workItemId, this.orchestrationOwnerId, claim.epoch, now);
+      const currentObservation = this.workStore.getSourceObservation(observationId);
+      const work = this.workStore.getWork(initialWork.workItemId, principalId, scope);
+      if (currentObservation.reconciledAt !== null) return this.detail(work.workItemId, principalId, scope);
+      if (currentObservation.state === "active") {
+        this.workStore.markSourceObservationReconciled(observationId, "noop", now);
+        return this.detail(work.workItemId, principalId, scope);
+      }
+      if (TERMINAL_WORK.has(work.status)) {
+        this.workStore.markSourceObservationReconciled(observationId, "noop", now);
+        return this.detail(work.workItemId, principalId, scope);
+      }
+      const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+      const policy = workflow.definition.source?.terminal ?? {
+        active: "cancel",
+        waitingReview: "retain_review" as const,
+      };
+      if (work.status === "waiting_review" && policy.waitingReview === "retain_review") {
+        this.workStore.markSourceObservationReconciled(observationId, "retain_review", now);
+        return this.detail(work.workItemId, principalId, scope);
+      }
+      this.cancelWork(work.workItemId, principalId, scope, now);
+      this.workStore.markSourceObservationReconciled(observationId, "cancel", now);
       return this.detail(work.workItemId, principalId, scope);
+    } finally {
+      this.workStore.releaseWorkOrchestrationClaim(initialWork.workItemId, this.orchestrationOwnerId, claim.epoch, now);
     }
-    if (TERMINAL_WORK.has(work.status)) {
-      this.workStore.markSourceObservationReconciled(observationId, "noop", now);
-      return this.detail(work.workItemId, principalId, scope);
-    }
-    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
-    const policy = workflow.definition.source?.terminal ?? {
-      active: "cancel",
-      waitingReview: "retain_review" as const,
-    };
-    if (work.status === "waiting_review" && policy.waitingReview === "retain_review") {
-      this.workStore.markSourceObservationReconciled(observationId, "retain_review", now);
-      return this.detail(work.workItemId, principalId, scope);
-    }
-    this.cancelWork(work.workItemId, principalId, scope, now);
-    this.workStore.markSourceObservationReconciled(observationId, "cancel", now);
-    return this.detail(work.workItemId, principalId, scope);
   }
 
   requestContinuation(
@@ -634,14 +648,30 @@ export class WorkOrchestrator {
     return processed;
   }
 
-  reconcileActive(now = Date.now(), limit = 100): string[] {
+  reconcilePendingSourceObservations(now = Date.now(), limit = 100): string[] {
     const processed: string[] = [];
-    for (const workItemId of this.workStore.listReconciliationWorkIds(now, limit)) {
-      const work = this.workStore.getWorkInternal(workItemId);
-      this.reconcileWork(workItemId, work.principalId, work.scope, now);
-      processed.push(workItemId);
+    for (const observationId of this.workStore.listPendingSourceObservationIds(limit)) {
+      const observation = this.workStore.getSourceObservation(observationId);
+      const work = this.workStore.getWorkInternal(observation.workItemId);
+      this.reconcileSourceObservation(observationId, work.principalId, work.scope, now);
+      processed.push(work.workItemId);
     }
     return processed;
+  }
+
+  reconcileActive(now = Date.now(), limit = 100): string[] {
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const processed = new Set<string>();
+    for (const workItemId of this.reconcilePendingSourceObservations(now, boundedLimit)) processed.add(workItemId);
+    const remaining = Math.max(0, boundedLimit - processed.size);
+    if (remaining > 0) {
+      for (const workItemId of this.workStore.listReconciliationWorkIds(now, remaining)) {
+        const work = this.workStore.getWorkInternal(workItemId);
+        this.reconcileWork(workItemId, work.principalId, work.scope, now);
+        processed.add(workItemId);
+      }
+    }
+    return [...processed];
   }
 
   reconcileStartup(now = Date.now(), limit = 100): string[] {
