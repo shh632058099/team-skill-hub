@@ -166,3 +166,70 @@ Completed on 2026-11-10 against the approved Work Orchestration spec.
 - Final project gate after the last source change: `npm run check` passed with 721/721 tests, 0 failures; formatting, ESLint, and build passed.
 - `git diff --check` passed.
 - Intentionally deferred: GitHub/GitLab/Jira adapters and tracker polling; Phase 3 autonomous PR review, external CI orchestration, and merge automation.
+
+## 2026-11-11 MCP Adapter and Source Foundation Completion
+
+The implementation was extended on `master` without creating another worktree. Scope remained limited to the MCP Adapter and provider-neutral Work/source foundations. GitHub/GitLab/Jira adapters, tracker polling, PR review automation, external CI orchestration, and merge automation remain intentionally deferred.
+
+### Alignment status against the recommended implementation order
+
+Items 1–13 in `2026-11-09-work-orchestration-design.md` are now implemented and acceptance-tested:
+
+1. WorkItem data model + stable source identity + idempotency.
+2. Durable WorkItem state machine + revision / orchestration claim / fencing.
+3. Versioned WorkflowDefinition + pinned workflow version.
+4. WorkAttempt / ExpertTask / Run / Agent Turn hierarchy.
+5. Workspace first-class model + deterministic key + Worker affinity.
+6. Persistent blocked semantics + explicit resume.
+7. Evidence envelope + verification binding/staleness.
+8. ReviewDecision / Approval separation.
+9. Completion Gate.
+10. Reconciliation-before-dispatch + durable retry/continuation scheduling.
+11. Feedback -> Rework signal and durable audit context.
+12. Admin WorkItem / Workflow / source-observation visibility.
+13. MCP Work API and MCP source lifecycle adapter.
+
+### MCP/source foundation added after the original Phase 1 ledger
+
+- `9e34e9e` — MCP source adapter lifecycle and durable source observations.
+- `6fe6d78` — trusted native MCP session identity when the client/hook supports it.
+- `3cb8274` — provider-neutral `WorkSourceAdapter` / `WorkSourceIngestion` boundary.
+- `d74ae88` — reconcile source state before initial dispatch.
+- `9a40393` — PowerShell hook parity for source-update signing.
+- `a437d6c` — opaque MCP source-control capability; only the hash is persisted and MCP observability redacts the token.
+- `4907dfe` — stable MCP submit response fields for source-control handling.
+- `7432d53` — source-state fencing before dispatch/resume/reconciliation advancement.
+- `4ff23c6` — bounded multi-capability storage so idempotent/concurrent `submit_work` retries do not invalidate an earlier successful response immediately; capabilities expire after 30 days and legacy single-token storage migrates in place.
+
+### Source lifecycle invariants now enforced
+
+- MCP submission is normalized through `McpWorkAdapter -> WorkSourceIngestion -> WorkOrchestrator`; it does not create ExpertTask directly.
+- Source observations are durable and replay-safe.
+- A terminal source observation is reconciled by the Orchestrator, not by the Adapter.
+- Active execution receives Task cancellation before Work termination; `waiting_review` is retained by the default source policy.
+- Pending source observations are reconciled before initial dispatch, direct Work reconciliation, and explicit resume.
+- `sourceControlToken` is an agent-held capability, not an external credential. Only SHA-256 hashes are stored; raw tokens are redacted from MCP observability.
+- Native session proof remains an additional binding when available, but MCP source lifecycle correctness does not depend on a particular MCP client's PreToolUse hook behavior.
+- Idempotent/concurrent MCP retries may hold multiple bounded source-control capabilities simultaneously so an earlier successful response does not become unusable because of a concurrent replay.
+
+### Final validation
+
+- Full project gate after the retry-capability change: `npm run check` passed with **745/745 tests**, 0 failures; formatting, ESLint, TypeScript build, and tests passed.
+- `git diff --check` passed.
+- Existing runtime database migration from single source-control capability to bounded multi-capability storage passed without reset.
+- Local WSL2 deployment passed readiness with 3/3 repositories healthy.
+- Real Claude CLI acceptance: `submit_work -> update_work_source(terminal) -> get_work` succeeded with the native Claude session UUID retained in `sourceScope`, final Work `cancelled`, observations `active/noop -> terminal/cancel`, and no source-control token printed.
+- Real Codex CLI acceptance: source lifecycle succeeded even though Codex 0.162.1 did not propagate PreToolUse-updated MCP arguments; the opaque source-control capability allowed `terminal -> cancel` safely without depending on that client behavior.
+- Real Codex retry acceptance: two identical `submit_work` calls reused the same WorkItem, returned two different private capabilities, the first capability successfully sent an `active` signal, the second successfully sent `terminal`, and the Work ended `cancelled`.
+
+### Intentionally deferred after foundation completion
+
+The next numbered items in the approved spec are external/provider work and remain deferred by design:
+
+- 14. GitHub Adapter.
+- 15. GitLab Adapter.
+- 16. Auto polling / dispatch from external trackers.
+- 17. PR review loop.
+- 18. External CI / Human Review / Merge gate automation.
+
+Do not start these provider-specific items until explicitly requested. Future work should continue from the provider-neutral source boundary rather than adding provider fields to WorkItem/ExpertTask.
