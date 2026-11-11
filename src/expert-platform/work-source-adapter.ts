@@ -59,7 +59,7 @@ export class WorkSourceIngestion {
     now = Date.now(),
   ): WorkDetail {
     const normalized = adapter.normalizeSubmission(input, context, now);
-    const detail = this.orchestrator.submitWork(
+    const staged = this.orchestrator.stageWork(
       {
         ...normalized,
         principalId: actor.principalId,
@@ -71,10 +71,10 @@ export class WorkSourceIngestion {
       },
       now,
     );
-    if (!sameIdentity(detail.work, normalized.identity)) throw new Error("SOURCE_ADAPTER_IDENTITY_MISMATCH");
+    if (!sameIdentity(staged.work, normalized.identity)) throw new Error("SOURCE_ADAPTER_IDENTITY_MISMATCH");
     const observation = this.store.recordSourceObservation(
       {
-        workItemId: detail.work.workItemId,
+        workItemId: staged.work.workItemId,
         sourceType: normalized.identity.sourceType,
         sourceScope: normalized.identity.sourceScope,
         sourceRef: normalized.identity.sourceRef,
@@ -85,7 +85,14 @@ export class WorkSourceIngestion {
       },
       now,
     );
-    return this.orchestrator.reconcileSourceObservation(observation.observationId, actor.principalId, actor.scope, now);
+    const sourceReconciled = this.orchestrator.reconcileSourceObservation(
+      observation.observationId,
+      actor.principalId,
+      actor.scope,
+      now,
+    );
+    if (["completed", "failed", "cancelled"].includes(sourceReconciled.work.status)) return sourceReconciled;
+    return this.orchestrator.reconcileWork(sourceReconciled.work.workItemId, actor.principalId, actor.scope, now);
   }
 
   update<TSubmit, TSignal, TContext>(

@@ -241,9 +241,14 @@ export class WorkOrchestrator {
     private readonly publications?: WorkPublicationStore,
   ) {}
 
-  submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
+  stageWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
     const work = this.workStore.createOrReuseWork(input, now);
-    return this.reconcileWork(work.workItemId, input.principalId, input.scope, now);
+    return this.detail(work.workItemId, input.principalId, input.scope);
+  }
+
+  submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
+    const staged = this.stageWork(input, now);
+    return this.reconcileWork(staged.work.workItemId, input.principalId, input.scope, now);
   }
 
   getWork(workItemId: string, principalId: string, scope: string): WorkDetail {

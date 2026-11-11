@@ -290,3 +290,41 @@ test("source reconciliation respects the durable orchestration claim before chan
     f.close();
   }
 });
+
+test("source observation is durable and reconciled before any initial dispatch", () => {
+  const f = fixture();
+  try {
+    const terminalOnSubmit: WorkSourceAdapter<DemoSubmit, DemoSignal, DemoContext> = {
+      ...adapter,
+      normalizeSubmission(input, context) {
+        const normalized = adapter.normalizeSubmission(input, context, 1000);
+        return {
+          ...normalized,
+          observation: { state: "terminal", fingerprint: `terminal:${input.key}` },
+        };
+      },
+    };
+    const detail = f.ingestion.submit(
+      terminalOnSubmit,
+      { key: "terminal-before-dispatch" },
+      { sourceScope: "scope-a" },
+      { principalId: "alice", scope: "team-a" },
+      1000,
+    );
+    assert.equal(detail.work.status, "cancelled");
+    assert.equal(detail.attempts.length, 0);
+    assert.equal(detail.currentTask, null);
+    assert.deepEqual(
+      detail.sourceObservations.map((item) => [item.state, item.reconciliationAction]),
+      [["terminal", "cancel"]],
+    );
+    const events = f.work.listEvents(detail.work.workItemId, 0, 100).events.map((event) => event.eventType);
+    assert.ok(events.indexOf("source.observed") > events.indexOf("work.created"));
+    assert.equal(
+      events.some((event) => event.startsWith("work_attempt.")),
+      false,
+    );
+  } finally {
+    f.close();
+  }
+});
