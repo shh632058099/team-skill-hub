@@ -875,6 +875,11 @@ test("expert task detail UI displays persisted source session and client", () =>
   assert.match(ADMIN_EXPERTS_HTML, /renderChangeRequest/);
   assert.match(ADMIN_EXPERTS_HTML, /GitHub PR/);
   assert.match(ADMIN_EXPERTS_HTML, /GitLab MR/);
+  assert.match(ADMIN_EXPERTS_HTML, /workflowHistoryRows/);
+  assert.match(ADMIN_EXPERTS_HTML, /版本历史/);
+  assert.match(ADMIN_EXPERTS_HTML, /当前使用/);
+  assert.match(ADMIN_EXPERTS_HTML, /详情 \/ 历史/);
+  assert.match(ADMIN_EXPERTS_HTML, /workflowVersionGroups/);
   assert.match(ADMIN_EXPERTS_HTML, /source_session_id/);
   assert.match(ADMIN_EXPERTS_HTML, /source_client/);
 });
