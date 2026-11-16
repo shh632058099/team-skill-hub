@@ -34,6 +34,7 @@ import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service
 import { WorkOrchestrationStore, type WorkStatus } from "./expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
 import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
+import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import {
   createWorkerAvailabilityProbe,
@@ -231,6 +232,7 @@ export async function startServer(
     | {
         work: WorkOrchestrationStore;
         publications: WorkPublicationStore;
+        changeRequests: WorkChangeRequestStore;
         tasks: ExpertTaskStore;
         experts: ExpertStore;
         orchestrator: WorkOrchestrator;
@@ -239,6 +241,7 @@ export async function startServer(
   if (workRuntimeDb) {
     const work = new WorkOrchestrationStore(workRuntimeDb);
     const publications = new WorkPublicationStore(workRuntimeDb);
+    const changeRequests = new WorkChangeRequestStore(workRuntimeDb);
     const tasks = new ExpertTaskStore(workRuntimeDb);
     const experts = new ExpertStore(workRuntimeDb);
     const registryDb =
@@ -249,12 +252,14 @@ export async function startServer(
       new ExpertDispatchService(experts, tasks),
       createWorkerAvailabilityProbe(registryDb),
       publications,
+      changeRequests,
     );
-    workRuntimeResources = { work, publications, tasks, experts, orchestrator };
+    workRuntimeResources = { work, publications, changeRequests, tasks, experts, orchestrator };
     app.addHook("onClose", async () => {
       if (workReconcileTimer) clearInterval(workReconcileTimer);
       work.close();
       publications.close();
+      changeRequests.close();
       tasks.close();
       experts.close();
     });
@@ -957,6 +962,88 @@ export async function startServer(
     }
   });
 
+  app.post<{
+    Body: { workflowId: string; version: number; definition: unknown };
+  }>("/admin/api/workflows", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    const body = request.body;
+    if (
+      !body ||
+      typeof body.workflowId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(body.workflowId) ||
+      !Number.isSafeInteger(body.version) ||
+      body.version < 1 ||
+      !body.definition ||
+      typeof body.definition !== "object" ||
+      Array.isArray(body.definition)
+    ) {
+      return reply.code(400).send({ error: "INVALID_WORKFLOW" });
+    }
+    try {
+      const workflow = requireWorkRuntime().work.putWorkflow(
+        body.workflowId,
+        body.version,
+        body.definition as import("./expert-platform/work-orchestration-store.js").WorkflowDefinition,
+      );
+      return reply.code(201).send({ workflow });
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.get("/admin/api/workflow-repository-defaults", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    try {
+      const runtime = requireWorkRuntime();
+      const repositoryIds = [
+        ...new Set(runtime.experts.listDeployments().flatMap((deployment) => deployment.repositoryIds)),
+      ].sort();
+      return {
+        repositoryIds,
+        defaults: runtime.work.listRepositoryWorkflowDefaults(),
+      };
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.put<{
+    Params: { repositoryId: string };
+    Body: { workflowId: string };
+  }>("/admin/api/workflow-repository-defaults/:repositoryId", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    const repositoryId = request.params.repositoryId.trim();
+    const workflowId = request.body?.workflowId?.trim();
+    if (!repositoryId || !workflowId) return reply.code(400).send({ error: "INVALID_REPOSITORY_WORKFLOW_DEFAULT" });
+    try {
+      const runtime = requireWorkRuntime();
+      const known = runtime.experts
+        .listDeployments()
+        .some((deployment) => deployment.repositoryIds.includes(repositoryId));
+      if (!known) return reply.code(404).send({ error: "REPOSITORY_NOT_FOUND" });
+      runtime.work.putRepositoryWorkflowDefault(repositoryId, workflowId);
+      return {
+        repositoryId,
+        workflowId: runtime.work.getRepositoryWorkflowDefault(repositoryId),
+      };
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.delete<{ Params: { repositoryId: string } }>(
+    "/admin/api/workflow-repository-defaults/:repositoryId",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+      try {
+        requireWorkRuntime().work.deleteRepositoryWorkflowDefault(request.params.repositoryId);
+        return { deleted: true };
+      } catch (error) {
+        return adminWorkError(error, reply);
+      }
+    },
+  );
+
   app.get<{ Params: { id: string; version: string } }>("/admin/api/workflows/:id/:version", async (request, reply) => {
     if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(request.params.id))
@@ -975,6 +1062,45 @@ export async function startServer(
     if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
     if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
     try {
+      return adminWorkDetail(request.params.id);
+    } catch (error) {
+      return adminWorkError(error, reply);
+    }
+  });
+
+  app.post<{
+    Params: { id: string };
+    Body: {
+      expectedRevision: number;
+      subjectRevision: string;
+      decision: "accepted" | "rework" | "rejected";
+      reason?: string;
+    };
+  }>("/admin/api/work-items/:id/review", async (request, reply) => {
+    if (!hasAdminAccess(request)) return reply.code(403).send({ error: "admin API access denied" });
+    if (!/^[a-f0-9-]{36}$/i.test(request.params.id)) return reply.code(400).send({ error: "invalid WorkItem ID" });
+    const body = request.body;
+    if (
+      !body ||
+      !Number.isSafeInteger(body.expectedRevision) ||
+      body.expectedRevision < 0 ||
+      typeof body.subjectRevision !== "string" ||
+      !body.subjectRevision.trim() ||
+      !["accepted", "rework", "rejected"].includes(body.decision) ||
+      ((body.decision === "rework" || body.decision === "rejected") && !body.reason?.trim())
+    ) {
+      return reply.code(400).send({ error: "INVALID_REVIEW_DECISION" });
+    }
+    try {
+      const runtime = requireWorkRuntime();
+      const owner = runtime.work.getWorkInternal(request.params.id);
+      runtime.orchestrator.submitReview(request.params.id, owner.principalId, owner.scope, {
+        expectedRevision: body.expectedRevision,
+        subjectRevision: body.subjectRevision.trim(),
+        decision: body.decision,
+        ...(body.reason?.trim() ? { reason: body.reason.trim() } : {}),
+        actorPrincipalId: adminPrincipal.id,
+      });
       return adminWorkDetail(request.params.id);
     } catch (error) {
       return adminWorkError(error, reply);
@@ -1067,7 +1193,23 @@ export async function startServer(
           reply.code(404);
           return { error: "task not found" };
         }
-        return detail;
+        const workItemId =
+          detail.task && typeof detail.task === "object" && "work_item_id" in detail.task
+            ? String((detail.task as { work_item_id?: unknown }).work_item_id ?? "")
+            : "";
+        if (workItemId && workRuntimeResources) {
+          try {
+            const linkedWork = adminWorkDetail(workItemId);
+            return {
+              ...detail,
+              work: linkedWork.work,
+              changeRequest: linkedWork.changeRequest,
+            };
+          } catch {
+            // Keep historical/partially-migrated task detail available even if its Work is no longer readable.
+          }
+        }
+        return { ...detail, work: null, changeRequest: null };
       } catch (error) {
         reply.code(503);
         return { error: error instanceof Error ? error.message : "TASK_DETAIL_FAILED" };
@@ -1176,6 +1318,30 @@ export async function startServer(
       }
     });
   const mcpToolNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/);
+  const verificationPolicyStepSchema = z.object({
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+    type: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/),
+    argv: z.array(z.string().trim().min(1).max(2000)).min(1).max(64),
+    timeoutMs: z.number().int().min(100).max(3_600_000),
+    evidenceType: z.enum(["build", "unit_test", "integration_test"]),
+  });
+  const repositoryVerificationPolicySchema = z.object({
+    version: z.number().int().min(1),
+    required: z.array(verificationPolicyStepSchema).min(1).max(100),
+  });
+  const repositoryPublicationPolicySchema = z.object({
+    version: z.number().int().min(1),
+    permissions: z
+      .array(z.enum(["prepare-commit", "push-work-branch", "create-change-request"]))
+      .min(1)
+      .max(3),
+    branchPrefix: z.string().trim().min(1).max(100),
+    protectedBranches: z.array(z.string().trim().min(1).max(250)).max(100),
+    allowedPushRemote: z.literal("origin"),
+    credentialRef: z.string().trim().min(1).max(100).optional(),
+    allowForcePush: z.literal(false),
+    allowDeleteRef: z.literal(false),
+  });
   const expertDeploymentSchema = z
     .object({
       id: z.string().trim().min(1).max(100),
@@ -1188,6 +1354,19 @@ export async function startServer(
             branch: z.string().trim().min(1).max(250),
             credentialRef: z.string().trim().max(100).optional(),
             gitProxyUrl: z.string().trim().max(2048).optional(),
+            publicationPolicy: repositoryPublicationPolicySchema.optional(),
+            publicationTemplate: z
+              .object({
+                preset: z.enum(["work-branch", "change-request"]),
+                branchPrefix: z.string().trim().min(1).max(100).optional(),
+              })
+              .strict()
+              .optional(),
+            verificationPolicy: repositoryVerificationPolicySchema.optional(),
+            verificationTemplate: z
+              .object({ preset: z.literal("cmake-ctest") })
+              .strict()
+              .optional(),
           }),
         )
         .max(100)

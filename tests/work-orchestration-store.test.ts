@@ -32,6 +32,92 @@ test("workflow list exposes all versioned definitions in stable order", () => {
   });
 });
 
+test("platform presets preserve history and publish stricter development and readonly workflows", () => {
+  withStore((store) => {
+    for (const id of [
+      "investigation",
+      "code-review",
+      "bug-fix",
+      "feature-change",
+      "refactor",
+      "test-improvement",
+      "build-fix",
+      "release-change",
+    ]) {
+      assert.equal(store.getWorkflow(id, 1).version, 1);
+    }
+
+    for (const id of ["bug-fix", "feature-change", "refactor", "test-improvement", "build-fix", "release-change"]) {
+      assert.equal(store.getWorkflow(id).version, 2);
+      const workflow = store.getWorkflow(id).definition;
+      assert.deepEqual(workflow.change, { mode: "code_change", delivery: "merge_request" });
+      assert.ok(workflow.validation.requiredEvidence.includes("build"));
+      assert.ok(workflow.validation.requiredEvidence.includes("unit_test"));
+      assert.equal(workflow.review.required, true);
+      assert.equal(workflow.publication?.required, true);
+      assert.equal(workflow.publication?.approvalRequired, false);
+      assert.ok(workflow.completion.require.includes("publication_succeeded"));
+      assert.ok(workflow.completion.require.includes("change_request_created"));
+      assert.equal(workflow.completion.require.includes("required_approvals_approved"), false);
+    }
+
+    for (const id of ["investigation", "code-review"]) {
+      assert.equal(store.getWorkflow(id, 2).version, 2);
+      assert.equal(store.getWorkflow(id).version, 3);
+      const workflow = store.getWorkflow(id).definition;
+      assert.deepEqual(workflow.change, { mode: "readonly" });
+      assert.equal(workflow.review.required, false);
+      assert.equal(workflow.completion.require.includes("review_accepted"), false);
+    }
+  });
+});
+test("workflow selection prefers explicit then repository default then platform default", () => {
+  withStore((store) => {
+    store.putRepositoryWorkflowDefault("repo-a", "investigation", 100);
+    assert.equal(store.getRepositoryWorkflowDefault("repo-a"), "investigation");
+    assert.deepEqual(store.listRepositoryWorkflowDefaults(), [
+      { repositoryId: "repo-a", workflowId: "investigation", updatedAt: 100 },
+    ]);
+
+    const repositoryDefault = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "repo-default-workflow",
+      sourceType: "mcp",
+      title: "Investigate",
+      description: "use repository default",
+      repositoryId: "repo-a",
+    });
+    assert.equal(repositoryDefault.workflowId, "investigation");
+
+    const explicit = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "explicit-workflow",
+      sourceType: "mcp",
+      title: "Review",
+      description: "explicit overrides repository default",
+      repositoryId: "repo-a",
+      workflowId: "code-review",
+    });
+    assert.equal(explicit.workflowId, "code-review");
+
+    const fallback = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "platform-default-workflow",
+      sourceType: "mcp",
+      title: "Fallback",
+      description: "use platform default",
+      repositoryId: "repo-b",
+    });
+    assert.equal(fallback.workflowId, "code-fix-default");
+
+    store.deleteRepositoryWorkflowDefault("repo-a");
+    assert.equal(store.getRepositoryWorkflowDefault("repo-a"), null);
+  });
+});
+
 test("work submission is idempotent and conflicting reuse fails closed", () => {
   withStore((store) => {
     const first = store.createOrReuseWork({
@@ -501,7 +587,7 @@ test("completion gate rejects failed and stale required verification evidence", 
           },
         ],
       },
-      review: { humanReview: false },
+      review: { required: false },
       completion: {
         require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
       },
@@ -559,7 +645,7 @@ test("new authoritative verification binding stales older evidence for the same 
     store.putWorkflow("binding-stale", 1, {
       ...structuredClone(base),
       validation: { requiredEvidence: ["unit_test"], required: [] },
-      review: { humanReview: false },
+      review: { required: false },
       completion: {
         require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
       },
@@ -737,7 +823,13 @@ test("workflow validation policy is append-only, version-pinned and rejects malf
     assert.deepEqual(registered.definition.validation.required, definition.validation.required);
     assert.equal(store.putWorkflow("verified-code-fix", 1, definition, 101).version, 1);
     assert.throws(
-      () => store.putWorkflow("verified-code-fix", 1, { ...definition, review: { humanReview: false } }, 102),
+      () =>
+        store.putWorkflow(
+          "verified-code-fix",
+          1,
+          { ...definition, review: { required: true, reviewerExpertId: "reviewer" } },
+          102,
+        ),
       /WORKFLOW_VERSION_CONFLICT/,
     );
     assert.throws(
@@ -774,6 +866,47 @@ test("workflow validation policy is append-only, version-pinned and rejects malf
     });
     assert.equal(attempt.workflowId, "verified-code-fix");
     assert.equal(attempt.workflowVersion, 1);
+  });
+});
+
+test("code-change workflow fails closed without mandatory quality and delivery gates", () => {
+  withStore((store) => {
+    const base = structuredClone(store.getWorkflow("bug-fix").definition);
+    const withoutBuild = structuredClone(base);
+    withoutBuild.validation.requiredEvidence = withoutBuild.validation.requiredEvidence.filter(
+      (item) => item !== "build",
+    );
+    assert.throws(() => store.putWorkflow("bad-code-change-build", 1, withoutBuild), /INVALID_WORKFLOW/);
+
+    const withoutUnit = structuredClone(base);
+    withoutUnit.validation.requiredEvidence = withoutUnit.validation.requiredEvidence.filter(
+      (item) => item !== "unit_test",
+    );
+    assert.throws(() => store.putWorkflow("bad-code-change-unit", 1, withoutUnit), /INVALID_WORKFLOW/);
+
+    const withoutReview = structuredClone(base);
+    withoutReview.review = { required: false };
+    withoutReview.completion.require = withoutReview.completion.require.filter((item) => item !== "review_accepted");
+    assert.throws(() => store.putWorkflow("bad-code-change-review", 1, withoutReview), /INVALID_WORKFLOW/);
+
+    const withoutMr = structuredClone(base);
+    withoutMr.completion.require = withoutMr.completion.require.filter((item) => item !== "change_request_created");
+    assert.throws(() => store.putWorkflow("bad-code-change-mr", 1, withoutMr), /INVALID_WORKFLOW/);
+  });
+});
+
+test("configured integration test becomes mandatory evidence automatically", () => {
+  withStore((store) => {
+    const base = structuredClone(store.getWorkflow("bug-fix").definition);
+    base.validation.required.push({
+      id: "integration",
+      type: "command",
+      argv: ["./scripts/integration-test.sh"],
+      timeoutMs: 600_000,
+      evidenceType: "integration_test",
+    });
+    const registered = store.putWorkflow("integration-code-change", 1, base);
+    assert.ok(registered.definition.validation.requiredEvidence.includes("integration_test"));
   });
 });
 
@@ -852,6 +985,30 @@ test("workflow rejects unknown write profiles and malformed approval requirement
         }),
       /INVALID_WORKFLOW/,
     );
+    const codeChange = structuredClone(store.getWorkflow("bug-fix").definition);
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-code-change-runtime", 1, {
+          ...codeChange,
+          execution: {
+            ...structuredClone(codeChange.execution),
+            requiredRuntimeProfile: "claude-readonly",
+          },
+        }),
+      /INVALID_WORKFLOW/,
+    );
+    const readonly = structuredClone(store.getWorkflow("investigation").definition);
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-readonly-runtime", 1, {
+          ...readonly,
+          execution: {
+            ...structuredClone(readonly.execution),
+            requiredRuntimeProfile: "claude-workspace-write",
+          },
+        }),
+      /INVALID_WORKFLOW/,
+    );
     assert.throws(
       () =>
         store.putWorkflow("missing-approval", 1, {
@@ -883,6 +1040,15 @@ test("legacy workflow without runtime or approval requirements remains normalize
     assert.equal(record.definition.execution.requiredRuntimeProfile, undefined);
     assert.equal(record.definition.completion.requiredApprovals, undefined);
     assert.deepEqual(record.definition.completion.require, base.completion.require);
+  });
+});
+
+test("legacy humanReview workflow shape normalizes to required review", () => {
+  withStore((store) => {
+    const base = structuredClone(store.getWorkflow("code-fix-default").definition) as any;
+    base.review = { humanReview: true };
+    const record = store.putWorkflow("legacy-human-review", 1, base);
+    assert.deepEqual(record.definition.review, { required: true });
   });
 });
 
@@ -1019,7 +1185,7 @@ test("new WorkAttempt invalidates prior attempt evidence even when subject revis
     store.putWorkflow("attempt-bound-evidence", 1, {
       ...structuredClone(base),
       validation: { requiredEvidence: ["unit_test"], required: [] },
-      review: { humanReview: false },
+      review: { required: false },
       completion: {
         require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
       },
@@ -1370,6 +1536,147 @@ test("publication-required workflow gates completion on exact pushed artifact ev
       store.evaluateCompletionGate(work.workItemId, "alice", "team-a").missing.includes("publication_succeeded"),
     );
 
+    store.close();
+  } finally {
+    publications.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("code-change completion waits for change-request evidence after branch publication", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-change-request-gate-"));
+  const file = path.join(dir, "runtime.db");
+  const publications = new WorkPublicationStore(file);
+  try {
+    const store = new WorkOrchestrationStore(file);
+    let work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "change-request-gate",
+      sourceType: "mcp",
+      title: "Code change",
+      description: "Require branch and MR",
+      workflowId: "bug-fix",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-write",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {
+      baseCommit: "b".repeat(40),
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+    });
+    work = store.getWork(work.workItemId, "alice", "team-a");
+    const sourceSubject = "workspace:" + "a".repeat(64);
+    work = store.setCurrentSubjectRevision(work.workItemId, "alice", "team-a", work.stateRevision, sourceSubject, 100);
+    for (const type of ["expert_result", "build", "unit_test"]) {
+      store.recordEvidence(work.workItemId, "alice", "team-a", {
+        workAttemptId: attempt.workAttemptId,
+        type,
+        status: "passed",
+        source: "worker_verified",
+        subjectRevision: sourceSubject,
+      });
+    }
+    work = store.finishWorkAttempt(
+      work.workItemId,
+      attempt.workAttemptId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "succeeded",
+      "waiting_review",
+      110,
+    );
+    store.submitReviewDecision(
+      work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: work.stateRevision,
+        subjectRevision: sourceSubject,
+        decision: "accepted",
+      },
+      120,
+    );
+
+    const publication = publications.createOrReusePublication(
+      {
+        workItemId: work.workItemId,
+        workAttemptId: attempt.workAttemptId,
+        workspaceId: workspace.workspaceId,
+        sourceSubjectRevision: sourceSubject,
+        baseCommit: "b".repeat(40),
+        repositoryId: "ota-repo",
+        repositoryIdentityRevision: 1,
+        publicationPolicyRevision: 1,
+        branchName: "tsh/bug-fix/change-request-gate",
+        pushRemoteName: "origin",
+        ownerWorkerId: "worker-a",
+        commitTimestamp: 1_800_000_000_000,
+        commitAuthorName: "Team Skill Hub",
+        commitAuthorEmail: "team-skill-hub@local.invalid",
+        commitMessage: "Code change\n",
+        executionSnapshot: {
+          workspacePath: "/srv/workspaces/change-request-gate",
+          repositoryUrl: "https://example.test/ota.git",
+          defaultBranch: "main",
+          branchPrefix: "tsh/bug-fix/",
+          protectedBranches: ["main"],
+          allowedPushRemote: "origin",
+          expectedContentRevision: "a".repeat(64),
+          approvedChangeSummary: {
+            baseCommit: "b".repeat(40),
+            changedFiles: ["src/fix.ts"],
+            addedFiles: [],
+            deletedFiles: [],
+            diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+            contentRevision: "a".repeat(64),
+          },
+        },
+      } as any,
+      130,
+    );
+    publications.transitionPublication(
+      publication.publicationId,
+      "prepared",
+      {
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      140,
+    );
+    publications.transitionPublication(publication.publicationId, "approved", {}, 150);
+    publications.transitionPublication(publication.publicationId, "pushing", {}, 160);
+    publications.transitionPublication(publication.publicationId, "pushed", {}, 170);
+    const publicationSubject = "publication:" + publication.publicationId + ":" + "c".repeat(40);
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      type: "publication",
+      status: "passed",
+      source: "worker_verified",
+      artifactRef: "publication:" + publication.publicationId,
+      subjectRevision: publicationSubject,
+    });
+
+    let gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.deepEqual(gate.missing, ["change_request_created"]);
+    store.recordEvidence(work.workItemId, "alice", "team-a", {
+      workAttemptId: attempt.workAttemptId,
+      type: "pull_request",
+      status: "passed",
+      source: "external_verified",
+      artifactRef: "https://git.example/merge_requests/42",
+      subjectRevision: publicationSubject,
+    });
+    gate = store.evaluateCompletionGate(work.workItemId, "alice", "team-a");
+    assert.equal(gate.ready, true);
+    assert.deepEqual(gate.missing, []);
     store.close();
   } finally {
     publications.close();

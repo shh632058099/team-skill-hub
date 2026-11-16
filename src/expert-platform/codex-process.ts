@@ -69,12 +69,17 @@ function classifyJsonlFailure(output: string): string | undefined {
     } catch {
       continue;
     }
-    if (event.type !== "error" && event.type !== "turn.failed") continue;
+    if (event.type !== "error" && event.type !== "turn.failed" && !(event.type === "result" && event.is_error === true))
+      continue;
     const failure = event.error;
     const code = failure && typeof failure === "object" ? (failure as Record<string, unknown>).code : undefined;
     if (code === "insufficient_quota") return "MODEL_QUOTA_EXCEEDED";
     const message =
-      failure && typeof failure === "object" ? (failure as Record<string, unknown>).message : event.message;
+      failure && typeof failure === "object"
+        ? (failure as Record<string, unknown>).message
+        : typeof event.message === "string"
+          ? event.message
+          : event.result;
     if (typeof message !== "string") return "MODEL_REQUEST_FAILED";
     if (/401|unauthorized|invalid.api.key|authentication/i.test(message)) return "AUTHENTICATION_FAILED";
     if (/403|access.denied|forbidden/i.test(message)) return "MODEL_ACCESS_DENIED";
@@ -128,8 +133,7 @@ export async function runCodexProcess(options: CodexProcessOptions): Promise<str
     const reader = collector
       ? new JsonlReader((event) => {
           collector.accept(event);
-          if (options.streamingBackend === "codex" && !structuredErrorCode)
-            structuredErrorCode = classifyJsonlFailure(JSON.stringify(event));
+          if (!structuredErrorCode) structuredErrorCode = classifyJsonlFailure(JSON.stringify(event));
           for (const activity of mapExecutionActivity(options.streamingBackend!, event)) {
             try {
               options.onActivity?.(activity);

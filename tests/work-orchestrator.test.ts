@@ -8,15 +8,17 @@ import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
+import { WorkChangeRequestStore } from "../src/expert-platform/work-change-request-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
 
-function fixture(workerAvailable?: (workerId: string, now: number) => boolean) {
+function fixture(workerAvailable?: (workerId: string, now: number) => boolean, enableChangeRequests = false) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-"));
   const db = path.join(dir, "runtime.sqlite");
   const experts = new ExpertStore(db);
   const tasks = new ExpertTaskStore(db);
   const work = new WorkOrchestrationStore(db);
   const publications = new WorkPublicationStore(db);
+  const changeRequests = enableChangeRequests ? new WorkChangeRequestStore(db) : undefined;
   experts.putDefinition({
     id: "ota",
     displayName: "OTA Expert",
@@ -35,16 +37,18 @@ function fixture(workerAvailable?: (workerId: string, now: number) => boolean) {
     active: true,
   });
   const dispatch = new ExpertDispatchService(experts, tasks);
-  const orchestrator = new WorkOrchestrator(work, tasks, dispatch, workerAvailable, publications);
+  const orchestrator = new WorkOrchestrator(work, tasks, dispatch, workerAvailable, publications, changeRequests);
   return {
     dir,
     experts,
     tasks,
     work,
     publications,
+    changeRequests,
     orchestrator,
     close() {
       publications.close();
+      changeRequests?.close();
       work.close();
       tasks.close();
       experts.close();
@@ -145,6 +149,301 @@ test("deterministic dispatch rejection becomes durable blocked work instead of r
     assert.deepEqual(f.orchestrator.reconcileActive(Date.now() + 10_000, 100), []);
   } finally {
     f.close();
+  }
+});
+
+test("code-change work auto-routes Claude submission to the Claude write deployment", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-auto-deployment-"));
+  const db = path.join(dir, "runtime.sqlite");
+  const experts = new ExpertStore(db);
+  const tasks = new ExpertTaskStore(db);
+  const work = new WorkOrchestrationStore(db);
+  const publications = new WorkPublicationStore(db);
+  try {
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA Expert",
+      capabilities: ["ota"],
+      keywords: ["ota", "upgrade"],
+      active: true,
+    });
+    const verificationPolicy = {
+      version: 1,
+      required: [
+        {
+          id: "build",
+          type: "command",
+          argv: ["cmake", "--build", "/tmp/build"],
+          timeoutMs: 120_000,
+          evidenceType: "build",
+        },
+        {
+          id: "unit",
+          type: "command",
+          argv: ["ctest", "--test-dir", "/tmp/build"],
+          timeoutMs: 120_000,
+          evidenceType: "unit_test",
+        },
+      ],
+    };
+    const common = {
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://example.test/ota.git",
+          branch: "main",
+          verificationPolicy,
+        } as any,
+      ],
+      principals: ["alice"],
+      active: true,
+    };
+    experts.putDeployment({ ...common, id: "ota-claude-ro", runtimeProfile: "claude-readonly" });
+    experts.putDeployment({
+      ...common,
+      id: "ota-claude-rw",
+      runtimeProfile: "claude-workspace-write",
+      executor: {
+        backend: "claude",
+        modelConfig: {
+          providerId: "router",
+          model: "model",
+          baseUrl: "https://router.example/v1",
+          wireApi: "anthropic-messages",
+          allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+        },
+      },
+    });
+    experts.putDeployment({ ...common, id: "ota-codex-ro", runtimeProfile: "codex-readonly" });
+    experts.putDeployment({
+      ...common,
+      id: "ota-codex-rw",
+      runtimeProfile: "codex-workspace-write",
+      executor: {
+        backend: "codex",
+        modelConfig: {
+          providerId: "router",
+          model: "model",
+          baseUrl: "https://router.example/v1",
+          wireApi: "responses",
+          allowedEnvNames: ["OPENAI_API_KEY"],
+        },
+      },
+    });
+    const orchestrator = new WorkOrchestrator(
+      work,
+      tasks,
+      new ExpertDispatchService(experts, tasks),
+      undefined,
+      publications,
+    );
+
+    const detail = orchestrator.submitWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "claude-auto-code-change",
+      sourceType: "mcp",
+      sourceScope: "claude-code_2.1.319 (cli)/38a7f4f7-ad57-4a4b-9f86-f793e0839622",
+      sourceRef: "claude-auto-code-change",
+      title: "Fix OTA bug",
+      description: "fix one low-risk OTA boundary bug",
+      workflowId: "bug-fix",
+      expertId: "ota",
+    });
+
+    assert.equal(detail.work.status, "running");
+    assert.equal(
+      detail.work.repositoryId,
+      null,
+      "repository remains an intake hint; resolved repository is pinned on attempt",
+    );
+    assert.equal(detail.attempts.length, 1);
+    assert.equal(detail.attempts[0]!.deploymentId, "ota-claude-rw");
+    assert.equal(detail.currentTask!.deploymentId, "ota-claude-rw");
+    assert.equal(detail.currentTask!.repositoryId, "ota-repo");
+    assert.equal(
+      (detail.attempts[0]!.dispatchBinding as { runtimeProfile?: string }).runtimeProfile,
+      "claude-workspace-write",
+    );
+    const claim = tasks.claim("worker-a", 1_000, 30_000, "ota", {
+      backend: "claude",
+      runtimeProfiles: ["claude-workspace-write"],
+    })!;
+    assert.match(claim.problem, /existing Team Skill Hub WorkAttempt/);
+    assert.match(claim.problem, /Do NOT call submit_work, submit_expert_task, submit_expert_task_auto/);
+    assert.match(claim.problem, /orchestration step has already happened/);
+    assert.match(claim.problem, /Original work:\nfix one low-risk OTA boundary bug/);
+  } finally {
+    publications.close();
+    work.close();
+    tasks.close();
+    experts.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("code-change blocks before ExpertTask dispatch when concrete build and unit verification are missing", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-verification-missing-"));
+  const db = path.join(dir, "runtime.sqlite");
+  const experts = new ExpertStore(db);
+  const tasks = new ExpertTaskStore(db);
+  const work = new WorkOrchestrationStore(db);
+  const publications = new WorkPublicationStore(db);
+  try {
+    experts.putDefinition({ id: "ota", displayName: "OTA", capabilities: ["ota"], keywords: ["ota"], active: true });
+    experts.putDeployment({
+      id: "ota-write",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [{ id: "ota-repo", url: "https://example.test/ota.git", branch: "main" }],
+      principals: ["alice"],
+      runtimeProfile: "claude-workspace-write",
+      active: true,
+      executor: {
+        backend: "claude",
+        modelConfig: {
+          providerId: "router",
+          model: "model",
+          baseUrl: "https://router.example/v1",
+          wireApi: "anthropic-messages",
+          allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+        },
+      },
+    });
+    const orchestrator = new WorkOrchestrator(
+      work,
+      tasks,
+      new ExpertDispatchService(experts, tasks),
+      undefined,
+      publications,
+    );
+    const detail = orchestrator.submitWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "verification-policy-missing",
+      sourceType: "mcp",
+      sourceScope: "claude-code/verification-policy-missing",
+      sourceRef: "verification-policy-missing",
+      title: "Fix OTA bug",
+      description: "fix an OTA bug",
+      workflowId: "bug-fix",
+      expertId: "ota",
+    });
+
+    assert.equal(detail.work.status, "blocked");
+    assert.equal(detail.work.blockedReason, "policy_blocked");
+    assert.match(detail.work.blockedContext ?? "", /VERIFICATION_POLICY_MISSING/);
+    assert.equal(detail.attempts.length, 1);
+    assert.equal(detail.currentTask, null);
+  } finally {
+    publications.close();
+    work.close();
+    tasks.close();
+    experts.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository verification policy is pinned into code-change task and makes integration evidence mandatory", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-repository-verification-"));
+  const db = path.join(dir, "runtime.sqlite");
+  const experts = new ExpertStore(db);
+  const tasks = new ExpertTaskStore(db);
+  const work = new WorkOrchestrationStore(db);
+  const publications = new WorkPublicationStore(db);
+  try {
+    const steps = [
+      {
+        id: "build",
+        type: "command",
+        argv: ["sh", "-lc", "cmake -S /workspace -B /tmp/build && cmake --build /tmp/build"],
+        timeoutMs: 120_000,
+        evidenceType: "build",
+      },
+      {
+        id: "unit",
+        type: "command",
+        argv: ["sh", "-lc", "ctest --test-dir /tmp/build -R '^unit_'"],
+        timeoutMs: 120_000,
+        evidenceType: "unit_test",
+      },
+      {
+        id: "integration",
+        type: "command",
+        argv: ["sh", "-lc", "ctest --test-dir /tmp/build -R '^integration_tests$'"],
+        timeoutMs: 120_000,
+        evidenceType: "integration_test",
+      },
+    ];
+    experts.putDefinition({ id: "ota", displayName: "OTA", capabilities: ["ota"], keywords: ["ota"], active: true });
+    experts.putDeployment({
+      id: "ota-write",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://example.test/ota.git",
+          branch: "main",
+          verificationPolicy: { version: 1, required: steps },
+        } as any,
+      ],
+      principals: ["alice"],
+      runtimeProfile: "claude-workspace-write",
+      active: true,
+      executor: {
+        backend: "claude",
+        modelConfig: {
+          providerId: "router",
+          model: "model",
+          baseUrl: "https://router.example/v1",
+          wireApi: "anthropic-messages",
+          allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+        },
+      },
+    });
+    const orchestrator = new WorkOrchestrator(
+      work,
+      tasks,
+      new ExpertDispatchService(experts, tasks),
+      undefined,
+      publications,
+    );
+    const detail = orchestrator.submitWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "repository-verification-policy",
+      sourceType: "mcp",
+      sourceScope: "claude-code/repository-verification-policy",
+      sourceRef: "repository-verification-policy",
+      title: "Fix OTA bug",
+      description: "fix an OTA bug",
+      workflowId: "bug-fix",
+      expertId: "ota",
+    });
+
+    assert.equal(detail.work.status, "running");
+    assert.deepEqual(detail.currentTask?.validationSnapshot, steps);
+    assert.ok(detail.gate.missing.includes("required_evidence:integration_test"));
+
+    experts.putDeployment({
+      ...experts.getDeployment("ota-write"),
+      repositories: [
+        {
+          ...experts.getDeployment("ota-write").repositories![0]!,
+          verificationPolicy: { version: 2, required: steps.slice(0, 2) },
+        } as any,
+      ],
+    });
+    assert.deepEqual(tasks.get(detail.currentTask!.taskId, "alice", "team-a").validationSnapshot, steps);
+  } finally {
+    publications.close();
+    work.close();
+    tasks.close();
+    experts.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -475,6 +774,83 @@ test("successful task becomes revision-bound evidence then accepted review compl
     f.work.completeWorkspaceCleanup(cleanup.workspaceId, "worker-a", cleanup.fencing, false, "DELETE_FAILED", 4_100);
     assert.equal(f.work.getWorkspace(workspace.workspaceId).state, "failed");
     assert.equal(f.work.getWork(detail.work.workItemId, "alice", "team-a").status, "completed");
+  } finally {
+    f.close();
+  }
+});
+
+test("configured reviewer expert runs an independent owner-affine review task and records accepted review", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("agent-reviewed", 1, {
+      ...structuredClone(base),
+      review: { required: true, reviewerExpertId: "ota" },
+    });
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "agent-reviewed-work",
+      workflowId: "agent-reviewed",
+    });
+    const workspace = f.work.getWorkspace(detail.attempts[0]!.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      1_100,
+      "a".repeat(40),
+    );
+    const implementation = f.tasks.claim("worker-a", 1_200, 30_000, "ota")!;
+    f.tasks.complete(implementation, "implementation result", 2_000, { commitSha: "a".repeat(40) });
+
+    const reviewing = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(reviewing.work.status, "running");
+    assert.equal(reviewing.attempts[0]!.status, "active");
+    assert.ok(reviewing.reviewTask);
+    assert.equal(reviewing.reviewTask!.expertId, "ota");
+    assert.equal(reviewing.reviewTask!.requiredWorkerId, "worker-a");
+    assert.notEqual(reviewing.reviewTask!.taskId, reviewing.currentTask!.taskId);
+
+    const reviewClaim = f.tasks.claim("worker-a", 3_100, 30_000, "ota")!;
+    assert.equal(reviewClaim.taskId, reviewing.reviewTask!.taskId);
+    f.tasks.complete(reviewClaim, JSON.stringify({ decision: "accepted", reason: "looks good" }), 3_200, {
+      commitSha: "a".repeat(40),
+    });
+
+    const completed = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 4_000);
+    assert.equal(completed.work.status, "completed");
+    assert.equal(completed.attempts[0]!.status, "succeeded");
+    assert.equal(completed.reviews.at(-1)?.decision, "accepted");
+    assert.equal(completed.reviews.at(-1)?.actorPrincipalId, "agent:ota");
+    assert.equal(completed.gate.ready, true);
+  } finally {
+    f.close();
+  }
+});
+
+test("required build and unit evidence block before review is dispatched", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("quality-before-review", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: ["expert_result", "build", "unit_test"], required: [] },
+      review: { required: true, reviewerExpertId: "ota" },
+    });
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "quality-before-review",
+      workflowId: "quality-before-review",
+    });
+    const implementation = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    f.tasks.complete(implementation, "implementation result", 2_000, { commitSha: "a".repeat(40) });
+
+    const blocked = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(blocked.work.status, "blocked");
+    assert.equal(blocked.work.blockedReason, "verification_required");
+    assert.match(blocked.work.blockedContext ?? "", /required_evidence:build/);
+    assert.match(blocked.work.blockedContext ?? "", /required_evidence:unit_test/);
+    assert.equal(blocked.reviewTask, null);
   } finally {
     f.close();
   }
@@ -922,6 +1298,38 @@ test("permission blocker is durable and does not retry", () => {
     f.close();
   }
 });
+test("deterministic workspace owner and shared-group violations block without retry", () => {
+  for (const code of [
+    "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
+    "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
+    "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
+    "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
+    "WORKER_RUNTIME_STATE_OWNER_INVALID",
+    "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
+    "WORKSPACE_PREPARATION_INCOMPLETE",
+    "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+  ]) {
+    const f = fixture();
+    try {
+      const detail = f.orchestrator.submitWork(submission);
+      const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+      f.tasks.fail(claim, code, 2_000);
+      const blocked = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+      assert.equal(blocked.work.status, "blocked", code);
+      assert.equal(blocked.work.blockedReason, "policy_blocked", code);
+      assert.equal(blocked.work.blockedContext, code);
+      assert.equal(blocked.work.nextActionAt, null);
+      assert.equal(f.tasks.runCount(claim.taskId), 1);
+      assert.equal(
+        f.work.listEvents(detail.work.workItemId).events.filter((event) => event.eventType === "run.retry_scheduled")
+          .length,
+        0,
+      );
+    } finally {
+      f.close();
+    }
+  }
+});
 
 test("write task uses workspace content revision and invalidates prior revision decisions", () => {
   const f = fixture();
@@ -1244,13 +1652,13 @@ test("ensurePublication creates an owner-affine prepared-work command only after
           id: "ota-repo",
           url: "https://example.test/ota.git",
           branch: "main",
+          credentialRef: "publish-ref",
           publicationPolicy: {
             version: 4,
             permissions: ["prepare-commit", "push-work-branch"],
             branchPrefix: "skillhub/work/",
             protectedBranches: ["main"],
             allowedPushRemote: "origin",
-            credentialRef: "publish-ref",
             allowForcePush: false,
             allowDeleteRef: false,
           },
@@ -1392,7 +1800,11 @@ test("publication-required workflow automatically prepares, pushes evidence, and
       },
       publication: { required: true, mode: "work_branch" },
       completion: {
-        require: [...base.completion.require, "required_approvals_approved", "publication_succeeded"],
+        require: [
+          ...base.completion.require.filter((item) => item !== "change_request_created"),
+          "required_approvals_approved",
+          "publication_succeeded",
+        ],
         requiredApprovals: [{ scope: "publish_work_branch", subjectType: "publication_artifact" }],
       },
     });
@@ -1497,6 +1909,218 @@ test("publication-required workflow automatically prepares, pushes evidence, and
     assert.equal(publicationEvidence?.artifactRef, "publication:" + publication.publicationId);
     assert.equal(detail.gate.ready, true);
     assert.deepEqual(detail.gate.missing, []);
+  } finally {
+    f.close();
+  }
+});
+test("pushed publication recovers into a durable change request and completes after verified PR evidence", () => {
+  const f = fixture(() => true, true);
+  try {
+    const modelConfig = {
+      providerId: "router",
+      model: "model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    f.experts.putDeployment({
+      id: "ota-change-request",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://github.com/example/project.git",
+          branch: "main",
+          credentialRef: "publish-token",
+          publicationPolicy: {
+            version: 7,
+            permissions: ["prepare-commit", "push-work-branch", "create-change-request"],
+            branchPrefix: "tsh/",
+            protectedBranches: ["main"],
+            allowedPushRemote: "origin",
+            allowForcePush: false,
+            allowDeleteRef: false,
+          },
+          verificationPolicy: {
+            version: 1,
+            required: [
+              {
+                id: "build",
+                type: "command",
+                argv: ["sh", "-lc", "true"],
+                timeoutMs: 60_000,
+                evidenceType: "build",
+              },
+              {
+                id: "unit-test",
+                type: "command",
+                argv: ["sh", "-lc", "true"],
+                timeoutMs: 60_000,
+                evidenceType: "unit_test",
+              },
+            ],
+          },
+        },
+      ],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
+      active: true,
+      executor: { backend: "codex", modelConfig },
+    });
+
+    const base = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("change-request-publication", 1, {
+      ...structuredClone(base),
+      execution: {
+        ...structuredClone(base.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      change: { mode: "code_change", delivery: "merge_request" },
+      validation: {
+        requiredEvidence: ["expert_result", "build", "unit_test"],
+        required: [],
+      },
+      publication: { required: true, mode: "work_branch", approvalRequired: false },
+      completion: {
+        require: [
+          "latest_work_attempt_succeeded",
+          "required_evidence_passed",
+          "no_unresolved_blocker",
+          "review_accepted",
+          "publication_succeeded",
+          "change_request_created",
+        ],
+      },
+    });
+    const submitted = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "change-request-publication",
+      workflowId: "change-request-publication",
+      deploymentId: "ota-change-request",
+    });
+    const attempt = submitted.attempts[0]!;
+    const workspace = f.work.getWorkspace(attempt.workspaceId!);
+    f.work.assignWorkspaceOwner(
+      workspace.workspaceId,
+      "worker-a",
+      "/srv/workspaces/" + workspace.workspaceKey,
+      1100,
+      "b".repeat(40),
+    );
+
+    const claim = f.tasks.claim("worker-a", 1000, 30_000, "ota", {
+      backend: "codex",
+      runtimeProfiles: ["codex-workspace-write"],
+    })!;
+    const summary = {
+      baseCommit: "b".repeat(40),
+      changedFiles: ["README.md"],
+      addedFiles: [],
+      deletedFiles: [],
+      diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+      contentRevision: "a".repeat(64),
+    };
+    const subject = "workspace:" + summary.contentRevision;
+    f.tasks.complete(
+      claim,
+      "changed",
+      2000,
+      { commitSha: summary.baseCommit },
+      [
+        {
+          stepId: "build",
+          type: "command",
+          evidenceType: "build",
+          status: "passed",
+          exitCode: 0,
+          durationMs: 10,
+          errorCode: null,
+          subjectRevision: subject,
+          environmentIdentity: "worker:worker-a",
+          verifierIdentity: "team-skill-hub-worker",
+        },
+        {
+          stepId: "unit-test",
+          type: "command",
+          evidenceType: "unit_test",
+          status: "passed",
+          exitCode: 0,
+          durationMs: 10,
+          errorCode: null,
+          subjectRevision: subject,
+          environmentIdentity: "worker:worker-a",
+          verifierIdentity: "team-skill-hub-worker",
+        },
+      ],
+      summary,
+    );
+
+    let detail = f.orchestrator.reconcileWork(submitted.work.workItemId, "alice", "team-a", 2100);
+    assert.equal(detail.work.status, "waiting_review");
+    detail = f.orchestrator.submitReview(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      {
+        expectedRevision: detail.work.stateRevision,
+        subjectRevision: subject,
+        decision: "accepted",
+      },
+      2200,
+    );
+
+    let publication = f.publications.listPublications(detail.work.workItemId).at(-1)!;
+    const prepare = f.publications.claimPublicationOperation("worker-a", 2300, 30_000)!;
+    f.publications.completePublicationOperation(
+      prepare,
+      {
+        success: true,
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      2400,
+    );
+    detail = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 2500);
+    publication = f.publications.getPublication(publication.publicationId);
+    assert.equal(publication.state, "approved");
+
+    const push = f.publications.claimPublicationOperation("worker-a", 2600, 30_000)!;
+    f.publications.completePublicationOperation(push, { success: true }, 2700);
+
+    detail = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 2800);
+    assert.equal(detail.work.status, "waiting_review");
+    assert.equal(detail.changeRequest?.state, "pending");
+    assert.equal(detail.changeRequest?.provider, null);
+
+    const changeClaim = f.changeRequests!.claim("worker-a", 2900, 30_000)!;
+    assert.equal(changeClaim.headBranch, publication.branchName);
+    assert.equal(changeClaim.headCommit, "c".repeat(40));
+    f.changeRequests!.complete(
+      changeClaim,
+      {
+        success: true,
+        provider: "github",
+        externalId: "17",
+        url: "https://github.com/example/project/pull/17",
+        headCommit: "c".repeat(40),
+        baseBranch: "main",
+      },
+      3000,
+    );
+
+    detail = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3100);
+    assert.equal(detail.work.status, "completed");
+    assert.equal(detail.changeRequest?.state, "created");
+    assert.equal(detail.changeRequest?.url, "https://github.com/example/project/pull/17");
+    const prEvidence = detail.evidence.find((e) => e.type === "pull_request" && !e.stale);
+    assert.equal(prEvidence?.status, "passed");
+    assert.equal(prEvidence?.source, "external_verified");
+    assert.equal(prEvidence?.subjectRevision, "publication:" + publication.publicationId + ":" + "c".repeat(40));
+    assert.equal(prEvidence?.artifactRef, "change-request:github:17");
+    assert.equal(detail.gate.ready, true);
   } finally {
     f.close();
   }

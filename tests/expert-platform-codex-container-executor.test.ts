@@ -8,6 +8,7 @@ test("Docker Codex executor builds a constrained read-only invocation", () => {
     sourcePath: "/work/repo",
     network: "expert-egress",
     supplementalGroupId: 988,
+    primaryGroupId: 988,
     envNames: ["OPENAI_API_KEY", "HTTPS_PROXY"],
     codexArgs: ["exec", "--sandbox", "read-only", "--json", "inspect"],
   });
@@ -18,16 +19,16 @@ test("Docker Codex executor builds a constrained read-only invocation", () => {
     "--network",
     "expert-egress",
     "--read-only",
-    "--group-add",
-    "988",
+    "--user",
+    "10001:988",
     "--cap-drop",
     "ALL",
   ]);
   assert.ok(args.includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
-  assert.ok(args.some((arg, index) => arg === "--group-add" && args[index + 1] === "988"));
+  assert.ok(!args.includes("--group-add"), "primary shared GID does not need a duplicate supplemental group");
   assert.ok(args.includes("OPENAI_API_KEY"));
   assert.ok(args.includes("HTTPS_PROXY"));
-  assert.ok(args.includes("/home/expert:rw,uid=10001,gid=10001,size=64m"));
+  assert.ok(args.includes("/home/expert:rw,uid=10001,gid=988,size=64m"));
   assert.ok(args.some((arg, index) => arg === "--env" && args[index + 1] === "HOME=/home/expert"));
   assert.ok(args.some((arg, index) => arg === "--env" && args[index + 1] === "CODEX_HOME=/home/expert/.codex"));
   assert.ok(!args.some((arg, index) => arg === "--env" && (!args[index + 1] || args[index + 1]!.startsWith("--"))));

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# Preserve shared-group write access for files created in workspace-write mode.
+umask 0002
+
 export CODEX_HOME="${CODEX_HOME:-/tmp/codex-home}"
 mkdir -p "$CODEX_HOME"
 

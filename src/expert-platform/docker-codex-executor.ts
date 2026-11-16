@@ -17,6 +17,7 @@ import type { ExpertModelConfig } from "./expert-store.js";
 import {
   grantExecutionContainerAccess,
   prepareRepositoryWorkspace,
+  prepareRuntimeStateDirectory,
   type GitCredentialConfig,
 } from "./repository-workspace.js";
 import { buildCodexArgs } from "./codex-runtime.js";
@@ -46,6 +47,7 @@ export interface DockerCodexExecutorOptions {
   configFilePath?: string;
   timeoutMs: number;
   idleTimeoutMs?: number;
+  verificationTmpfsMb?: number;
   maxOutputBytes?: number;
   onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
   onActivity?: (claim: Claim, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>;
@@ -341,9 +343,8 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
     let runtimeStateTarget: "/home/expert/.codex" | "/home/expert/.claude" | undefined;
     if (preparedRepository && claim.workspaceKey) {
       runtimeStatePath = path.join(path.dirname(preparedRepository.path), ".runtime-session", backend);
-      mkdirSync(runtimeStatePath, { recursive: true });
       const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
-      grantExecutionContainerAccess(runtimeStatePath, "read-write", workerGroupId);
+      prepareRuntimeStateDirectory(runtimeStatePath, workerGroupId);
       runtimeStateTarget = backend === "claude" ? "/home/expert/.claude" : "/home/expert/.codex";
     }
     let generatedConfigDir: string | undefined;
@@ -503,6 +504,7 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
         workspaceAccess,
         network: options.network,
         seccompProfile: options.seccompProfile,
+        primaryGroupId: workerGroupId,
         supplementalGroupId: workerGroupId,
         envNames,
         authFilePath: options.authFilePath,
@@ -624,7 +626,9 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
           {
             image: options.image,
             containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
+            primaryGroupId: workerGroupId,
             supplementalGroupId: workerGroupId,
+            tmpfsSizeMb: options.verificationTmpfsMb ?? 1024,
           },
         );
         const validationPolicyHash = createHash("sha256")

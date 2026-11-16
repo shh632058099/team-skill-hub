@@ -14,6 +14,8 @@
 
 Runtime **不是 Docker image**，Image 也**不是常驻 Worker 服务**。两者通过 `EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0` 关联。当前发行目录 `artifacts/` 被 Git 忽略：**本地生成不等于已公开发布**。应通过组织批准的制品库/内部文件服务向部署人员提供真实下载地址、校验值和版本；不要编造 GitHub Releases 地址，也不要直接提交大型 tar 到 Git。
 
+从 Work Orchestration Phase 1 起，Worker Runtime 还负责 Workspace owner affinity、`allocating → ready` 生命周期、runtime session id 回传以及 Claude/Codex process-level session resume。因此 **Runtime 与 Hub 的协议兼容性比单纯 CLI 版本更重要**；发布清单应明确兼容的 Hub commit/version、Worker proto/schema 版本与执行镜像版本，不能只写一个 Docker tag。
+
 > 当前源代码的 `worker-runtime/package.json` 版本为 `0.1.0`。Runtime **由该文件决定版本号**；Image 构建脚本的参数 **独立决定 tag 和 tar 文件名**。打包前务必核对二者相同，不能只改 Image 的版本参数。
 
 ## 2. 发布机所需环境
@@ -119,9 +121,9 @@ worker-artifacts-0.1.0.release.txt
 1. 将四个文件上传到经批准的私有制品库或内部文件服务；为同一版本保留历史文件，限制上传/修改权限。若使用镜像仓库交付，应额外提供镜像 digest 和拉取权限；本文默认交付离线 tar。
 2. **不要**将模型 API Key、Hub bootstrap token、Worker credential、Git 私钥或实际 `worker.env` 放入包中。秘密由 Hub 管理员和 Worker 部署者分别通过安全渠道配置。
 3. 向部署者提供 [add-expert.md](./add-expert.md)，其第 6～8 节只负责领取、`tar`/安装、`docker load`、配置与管理员审批。
-4. 发布管理员确认 Worker 已注册、审批、在线，随后由真实 MCP 客户端下发**只读任务**，确认执行使用正确仓库、模型与镜像，结果回传到 Hub，且未修改 Git 仓库。
+4. 发布管理员确认 Worker 已注册、审批、在线，随后由真实 MCP 客户端下发**只读任务**，确认执行使用正确 Deployment 快照（仓库、Backend、模型、Runtime Profile、MCP Profile/覆盖）、正确镜像，结果回传到 Hub，且未修改 Git 仓库；再至少执行一次 continuation 验收，确认新 Run 仍使用同一 WorkAttempt/ExpertTask/Workspace，并能恢复同一 Claude/Codex runtime session。
 
-部署端若需要多个 Worker：每个 Worker 必须有不同 `EXPERT_WORKER_ID` 和独立 credential / Git 工作区。不要因为主机相同就复用相同的 Worker 身份。
+部署端若需要多个 Worker：每个 Worker 必须有不同 `EXPERT_WORKER_ID` 和独立 credential / Workspace 根目录。不要因为主机相同就复用相同的 Worker 身份。Workspace 现在同时承载源码状态和 `.runtime-session/<backend>`；禁止在多个 Worker 之间共享同一个 Workspace/runtime-session 目录。
 
 ## 6. 升级、回滚和常见问题
 
@@ -129,10 +131,14 @@ worker-artifacts-0.1.0.release.txt
 - **Runtime 与 Image 版本不一致：** 核对 `worker-runtime/package.json`、构建脚本参数、导入后的 Image tag 和 `EXPERT_DOCKER_IMAGE`；不要仅修改 tar 文件名来伪装版本。
 - **Docker build 失败：** 检查 daemon 权限、`node:24-bookworm-slim` 拉取、npm registry / Claude Code 包、代理与 CA。不要把构建机的私有模型密钥注入 Docker image。
 - **目标主机架构不同：** 为目标架构构建并测试镜像，记录架构；不能只靠 `docker tag` 转换 CPU 架构。
-- **升级：** 发布新版本两类制品和 SHA-256，先在测试 Worker 完成任务验收，再滚动升级生产 Worker；排空任务，避免中途销毁在运行的容器。
-- **回滚：** 保留旧 Runtime、旧镜像 tag、兼容的配置/数据备份。Runtime 安装器按版本安装并切换 `current`，但只恢复目录软链接并不能自动恢复旧镜像/数据库/协议兼容性。
+- **升级：** 发布新版本两类制品和 SHA-256，先在测试 Worker 完成任务验收，再滚动升级生产 Worker；升级前排空或安全阻塞 active WorkAttempt，避免中途销毁运行容器或丢失 Workspace/runtime-session。若 Runtime、proto 或 session 语义发生不兼容变化，应按 Hub + Runtime + Image 的兼容矩阵一起升级。
+- **回滚：** 保留旧 Runtime、旧镜像 tag、兼容的 Hub 数据/配置备份，并记录是否存在需要继续 resume 的 active WorkAttempt。Runtime 安装器按版本安装并切换 `current`，但只恢复目录软链接并不能自动恢复旧镜像、proto/schema、数据库或 runtime-session 兼容性；无法确认兼容时应保持 Work blocked，而不是强行在另一 Worker 重新执行。
 
 **职责边界：** 本手册是发布管理员/CI 的“制作和交付”流程；`add-expert.md` 是管理员/部署用户的“领取和使用”流程。需要正式一键发布或公开下载时，应在 CI/制品仓库实现可审计的上传、签名与版本管理，而不是让部署用户执行源码构建。
+
+### 发布兼容性最低验收项
+
+每个正式 Worker Runtime 发布至少应在目标 Hub 版本上验证：Worker 注册/审批与心跳、Deployment Backend/Runtime Profile 能力匹配、Workspace `allocating → ready` 上报、只读任务执行、workspace-write 隔离、Evidence 绑定、进程退出后的新 Run session resume，以及旧 fencing/旧 Worker 不能完成新 Run。发布包不得包含任何实际 `.runtime-session`、Workspace checkout 或 credential 文件。
 
 ## Codex 执行镜像
 

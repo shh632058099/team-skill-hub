@@ -112,15 +112,16 @@ command -v systemctl      # 可选：仅 systemd 主机需要
 | 启用执行配置            | 勾选                                                 | 只有启用的 Deployment 才能参与任务派发                                                        |
 | Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名                      |
 | 模型 Credential Ref     | `model-readonly`                                     | Worker 本地模型凭据映射，不存 Key 明文                                                        |
-| MCP Profile             | `default`                                            | Admin 全局 Profile，可由 Deployment 引用/覆盖                                                 |
-| MCP URL                 | `http://hub.internal:8080/mcp`                       | 必须从任务容器网络可达；不能用 127.0.0.1 指向外部 Hub                                         |
-| MCP Credential Ref      | `skillhub-readonly`                                  | 独立只读 API Key 的本地文件映射                                                               |
-| MCP Allowed Tools       | 从 Admin 动态工具列表中选择                          | 工具列表来自当前 Hub MCP `tools/list`；最终能否调用由 Credential 对应 principal/role 权限决定 |
-| MCP Required            | 按需                                                 | Key/URL 不可用时是否直接失败                                                                  |
-
+| MCP Profile             | `default`                                            | 推荐配置：默认只选择 Admin 全局 Profile；任务派发时解析为不可变任务快照                                     |
+| MCP URL                 | `http://hub.internal:8080/mcp`                       | **仅自定义覆盖时填写**；否则继承 Profile。必须从任务容器网络可达，不能用 127.0.0.1 指向外部 Hub              |
+| MCP Credential Ref      | `skillhub-readonly`                                  | **仅自定义覆盖时填写**；否则继承 Profile。Worker 只保存 credentialRef → 本地 key 文件映射，不保存明文到 Hub |
+| MCP Allowed Tools       | 从 Admin 动态工具列表中选择                          | **仅自定义覆盖时填写**；必须是 Profile 允许工具的子集；实际权限仍由 Credential 对应 principal/role 决定     |
+| MCP Required            | 继承 / 必需 / 非必需                                 | 默认继承 Profile；仅在 Deployment 有特殊失败策略时覆盖                                                       |
 可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。
 
 点击“保存执行配置”后，确认列表中的专家、仓库 URL、分支、调用者、Runtime Profile 和启用状态正确。
+
+> **职责边界：** Expert 只描述“是谁/擅长什么”；Deployment 决定 Backend、模型、仓库、Runtime Profile 与 MCP 策略；Worker 只声明自己能执行哪些 Backend/Runtime Profile，并提供本机 credential 映射与 Docker/Git 运行环境。模型选择、MCP Tools 和任务级 URL 不应由 Worker 自行决定。
 
 ### 仓库 ID 是什么？
 
@@ -439,10 +440,11 @@ EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
 EXPERT_MODEL_CREDENTIAL_REFS_JSON='{"bst-router":"ANTHROPIC_AUTH_TOKEN"}'
 ANTHROPIC_AUTH_TOKEN=通过安全方式配置真实模型密钥
 
-# MCP API Key 不直接写入 env。这里仅配置 credentialRef -> key 文件路径：
+# MCP API Key 不直接写入 env。EXPERT_MCP_URL 是 Worker 的默认/fallback 地址；
+# 正常情况下任务使用 Deployment 中已解析的 MCP Profile 快照，若快照有 urlOverride 则优先于该默认值。
+# Worker 仍只负责 credentialRef -> 本地 key 文件路径映射：
 EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
 EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly"}'
-
 # 可选 Git credential：
 # EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/git-readonly"}'
 ```
@@ -453,19 +455,20 @@ Claude Worker 可通过 `EXPERT_CLAUDE_MAX_TURNS` 控制单个任务允许的 Cl
 
 #### 8.1.1 配置 MCP API Key
 
-假设 Admin 中执行配置的 MCP credentialRef 为：
+推荐先在 Admin 的全局 MCP Profile（通常为 `default`）中维护 URL、credentialRef、Allowed Tools 与 Required，再让 Deployment 仅引用该 Profile。只有 Deployment 明确开启“自定义覆盖”时，才单独保存 URL / credentialRef / Tools / Required 覆盖值。
+
+假设最终解析后的任务 MCP 配置使用 credentialRef：
 
 ```text
 skillhub-readonly
 ```
 
-则 `claude-01` 的 env 中配置：
+则 `claude-01` 的 env 只需要保证默认 URL（作为未提供 `urlOverride` 时的 fallback）和 credential 文件映射可用：
 
 ```dotenv
 EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
 EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly"}'
 ```
-
 真正的 API Key 写入 instance 私有文件，不放到 env：
 
 ```bash
@@ -494,6 +497,12 @@ EXPERT_MCP_CREDENTIAL_FILES_JSON
 ```
 
 如果创建的是 `codex-01`，路径也必须替换成 `/instances/codex-01/keys/...`。不同 Worker instance 不应共用同一个 key 文件路径。
+
+### 8.1.2 Workspace 与 Agent Session 持久化
+
+Work Orchestration 下，Workspace 不再只是一次性的源码 clone。逻辑 Workspace 创建时先进入 `allocating`，Worker 完成仓库准备并上报 `workspace.ready` 后才进入 `ready` 并记录 owner Worker/path。后续 continuation/retry 优先回到该 owner Worker；Phase 1 不做跨 Worker 的隐式 Workspace 迁移，owner 不可用时会 fail-close 为 `blocked(workspace_unavailable)`。
+
+对于带 Workspace 的 Claude/Codex 任务，Worker 会在 Workspace 相邻目录维护 `.runtime-session/<backend>`，并仅把它 bind mount 到容器内 `/home/expert/.claude` 或 `/home/expert/.codex`。Hub 持久化的是受约束的 `runtimeSessionId`，后续新 Run 使用 Claude `--resume` 或 Codex `exec resume` 恢复同一 Agent session。不要手工复制、共享或跨 Worker 迁移该目录，也不要把它放进发布制品或 Git。
 
 ### 8.2 systemd 主机
 
@@ -799,5 +808,7 @@ docker exec team-skill-hub node dist/src/cli/expert-worker-admin.js revoke yocto
 ## Execution 配置中的 Skill Hub MCP Profile
 
 执行配置默认只选择全局 MCP Profile（通常为 `default`），不重复保存 URL、Credential、Tools 和 Required。Worker 派发任务时会读取 Profile 当前值，并把解析后的完整配置写入任务快照。Profile 后续更新只影响新任务，不改变已排队/运行任务的快照。
+
+Worker 本地的 `EXPERT_MCP_URL` 不是 Deployment 配置的替代品，而是执行端默认/fallback 地址；任务快照中存在 `urlOverride` 时以任务快照为准。Worker 本地 `EXPERT_MCP_CREDENTIAL_FILES_JSON` 只负责把任务快照中的 credentialRef 解析为本机受保护的 key 文件。
 
 如确有特殊需要，可开启执行配置中的「自定义覆盖」：URL、Credential、Tools 均为可选覆盖项；留空或不选择表示继承 Profile。Tools 覆盖必须是 Profile 允许工具的子集。Required 可选择继承、必需或非必需。历史执行配置中已有的 MCP 字段会按显式覆盖兼容加载，避免升级后改变既有行为。

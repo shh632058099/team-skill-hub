@@ -18,7 +18,10 @@ import {
   WorkOrchestrationStore,
 } from "./work-orchestration-store.js";
 import { WorkPublicationStore, type WorkPublicationRecord } from "./work-publication-store.js";
+import { WorkChangeRequestStore, type WorkChangeRequestRecord } from "./work-change-request-store.js";
 import { buildPublicationCommitMetadata, buildWorkBranchName } from "./publication-policy.js";
+import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
+import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -32,6 +35,7 @@ export interface WorkDetail {
   evidence: WorkEvidenceRecord[];
   sourceObservations: WorkSourceObservationRecord[];
   currentTask: TaskRecord | null;
+  reviewTask: TaskRecord | null;
   turns: TaskRunTurnRecord[];
   workspace: WorkspaceRecord | null;
   verification: {
@@ -68,6 +72,20 @@ export interface WorkDetail {
     approvedAt: number | null;
     pushedAt: number | null;
   } | null;
+  changeRequest: {
+    changeRequestId: string;
+    publicationId: string;
+    state: WorkChangeRequestRecord["state"];
+    provider: string | null;
+    externalId: string | null;
+    url: string | null;
+    headBranch: string;
+    headCommit: string;
+    baseBranch: string;
+    retryCount: number;
+    nextAttemptAt: number | null;
+    lastErrorCode: string | null;
+  } | null;
 }
 
 export interface WorkReviewInput {
@@ -75,6 +93,7 @@ export interface WorkReviewInput {
   subjectRevision: string;
   decision: ReviewDecision;
   reason?: string;
+  actorPrincipalId?: string;
 }
 
 export interface WorkApprovalInput {
@@ -91,8 +110,19 @@ export interface WorkApprovalActor {
 
 const TERMINAL_WORK = new Set(["completed", "failed", "cancelled"]);
 
+const DETERMINISTIC_WORKSPACE_ERRORS = new Set([
+  "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
+  "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
+  "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
+  "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
+  "WORKER_RUNTIME_STATE_OWNER_INVALID",
+  "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
+  "WORKSPACE_PREPARATION_INCOMPLETE",
+  "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+]);
 function isBlocker(reason: string): string | null {
   const normalized = reason.trim().toUpperCase();
+  if (DETERMINISTIC_WORKSPACE_ERRORS.has(normalized)) return "policy_blocked";
   if (normalized.includes("MISSING_PERMISSION") || normalized.includes("PERMISSION_DENIED"))
     return "missing_permission";
   if (normalized.includes("MISSING_SECRET") || normalized.includes("SECRET_REQUIRED")) return "missing_secret";
@@ -119,6 +149,7 @@ function isBlocker(reason: string): string | null {
     normalized.includes("WORKSPACE_WRITE_NOT_ALLOWED") ||
     normalized.includes("EXPERT_FORBIDDEN") ||
     normalized.includes("MCP_PROFILE_TOOL_NOT_ALLOWED") ||
+    normalized.includes("VERIFICATION_POLICY_") ||
     normalized.includes("STALE_DEPLOYMENT_CONFIG") ||
     normalized.includes("INVALID_PINNED_DISPATCH_BINDING")
   ) {
@@ -169,6 +200,40 @@ function isRetryable(reason: string): boolean {
   );
 }
 
+function requiredWorkspaceAccessForWorkflow(
+  workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
+): "read-only" | "read-write" | undefined {
+  if (workflow.definition.change?.mode === "code_change") return "read-write";
+  if (workflow.definition.change?.mode === "readonly") return "read-only";
+  return undefined;
+}
+
+function preferredBackendForWork(work: WorkItemRecord): "claude" | "codex" | undefined {
+  const source = (work.sourceScope ?? "").split("/", 1)[0]!.toLowerCase();
+  if (source.includes("claude")) return "claude";
+  if (source.includes("codex")) return "codex";
+  return undefined;
+}
+
+function effectiveVerificationSteps(
+  workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
+  resolved: ResolvedDispatch,
+): VerificationPolicyStep[] {
+  const repositorySteps = resolved.deploymentSnapshot?.repository?.verificationPolicy?.required ?? [];
+  let steps: VerificationPolicyStep[];
+  try {
+    steps = normalizeVerificationPolicy([...workflow.definition.validation.required, ...repositorySteps]);
+  } catch {
+    throw new Error("VERIFICATION_POLICY_INVALID");
+  }
+  if (workflow.definition.change?.mode === "code_change") {
+    const evidenceTypes = new Set(steps.map((step) => step.evidenceType));
+    const missing = ["build", "unit_test"].filter((type) => !evidenceTypes.has(type));
+    if (missing.length > 0) throw new Error("VERIFICATION_POLICY_MISSING:" + missing.join(","));
+  }
+  return steps;
+}
+
 function resultSubject(task: TaskRecord): string {
   if (task.workspaceChangeSummary) {
     return `workspace:${task.workspaceChangeSummary.contentRevision}`;
@@ -180,6 +245,39 @@ function resultSubject(task: TaskRecord): string {
       .update(task.result ?? task.taskId)
       .digest("hex")
   );
+}
+
+function workAttemptExecutionProblem(work: WorkItemRecord, attempt: WorkAttemptRecord): string {
+  return [
+    "You are the execution agent for an existing Team Skill Hub WorkAttempt.",
+    `WorkItem: ${work.workItemId}`,
+    `WorkAttempt: ${attempt.workAttemptId}`,
+    "The durable Work and ExpertTask have already been created by the platform.",
+    "Do NOT call submit_work, submit_expert_task, submit_expert_task_auto, or any equivalent tool that creates/delegates another Work or ExpertTask.",
+    "Do NOT stop or ask the caller to resubmit merely because the original request mentions Team Skill Hub submission; that orchestration step has already happened.",
+    "Work directly in the provided repository/workspace. Use allowed Skill/Knowledge MCP tools only for execution context when useful.",
+    "Implement or analyze the requested work. The platform will separately enforce verification, review, rework, branch publication, and completion gates.",
+    "",
+    "Original work:",
+    work.description,
+  ].join("\n");
+}
+
+function parseAgentReviewResult(result: string | null): { decision: "accepted" | "rework"; reason?: string } {
+  if (!result) throw new Error("AGENT_REVIEW_RESULT_INVALID");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result);
+  } catch {
+    throw new Error("AGENT_REVIEW_RESULT_INVALID");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("AGENT_REVIEW_RESULT_INVALID");
+  const decision = (parsed as { decision?: unknown }).decision;
+  const reason =
+    typeof (parsed as { reason?: unknown }).reason === "string" ? (parsed as { reason: string }).reason.trim() : "";
+  if (decision !== "accepted" && decision !== "rework") throw new Error("AGENT_REVIEW_RESULT_INVALID");
+  if (decision === "rework" && !reason) throw new Error("AGENT_REVIEW_RESULT_INVALID");
+  return { decision, ...(reason ? { reason } : {}) };
 }
 
 function asResolvedDispatch(binding: Record<string, unknown>): ResolvedDispatch {
@@ -239,6 +337,7 @@ export class WorkOrchestrator {
     private readonly dispatch: ExpertDispatchService,
     private readonly workerAvailable: (workerId: string, now: number) => boolean = () => true,
     private readonly publications?: WorkPublicationStore,
+    private readonly changeRequests?: WorkChangeRequestStore,
   ) {}
 
   stageWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
@@ -639,6 +738,10 @@ export class WorkOrchestrator {
       work = this.workStore.getWork(workItemId, principalId, scope);
     }
     task = this.tasks.get(attempt.taskId!, principalId, scope);
+    if (attempt.reviewTaskId) {
+      const reviewTask = this.tasks.get(attempt.reviewTaskId, principalId, scope);
+      return this.reconcileAgentReview(work, attempt, reviewTask, now, fence);
+    }
     if (task.status === "queued" || task.status === "running") {
       return this.detail(workItemId, principalId, scope);
     }
@@ -1011,7 +1114,11 @@ export class WorkOrchestrator {
           branchPrefix: policy.branchPrefix,
           protectedBranches: [...policy.protectedBranches],
           allowedPushRemote: policy.allowedPushRemote,
-          ...(policy.credentialRef ? { credentialRef: policy.credentialRef } : {}),
+          // The repository credential is the safe default for template-based publication.
+          // An explicit publication credential can still override it.
+          ...((policy.credentialRef ?? repository.credentialRef)
+            ? { credentialRef: policy.credentialRef ?? repository.credentialRef }
+            : {}),
           expectedContentRevision: summary.contentRevision,
           approvedChangeSummary: summary,
         },
@@ -1073,6 +1180,9 @@ export class WorkOrchestrator {
     if (detail.currentTask && (detail.currentTask.status === "queued" || detail.currentTask.status === "running")) {
       this.tasks.cancel(detail.currentTask.taskId, principalId, scope);
     }
+    if (detail.reviewTask && (detail.reviewTask.status === "queued" || detail.reviewTask.status === "running")) {
+      this.tasks.cancel(detail.reviewTask.taskId, principalId, scope);
+    }
     const current = this.workStore.getWork(workItemId, principalId, scope);
     if (current.activeWorkAttemptId) {
       this.workStore.finishWorkAttempt(
@@ -1110,6 +1220,8 @@ export class WorkOrchestrator {
       repositoryId: work.repositoryId ?? undefined,
       deploymentId: work.requestedDeploymentId ?? undefined,
       requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile,
+      requiredWorkspaceAccess: requiredWorkspaceAccessForWorkflow(workflow),
+      preferredBackend: preferredBackendForWork(work),
     });
     const attempt = this.workStore.createWorkAttempt(
       work.workItemId,
@@ -1172,6 +1284,10 @@ export class WorkOrchestrator {
         deploymentId: attempt.deploymentId,
         requiredRuntimeProfile: this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion).definition
           .execution.requiredRuntimeProfile,
+        requiredWorkspaceAccess: requiredWorkspaceAccessForWorkflow(
+          this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion),
+        ),
+        preferredBackend: preferredBackendForWork(work),
       });
       if (fresh.deploymentConfigVersion !== attempt.deploymentConfigVersion) {
         throw new Error("STALE_DEPLOYMENT_CONFIG");
@@ -1184,6 +1300,8 @@ export class WorkOrchestrator {
       );
     }
 
+    const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
+    const validationSnapshot = effectiveVerificationSteps(workflow, resolved);
     const workspace = this.ensureWorkspace(work.workItemId, attempt, resolved, Date.now());
     attempt = this.workStore.getWorkAttempt(attempt.workAttemptId);
 
@@ -1193,7 +1311,7 @@ export class WorkOrchestrator {
         scope: work.scope,
         idempotencyKey: `work:${work.workItemId}:attempt:${attempt.sequence}`,
         sourceClient: "work_orchestrator",
-        problem: work.description,
+        problem: workAttemptExecutionProblem(work, attempt),
         expertId: resolved.expertId,
         selectionMode: "explicit",
         repositoryId: resolved.repositoryId,
@@ -1203,12 +1321,144 @@ export class WorkOrchestrator {
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
-        validationSnapshot: this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion).definition
-          .validation.required,
+        validationSnapshot,
       },
       resolved,
     );
     return this.workStore.linkAttemptTask(attempt.workAttemptId, task.taskId);
+  }
+
+  private dispatchReviewTask(
+    work: WorkItemRecord,
+    attempt: WorkAttemptRecord,
+    reviewerExpertId: string,
+    now: number,
+  ): WorkAttemptRecord {
+    if (!attempt.workspaceId) throw new Error("WORKSPACE_NOT_FOUND");
+    const workspace = this.workStore.getWorkspace(attempt.workspaceId);
+    if (!workspace.ownerWorkerId || !workspace.path || ["removed", "failed"].includes(workspace.state)) {
+      throw new Error("WORKSPACE_OWNER_UNAVAILABLE");
+    }
+    const resolved = this.dispatch.resolve({
+      principalId: work.principalId,
+      scope: work.scope,
+      problem: work.description,
+      expertId: reviewerExpertId,
+      selectionMode: "explicit",
+      repositoryId: work.repositoryId ?? undefined,
+      requiredWorkspaceAccess: "read-only",
+      preferredBackend: preferredBackendForWork(work),
+    });
+    if (
+      !resolved.runtimeProfile ||
+      resolveRuntimeProfilePolicy(resolved.runtimeProfile).workspaceAccess !== "read-only"
+    ) {
+      throw new Error("RUNTIME_PROFILE_MISMATCH: review requires read-only runtime");
+    }
+    const task = this.dispatch.submitResolved(
+      {
+        principalId: work.principalId,
+        scope: work.scope,
+        idempotencyKey: `work:${work.workItemId}:attempt:${attempt.sequence}:review`,
+        sourceClient: "work_orchestrator_review",
+        problem:
+          "Perform an independent code review of the current workspace changes for this work item. Do not modify files. " +
+          "Review correctness, regressions, tests, maintainability, and requirement coverage. " +
+          'Return ONLY JSON: {"decision":"accepted"|"rework","reason":"..."}. ' +
+          "Use rework when any blocking issue remains.\n\nOriginal work:\n" +
+          work.description,
+        expertId: resolved.expertId,
+        selectionMode: "explicit",
+        repositoryId: resolved.repositoryId,
+        deploymentId: resolved.deploymentId,
+        workItemId: work.workItemId,
+        workAttemptId: attempt.workAttemptId,
+        workflowId: attempt.workflowId,
+        workflowVersion: attempt.workflowVersion,
+        workspaceKey: workspace.workspaceKey,
+        validationSnapshot: [],
+      },
+      resolved,
+    );
+    this.tasks.requireWorker(task.taskId, workspace.ownerWorkerId);
+    return this.workStore.linkAttemptReviewTask(attempt.workAttemptId, task.taskId);
+  }
+
+  private reconcileAgentReview(
+    work: WorkItemRecord,
+    attempt: WorkAttemptRecord,
+    reviewTask: TaskRecord,
+    now: number,
+    fence?: WorkOrchestrationFence,
+  ): WorkDetail {
+    if (reviewTask.status === "queued" || reviewTask.status === "running")
+      return this.detail(work.workItemId, work.principalId, work.scope);
+    if (reviewTask.status === "failed" || reviewTask.status === "cancelled") {
+      const current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+      if (current.status !== "blocked") {
+        this.workStore.blockWork(
+          current.workItemId,
+          current.principalId,
+          current.scope,
+          current.stateRevision,
+          "review_unavailable",
+          reviewTask.result ?? "AGENT_REVIEW_FAILED",
+          now,
+          { resumeCondition: "manual", blockedByType: "review", blockedByRef: reviewTask.taskId },
+          fence,
+        );
+      }
+      return this.detail(work.workItemId, work.principalId, work.scope);
+    }
+    let review: { decision: "accepted" | "rework"; reason?: string };
+    try {
+      review = parseAgentReviewResult(reviewTask.result);
+    } catch (error) {
+      const current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+      if (current.status !== "blocked") {
+        this.workStore.blockWork(
+          current.workItemId,
+          current.principalId,
+          current.scope,
+          current.stateRevision,
+          "review_invalid",
+          error instanceof Error ? error.message : "AGENT_REVIEW_RESULT_INVALID",
+          now,
+          { resumeCondition: "manual", blockedByType: "review", blockedByRef: reviewTask.taskId },
+          fence,
+        );
+      }
+      return this.detail(work.workItemId, work.principalId, work.scope);
+    }
+    let current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+    if (!current.currentSubjectRevision) throw new Error("WORK_SUBJECT_REQUIRED");
+    if (current.activeWorkAttemptId === attempt.workAttemptId) {
+      this.workStore.finishWorkAttempt(
+        current.workItemId,
+        attempt.workAttemptId,
+        current.principalId,
+        current.scope,
+        current.stateRevision,
+        "succeeded",
+        "waiting_review",
+        now,
+        fence,
+      );
+    }
+    current = this.workStore.getWork(current.workItemId, current.principalId, current.scope);
+    return this.submitReview(
+      current.workItemId,
+      current.principalId,
+      current.scope,
+      {
+        expectedRevision: current.stateRevision,
+        subjectRevision: current.currentSubjectRevision!,
+        decision: review.decision,
+        ...(review.reason ? { reason: review.reason } : {}),
+        actorPrincipalId: `agent:${reviewTask.expertId}`,
+      },
+      now,
+    );
   }
 
   private handleDispatchFailure(
@@ -1329,6 +1579,11 @@ export class WorkOrchestrator {
     }
 
     publication = this.publications.getPublication(publication.publicationId);
+    if (publication.state === "prepared" && workflow.definition.publication?.approvalRequired === false) {
+      publication = this.publications.transitionPublication(publication.publicationId, "approved", {}, now);
+    }
+
+    publication = this.publications.getPublication(publication.publicationId);
     if (publication.state !== "pushed" || !publication.commitSha || !publication.artifactRef) {
       return this.workStore.getWork(work.workItemId, work.principalId, work.scope);
     }
@@ -1362,6 +1617,131 @@ export class WorkOrchestrator {
         },
         now,
       );
+    }
+
+    if (workflow.definition.completion.require.includes("change_request_created") && this.changeRequests) {
+      let changeRequest = this.changeRequests.getByPublication(publication.publicationId);
+      if (!changeRequest) {
+        const attempt = this.workStore
+          .listAttempts(work.workItemId)
+          .find((item) => item.workAttemptId === publication!.workAttemptId);
+        const resolved = attempt?.dispatchBinding ? asResolvedDispatch(attempt.dispatchBinding) : null;
+        const repository = resolved?.deploymentSnapshot?.repository;
+        const policy = repository?.publicationPolicy;
+        if (policy?.permissions.includes("create-change-request")) {
+          const snapshot = publication.executionSnapshot;
+          const credentialGrantRef = snapshot?.credentialRef;
+          if (!snapshot || !credentialGrantRef) {
+            const current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+            if (current.status !== "blocked") {
+              return this.workStore.blockWork(
+                current.workItemId,
+                current.principalId,
+                current.scope,
+                current.stateRevision,
+                "publication_blocked",
+                "CHANGE_REQUEST_CREDENTIAL_UNAVAILABLE",
+                now,
+                {
+                  resumeCondition: "manual",
+                  blockedByType: "change_request",
+                  blockedByRef: publication.publicationId,
+                },
+                fence,
+              );
+            }
+            return current;
+          }
+          changeRequest = this.changeRequests.createOrReuse(
+            {
+              workItemId: work.workItemId,
+              workAttemptId: publication.workAttemptId,
+              publicationId: publication.publicationId,
+              ownerWorkerId: publication.ownerWorkerId,
+              repositoryIdentity:
+                publication.repositoryId +
+                "@" +
+                (publication.repositoryIdentityRevision ?? publication.publicationPolicyRevision),
+              repositoryUrl: snapshot.repositoryUrl,
+              headBranch: publication.branchName,
+              headCommit: publication.commitSha,
+              baseBranch: snapshot.defaultBranch,
+              title: work.title,
+              body:
+                "Created by Team Skill Hub Work Orchestration.\n\n" +
+                "Work Item: " +
+                work.workItemId +
+                "\nPublication: " +
+                publication.publicationId +
+                "\nCommit: " +
+                publication.commitSha,
+              idempotencyKey: "publication:" + publication.publicationId,
+              credentialGrantRef,
+            },
+            now,
+          );
+        }
+      }
+
+      if (changeRequest?.state === "blocked") {
+        const current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
+        if (current.status !== "blocked") {
+          return this.workStore.blockWork(
+            current.workItemId,
+            current.principalId,
+            current.scope,
+            current.stateRevision,
+            "publication_blocked",
+            changeRequest.lastErrorCode ?? "CHANGE_REQUEST_CREATE_FAILED",
+            now,
+            {
+              resumeCondition: "manual",
+              blockedByType: "change_request",
+              blockedByRef: changeRequest.changeRequestId,
+            },
+            fence,
+          );
+        }
+        return current;
+      }
+
+      if (
+        changeRequest?.state === "created" &&
+        changeRequest.provider &&
+        changeRequest.externalId &&
+        changeRequest.url
+      ) {
+        const artifactRef = "change-request:" + changeRequest.provider + ":" + changeRequest.externalId;
+        const hasChangeRequestEvidence = this.workStore
+          .listEvidence(work.workItemId)
+          .some(
+            (evidence) =>
+              !evidence.stale &&
+              evidence.type === "pull_request" &&
+              evidence.status === "passed" &&
+              evidence.subjectRevision === publicationSubject &&
+              evidence.artifactRef === artifactRef,
+          );
+        if (!hasChangeRequestEvidence) {
+          this.workStore.recordEvidence(
+            work.workItemId,
+            work.principalId,
+            work.scope,
+            {
+              workAttemptId: publication.workAttemptId,
+              type: "pull_request",
+              status: "passed",
+              source: "external_verified",
+              summary: changeRequest.url,
+              artifactRef,
+              subjectRevision: publicationSubject,
+              environmentIdentity: changeRequest.provider,
+              verifierIdentity: "team-skill-hub-change-request",
+            },
+            now,
+          );
+        }
+      }
     }
 
     let current = this.workStore.getWork(work.workItemId, work.principalId, work.scope);
@@ -1460,22 +1840,75 @@ export class WorkOrchestrator {
     }
 
     current = this.workStore.getWork(current.workItemId, current.principalId, current.scope);
+    const evidenceGate = this.workStore.evaluateCompletionGate(current.workItemId, current.principalId, current.scope);
+    const missingRequiredEvidence = evidenceGate.missing.filter((item) => item.startsWith("required_evidence:"));
+    if (missingRequiredEvidence.length > 0) {
+      this.workStore.blockWork(
+        current.workItemId,
+        current.principalId,
+        current.scope,
+        current.stateRevision,
+        "verification_required",
+        missingRequiredEvidence.join(","),
+        now,
+        {
+          resumeCondition: "verification_evidence",
+          blockedByType: "verification",
+          blockedByRef: attempt.workAttemptId,
+        },
+        fence,
+      );
+      return this.detail(current.workItemId, current.principalId, current.scope);
+    }
+    current = this.workStore.getWork(current.workItemId, current.principalId, current.scope);
+    const workflow = this.workStore.getWorkflow(current.workflowId, current.workflowVersion);
+    if (workflow.definition.review.required && workflow.definition.review.reviewerExpertId) {
+      try {
+        this.dispatchReviewTask(current, attempt, workflow.definition.review.reviewerExpertId, now);
+        return this.detail(current.workItemId, current.principalId, current.scope);
+      } catch (error) {
+        const blocked = this.handleDispatchFailure(
+          current.workItemId,
+          current.principalId,
+          current.scope,
+          error,
+          now,
+          fence,
+        );
+        if (blocked) return blocked;
+        throw error;
+      }
+    }
     if (current.activeWorkAttemptId === attempt.workAttemptId) {
-      this.workStore.finishWorkAttempt(
+      current = this.workStore.finishWorkAttempt(
         current.workItemId,
         attempt.workAttemptId,
         current.principalId,
         current.scope,
         current.stateRevision,
         "succeeded",
-        "waiting_review",
+        workflow.definition.review.required ? "waiting_review" : "running",
         now,
         fence,
       );
     }
+    if (!workflow.definition.review.required) {
+      const gate = this.workStore.evaluateCompletionGate(current.workItemId, current.principalId, current.scope);
+      if (gate.ready && !TERMINAL_WORK.has(current.status)) {
+        current = this.workStore.transitionWork(
+          current.workItemId,
+          current.principalId,
+          current.scope,
+          current.stateRevision,
+          "completed",
+          now,
+          fence,
+        );
+        this.workStore.requestTerminalWorkspaceCleanup(current.workItemId, now);
+      }
+    }
     return this.detail(current.workItemId, current.principalId, current.scope);
   }
-
   private reconcileFailed(
     work: WorkItemRecord,
     attempt: WorkAttemptRecord,
@@ -1557,12 +1990,16 @@ export class WorkOrchestrator {
     const attempts = this.workStore.listAttempts(workItemId);
     const latest = attempts.at(-1);
     const currentTask = latest?.taskId ? this.tasks.get(latest.taskId, principalId, scope) : null;
+    const reviewTask = latest?.reviewTaskId ? this.tasks.get(latest.reviewTaskId, principalId, scope) : null;
     const turns = currentTask ? this.tasks.listRunTurns(currentTask.taskId, principalId, scope) : [];
     const workspace = latest?.workspaceId ? this.workStore.getWorkspace(latest.workspaceId) : null;
     const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const verificationResults = currentTask?.verificationResults ?? [];
     const approvals = this.workStore.listApprovals(workItemId);
     const publicationRecord = this.publications?.listPublications(workItemId).at(-1) ?? null;
+    const changeRequestRecord = publicationRecord
+      ? (this.changeRequests?.getByPublication(publicationRecord.publicationId) ?? null)
+      : null;
     const publicationSubject = publicationRecord?.commitSha
       ? "publication:" + publicationRecord.publicationId + ":" + publicationRecord.commitSha
       : null;
@@ -1598,16 +2035,33 @@ export class WorkOrchestrator {
           pushedAt: publicationRecord.pushedAt,
         }
       : null;
+    const changeRequest = changeRequestRecord
+      ? {
+          changeRequestId: changeRequestRecord.changeRequestId,
+          publicationId: changeRequestRecord.publicationId,
+          state: changeRequestRecord.state,
+          provider: changeRequestRecord.provider,
+          externalId: changeRequestRecord.externalId,
+          url: changeRequestRecord.url,
+          headBranch: changeRequestRecord.headBranch,
+          headCommit: changeRequestRecord.headCommit,
+          baseBranch: changeRequestRecord.baseBranch,
+          retryCount: changeRequestRecord.retryCount,
+          nextAttemptAt: changeRequestRecord.nextAttemptAt,
+          lastErrorCode: changeRequestRecord.lastErrorCode,
+        }
+      : null;
     return {
       work,
       attempts,
       evidence: this.workStore.listEvidence(workItemId),
       sourceObservations: this.workStore.listSourceObservations(workItemId),
       currentTask,
+      reviewTask,
       turns,
       workspace,
       verification: {
-        requiredEvidence: workflow.definition.validation.requiredEvidence,
+        requiredEvidence: this.workStore.getEffectiveRequiredEvidence(workItemId),
         requiredSteps: currentTask?.validationSnapshot ?? workflow.definition.validation.required,
         results: verificationResults,
         passed: verificationResults.filter((item) => item.status === "passed").length,
@@ -1625,6 +2079,7 @@ export class WorkOrchestrator {
       reviews: this.workStore.listReviewDecisions(workItemId),
       approvals,
       publication,
+      changeRequest,
     };
   }
 }

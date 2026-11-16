@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ExpertModelConfig, RepositoryPublicationPolicy } from "./expert-store.js";
+import type { ExpertModelConfig, RepositoryPublicationPolicy, RepositoryVerificationPolicy } from "./expert-store.js";
 import {
   normalizeVerificationEvidenceResults,
   normalizeVerificationPolicy,
@@ -36,6 +36,7 @@ export type DeploymentTaskSnapshot = {
     credentialRef?: string;
     gitProxyUrl?: string;
     publicationPolicy?: RepositoryPublicationPolicy;
+    verificationPolicy?: RepositoryVerificationPolicy;
   } | null;
   executor: { backend: "claude" | "codex"; modelConfig: ExpertModelConfig };
   mcp?: {
@@ -819,6 +820,17 @@ export class ExpertTaskStore {
     }
   }
 
+  requireWorker(taskId: string, workerId: string): TaskRecord {
+    const normalizedWorker = workerId.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(normalizedWorker)) throw new Error("INVALID_WORKER");
+    const changed = this.db
+      .prepare("UPDATE expert_tasks SET required_worker_id=? WHERE task_id=? AND status='queued'")
+      .run(normalizedWorker, taskId);
+    if (changed.changes !== 1) throw new Error("TASK_WORKER_AFFINITY_NOT_ALLOWED");
+    const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+    return this.fromRow(row);
+  }
+
   runCount(taskId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM expert_runs WHERE task_id=?").get(taskId) as { n: number };
     return Number(row.n);
@@ -1014,7 +1026,7 @@ export class ExpertTaskStore {
     const offset = Number.isFinite(query.offset) ? Math.min(1000 - limit, Math.max(0, Math.floor(query.offset!))) : 0;
     const task = this.db
       .prepare(
-        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,cancellation_requested FROM expert_tasks WHERE task_id=?",
+        "SELECT task_id,principal_id,scope,source_client,source_session_id,problem,expert_id,repository_id,selection_mode,status,result,run_id,worker_id,fencing,repository_url,repository_branch,commit_sha,deployment_id,deployment_config_version,deployment_snapshot_json,created_at,cancellation_requested,work_item_id FROM expert_tasks WHERE task_id=?",
       )
       .get(taskId);
     if (!task) return null;

@@ -31,6 +31,9 @@ test("verification runner executes steps only through an isolated read-only Dock
       {
         image: "expert-worker:test",
         containerNamePrefix: "verify-task-run",
+        primaryGroupId: 988,
+        supplementalGroupId: 988,
+        tmpfsSizeMb: 1024,
         runDocker: async (args) => {
           calls.push([...args]);
           return {
@@ -47,6 +50,10 @@ test("verification runner executes steps only through an isolated read-only Dock
       assert.ok(args.includes("--network"));
       assert.equal(args[args.indexOf("--network") + 1], "none");
       assert.ok(args.includes("--read-only"));
+      assert.ok(args.some((arg, index) => arg === "--user" && args[index + 1] === "10001:988"));
+      assert.ok(!args.includes("--group-add"));
+      assert.ok(args.includes("/home/expert:rw,uid=10001,gid=988,size=64m"));
+      assert.ok(args.includes("/tmp:rw,exec,uid=10001,gid=988,size=1024m"));
       assert.ok(args.includes("--cap-drop"));
       assert.equal(args[args.indexOf("--cap-drop") + 1], "ALL");
       assert.ok(args.includes("no-new-privileges"));
@@ -75,6 +82,34 @@ test("verification runner executes steps only through an isolated read-only Dock
         { stepId: "fail", evidenceType: "lint", status: "failed", exitCode: 7, errorCode: "VERIFICATION_EXIT_NONZERO" },
       ],
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verification runner rejects unsafe scratch tmpfs sizes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "verification-scratch-"));
+  try {
+    const policy = [
+      {
+        id: "build",
+        type: "command" as const,
+        argv: ["true"],
+        timeoutMs: 2_000,
+        evidenceType: "build",
+      },
+    ];
+    for (const tmpfsSizeMb of [0, 63, 4097, 1.5]) {
+      await assert.rejects(
+        runVerificationPolicy(root, policy, new AbortController().signal, {
+          image: "expert-worker:test",
+          containerNamePrefix: "verify-scratch",
+          tmpfsSizeMb,
+          runDocker: async () => ({ exitCode: 0, timedOut: false }),
+        }),
+        /INVALID_VERIFICATION_TMPFS_SIZE/,
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -69,6 +69,7 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
         envNames: backend === "codex" ? ["OPENAI_API_KEY"] : ["ANTHROPIC_API_KEY"],
         mcpCredentialFiles: { "read-only": keyFile },
         timeoutMs: 1000,
+        verificationTmpfsMb: 2048,
         runProcess: async (options) => {
           const argv = options.args.join(" ");
           assert.ok(!argv.includes(key), "Docker arguments must not contain secrets");
@@ -468,6 +469,7 @@ test("Docker executor keeps legacy profiles read-only and rejects write profile 
       network: "expert-egress",
       envNames: ["OPENAI_API_KEY"],
       timeoutMs: 1000,
+      verificationTmpfsMb: 2048,
       runProcess: async (options) => {
         launched = true;
         args = options.args;
@@ -618,6 +620,7 @@ test("workspace-write verification observes mutated content and binds evidence t
       network: "bridge",
       envNames: ["OPENAI_API_KEY"],
       timeoutMs: 1000,
+      verificationTmpfsMb: 2048,
       onStage: async () => undefined,
       runProcess: async (options) => {
         const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
@@ -630,6 +633,7 @@ test("workspace-write verification observes mutated content and binds evidence t
       runVerificationPolicy: async (workspace, policy, _signal, options) => {
         verifiedWorkspace = workspace;
         assert.equal(options.supplementalGroupId, 10001);
+        assert.equal(options.tmpfsSizeMb, 2048);
         assert.equal(readFileSync(path.join(workspace, "fixture.txt"), "utf8"), "after\n");
         assert.notEqual(
           statSync(path.join(workspace, ".git", "index")).mode & 0o040,

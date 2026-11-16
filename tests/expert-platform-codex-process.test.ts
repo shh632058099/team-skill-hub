@@ -134,6 +134,31 @@ test("Codex JSONL model errors receive a fixed code without exposing response te
   assert.ok(logs.every((line) => !line.includes("secret-example")));
 });
 
+test("Claude JSONL result errors receive a fixed code without exposing response text", async () => {
+  const logs: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await assert.rejects(
+      () =>
+        runCodexProcess({
+          executable: process.execPath,
+          args: [
+            "-e",
+            "console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:'HTTP 429 quota exceeded secret-claude'})); process.exit(1)",
+          ],
+          timeoutMs: 5000,
+          streamingBackend: "claude",
+        }),
+      /CODEX_PROCESS_FAILED/,
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.ok(logs.some((line) => line.includes('"errorCode":"MODEL_RATE_LIMITED"')));
+  assert.ok(logs.every((line) => !line.includes("secret-claude")));
+});
+
 test("process runner enforces deadline and abort", async () => {
   await assert.rejects(
     () =>

@@ -19,6 +19,8 @@ export interface VerificationContainerOptions {
   image: string;
   containerNamePrefix: string;
   supplementalGroupId?: number;
+  primaryGroupId?: number;
+  tmpfsSizeMb?: number;
   runDocker?: VerificationDockerRunner;
 }
 
@@ -92,6 +94,16 @@ function buildVerificationDockerArgs(
   ) {
     throw new Error("INVALID_VERIFICATION_GROUP");
   }
+  if (
+    options.primaryGroupId !== undefined &&
+    (!Number.isSafeInteger(options.primaryGroupId) || options.primaryGroupId < 1)
+  ) {
+    throw new Error("INVALID_VERIFICATION_GROUP");
+  }
+  const tmpfsSizeMb = options.tmpfsSizeMb ?? 1024;
+  if (!Number.isSafeInteger(tmpfsSizeMb) || tmpfsSizeMb < 64 || tmpfsSizeMb > 4096) {
+    throw new Error("INVALID_VERIFICATION_TMPFS_SIZE");
+  }
   if (!step.argv[0] || step.argv.some((arg) => !arg || arg.includes("\0"))) {
     throw new Error("INVALID_VERIFICATION_COMMAND");
   }
@@ -106,7 +118,10 @@ function buildVerificationDockerArgs(
     "--network",
     "none",
     "--read-only",
-    ...(options.supplementalGroupId !== undefined ? ["--group-add", String(options.supplementalGroupId)] : []),
+    ...(options.primaryGroupId !== undefined ? ["--user", `10001:${options.primaryGroupId}`] : []),
+    ...(options.supplementalGroupId !== undefined && options.supplementalGroupId !== options.primaryGroupId
+      ? ["--group-add", String(options.supplementalGroupId)]
+      : []),
     "--cap-drop",
     "ALL",
     "--security-opt",
@@ -119,10 +134,10 @@ function buildVerificationDockerArgs(
     "2",
     "--mount",
     `type=bind,src=${workspacePath},dst=/workspace,readonly`,
-    "--mount",
-    "type=tmpfs,dst=/tmp,tmpfs-size=33554432",
     "--tmpfs",
-    "/home/expert:rw,uid=10001,gid=10001,size=64m",
+    `/tmp:rw,exec,uid=10001,gid=${options.primaryGroupId ?? 10001},size=${tmpfsSizeMb}m`,
+    "--tmpfs",
+    `/home/expert:rw,uid=10001,gid=${options.primaryGroupId ?? 10001},size=64m`,
     "--env",
     "HOME=/home/expert",
     "--env",
@@ -149,9 +164,10 @@ async function runStep(
   if (signal.aborted) throw new Error("VERIFICATION_CANCELLED");
   const startedAt = Date.now();
   const runDocker = options.runDocker ?? defaultRunDocker;
+  const dockerArgs = buildVerificationDockerArgs(workspacePath, step, options);
   let execution: VerificationDockerResult;
   try {
-    execution = await runDocker(buildVerificationDockerArgs(workspacePath, step, options), step.timeoutMs, signal);
+    execution = await runDocker(dockerArgs, step.timeoutMs, signal);
   } catch (error) {
     if (signal.aborted || (error instanceof Error && error.message === "VERIFICATION_CANCELLED")) throw error;
     execution = { exitCode: null, timedOut: false, processError: true };

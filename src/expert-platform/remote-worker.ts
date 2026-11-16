@@ -2,6 +2,7 @@ import type { Claim } from "./task-store.js";
 import type { VerificationEvidenceResult } from "./verification-policy.js";
 import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
 import type { PublicationOperationLease, PublicationOperationResult } from "./work-publication-store.js";
+import type { ChangeRequestOperationLease, ChangeRequestOperationResult } from "./work-change-request-store.js";
 
 export type WorkerExecutionResult = {
   result: string;
@@ -21,6 +22,11 @@ export type WorkspaceCleanupLease = {
 export interface RemoteWorkerClient {
   claimPublicationOperation?(workerId: string): Promise<PublicationOperationLease | null>;
   completePublicationOperation?(claim: PublicationOperationLease, result: PublicationOperationResult): Promise<unknown>;
+  claimChangeRequestOperation?(workerId: string): Promise<ChangeRequestOperationLease | null>;
+  completeChangeRequestOperation?(
+    claim: ChangeRequestOperationLease,
+    result: ChangeRequestOperationResult,
+  ): Promise<unknown>;
   claimWorkspaceCleanup?(workerId: string): Promise<WorkspaceCleanupLease | null>;
   completeWorkspaceCleanup?(claim: WorkspaceCleanupLease, success: boolean, errorCode?: string): Promise<unknown>;
   claimTask(workerId: string, expertId: string, capability: string): Promise<Claim | null>;
@@ -41,6 +47,17 @@ export interface RemoteWorkerOptions {
   expertId?: string;
 }
 
+// Only these fixed, non-secret codes may cross the Worker -> Hub failure boundary.
+const DETERMINISTIC_WORKSPACE_ERRORS = new Set([
+  "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
+  "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
+  "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
+  "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
+  "WORKER_RUNTIME_STATE_OWNER_INVALID",
+  "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
+  "WORKSPACE_PREPARATION_INCOMPLETE",
+  "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+]);
 export async function runRemoteWorkerOnce(
   client: RemoteWorkerClient,
   workerId: string,
@@ -118,7 +135,7 @@ export async function runRemoteWorkerOnce(
           errorCode: /^[A-Z0-9_]{1,80}$/.test(errorCode) ? errorCode : "UNCLASSIFIED",
         }),
       );
-      await client.failTask(claim, "EXECUTION_FAILED");
+      await client.failTask(claim, DETERMINISTIC_WORKSPACE_ERRORS.has(errorCode) ? errorCode : "EXECUTION_FAILED");
       return true;
     }
     if (leaseLost) throw leaseLost;

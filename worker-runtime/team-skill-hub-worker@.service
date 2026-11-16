@@ -11,7 +11,12 @@ Group=expert-worker
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/etc/team-skill-hub-worker/workers/%i.env
 Environment=EXPERT_WORKER_INSTANCE=%i
+Environment=HOME=/var/lib/team-skill-hub-worker/%i/home
+Environment=USER=expert-worker
+Environment=LOGNAME=expert-worker
+Environment=DOCKER_CONFIG=/var/lib/team-skill-hub-worker/%i/docker-config
 WorkingDirectory="/opt/team-skill-hub-worker/current"
+ExecStartPre=/usr/bin/mkdir -p /var/lib/team-skill-hub-worker/%i/home /var/lib/team-skill-hub-worker/%i/docker-config
 ExecStartPre="/opt/team-skill-hub-worker/node" "/opt/team-skill-hub-worker/current/check-worker-config.js"
 ExecStart="/opt/team-skill-hub-worker/node" "/opt/team-skill-hub-worker/current/src/cli/expert-worker.js"
 Restart=always

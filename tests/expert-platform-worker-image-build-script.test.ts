@@ -7,6 +7,10 @@ import { test } from "node:test";
 
 const script = new URL("../scripts/build-worker-image.sh", import.meta.url).pathname;
 const root = path.resolve(path.dirname(script), "..");
+const claudeEntrypoint = readFileSync(new URL("../docker/expert-worker/claude-entrypoint.sh", import.meta.url), "utf8");
+const codexEntrypoint = readFileSync(new URL("../docker/expert-worker/entrypoint.sh", import.meta.url), "utf8");
+const claudeDockerfile = readFileSync(new URL("../docker/expert-worker/Dockerfile.claude", import.meta.url), "utf8");
+const codexDockerfile = readFileSync(new URL("../docker/expert-worker/Dockerfile", import.meta.url), "utf8");
 
 function fixture(serverVersion: string, extraEnv: Record<string, string> = {}) {
   const temp = mkdtempSync(path.join(os.tmpdir(), "worker-image-build-test-"));
@@ -35,6 +39,12 @@ esac
     ...process.env,
     PATH: `${temp}:${process.env.PATH}`,
     DOCKER_CALL_LOG: logfile,
+    HTTP_PROXY: "",
+    HTTPS_PROXY: "",
+    NO_PROXY: "",
+    http_proxy: "",
+    https_proxy: "",
+    no_proxy: "",
     ...extraEnv,
   };
   return { temp, logfile, env };
@@ -43,6 +53,38 @@ esac
 function run(env: NodeJS.ProcessEnv, ...args: string[]) {
   return spawnSync("bash", [script, ...args], { env, encoding: "utf8" });
 }
+
+test("expert image entrypoints preserve shared-group write permissions", () => {
+  assert.match(claudeEntrypoint, /umask 0002/);
+  assert.match(claudeEntrypoint, /exec claude "\$@"/);
+  assert.match(codexEntrypoint, /umask 0002/);
+  assert.match(codexEntrypoint, /exec codex "\$@"/);
+});
+
+test("Claude and Codex expert images include the common native build toolchain", () => {
+  const requiredPackages = [
+    "build-essential",
+    "cmake",
+    "ninja-build",
+    "pkg-config",
+    "python3",
+    "curl",
+    "wget",
+    "patch",
+    "file",
+    "unzip",
+    "libssl-dev",
+    "zlib1g-dev",
+  ];
+  for (const dockerfile of [claudeDockerfile, codexDockerfile]) {
+    for (const packageName of requiredPackages) {
+      assert.match(
+        dockerfile,
+        new RegExp(`(^|\\s)${packageName.replace(/[.*+?^$()|[\\]\\]/g, "\\$&")}(\\s|\\\\|$)`, "m"),
+      );
+    }
+  }
+});
 
 test("auto mode selects legacy for old Docker Server and standard for modern Docker Server", () => {
   for (const [version, expected] of [
@@ -66,6 +108,38 @@ test("auto mode selects legacy for old Docker Server and standard for modern Doc
     } finally {
       rmSync(f.temp, { recursive: true, force: true });
     }
+  }
+});
+
+test("standard mode reuses a locally cached base image instead of forcing Docker Hub metadata", () => {
+  const f = fixture("27.0.0", { BUILD_MODE: "standard", MOCK_BASE_PRESENT: "1" });
+  try {
+    const result = run(f.env, "claude", "2.3.4");
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(f.logfile, "utf8");
+    assert.match(calls, /image inspect node:24-bookworm-slim/);
+    assert.match(calls, /build -f .*Dockerfile\.claude -t team-skill-hub-expert-claude:2\.3\.4/);
+    assert.doesNotMatch(calls, /build --pull/);
+  } finally {
+    rmSync(f.temp, { recursive: true, force: true });
+  }
+});
+
+test("expert image build forwards explicitly configured proxy variables to Docker build", () => {
+  const f = fixture("27.0.0", {
+    BUILD_MODE: "standard",
+    MOCK_BASE_PRESENT: "1",
+    HTTPS_PROXY: "http://proxy.example:8180",
+    NO_PROXY: "localhost,team-skill-hub",
+  });
+  try {
+    const result = run(f.env, "claude", "2.3.4");
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(f.logfile, "utf8");
+    assert.match(calls, /--build-arg HTTPS_PROXY=http:\/\/proxy\.example:8180/);
+    assert.match(calls, /--build-arg NO_PROXY=localhost,team-skill-hub/);
+  } finally {
+    rmSync(f.temp, { recursive: true, force: true });
   }
 });
 
@@ -116,7 +190,7 @@ test("legacy mode derives Bullseye Dockerfiles for both backends and honors BASE
       assert.match(
         generated,
         backend === "claude"
-          ? /ENTRYPOINT \["claude"\]/
+          ? /ENTRYPOINT \["\/usr\/local\/bin\/expert-claude-entrypoint"\]/
           : /ENTRYPOINT \["\/usr\/local\/bin\/expert-codex-entrypoint"\]/,
       );
       assert.match(

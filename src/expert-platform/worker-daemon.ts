@@ -12,6 +12,8 @@ import {
   type PushGitPublicationInput,
   type PushGitPublicationResult,
 } from "./git-publication-executor.js";
+import { createGitChangeRequestProvider } from "./git-change-request-provider.js";
+import type { ChangeRequestProvider } from "./change-request-provider.js";
 
 interface ClosableRemoteWorkerClient extends RemoteWorkerClient {
   close(): void;
@@ -22,6 +24,10 @@ export interface ExpertWorkerRuntimeDependencies {
   createExecutor?: (options: DockerCodexExecutorOptions) => ReturnType<typeof createDockerCodexExecutor>;
   preparePublication?: (input: PrepareGitPublicationInput) => Promise<PreparedGitPublication>;
   pushPublication?: (input: PushGitPublicationInput) => Promise<PushGitPublicationResult>;
+  createChangeRequestProvider?: (
+    repositoryUrl: string,
+    credentials: ExpertWorkerRuntimeConfig["gitCredentialConfigs"],
+  ) => ChangeRequestProvider;
 }
 
 export function createExpertWorkerRuntime(
@@ -88,6 +94,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      verificationTmpfsMb: config.verificationTmpfsMb ?? 1024,
       ...(config.taskIdleTimeoutMs !== undefined ? { idleTimeoutMs: config.taskIdleTimeoutMs } : {}),
       onActivity,
       onStage: async (claim, stage, details) => {
@@ -122,6 +129,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      verificationTmpfsMb: config.verificationTmpfsMb ?? 1024,
       ...(config.taskIdleTimeoutMs !== undefined ? { idleTimeoutMs: config.taskIdleTimeoutMs } : {}),
       onActivity,
       onStage: async (claim, stage, details) => {
@@ -140,6 +148,7 @@ export function createExpertWorkerRuntime(
 
   const preparePublication = dependencies.preparePublication ?? prepareGitPublication;
   const pushPublication = dependencies.pushPublication ?? pushGitPublication;
+  const createChangeRequestProvider = dependencies.createChangeRequestProvider ?? createGitChangeRequestProvider;
 
   const runPublicationOperation = async (): Promise<boolean> => {
     if (!client.claimPublicationOperation || !client.completePublicationOperation) return false;
@@ -199,14 +208,46 @@ export function createExpertWorkerRuntime(
     }
   };
 
+  const runChangeRequestOperation = async (): Promise<boolean> => {
+    if (!client.claimChangeRequestOperation || !client.completeChangeRequestOperation) return false;
+    const claim = await client.claimChangeRequestOperation(config.workerId);
+    if (!claim) return false;
+    try {
+      const provider = createChangeRequestProvider(claim.repositoryUrl, config.gitCredentialConfigs);
+      const result = await provider.create({
+        repositoryIdentity: claim.repositoryIdentity,
+        headBranch: claim.headBranch,
+        headCommit: claim.headCommit,
+        baseBranch: claim.baseBranch,
+        title: claim.title,
+        body: claim.body,
+        idempotencyKey: claim.idempotencyKey,
+        credentialGrantRef: claim.credentialGrantRef,
+      });
+      await client.completeChangeRequestOperation(claim, { success: true, ...result });
+      return true;
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : "CHANGE_REQUEST_CREATE_FAILED";
+      const errorCode = /^[A-Z][A-Z0-9_]{0,79}$/.test(raw) ? raw : "CHANGE_REQUEST_CREATE_FAILED";
+      await client.completeChangeRequestOperation(claim, { success: false, errorCode });
+      return true;
+    }
+  };
+
   return {
     runOnce: async () => {
       if (await runPublicationOperation()) return true;
+      if (await runChangeRequestOperation()) return true;
       if (client.claimWorkspaceCleanup && client.completeWorkspaceCleanup) {
         const cleanup = await client.claimWorkspaceCleanup(config.workerId);
         if (cleanup) {
           try {
-            await removeWorkspaceDirectory(config.repositoryRoot, cleanup.workspaceKey);
+            const workerGroupId =
+              typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
+            await removeWorkspaceDirectory(config.repositoryRoot, cleanup.workspaceKey, {
+              image: config.dockerImage,
+              workerGroupId,
+            });
             await client.completeWorkspaceCleanup(cleanup, true);
           } catch (error) {
             const raw = error instanceof Error ? error.message : "WORKSPACE_CLEANUP_FAILED";

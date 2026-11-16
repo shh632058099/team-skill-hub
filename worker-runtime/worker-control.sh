@@ -300,6 +300,15 @@ prepare_instance_env() {
   export EXPERT_WORKER_CREDENTIAL_FILE=${EXPERT_WORKER_CREDENTIAL_FILE:-"$DATA/worker-credential"}
   export EXPERT_SOURCE_PATH=${EXPERT_SOURCE_PATH:-"$DATA/source"}
   export EXPERT_REPOSITORY_ROOT=${EXPERT_REPOSITORY_ROOT:-"$DATA/repositories"}
+  if [[ $USER_MODE -eq 0 ]]; then
+    # System-mode workers run as expert-worker but are started by root. Keep the
+    # required instance environment while replacing root-owned identity paths so
+    # Docker/CLI tooling never attempts to read /root/.docker or /root state.
+    export HOME="$DATA/home"
+    export USER=expert-worker
+    export LOGNAME=expert-worker
+    export DOCKER_CONFIG="$DATA/docker-config"
+  fi
 }
 
 matching_systemd_active() {
@@ -322,6 +331,12 @@ start_worker() {
   fi
   prepare_instance_env
   install -d -m 0750 "$DATA"
+  if [[ $USER_MODE -eq 0 ]]; then
+    install -d -m 0700 "$HOME" "$DOCKER_CONFIG"
+    if [[ "${WORKER_RUNTIME_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+      chown expert-worker:expert-worker "$DATA" "$HOME" "$DOCKER_CONFIG"
+    fi
+  fi
   "$NODE" "$BASE/check-worker-config.js"
   rm -f "$PID_FILE" "$START_FILE"
   touch "$LOG_FILE"

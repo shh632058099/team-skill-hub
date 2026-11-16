@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -56,33 +57,58 @@ function sshCommand(keyPath: string): string {
 
 export type WorkspaceAccess = "read-only" | "read-write";
 
-/** Prepare a private Worker checkout for the execution container.
- * Non-root Workers keep their own primary group; root Workers retain the image GID 10001 fallback.
- * The working tree may be group-writable for an explicit workspace-write profile, but .git metadata
- * always remains group-readable only. Never follow symlinks outside the checkout.
+export const EXECUTION_CONTAINER_UID = 10001;
+
+/**
+ * Prepare a private Worker checkout for the execution container.
+ *
+ * Worker-owned paths may be normalized in-place because the Worker owns them.
+ * Execution-container-owned paths are never chmod/chown'ed by the Worker: they
+ * must already use the shared Worker GID and expose sufficient group access.
+ * This keeps retry/continuation compatible with an unprivileged Worker while
+ * preserving .git metadata as Worker-owned, group-read-only state.
  */
 export function grantExecutionContainerAccess(
   root: string,
   access: WorkspaceAccess,
   containerGid = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001,
 ): void {
+  const workerUid = typeof process.getuid === "function" ? process.getuid() : 0;
   const visit = (file: string, gitMetadata: boolean): void => {
-    const stat = lstatSync(file);
+    let stat = lstatSync(file);
     if (stat.isSymbolicLink()) return;
     if (!stat.isDirectory() && !stat.isFile()) return;
+
+    const workerOwned = stat.uid === workerUid;
+    const executionOwned = stat.uid === EXECUTION_CONTAINER_UID;
+    if (!workerOwned && !executionOwned) throw new Error("WORKER_CHECKOUT_OWNER_NOT_ALLOWED");
+    if (executionOwned && gitMetadata) throw new Error("WORKER_GIT_METADATA_OWNERSHIP_INVALID");
+
     if (stat.gid !== containerGid) {
+      if (!workerOwned) throw new Error("WORKER_CHECKOUT_GROUP_NOT_CONFIGURED");
       try {
         chownSync(file, stat.uid, containerGid);
+        stat = lstatSync(file);
       } catch (error) {
         if (error instanceof Error && "code" in error && error.code === "EPERM")
           throw new Error("WORKER_CHECKOUT_GROUP_NOT_CONFIGURED");
         throw error;
       }
     }
-    const ownerBits = (stat.mode >> 6) & 0o7;
-    const groupBits =
-      access === "read-write" && !gitMetadata ? ownerBits : stat.isDirectory() ? ownerBits & 0o5 : ownerBits & 0o4;
-    chmodSync(file, (stat.mode & 0o707) | (groupBits << 3));
+
+    if (workerOwned) {
+      const ownerBits = (stat.mode >> 6) & 0o7;
+      const groupBits =
+        access === "read-write" && !gitMetadata ? ownerBits : stat.isDirectory() ? ownerBits & 0o5 : ownerBits & 0o4;
+      const setgid = access === "read-write" && stat.isDirectory() && !gitMetadata ? 0o2000 : 0;
+      const desiredMode = (stat.mode & 0o707) | (groupBits << 3) | setgid;
+      if ((stat.mode & 0o7777) !== desiredMode) chmodSync(file, desiredMode);
+    } else {
+      const groupBits = (stat.mode >> 3) & 0o7;
+      const requiredBits = access === "read-write" ? (stat.isDirectory() ? 0o7 : 0o6) : stat.isDirectory() ? 0o5 : 0o4;
+      if ((groupBits & requiredBits) !== requiredBits) throw new Error("WORKER_CHECKOUT_PERMISSION_NOT_SHARED");
+    }
+
     if (stat.isDirectory()) {
       for (const entry of readdirSync(file)) {
         visit(path.join(file, entry), gitMetadata || (file === root && entry === ".git"));
@@ -92,13 +118,39 @@ export function grantExecutionContainerAccess(
   visit(root, false);
 }
 
+export function prepareRuntimeStateDirectory(
+  root: string,
+  workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001,
+): void {
+  if (!path.isAbsolute(root) || root === path.parse(root).root) throw new Error("INVALID_RUNTIME_STATE_PATH");
+  mkdirSync(root, { recursive: true });
+  const workerUid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const normalizeBoundary = (directory: string): void => {
+    let stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("INVALID_RUNTIME_STATE_PATH");
+    if (stat.uid !== workerUid) throw new Error("WORKER_RUNTIME_STATE_OWNER_INVALID");
+    if (stat.gid !== workerGroupId) {
+      try {
+        chownSync(directory, stat.uid, workerGroupId);
+        stat = lstatSync(directory);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "EPERM")
+          throw new Error("WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED");
+        throw error;
+      }
+    }
+    if ((stat.mode & 0o7777) !== 0o2770) chmodSync(directory, 0o2770);
+  };
+  normalizeBoundary(path.dirname(root));
+  normalizeBoundary(root);
+}
+
 export function grantExecutionContainerReadAccess(
   root: string,
   containerGid = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001,
 ): void {
   grantExecutionContainerAccess(root, "read-only", containerGid);
 }
-
 export async function prepareRepositoryWorkspace(
   input: PrepareRepositoryInput,
 ): Promise<{ path: string; commitSha: string }> {
@@ -180,6 +232,9 @@ export async function prepareRepositoryWorkspace(
     mkdirSync(workspaceRoot, { recursive: true });
     const destination = path.join(workspaceRoot, input.id);
     const existingWorkspace = existsSync(path.join(destination, ".git"));
+    const checkoutMarker = input.workspaceKey
+      ? path.join(destination, ".git", "team-skill-hub-workspace-ready")
+      : undefined;
     if (!existingWorkspace) {
       if (existsSync(destination)) throw new Error("SOURCE_REPOSITORY_PATH_NOT_EMPTY");
       await run(
@@ -199,6 +254,7 @@ export async function prepareRepositoryWorkspace(
         env,
       );
     } else {
+      if (checkoutMarker && !existsSync(checkoutMarker)) throw new Error("WORKSPACE_PREPARATION_INCOMPLETE");
       const remote = await new Promise<string>((resolve, reject) => {
         const child = spawn("git", ["-C", destination, "remote", "get-url", "origin"], {
           env,
@@ -237,6 +293,16 @@ export async function prepareRepositoryWorkspace(
     });
     if (!/^[a-f0-9]{40,64}$/i.test(origin)) throw new Error("SOURCE_REPOSITORY_COMMIT_UNAVAILABLE");
     grantExecutionContainerAccess(destination, input.workspaceAccess ?? "read-only");
+    if (checkoutMarker) {
+      if (existingWorkspace) {
+        const recordedRevision = readFileSync(checkoutMarker, "utf8").trim();
+        if (recordedRevision !== origin) throw new Error("WORKSPACE_PREPARATION_REVISION_MISMATCH");
+      } else {
+        // Only a successful checkout, access validation, and pinned revision earn a ready marker.
+        // It lives under Worker-owned .git so the Agent cannot forge readiness.
+        writeFileSync(checkoutMarker, origin + "\n", { flag: "wx", mode: 0o640 });
+      }
+    }
     return { path: destination, commitSha: origin };
   } finally {
     if (credentialTempDir) rmSync(credentialTempDir, { recursive: true, force: true });

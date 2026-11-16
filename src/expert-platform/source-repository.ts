@@ -7,6 +7,10 @@ export type SourceRepositoryInput = {
   branch: string;
   credentialRef?: string;
   gitProxyUrl?: string;
+  publicationPolicy?: ExpertSourceRepository["publicationPolicy"];
+  publicationTemplate?: { preset: "work-branch" | "change-request"; branchPrefix?: string };
+  verificationPolicy?: ExpertSourceRepository["verificationPolicy"];
+  verificationTemplate?: { preset: "cmake-ctest" };
 };
 
 export function sourceRepositoryId(url: string, branch: string): string {
@@ -64,11 +68,80 @@ export function normalizeSourceRepository(input: SourceRepositoryInput): ExpertS
       throw new Error("INVALID_GIT_PROXY_URL");
     }
   }
+  if (input.publicationTemplate && input.publicationPolicy) {
+    throw new Error("CONFLICTING_PUBLICATION_CONFIG");
+  }
+  let publicationPolicy = input.publicationPolicy ? structuredClone(input.publicationPolicy) : undefined;
+  if (input.publicationTemplate) {
+    const { preset } = input.publicationTemplate;
+    const branchPrefix = input.publicationTemplate.branchPrefix?.trim() ?? "tsh/";
+    if (
+      !["work-branch", "change-request"].includes(preset) ||
+      branchPrefix.length > 100 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/-]*\/$/.test(branchPrefix) ||
+      branchPrefix.startsWith("refs/") ||
+      branchPrefix.includes("..") ||
+      branchPrefix.includes("//") ||
+      branchPrefix.includes("/.") ||
+      branchPrefix.includes(".lock/")
+    ) {
+      throw new Error("INVALID_PUBLICATION_TEMPLATE");
+    }
+    publicationPolicy = {
+      version: 1,
+      permissions: [
+        "prepare-commit",
+        "push-work-branch",
+        ...(preset === "change-request" ? (["create-change-request"] as const) : []),
+      ],
+      branchPrefix,
+      protectedBranches: [...new Set(["main", "master", branch])],
+      allowedPushRemote: "origin",
+      allowForcePush: false,
+      allowDeleteRef: false,
+    };
+  }
+  if (input.verificationTemplate && input.verificationPolicy) {
+    throw new Error("CONFLICTING_VERIFICATION_CONFIG");
+  }
+  const verificationPolicy = input.verificationTemplate
+    ? {
+        version: 1,
+        required: [
+          {
+            id: "build",
+            type: "command" as const,
+            argv: [
+              "sh",
+              "-lc",
+              "set -eu; cmake -S /workspace -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=Debug; cmake --build /tmp/build --parallel 2",
+            ],
+            timeoutMs: 600_000,
+            evidenceType: "build",
+          },
+          {
+            id: "unit-test",
+            type: "command" as const,
+            argv: [
+              "sh",
+              "-lc",
+              "set -eu; mkdir -p /tmp/src; cp -a /workspace/. /tmp/src/; chmod -R u+rwX /tmp/src; cmake -S /tmp/src -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=Debug; cmake --build /tmp/build --parallel 2; ctest --test-dir /tmp/build --output-on-failure --no-tests=error",
+            ],
+            timeoutMs: 900_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      }
+    : input.verificationPolicy
+      ? structuredClone(input.verificationPolicy)
+      : undefined;
   return {
     id: sourceRepositoryId(url, branch),
     url,
     branch,
     ...(credentialRef ? { credentialRef } : {}),
     ...(gitProxyUrl ? { gitProxyUrl } : {}),
+    ...(publicationPolicy ? { publicationPolicy } : {}),
+    ...(verificationPolicy ? { verificationPolicy } : {}),
   };
 }

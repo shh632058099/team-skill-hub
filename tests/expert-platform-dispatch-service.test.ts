@@ -530,6 +530,214 @@ test("dispatch filters deployments by required runtime profile and fails closed 
   }
 });
 
+test("dispatch combines workflow workspace access with caller backend preference", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-workspace-access-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA",
+      capabilities: ["ota"],
+      keywords: ["upgrade"],
+      active: true,
+    });
+    const common = {
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [{ id: "ota-repo", url: "https://example.test/ota.git", branch: "main" }],
+      principals: ["alice"],
+      active: true,
+    };
+    experts.putDeployment({ ...common, id: "ota-claude-ro", runtimeProfile: "claude-readonly" });
+    experts.putDeployment({ ...common, id: "ota-claude-rw", runtimeProfile: "claude-workspace-write" });
+    experts.putDeployment({ ...common, id: "ota-codex-ro", runtimeProfile: "codex-readonly" });
+    experts.putDeployment({ ...common, id: "ota-codex-rw", runtimeProfile: "codex-workspace-write" });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+
+    const claudeWrite = dispatch.resolve({
+      principalId: "alice",
+      scope: "org",
+      problem: "fix upgrade failure",
+      expertId: "ota",
+      selectionMode: "explicit",
+      requiredWorkspaceAccess: "read-write",
+      preferredBackend: "claude",
+    });
+    assert.equal(claudeWrite.repositoryId, "ota-repo");
+    assert.equal(claudeWrite.deploymentId, "ota-claude-rw");
+
+    const codexRead = dispatch.resolve({
+      principalId: "alice",
+      scope: "org",
+      problem: "inspect upgrade failure",
+      expertId: "ota",
+      selectionMode: "explicit",
+      requiredWorkspaceAccess: "read-only",
+      preferredBackend: "codex",
+    });
+    assert.equal(codexRead.deploymentId, "ota-codex-ro");
+
+    assert.throws(
+      () =>
+        dispatch.resolve({
+          principalId: "alice",
+          scope: "org",
+          problem: "fix upgrade failure",
+          expertId: "ota",
+          selectionMode: "explicit",
+          requiredWorkspaceAccess: "read-write",
+        }),
+      /DEPLOYMENT_REQUIRED/,
+      "without an exact deployment or backend preference multiple write deployments remain ambiguous",
+    );
+
+    assert.throws(
+      () =>
+        dispatch.resolve({
+          principalId: "alice",
+          scope: "org",
+          problem: "fix upgrade failure",
+          expertId: "ota",
+          selectionMode: "explicit",
+          deploymentId: "ota-claude-ro",
+          requiredWorkspaceAccess: "read-write",
+        }),
+      /RUNTIME_PROFILE_MISMATCH/,
+    );
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("repository verification policy is validated and pinned into the deployment snapshot", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-verification-policy-"));
+  const db = path.join(dir, "runtime.sqlite");
+  try {
+    const experts = new ExpertStore(db);
+    const tasks = new ExpertTaskStore(db);
+    experts.putDefinition({
+      id: "ota",
+      displayName: "OTA",
+      capabilities: ["ota"],
+      keywords: ["upgrade"],
+      active: true,
+    });
+    const modelConfig = {
+      providerId: "router",
+      model: "model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "anthropic-messages" as const,
+      allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+    };
+    const verificationPolicy = {
+      version: 3,
+      required: [
+        {
+          id: "build",
+          type: "command",
+          argv: ["cmake", "--build", "/tmp/build"],
+          timeoutMs: 120_000,
+          evidenceType: "build",
+        },
+        {
+          id: "unit",
+          type: "command",
+          argv: ["ctest", "--test-dir", "/tmp/build"],
+          timeoutMs: 120_000,
+          evidenceType: "unit_test",
+        },
+        {
+          id: "integration",
+          type: "command",
+          argv: ["ctest", "--test-dir", "/tmp/build", "-R", "^integration$"],
+          timeoutMs: 120_000,
+          evidenceType: "integration_test",
+        },
+      ],
+    };
+    experts.putDeployment({
+      id: "ota-write",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://example.org/ota.git",
+          branch: "main",
+          verificationPolicy,
+        } as any,
+      ],
+      principals: ["alice"],
+      runtimeProfile: "claude-workspace-write",
+      active: true,
+      executor: { backend: "claude", modelConfig },
+    });
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    const resolved = dispatch.resolve({
+      principalId: "alice",
+      scope: "org",
+      problem: "fix upgrade failure",
+      expertId: "ota",
+      selectionMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-write",
+    });
+    assert.deepEqual((resolved.deploymentSnapshot?.repository as any)?.verificationPolicy, verificationPolicy);
+
+    assert.throws(
+      () =>
+        experts.putDeployment({
+          ...experts.getDeployment("ota-write"),
+          id: "ota-invalid-verification",
+          repositories: [
+            {
+              id: "ota-repo",
+              url: "https://example.org/ota.git",
+              branch: "main",
+              verificationPolicy: {
+                version: 1,
+                required: [
+                  {
+                    id: "lint",
+                    type: "command",
+                    argv: ["npm", "run", "lint"],
+                    timeoutMs: 60_000,
+                    evidenceType: "lint",
+                  },
+                ],
+              },
+            } as any,
+          ],
+        }),
+      /INVALID_EXPERT_DEPLOYMENT/,
+    );
+
+    experts.putDeployment({
+      ...experts.getDeployment("ota-write"),
+      repositories: [
+        {
+          ...experts.getDeployment("ota-write").repositories![0]!,
+          verificationPolicy: {
+            ...verificationPolicy,
+            version: 4,
+            required: verificationPolicy.required.slice(0, 2),
+          },
+        } as any,
+      ],
+    });
+    assert.equal((resolved.deploymentSnapshot?.repository as any)?.verificationPolicy.version, 3);
+    assert.equal((resolved.deploymentSnapshot?.repository as any)?.verificationPolicy.required.length, 3);
+    experts.close();
+    tasks.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatch pins repository publication policy into the task snapshot", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-dispatch-publication-policy-"));
   const db = path.join(dir, "runtime.sqlite");

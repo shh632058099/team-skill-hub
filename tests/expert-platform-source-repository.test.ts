@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -70,6 +71,75 @@ test("source repository configuration derives stable internal IDs and validates 
   );
 });
 
+test("publication templates generate safe repository-specific permissions without handwritten JSON", () => {
+  const base = { url: "https://github.com/example/repo.git", branch: "release/2026" };
+  const review = normalizeSourceRepository({
+    ...base,
+    credentialRef: "git-writer",
+    publicationTemplate: { preset: "change-request" },
+  });
+  assert.deepEqual(review.publicationPolicy, {
+    version: 1,
+    permissions: ["prepare-commit", "push-work-branch", "create-change-request"],
+    branchPrefix: "tsh/",
+    protectedBranches: ["main", "master", "release/2026"],
+    allowedPushRemote: "origin",
+    allowForcePush: false,
+    allowDeleteRef: false,
+  });
+  assert.equal(review.credentialRef, "git-writer");
+  const branchOnly = normalizeSourceRepository({
+    ...base,
+    publicationTemplate: { preset: "work-branch", branchPrefix: "expert/" },
+  });
+  assert.deepEqual(branchOnly.publicationPolicy?.permissions, ["prepare-commit", "push-work-branch"]);
+  assert.equal(branchOnly.publicationPolicy?.branchPrefix, "expert/");
+  assert.deepEqual(
+    normalizeSourceRepository({
+      ...base,
+      publicationTemplate: { preset: "change-request" },
+    }).publicationPolicy,
+    review.publicationPolicy,
+  );
+  for (const branchPrefix of ["../escape/", "refs/heads/anything/", "a b/", "/absolute/", "missing-slash"]) {
+    assert.throws(
+      () => normalizeSourceRepository({ ...base, publicationTemplate: { preset: "change-request", branchPrefix } }),
+      /INVALID_PUBLICATION_TEMPLATE/,
+    );
+  }
+  assert.throws(
+    () =>
+      normalizeSourceRepository({
+        ...base,
+        publicationTemplate: { preset: "change-request" },
+        publicationPolicy: review.publicationPolicy,
+      }),
+    /CONFLICTING_PUBLICATION_CONFIG/,
+  );
+});
+test("CMake and CTest template emits isolated build/unit steps and never hides missing tests", () => {
+  const base = { url: "https://github.com/example/repo.git", branch: "main" };
+  const repo = normalizeSourceRepository({ ...base, verificationTemplate: { preset: "cmake-ctest" } });
+  const steps = repo.verificationPolicy?.required ?? [];
+  assert.equal(repo.verificationPolicy?.version, 1);
+  assert.deepEqual(
+    steps.map((step) => step.evidenceType),
+    ["build", "unit_test"],
+  );
+  assert.ok(steps.every((step) => step.timeoutMs >= 600_000));
+  assert.match(steps[0]?.argv[2] ?? "", /cmake -S \/workspace -B \/tmp\/build/);
+  assert.match(steps[1]?.argv[2] ?? "", /--no-tests=error/);
+  assert.match(steps[1]?.argv[2] ?? "", /cp -a \/workspace\/\. \/tmp\/src\//);
+  assert.throws(
+    () =>
+      normalizeSourceRepository({
+        ...base,
+        verificationTemplate: { preset: "cmake-ctest" },
+        verificationPolicy: repo.verificationPolicy,
+      }),
+    /CONFLICTING_VERIFICATION_CONFIG/,
+  );
+});
 test("worker clones configured repositories and refreshes to the configured branch", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "expert-repository-workspace-"));
   try {
@@ -131,6 +201,7 @@ test("repository checkouts are isolated by workspaceKey and reused within one wo
 
     const common = { id: "repo-workspace-key", url: bare, branch: "main", root: workspaceRoot };
     const first = await prepareRepositoryWorkspace({ ...common, workspaceKey: "work-11111111-a1" });
+    assert.ok(existsSync(path.join(first.path, ".git", "team-skill-hub-workspace-ready")));
     const again = await prepareRepositoryWorkspace({ ...common, workspaceKey: "work-11111111-a1" });
     const second = await prepareRepositoryWorkspace({ ...common, workspaceKey: "work-11111111-a2" });
 
@@ -139,6 +210,54 @@ test("repository checkouts are isolated by workspaceKey and reused within one wo
     assert.equal(first.path, path.join(workspaceRoot, "work-11111111-a1", common.id));
     assert.equal(second.path, path.join(workspaceRoot, "work-11111111-a2", common.id));
     await assert.rejects(prepareRepositoryWorkspace({ ...common, workspaceKey: "../escape" }), /INVALID_WORKSPACE_KEY/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("interrupted checkout cannot be misclassified as a ready WorkAttempt workspace", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "expert-incomplete-workspace-"));
+  try {
+    const seed = path.join(root, "seed");
+    const bare = path.join(root, "origin.git");
+    await mkdir(seed);
+    git(["init", "-b", "main"], seed);
+    git(["config", "user.email", "test@example.invalid"], seed);
+    git(["config", "user.name", "Expert Test"], seed);
+    await writeFile(path.join(seed, "README.md"), "source exists\\n");
+    git(["add", "README.md"], seed);
+    git(["commit", "-m", "initial"], seed);
+    git(["init", "--bare", bare]);
+    git(["remote", "add", "origin", bare], seed);
+    git(["push", "-u", "origin", "main"], seed);
+    const input = {
+      id: "repo-interrupted",
+      url: bare,
+      branch: "main",
+      root: path.join(root, "workspaces"),
+      workspaceKey: "work-interrupted-a1",
+      workspaceAccess: "read-write" as const,
+    };
+    await assert.rejects(
+      prepareRepositoryWorkspace({
+        ...input,
+        runGit: async (args, cwd, env) => {
+          if (args.includes("checkout")) throw new Error("GIT_OPERATION_FAILED:LFS_SMUDGE_INTERRUPTED");
+          execFileSync("git", args, { cwd, env, stdio: ["ignore", "ignore", "pipe"] });
+        },
+      }),
+      /LFS_SMUDGE_INTERRUPTED/,
+    );
+    const destination = path.join(input.root, input.workspaceKey, input.id);
+    assert.ok(existsSync(path.join(destination, ".git")), "failed clone left Git metadata");
+    assert.equal(existsSync(path.join(destination, "README.md")), false, "checkout did not complete");
+
+    await assert.rejects(
+      prepareRepositoryWorkspace(input),
+      /WORKSPACE_PREPARATION_INCOMPLETE/,
+      "a retry may not treat an unhydrated workspace as ready",
+    );
+    assert.equal(existsSync(path.join(destination, "README.md")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

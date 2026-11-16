@@ -95,6 +95,32 @@ test("executor failure is reported to Hub with generic reason", async () => {
   assert.equal(client.failed, "EXECUTION_FAILED");
   assert.equal(client.completed, undefined);
 });
+test("worker forwards only known deterministic workspace error codes, never exception details", async () => {
+  for (const code of [
+    "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
+    "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
+    "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
+    "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
+    "WORKER_RUNTIME_STATE_OWNER_INVALID",
+    "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
+    "WORKSPACE_PREPARATION_INCOMPLETE",
+    "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+  ]) {
+    const client = new FakeClient(claim);
+    assert.equal(
+      await runRemoteWorkerOnce(client, "worker-1", "ota", async () => {
+        throw new Error(code + ":/private/secret/filename");
+      }),
+      true,
+    );
+    assert.equal(client.failed, code);
+  }
+  const unknown = new FakeClient(claim);
+  await runRemoteWorkerOnce(unknown, "worker-1", "ota", async () => {
+    throw new Error("WORKER_FAKE_PERMISSION_DENIED:secret");
+  });
+  assert.equal(unknown.failed, "EXECUTION_FAILED");
+});
 
 test("two-worker crash recovery: expired first run is fenced and second run wins", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-two-worker-recovery-"));

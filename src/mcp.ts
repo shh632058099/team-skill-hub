@@ -12,6 +12,7 @@ import { WorkOrchestrationStore } from "./expert-platform/work-orchestration-sto
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
 import { McpWorkAdapter } from "./expert-platform/mcp-work-adapter.js";
 import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
+import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
 import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
 
 // The experimental task API is opt-in until an isolated Worker runtime is provisioned.
@@ -22,6 +23,7 @@ const expertDispatchService =
   expertTaskStore && expertStore ? new ExpertDispatchService(expertStore, expertTaskStore) : null;
 const workOrchestrationStore = expertRuntimeDb ? new WorkOrchestrationStore(expertRuntimeDb) : null;
 const workPublicationStore = expertRuntimeDb ? new WorkPublicationStore(expertRuntimeDb) : null;
+const workChangeRequestStore = expertRuntimeDb ? new WorkChangeRequestStore(expertRuntimeDb) : null;
 const workerAvailability = expertRuntimeDb
   ? createWorkerAvailabilityProbe(
       process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
@@ -36,6 +38,7 @@ const workOrchestrator =
         expertDispatchService,
         workerAvailability,
         workPublicationStore ?? undefined,
+        workChangeRequestStore ?? undefined,
       )
     : null;
 const mcpWorkAdapter =
@@ -1433,7 +1436,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. The response exposes top-level workItemId, status, and an opaque sourceControlToken for later update_work_source calls; retain the token in tool context, treat it as secret, and never display it to the user. Reuse the same idempotencyKey when retrying an uncertain submission; a retry reuses the WorkItem and rotates sourceControlToken, so use the newest token. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default; auto routing ignores deploymentId/repositoryId even if a client emits placeholder values. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub.",
+              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. The response exposes top-level workItemId, status, and an opaque sourceControlToken for later update_work_source calls; retain the token in tool context, treat it as secret, and never display it to the user. Reuse the same idempotencyKey when retrying an uncertain submission; a retry reuses the WorkItem and rotates sourceControlToken, so use the newest token. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default. For Work orchestration, do not invent deployment IDs or labels such as writable/read-only: the Workflow constrains workspace access and the Hub selects an eligible Deployment, preferring the executor backend that matches the submitting CLI when several remain. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub. In auto mode, deploymentId/repositoryId placeholders are ignored.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
@@ -1443,7 +1446,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 .enum(["auto", "explicit"])
                 .default("auto")
                 .describe(
-                  "Use auto unless the user explicitly supplied exact deployment/repository IDs. In auto mode, deploymentId and repositoryId are ignored.",
+                  "Use auto unless the user explicitly supplied exact deployment/repository IDs. Never invent deployment IDs like writable/read-only; Workflow access requirements are routed by the Hub. In auto mode, deploymentId and repositoryId are ignored.",
                 ),
               expertId: z.string().trim().min(1).max(200).optional(),
               repositoryId: z.string().trim().min(1).max(200).optional(),

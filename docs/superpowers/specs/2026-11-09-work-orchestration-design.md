@@ -455,13 +455,32 @@ execution:
     reuseOnContinuation: true
     cleanup: on_terminal
 
+change:
+  mode: code_change
+  delivery: merge_request
+
 validation:
-  required:
+  requiredEvidence:
+    - expert_result
     - build
     - unit_test
-
+  # 通用 Workflow 声明“必须证明什么”，不硬编码项目命令。
+  # 可选 Workflow-level steps 用于真正跨仓库通用的验证；
+  # 标准 code-change preset 默认留空，具体 build/unit/integration
+  # 命令由 Repository Verification Policy 提供。
+  required: []
 review:
-  humanReview: true
+  required: true
+  # 可选。配置时由独立 Review ExpertTask / Agent session 自动审查；
+  # 未配置时进入 Human Review fallback。
+  reviewerExpertId: code-review
+
+publication:
+  required: true
+  mode: work_branch
+  # Code-change 默认在 Review 通过后自动 prepare/push 工作分支，
+  # 人不需要在 Hub 再批准一次 push。
+  approvalRequired: false
 
 completion:
   require:
@@ -469,6 +488,8 @@ completion:
     - required_evidence_passed
     - no_unresolved_blocker
     - review_accepted
+    - publication_succeeded
+    - change_request_created
 
 graph:
   mode: single-node
@@ -476,7 +497,61 @@ graph:
 agentInstructions: |
   ...
 ```
+### Repository Verification Policy
 
+具体项目如何 Build/Test 属于 Repository 配置，而不是 Expert 或通用 Workflow：
+
+```yaml
+repository:
+  id: repo-...
+  url: https://github.com/example/project.git
+  branch: main
+
+  verificationPolicy:
+    version: 1
+    required:
+      - id: build
+        type: command
+        argv: ["sh", "-lc", "./scripts/build.sh"]
+        timeoutMs: 600000
+        evidenceType: build
+
+      - id: unit-test
+        type: command
+        argv: ["sh", "-lc", "./scripts/unit-test.sh"]
+        timeoutMs: 600000
+        evidenceType: unit_test
+
+      - id: integration-test
+        type: command
+        argv: ["sh", "-lc", "./scripts/integration-test.sh"]
+        timeoutMs: 900000
+        evidenceType: integration_test
+```
+
+Phase 1 规则：
+
+- Repository Verification Policy 随 Deployment repository 配置保存，并由 `deployment_config_version` 固定。
+- 创建 ExpertTask 时，Workflow-level verification steps 与 Repository steps 合并成不可变 `validationSnapshot`。
+- `code_change` 的有效验证快照必须至少包含 `build` 与 `unit_test`；缺失时在 Agent 启动前 `blocked(policy_blocked / VERIFICATION_POLICY_MISSING)`。
+- Repository 配置 `integration_test` 时，它自动进入该 WorkAttempt 的 Required Evidence，不允许 Agent 自行声明“不需要”。
+- Completion Gate 从当前 WorkAttempt 的不可变 Task `validationSnapshot` 派生实际 Required Evidence，因此 Deployment 后续更新不会改变正在运行的 Attempt。
+- Repository Verification Policy 只允许 `build`、`unit_test`、`integration_test` Evidence 类型；lint 等跨项目策略仍可由 Workflow-level validation 承载。
+- Verification 命令在独立受限容器执行；Workspace 保持 read-only，构建中间产物应写入 `/tmp` 或项目专用临时目录。
+- Verification `/tmp` 使用独立 executable tmpfs，默认 1024MB，可由 Worker `EXPERT_VERIFICATION_TMPFS_MB` 在 64–4096MB 范围内调整；不允许使用宿主持久目录代替临时构建空间。
+- Verification 容器继续保持 `network=none`、read-only rootfs、drop all capabilities 与 bounded CPU/memory；scratch 扩容不能放宽 Workspace 或网络权限。
+- 对复杂命令优先引用仓库内脚本；确实没有脚本时允许受控的 `sh -lc` 作为过渡配置。
+
+### Repository Policy 模板（Admin / Deployment）
+
+管理端「执行配置 → Repository」以选择模板替代手工 JSON；模板在服务端统一展开成完整策略，保存于对应 Repository 的 Deployment configVersion 中。
+
+- **验证策略**：`保持原配置`（默认，对新仓库不自动授权验证）、`CMake + CTest`（生成独立 `build`/`unit_test`，无测试视为失败）、`关闭`、`高级 JSON`。CMake 模板采用隔离的 `/tmp` 构建目录，Unit Test 复制 read-only checkout 至临时目录，避免测试过程写回 Workspace；需特殊编译参数或 Integration Test 的项目使用高级配置。
+- **发布策略**：`保持原配置`（默认，对新仓库不授予发布权限）、`标准 PR/MR`、`仅推送工作分支`、`关闭`、`高级 JSON`。标准策略固定权限 `prepare-commit`、`push-work-branch`、`create-change-request`；分支模板不含最后一项，故 code-change 仍可能停在 MR gate。
+- 发布模板默认 `branchPrefix=tsh/`、`protectedBranches=[main,master,repository.branch]`（去重）、`allowedPushRemote=origin`、`allowForcePush=false`、`allowDeleteRef=false`。可选仅更改分支前缀；仓库 Git credentialRef 单独配置，不写入模板或输出明文 Token。
+- 管理端批量选择的模板仅用于当前编辑表单的仓库；选择保持原配置时仅按照相同 URL 和 base branch 对应保留，避免仓库地址改变后误继承发布权限。显式关闭需用户选择，不因只编辑其他执行字段而抹掉原策略。
+- 模板权限是允许的上限而非实际执行：需可用的写入凭据与对应 Git Provider Adapter。GitHub/GitLab Adapter 未实现时，不允许把 `create-change-request` 配置视为 MR 已创建。
+- 已有 WorkAttempt 的 Deployment/Task snapshot 不随配置修改追溯更新；新策略只能作用于新 WorkAttempt。被 `PUBLICATION_POLICY_MISSING` 阻塞的旧 Work 不能仅因设置模板而直接绕过这个约束。
 未来 DAG 版本仍使用同一个 WorkflowDefinition：
 
 ```text
@@ -509,12 +584,81 @@ Expert 回答：
 Workflow 回答：
 
 > 怎么推进到完成。
+对于代码改动类 Workflow，Phase 1 的强制推进顺序为：
+
+```text
+Implementation
+    |
+    v
+Build
+    |
+    v
+Unit Test
+    |
+    +--> Integration Test（配置了用例/step 时必须通过）
+    |
+    v
+Code Review
+    |  reviewerExpertId 已配置 -> 独立 Review Agent
+    |  reviewerExpertId 未配置 -> Human Review fallback
+    v
+Prepare / Push Work Branch
+    |
+    v
+Create Merge Request / Pull Request
+    |
+    v
+Human reviews MR/PR on code hosting platform
+```
+
+约束：
+
+- `code_change` Workflow 必须要求 `build` 与 `unit_test` Evidence。
+- 配置了 `integration_test` Verification step 时，该 Evidence 自动成为必需项。
+- 必需验证未通过或缺失时，不允许提前进入 Code Review。
+- Agent Review 必须使用独立 ExpertTask / Agent session；审查未 push 的 Workspace 时固定到 Workspace owner Worker，并使用只读 Runtime。
+- Review Decision 绑定当前 source/workspace revision；代码再次变化后旧 Review 不再能通过 Completion Gate。
+- Review 通过后才允许准备和 push 工作分支。
+- `merge_request` delivery 必须有针对已 push commit 的 `pull_request` Evidence；没有 MR/PR Evidence 时 Work 不得伪装为 completed。
+- 最终人的代码审核发生在 GitHub/GitLab 等代码平台的 MR/PR 上，不要求在 Team Skill Hub 重复审核。
+- GitHub/GitLab change-request Adapter 尚未接入时，Work 应明确停在 `change_request_created` Gate，而不是降低完成标准。
 
 Deployment 回答：
 
 > 在哪里、用什么 Runtime、模型、工具和权限做。
 
 三者职责必须分开。
+### Workflow 驱动的 Deployment 路由
+
+WorkOrchestrator 不要求调用端理解或猜测 Deployment ID。路由优先级固定为：
+
+```text
+显式且精确的 deploymentId
+    ↓
+Workflow execution.requiredRuntimeProfile（若配置）
+    ↓
+Workflow change.mode 推导 Workspace Access
+    code_change -> read-write
+    readonly    -> read-only
+    ↓
+Repository 授权 / 唯一 Repository
+    ↓
+提交端 Backend 偏好
+    Claude CLI -> Claude Deployment
+    Codex CLI  -> Codex Deployment
+    ↓
+唯一剩余 Deployment
+```
+
+约束：
+
+- `code_change` Workflow 不得路由到只读 Runtime。
+- `readonly` Workflow 不得路由到 workspace-write Runtime。
+- Workflow 仍保持 backend-neutral；`change.mode` 只表达所需 Workspace Access，不绑定 Claude / Codex。
+- 当同一 Expert / Repository 同时存在 Claude 与 Codex 候选时，MCP Work 优先匹配提交 CLI 的 backend。
+- 调用端不得构造 `writable`、`readonly` 等伪 Deployment ID；只有用户明确提供精确 ID 或 Hub 刚返回精确 ID 时才使用 explicit deployment routing。
+- 经过以上过滤仍存在多个等价 Deployment 时必须 `blocked(DEPLOYMENT_REQUIRED)`，不得通过 ID 字典序、随机或隐式配置猜测。
+- WorkAttempt 创建后固定最终 `deployment_id + deployment_config_version`，后续 continuation/retry 不重新漂移路由。
 
 ### Workflow 版本固定
 
@@ -589,6 +733,15 @@ WorkAttempt 不用于记录普通 continuation 或瞬时执行故障。
 未来语义收敛为：
 
 > WorkAttempt 内的一次专家任务。
+WorkOrchestrator 创建的实施类 ExpertTask 必须携带明确的执行上下文边界：
+
+- 当前 Agent 已经位于既有 `WorkItem -> WorkAttempt -> ExpertTask` 内，不得再次调用 `submit_work`、`submit_expert_task`、`submit_expert_task_auto` 或等价的二次委派工具。
+- 原始用户描述即使包含“必须通过 Team Skill Hub 创建 Work”等 Intake 指令，进入 Worker 后也视为已经完成，不得再次执行。
+- Worker Agent 直接在平台提供的 Workspace / Repository 内实施或分析当前任务。
+- Worker 仍可使用 Deployment 允许的 Skill / Knowledge MCP 工具获取执行上下文。
+- Verification、Review、Rework、Publication、Completion Gate 由 Orchestrator 在 ExpertTask 之外继续推进，Worker Agent 不负责重新创建这些顶层生命周期对象。
+
+这条边界用于避免 `Work -> Agent -> submit_work -> Work...` 的递归编排。
 
 推荐新增可空引用：
 
@@ -722,6 +875,36 @@ failed
 5. terminal 后按 cleanup policy 清理。
 6. workspace_key 必须 deterministic 且避免清洗后的名称碰撞，可采用稳定 hash suffix。
 7. 不能根据路径存在就假定 Workspace 有效；必须结合 owner、revision 和状态核验。
+### Workspace / Execution Container 权限模型
+
+Phase 1 使用显式共享组，而不是 root Worker 或 world-writable 目录：
+
+```text
+Worker process
+  uid = worker uid
+  gid = worker shared gid
+
+Execution container
+  uid = 10001
+  primary gid = worker shared gid
+```
+
+规则：
+
+- Workspace checkout 由 Worker 创建并拥有；`.git` metadata 始终保持 Worker-owned，group 仅可读，不允许执行容器修改。
+- `workspace-write` 执行容器使用固定 UID 10001 和 Worker shared GID 作为 primary GID；镜像 entrypoint 使用 `umask 0002`，使正常新建工作树文件天然可由共享组读取/清理。
+- Worker-owned 工作树路径可由 Worker 规范化 owner/group mode。
+- UID 10001 创建的工作树路径不得由非 root Worker 重新 `chown/chmod`；Worker 只验证其 GID 为 shared GID 且 group 权限满足当前 Workspace Access。未知 owner/group 必须 fail-close。
+- `runtime-session/<backend>` 根目录由 Worker 管理并作为 bind mount；Claude/Codex 私有 session 内容由执行 UID 10001 自主管理，Worker 不递归 chmod/chown 这些私有文件。
+- Verification 容器使用相同 UID/GID 身份，但 Workspace mount 仍保持 read-only、network=none、cap-drop ALL。
+- terminal cleanup 先由 Worker 正常删除；仅当遇到 EPERM/EACCES 时，允许启动受限 cleanup 容器，以 UID10001:shared-gid 只给 UID10001 自己创建的路径补 `g+rwX`，随后由 Worker 重试删除。
+- cleanup repair 容器必须 `network=none`、read-only rootfs、drop all capabilities、no-new-privileges，且不得放宽 `.git` 的 Worker-owned 权限。
+- Worker → Hub 的失败上报采用固定白名单错误码：`WORKER_CHECKOUT_OWNER_NOT_ALLOWED`、`WORKER_GIT_METADATA_OWNERSHIP_INVALID`、`WORKER_CHECKOUT_GROUP_NOT_CONFIGURED`、`WORKER_CHECKOUT_PERMISSION_NOT_SHARED`、`WORKER_RUNTIME_STATE_OWNER_INVALID`、`WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED`。这些确定性完整性问题必须 durable `blocked(policy_blocked)`，需要人工修复后显式 resume，不得自动 failure retry；其他异常继续只上传通用错误码，不传原始异常文本或路径。
+- 运维诊断必须以 Workspace owner Worker UID/GID 运行 `git status`、`git diff` 等 Git 命令。root 身份运行 Git 即使仅观察状态，也可能重新生成 root-owned `.git/index`，破坏 Worker affinity/continuation；切勿依赖 `GIT_OPTIONAL_LOCKS=0` 作为跨所有 Git 子命令的权限保护，也不得通过自动放宽未知 owner 来掩盖诊断污染。
+- Workspace 的 `.git` 存在不代表 checkout 已完成：首次 checkout、fetch、checkout/reset/clean、权限验证及基线 SHA 确认成功后，Worker 才在其私有 `.git/team-skill-hub-workspace-ready` 写入 revision marker 并上报 `workspace.ready`。Retry/continuation 必须校验 marker 与 HEAD 一致；缺失或不匹配时 fail-close 为 `WORKSPACE_PREPARATION_INCOMPLETE` / `WORKSPACE_PREPARATION_REVISION_MISMATCH`，Worker 白名单原样上报，Hub durable `blocked(policy_blocked)`，不得执行 Agent、自动 retry 或 reset/clean 含潜在修改的 Workspace。
+- Git LFS smudge 保持原有默认行为；若仓库的 Build/Unit/Integration 无需大型 LFS 对象，可以对受控 Worker 实例显式设置 `GIT_LFS_SKIP_SMUDGE=1`。需要 LFS 对象的仓库不能用该设置绕过验证，也不能将跳过 LFS 当成通过质量门禁的证据。
+
+该模型的目标同时满足：retry/continuation 可复用 Workspace、非 root Worker 可运行、Agent 私有 session 可持续、`.git` metadata 不暴露写权限、终态 cleanup 可恢复。
 
 ### Worker affinity
 
@@ -1676,40 +1859,48 @@ Plan / Expert Routing
 Workspace
   |
   v
-Implement
+Implementation
   |
   v
-Build / Test
+Build
   |
   v
-PR
+Unit Test
+  |
+  +---- configured ----> Integration Test
   |
   v
-Review Sweep
+Code Review
   |
-  +---- feedback ----> Rework
+  +---- reviewer configured ----> Independent Review Agent
   |
-  v
-Human Review
+  +---- no reviewer ------------> Human Review fallback
   |
-  v
-Merge
+  +---- rework -----------------> New WorkAttempt
   |
   v
-Done
+Work Branch Publication
+  |
+  v
+Create Merge Request / Pull Request
+  |
+  v
+Human Review on MR / PR
+  |
+  v
+Merge / external completion signal
 ```
-
 包括：
 
 - 自动 continuation。
 - failure retry + backoff。
-- PR review sweep。
-- CI gate。
-- Human Review gate。
+- Build / Unit Test / optional Integration Test gate。
+- 独立 Agent Review 或 Human Review fallback。
+- Review 后受控工作分支发布。
+- Merge Request / Pull Request creation gate。
+- 外部 MR/PR Human Review / merge signal。
 - rework loop。
-- merge gate。
 - terminal cleanup。
-
 ---
 
 ## 20. 风险

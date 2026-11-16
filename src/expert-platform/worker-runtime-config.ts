@@ -28,6 +28,7 @@ export interface ExpertWorkerRuntimeConfig {
   pollMs: number;
   taskTimeoutMs: number;
   taskIdleTimeoutMs?: number;
+  verificationTmpfsMb?: number;
   tlsCaPath?: string;
   tlsCertPath?: string;
   tlsKeyPath?: string;
@@ -106,6 +107,12 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error("INVALID_WORKER_CONFIG");
+  return parsed;
+}
+
+function boundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = positiveInteger(value, fallback);
+  if (parsed < min || parsed > max) throw new Error("INVALID_WORKER_CONFIG");
   return parsed;
 }
 
@@ -267,6 +274,7 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     heartbeatMs: positiveInteger(env.EXPERT_HEARTBEAT_MS, 10_000),
     pollMs: positiveInteger(env.EXPERT_POLL_MS, 3_000),
     taskTimeoutMs: positiveInteger(env.EXPERT_TASK_TIMEOUT_MS, 120_000),
+    verificationTmpfsMb: boundedInteger(env.EXPERT_VERIFICATION_TMPFS_MB, 1024, 64, 4096),
     ...(env.EXPERT_TASK_IDLE_TIMEOUT_MS?.trim()
       ? { taskIdleTimeoutMs: positiveInteger(env.EXPERT_TASK_IDLE_TIMEOUT_MS, 120_000) }
       : {}),

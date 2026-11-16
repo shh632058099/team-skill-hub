@@ -137,9 +137,29 @@ test("worker runtime config parses a cross-host Docker Codex deployment", () => 
   assert.equal(config.pollMs, 3_000);
   assert.equal(config.taskTimeoutMs, 90_000);
   assert.equal(config.taskIdleTimeoutMs, 45_000);
+  assert.equal(config.verificationTmpfsMb, 1024);
   assert.equal(config.tlsCaPath, "/etc/expert/ca.pem");
   assert.equal(config.tlsCertPath, "/etc/expert/worker.pem");
   assert.equal(config.tlsKeyPath, "/etc/expert/worker-key.pem");
+});
+
+test("worker runtime config accepts bounded verification scratch tmpfs size", () => {
+  const base = {
+    EXPERT_HUB_ADDRESS: "hub.internal:7443",
+    EXPERT_WORKER_ID: "ota-worker-01",
+    EXPERT_WORKER_CREDENTIAL: "ewc_example",
+    EXPERT_CAPABILITY: "ota",
+    EXPERT_SOURCE_PATH: "/srv/repos/ota",
+    EXPERT_EXECUTOR_BACKEND: "codex",
+    EXPERT_DOCKER_NETWORK: "expert-egress",
+  };
+  assert.equal(parseExpertWorkerConfig({ ...base, EXPERT_VERIFICATION_TMPFS_MB: "2048" }).verificationTmpfsMb, 2048);
+  for (const bad of ["0", "63", "4097", "1.5", "oops"]) {
+    assert.throws(
+      () => parseExpertWorkerConfig({ ...base, EXPERT_VERIFICATION_TMPFS_MB: bad }),
+      /INVALID_WORKER_CONFIG/,
+    );
+  }
 });
 
 test("worker runtime config rejects incomplete mTLS configuration", () => {

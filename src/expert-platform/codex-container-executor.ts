@@ -42,6 +42,7 @@ export interface CodexDockerConfig {
   network: string;
   seccompProfile?: "default" | "unconfined";
   supplementalGroupId?: number;
+  primaryGroupId?: number;
   envNames: readonly string[];
   authFilePath?: string;
   configFilePath?: string;
@@ -82,6 +83,12 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     (!Number.isSafeInteger(config.supplementalGroupId) || config.supplementalGroupId < 1)
   ) {
     throw new Error("INVALID_SUPPLEMENTAL_GROUP_ID");
+  }
+  if (
+    config.primaryGroupId !== undefined &&
+    (!Number.isSafeInteger(config.primaryGroupId) || config.primaryGroupId < 1)
+  ) {
+    throw new Error("INVALID_PRIMARY_GROUP_ID");
   }
   if (config.authFilePath && (!path.isAbsolute(config.authFilePath) || config.authFilePath === "/")) {
     throw new Error("INVALID_AUTH_FILE_PATH");
@@ -131,7 +138,10 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     "--network",
     config.network,
     "--read-only",
-    ...(config.supplementalGroupId !== undefined ? ["--group-add", String(config.supplementalGroupId)] : []),
+    ...(config.primaryGroupId !== undefined ? ["--user", `10001:${config.primaryGroupId}`] : []),
+    ...(config.supplementalGroupId !== undefined && config.supplementalGroupId !== config.primaryGroupId
+      ? ["--group-add", String(config.supplementalGroupId)]
+      : []),
     "--cap-drop",
     "ALL",
     "--security-opt",
@@ -147,7 +157,7 @@ export function buildCodexDockerArgs(config: CodexDockerConfig): string[] {
     "--mount",
     "type=tmpfs,dst=/tmp,tmpfs-size=33554432",
     "--tmpfs",
-    "/home/expert:rw,uid=10001,gid=10001,size=64m",
+    `/home/expert:rw,uid=10001,gid=${config.primaryGroupId ?? 10001},size=64m`,
     ...(config.runtimeStatePath && config.runtimeStateTarget
       ? ["--mount", `type=bind,src=${config.runtimeStatePath},dst=${config.runtimeStateTarget}`]
       : []),

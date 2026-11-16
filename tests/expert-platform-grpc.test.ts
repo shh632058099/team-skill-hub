@@ -455,3 +455,75 @@ test("publication operation RPC is owner-scoped and fenced", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+test("change request operation RPC is owner-scoped and fenced", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-change-request-"));
+  try {
+    const runtimeDb = path.join(dir, "runtime.sqlite");
+    const tasks = new ExpertTaskStore(runtimeDb);
+    const { WorkChangeRequestStore } = await import("../src/expert-platform/work-change-request-store.js");
+    const changeRequests = new WorkChangeRequestStore(runtimeDb);
+    const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+    for (const id of ["worker-a", "worker-b"]) {
+      workers.enroll(id, ["ota"]);
+      workers.approve(id);
+    }
+    const tokenA = workers.issueCredential("worker-a");
+    const tokenB = workers.issueCredential("worker-b");
+    const record = changeRequests.createOrReuse({
+      workItemId: "work-1",
+      workAttemptId: "attempt-1",
+      publicationId: "pub-1",
+      ownerWorkerId: "worker-a",
+      repositoryIdentity: "repo-1@7",
+      repositoryUrl: "https://github.com/example/project.git",
+      headBranch: "tsh/work-a1",
+      headCommit: "c".repeat(40),
+      baseBranch: "main",
+      title: "Fix",
+      body: "Generated",
+      idempotencyKey: "publication:pub-1",
+      credentialGrantRef: "publish-token",
+    });
+
+    const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0", {
+      changeRequestStore: changeRequests,
+    });
+    const clientB = new ExpertWorkerClient(server.address, { workerId: "worker-b", credential: tokenB });
+    assert.equal(await clientB.claimChangeRequestOperation("worker-b"), null);
+
+    const clientA = new ExpertWorkerClient(server.address, { workerId: "worker-a", credential: tokenA });
+    const claim = await clientA.claimChangeRequestOperation("worker-a");
+    assert.equal(claim?.changeRequestId, record.changeRequestId);
+    assert.equal(claim?.headCommit, "c".repeat(40));
+    await clientA.completeChangeRequestOperation(claim!, {
+      success: true,
+      provider: "github",
+      externalId: "17",
+      url: "https://github.com/example/project/pull/17",
+      headCommit: "c".repeat(40),
+      baseBranch: "main",
+    });
+    assert.equal(changeRequests.get(record.changeRequestId).state, "created");
+    await assert.rejects(
+      () =>
+        clientA.completeChangeRequestOperation(claim!, {
+          success: true,
+          provider: "github",
+          externalId: "17",
+          url: "https://github.com/example/project/pull/17",
+          headCommit: "c".repeat(40),
+          baseBranch: "main",
+        }),
+      /STALE_CHANGE_REQUEST_OPERATION/,
+    );
+
+    clientA.close();
+    clientB.close();
+    await server.close();
+    changeRequests.close();
+    tasks.close();
+    workers.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

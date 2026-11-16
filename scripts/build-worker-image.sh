@@ -65,12 +65,27 @@ if [[ "$MODE" == legacy && ! "$DEBIAN_SNAPSHOT" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
 fi
 printf 'Build mode: %s\n' "$MODE"
 
+PROXY_BUILD_ARGS=()
+for proxy_var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+  if [[ -n "${!proxy_var:-}" ]]; then
+    PROXY_BUILD_ARGS+=(--build-arg "$proxy_var=${!proxy_var}")
+  fi
+done
+
 OUT="$ROOT/artifacts/worker-runtime/$ARCHIVE"
 mkdir -p "$(dirname "$OUT")"
 
 if [[ "$MODE" == standard ]]; then
-  # Preserve the established modern-host build behavior.
-  docker build --pull -f "$DOCKERFILE" -t "$IMAGE" "$ROOT/docker/expert-worker"
+  # Prefer the exact locally cached base image when available. This keeps
+  # repeatable Worker image builds functional when Docker Hub metadata is
+  # temporarily unreachable; if the base is absent, preserve the existing
+  # pull behavior.
+  BASE_FROM=$(awk 'NR == 1 && $1 == "FROM" { print $2; exit }' "$DOCKERFILE")
+  if [[ -n "$BASE_FROM" ]] && docker image inspect "$BASE_FROM" >/dev/null 2>&1; then
+    docker build "${PROXY_BUILD_ARGS[@]}" -f "$DOCKERFILE" -t "$IMAGE" "$ROOT/docker/expert-worker"
+  else
+    docker build "${PROXY_BUILD_ARGS[@]}" --pull -f "$DOCKERFILE" -t "$IMAGE" "$ROOT/docker/expert-worker"
+  fi
 else
   TEMP_DIR=$(mktemp -d)
   cleanup() { rm -rf "$TEMP_DIR"; }
@@ -114,7 +129,7 @@ PYGEN
     fi
   fi
 
-  docker build -f "$GENERATED_DOCKERFILE" -t "$IMAGE" "$TEMP_DIR"
+  docker build "${PROXY_BUILD_ARGS[@]}" -f "$GENERATED_DOCKERFILE" -t "$IMAGE" "$TEMP_DIR"
   docker run --rm "$IMAGE"
 fi
 

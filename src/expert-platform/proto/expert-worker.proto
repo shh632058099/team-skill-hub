@@ -13,6 +13,8 @@ service ExpertWorkerService {
   rpc CompleteWorkspaceCleanup(WorkspaceCleanupCompleteRequest) returns (Empty);
   rpc ClaimPublicationOperation(PublicationOperationClaimRequest) returns (PublicationOperationClaimResponse);
   rpc CompletePublicationOperation(PublicationOperationCompleteRequest) returns (Empty);
+  rpc ClaimChangeRequestOperation(ChangeRequestOperationClaimRequest) returns (ChangeRequestOperationClaimResponse);
+  rpc CompleteChangeRequestOperation(ChangeRequestOperationCompleteRequest) returns (Empty);
 }
 
 message RegisterWorkerRequest {
@@ -143,6 +145,38 @@ message PublicationOperationCompleteRequest {
   string push_refspec = 9;
   string error_code = 10;
   string error_context = 11;
+}
+
+message ChangeRequestOperationClaimRequest {
+  string worker_id = 1;
+}
+
+message ChangeRequestOperationClaimResponse {
+  bool has_operation = 1;
+  string change_request_id = 2;
+  uint64 fencing = 3;
+  string repository_identity = 4;
+  string repository_url = 5;
+  string head_branch = 6;
+  string head_commit = 7;
+  string base_branch = 8;
+  string title = 9;
+  string body = 10;
+  string idempotency_key = 11;
+  string credential_grant_ref = 12;
+}
+
+message ChangeRequestOperationCompleteRequest {
+  string worker_id = 1;
+  string change_request_id = 2;
+  uint64 fencing = 3;
+  bool success = 4;
+  string provider = 5;
+  string external_id = 6;
+  string url = 7;
+  string head_commit = 8;
+  string base_branch = 9;
+  string error_code = 10;
 }
 
 message Empty {}

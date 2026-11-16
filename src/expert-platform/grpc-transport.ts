@@ -13,6 +13,11 @@ import type {
   PublicationOperationResult,
   WorkPublicationStore,
 } from "./work-publication-store.js";
+import type {
+  ChangeRequestOperationLease,
+  ChangeRequestOperationResult,
+  WorkChangeRequestStore,
+} from "./work-change-request-store.js";
 import {
   normalizeVerificationEvidenceResults,
   normalizeVerificationPolicy,
@@ -139,6 +144,35 @@ interface PublicationOperationCompleteRequest {
   error_code?: string;
   error_context?: string;
 }
+interface ChangeRequestOperationClaimRequest {
+  worker_id: string;
+}
+interface ChangeRequestOperationClaimResponse {
+  has_operation: boolean;
+  change_request_id?: string;
+  fencing?: string;
+  repository_identity?: string;
+  repository_url?: string;
+  head_branch?: string;
+  head_commit?: string;
+  base_branch?: string;
+  title?: string;
+  body?: string;
+  idempotency_key?: string;
+  credential_grant_ref?: string;
+}
+interface ChangeRequestOperationCompleteRequest {
+  worker_id: string;
+  change_request_id: string;
+  fencing: string;
+  success: boolean;
+  provider?: string;
+  external_id?: string;
+  url?: string;
+  head_commit?: string;
+  base_branch?: string;
+  error_code?: string;
+}
 
 type UnaryHandler<Request, Response> = (
   call: grpc.ServerUnaryCall<Request, Response>,
@@ -194,6 +228,16 @@ interface WorkerServiceClient extends grpc.Client {
   ): grpc.ClientUnaryCall;
   CompletePublicationOperation(
     request: PublicationOperationCompleteRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: Empty) => void,
+  ): grpc.ClientUnaryCall;
+  ClaimChangeRequestOperation(
+    request: ChangeRequestOperationClaimRequest,
+    metadata: grpc.Metadata,
+    callback: (error: grpc.ServiceError | null, response: ChangeRequestOperationClaimResponse) => void,
+  ): grpc.ClientUnaryCall;
+  CompleteChangeRequestOperation(
+    request: ChangeRequestOperationCompleteRequest,
     metadata: grpc.Metadata,
     callback: (error: grpc.ServiceError | null, response: Empty) => void,
   ): grpc.ClientUnaryCall;
@@ -304,6 +348,7 @@ export interface GrpcServerOptions {
   bootstrapAllowedCapabilities?: readonly string[];
   workStore?: WorkOrchestrationStore;
   publicationStore?: WorkPublicationStore;
+  changeRequestStore?: WorkChangeRequestStore;
 }
 
 export interface GrpcClientOptions {
@@ -754,6 +799,100 @@ export async function startExpertWorkerGrpcServer(
     }
   };
 
+  const claimChangeRequestOperation: UnaryHandler<
+    ChangeRequestOperationClaimRequest,
+    ChangeRequestOperationClaimResponse
+  > = (call, callback) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.changeRequestStore) throw new Error("CHANGE_REQUEST_STORE_UNAVAILABLE");
+      if (workers.get(authenticatedId).status !== "active") throw new Error("WORKER_FORBIDDEN");
+      workers.recordHeartbeat(authenticatedId);
+      const claim = options.changeRequestStore.claim(authenticatedId);
+      callback(
+        null,
+        claim
+          ? {
+              has_operation: true,
+              change_request_id: claim.changeRequestId,
+              fencing: String(claim.fencing),
+              repository_identity: claim.repositoryIdentity,
+              repository_url: claim.repositoryUrl,
+              head_branch: claim.headBranch,
+              head_commit: claim.headCommit,
+              base_branch: claim.baseBranch,
+              title: claim.title,
+              body: claim.body,
+              idempotency_key: claim.idempotencyKey,
+              credential_grant_ref: claim.credentialGrantRef,
+            }
+          : { has_operation: false },
+      );
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "CHANGE_REQUEST_OPERATION_CLAIM_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
+  const completeChangeRequestOperation: UnaryHandler<ChangeRequestOperationCompleteRequest, Empty> = (
+    call,
+    callback,
+  ) => {
+    try {
+      const authenticatedId = authenticatedWorkerId(workers, call.metadata);
+      requireIdentityMatch(authenticatedId, call.request.worker_id);
+      if (!options.changeRequestStore) throw new Error("CHANGE_REQUEST_STORE_UNAVAILABLE");
+      const fencing = Number(call.request.fencing);
+      if (!call.request.change_request_id || !Number.isSafeInteger(fencing) || fencing < 1) {
+        throw new Error("INVALID_CHANGE_REQUEST_OPERATION");
+      }
+      const current = options.changeRequestStore.get(call.request.change_request_id);
+      const claim: ChangeRequestOperationLease = {
+        changeRequestId: current.changeRequestId,
+        ownerWorkerId: authenticatedId,
+        fencing,
+        repositoryIdentity: current.repositoryIdentity,
+        repositoryUrl: current.repositoryUrl,
+        headBranch: current.headBranch,
+        headCommit: current.headCommit,
+        baseBranch: current.baseBranch,
+        title: current.title,
+        body: current.body,
+        idempotencyKey: current.idempotencyKey,
+        credentialGrantRef: current.credentialGrantRef,
+      };
+      const result: ChangeRequestOperationResult = call.request.success
+        ? {
+            success: true,
+            provider: call.request.provider ?? "",
+            externalId: call.request.external_id ?? "",
+            url: call.request.url ?? "",
+            headCommit: call.request.head_commit ?? "",
+            baseBranch: call.request.base_branch ?? "",
+          }
+        : {
+            success: false,
+            errorCode: call.request.error_code || "CHANGE_REQUEST_CREATE_FAILED",
+          };
+      options.changeRequestStore.complete(claim, result);
+      callback(null, {});
+    } catch (error) {
+      callback(
+        grpcError(
+          grpc.status.FAILED_PRECONDITION,
+          error instanceof Error ? error.message : "CHANGE_REQUEST_OPERATION_COMPLETE_FAILED",
+        ),
+        null,
+      );
+    }
+  };
+
   server.addService(proto.expert.v1.ExpertWorkerService.service, {
     RegisterWorker: registerWorker,
     ClaimTask: claimTask,
@@ -765,6 +904,8 @@ export async function startExpertWorkerGrpcServer(
     CompleteWorkspaceCleanup: completeWorkspaceCleanup,
     ClaimPublicationOperation: claimPublicationOperation,
     CompletePublicationOperation: completePublicationOperation,
+    ClaimChangeRequestOperation: claimChangeRequestOperation,
+    CompleteChangeRequestOperation: completeChangeRequestOperation,
   });
 
   const serverCredentials = options.tls
@@ -1016,6 +1157,70 @@ export class ExpertWorkerClient {
                 error_code: result.errorCode,
                 error_context: result.errorContext ?? "",
               }),
+        },
+        this.metadata,
+        callback,
+      ),
+    );
+  }
+  async claimChangeRequestOperation(workerId: string): Promise<ChangeRequestOperationLease | null> {
+    const response = await unary<ChangeRequestOperationClaimResponse>((callback) =>
+      this.client.ClaimChangeRequestOperation({ worker_id: workerId }, this.metadata, callback),
+    );
+    if (!response.has_operation) return null;
+    const fencing = Number(response.fencing);
+    if (
+      !response.change_request_id ||
+      !response.repository_identity ||
+      !response.repository_url ||
+      !response.head_branch ||
+      !response.head_commit ||
+      !response.base_branch ||
+      !response.title ||
+      !response.body ||
+      !response.idempotency_key ||
+      !response.credential_grant_ref ||
+      !Number.isSafeInteger(fencing) ||
+      fencing < 1
+    ) {
+      throw new Error("INVALID_CHANGE_REQUEST_OPERATION_RESPONSE");
+    }
+    return {
+      changeRequestId: response.change_request_id,
+      ownerWorkerId: workerId,
+      fencing,
+      repositoryIdentity: response.repository_identity,
+      repositoryUrl: response.repository_url,
+      headBranch: response.head_branch,
+      headCommit: response.head_commit,
+      baseBranch: response.base_branch,
+      title: response.title,
+      body: response.body,
+      idempotencyKey: response.idempotency_key,
+      credentialGrantRef: response.credential_grant_ref,
+    };
+  }
+
+  completeChangeRequestOperation(
+    claim: ChangeRequestOperationLease,
+    result: ChangeRequestOperationResult,
+  ): Promise<Empty> {
+    return unary((callback) =>
+      this.client.CompleteChangeRequestOperation(
+        {
+          worker_id: claim.ownerWorkerId,
+          change_request_id: claim.changeRequestId,
+          fencing: String(claim.fencing),
+          success: result.success,
+          ...(result.success
+            ? {
+                provider: result.provider,
+                external_id: result.externalId,
+                url: result.url,
+                head_commit: result.headCommit,
+                base_branch: result.baseBranch,
+              }
+            : { error_code: result.errorCode }),
         },
         this.metadata,
         callback,

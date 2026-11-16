@@ -2,6 +2,7 @@ import type { ExpertStore } from "./expert-store.js";
 import { routeExpert } from "./router.js";
 import type { DeploymentTaskSnapshot, ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord } from "./task-store.js";
 import type { VerificationPolicyStep } from "./verification-policy.js";
+import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 
 export interface DispatchInput {
   principalId: string;
@@ -22,6 +23,8 @@ export interface DispatchInput {
   workspaceKey?: string;
   validationSnapshot?: VerificationPolicyStep[];
   requiredRuntimeProfile?: string;
+  requiredWorkspaceAccess?: "read-only" | "read-write";
+  preferredBackend?: "claude" | "codex";
 }
 
 export interface AvailableExpert {
@@ -40,6 +43,14 @@ export interface ResolvedDispatch {
   deploymentConfigVersion: number;
   runtimeProfile?: string;
   deploymentSnapshot?: DeploymentTaskSnapshot;
+}
+
+function deploymentRuntimePolicy(runtimeProfile: string) {
+  try {
+    return resolveRuntimeProfilePolicy(runtimeProfile);
+  } catch {
+    return null;
+  }
 }
 
 export class ExpertDispatchService {
@@ -97,52 +108,73 @@ export class ExpertDispatchService {
       repositoryId: input.repositoryId,
     });
     const requiredRuntimeProfile = input.requiredRuntimeProfile?.trim() || undefined;
+    const requiredWorkspaceAccess = input.requiredWorkspaceAccess;
+    const preferredBackend = input.preferredBackend;
+    if (requiredRuntimeProfile && requiredWorkspaceAccess) {
+      const policy = deploymentRuntimePolicy(requiredRuntimeProfile);
+      if (!policy || policy.workspaceAccess !== requiredWorkspaceAccess) throw new Error("RUNTIME_PROFILE_MISMATCH");
+    }
+
+    const expertDeployments = deployments.filter(
+      (deployment) =>
+        deployment.active &&
+        deployment.expertId === route.expertId &&
+        deployment.principals.includes(input.principalId),
+    );
+    const explicitDeployment = input.deploymentId
+      ? expertDeployments.find((deployment) => deployment.id === input.deploymentId)
+      : undefined;
+    if (input.deploymentId && !explicitDeployment) throw new Error("DEPLOYMENT_FORBIDDEN");
+
+    if (explicitDeployment && requiredRuntimeProfile && explicitDeployment.runtimeProfile !== requiredRuntimeProfile) {
+      throw new Error("RUNTIME_PROFILE_MISMATCH");
+    }
+    if (explicitDeployment && requiredWorkspaceAccess) {
+      const policy = deploymentRuntimePolicy(explicitDeployment.runtimeProfile);
+      if (!policy || policy.workspaceAccess !== requiredWorkspaceAccess) {
+        throw new Error("RUNTIME_PROFILE_MISMATCH");
+      }
+    }
+
+    let runtimeEligible = input.deploymentId ? (explicitDeployment ? [explicitDeployment] : []) : expertDeployments;
+    if (requiredRuntimeProfile) {
+      runtimeEligible = runtimeEligible.filter((deployment) => deployment.runtimeProfile === requiredRuntimeProfile);
+    } else if (requiredWorkspaceAccess) {
+      runtimeEligible = runtimeEligible.filter(
+        (deployment) => deploymentRuntimePolicy(deployment.runtimeProfile)?.workspaceAccess === requiredWorkspaceAccess,
+      );
+    }
+    if (runtimeEligible.length === 0) {
+      if (requiredRuntimeProfile || requiredWorkspaceAccess) throw new Error("RUNTIME_PROFILE_UNAVAILABLE");
+      throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
+    }
+
     const availableRepositoryIds = [
       ...new Set(
-        deployments
-          .filter(
-            (deployment) =>
-              deployment.active &&
-              deployment.expertId === route.expertId &&
-              deployment.principals.includes(input.principalId) &&
-              (!input.deploymentId || deployment.id === input.deploymentId) &&
-              (!requiredRuntimeProfile || deployment.runtimeProfile === requiredRuntimeProfile) &&
-              (!input.repositoryId || deployment.repositoryIds.includes(input.repositoryId)),
-          )
-          .flatMap((deployment) => deployment.repositories ?? [])
-          .map((repository) => repository.id),
+        runtimeEligible.flatMap((deployment) => deployment.repositories ?? []).map((repository) => repository.id),
       ),
     ].sort();
     if (!input.repositoryId && availableRepositoryIds.length > 1) throw new Error("REPOSITORY_REQUIRED");
     const configuredRepositoryId = input.repositoryId ?? availableRepositoryIds[0];
-    const eligibleBase = deployments.filter(
-      (deployment) =>
-        deployment.active &&
-        deployment.expertId === route.expertId &&
-        deployment.principals.includes(input.principalId) &&
-        (!input.deploymentId || deployment.id === input.deploymentId) &&
-        (!configuredRepositoryId || deployment.repositoryIds.includes(configuredRepositoryId)),
+    let eligible = runtimeEligible.filter(
+      (deployment) => !configuredRepositoryId || deployment.repositoryIds.includes(configuredRepositoryId),
     );
-    if (
-      input.deploymentId &&
-      requiredRuntimeProfile &&
-      eligibleBase.some((deployment) => deployment.id === input.deploymentId) &&
-      eligibleBase.find((deployment) => deployment.id === input.deploymentId)?.runtimeProfile !== requiredRuntimeProfile
-    ) {
-      throw new Error("RUNTIME_PROFILE_MISMATCH");
+    if (configuredRepositoryId && eligible.length === 0) throw new Error("REPOSITORY_FORBIDDEN");
+
+    if (!input.deploymentId && preferredBackend && eligible.length > 1) {
+      const preferred = eligible.filter((deployment) => {
+        const policy = deploymentRuntimePolicy(deployment.runtimeProfile);
+        return deployment.executor?.backend === preferredBackend || policy?.backend === preferredBackend;
+      });
+      if (preferred.length > 0) eligible = preferred;
     }
-    const eligible = requiredRuntimeProfile
-      ? eligibleBase.filter((deployment) => deployment.runtimeProfile === requiredRuntimeProfile)
-      : eligibleBase;
+
     const selected = input.deploymentId
       ? eligible.find((deployment) => deployment.id === input.deploymentId)
       : eligible.length === 1
         ? eligible[0]
         : undefined;
-    if (!selected) {
-      if (requiredRuntimeProfile && !input.deploymentId) throw new Error("RUNTIME_PROFILE_UNAVAILABLE");
-      throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
-    }
+    if (!selected) throw new Error(input.deploymentId ? "DEPLOYMENT_FORBIDDEN" : "DEPLOYMENT_REQUIRED");
     const source = (selected.repositories ?? []).find((repository) => repository.id === configuredRepositoryId);
     if (selected.executor && !source) throw new Error("SOURCE_REPOSITORY_UNAVAILABLE");
     const configuredMcp = selected.mcp;

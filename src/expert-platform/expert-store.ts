@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 
 export interface ExpertModelConfig {
   providerId: string;
@@ -47,6 +48,11 @@ export interface RepositoryPublicationPolicy {
   allowDeleteRef: false;
 }
 
+export interface RepositoryVerificationPolicy {
+  version: number;
+  required: VerificationPolicyStep[];
+}
+
 export interface ExpertSourceRepository {
   id: string;
   url: string;
@@ -54,6 +60,7 @@ export interface ExpertSourceRepository {
   credentialRef?: string;
   gitProxyUrl?: string;
   publicationPolicy?: RepositoryPublicationPolicy;
+  verificationPolicy?: RepositoryVerificationPolicy;
 }
 
 export interface ExpertDeploymentRecord {
@@ -334,6 +341,20 @@ export class ExpertStore {
     return true;
   }
 
+  private validVerificationPolicy(policy: RepositoryVerificationPolicy | undefined): boolean {
+    if (!policy) return true;
+    if (!Number.isSafeInteger(policy.version) || policy.version < 1) return false;
+    try {
+      const required = normalizeVerificationPolicy(policy.required);
+      return (
+        required.length > 0 &&
+        required.every((step) => ["build", "unit_test", "integration_test"].includes(step.evidenceType))
+      );
+    } catch {
+      return false;
+    }
+  }
+
   putDeployment(deployment: ExpertDeploymentRecord): void {
     if (
       !deployment.id.trim() ||
@@ -345,7 +366,8 @@ export class ExpertStore {
           !repo.id.trim() ||
           !repo.url.trim() ||
           !repo.branch.trim() ||
-          !this.validPublicationPolicy(repo.publicationPolicy),
+          !this.validPublicationPolicy(repo.publicationPolicy) ||
+          !this.validVerificationPolicy(repo.verificationPolicy),
       ) ||
       deployment.principals.some((item) => !item.trim()) ||
       !deployment.runtimeProfile.trim() ||

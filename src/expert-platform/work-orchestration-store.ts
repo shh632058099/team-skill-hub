@@ -40,9 +40,10 @@ export interface WorkflowDefinition {
     };
   };
   validation: { requiredEvidence: string[]; required: VerificationPolicyStep[] };
-  review: { humanReview: boolean };
+  review: { required: boolean; reviewerExpertId?: string };
+  change?: { mode: "readonly" | "code_change"; delivery?: "merge_request" };
   source?: { terminal: { active: "cancel"; waitingReview: "retain_review" } };
-  publication?: { required: boolean; mode: "work_branch" };
+  publication?: { required: boolean; mode: "work_branch"; approvalRequired?: boolean };
   completion: {
     require: Array<
       | "latest_work_attempt_succeeded"
@@ -51,6 +52,7 @@ export interface WorkflowDefinition {
       | "review_accepted"
       | "required_approvals_approved"
       | "publication_succeeded"
+      | "change_request_created"
     >;
     requiredApprovals?: Array<
       | { scope: "work_completion"; subjectType: "workspace_revision" }
@@ -172,6 +174,7 @@ export interface WorkAttemptRecord {
   workflowVersion: number;
   workspaceId: string | null;
   taskId: string | null;
+  reviewTaskId: string | null;
   runCount: number;
   parentWorkAttemptId: string | null;
   originWorkAttemptId: string | null;
@@ -310,13 +313,115 @@ const DEFAULT_WORKFLOW: WorkflowDefinition = {
     },
   },
   validation: { requiredEvidence: ["expert_result"], required: [] },
-  review: { humanReview: true },
+  review: { required: true },
   completion: {
     require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker", "review_accepted"],
   },
   graph: { mode: "single-node" },
 };
 
+function presetWorkflow(overrides: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
+  return {
+    ...structuredClone(DEFAULT_WORKFLOW),
+    ...overrides,
+    lifecycle: { ...structuredClone(DEFAULT_WORKFLOW.lifecycle), ...(overrides.lifecycle ?? {}) },
+    execution: { ...structuredClone(DEFAULT_WORKFLOW.execution), ...(overrides.execution ?? {}) },
+    validation: { ...structuredClone(DEFAULT_WORKFLOW.validation), ...(overrides.validation ?? {}) },
+    review: { ...structuredClone(DEFAULT_WORKFLOW.review), ...(overrides.review ?? {}) },
+    completion: { ...structuredClone(DEFAULT_WORKFLOW.completion), ...(overrides.completion ?? {}) },
+    graph: { ...structuredClone(DEFAULT_WORKFLOW.graph), ...(overrides.graph ?? {}) },
+  };
+}
+
+function codeChangePreset(): WorkflowDefinition {
+  return presetWorkflow({
+    change: { mode: "code_change", delivery: "merge_request" },
+    validation: { requiredEvidence: ["expert_result", "build", "unit_test"], required: [] },
+    review: { required: true },
+    publication: { required: true, mode: "work_branch", approvalRequired: false },
+    completion: {
+      require: [
+        "latest_work_attempt_succeeded",
+        "required_evidence_passed",
+        "no_unresolved_blocker",
+        "review_accepted",
+        "publication_succeeded",
+        "change_request_created",
+      ],
+    },
+  });
+}
+
+function readonlyPreset(): WorkflowDefinition {
+  return presetWorkflow({
+    change: { mode: "readonly" },
+    lifecycle: { ...DEFAULT_WORKFLOW.lifecycle, attempt: { maxWorkAttempts: 3, maxReworks: 2 } },
+    review: { required: false },
+    completion: {
+      require: ["latest_work_attempt_succeeded", "required_evidence_passed", "no_unresolved_blocker"],
+    },
+  });
+}
+
+const PLATFORM_PRESET_WORKFLOWS: ReadonlyArray<readonly [string, number, WorkflowDefinition]> = [
+  [
+    "investigation",
+    1,
+    presetWorkflow({ lifecycle: { ...DEFAULT_WORKFLOW.lifecycle, attempt: { maxWorkAttempts: 3, maxReworks: 2 } } }),
+  ],
+  [
+    "code-review",
+    1,
+    presetWorkflow({ lifecycle: { ...DEFAULT_WORKFLOW.lifecycle, attempt: { maxWorkAttempts: 3, maxReworks: 2 } } }),
+  ],
+  ["bug-fix", 1, presetWorkflow()],
+  ["feature-change", 1, presetWorkflow()],
+  ["refactor", 1, presetWorkflow()],
+  ["test-improvement", 1, presetWorkflow()],
+  ["build-fix", 1, presetWorkflow()],
+  [
+    "release-change",
+    1,
+    presetWorkflow({
+      publication: { required: true, mode: "work_branch" },
+      completion: {
+        require: [
+          "latest_work_attempt_succeeded",
+          "required_evidence_passed",
+          "no_unresolved_blocker",
+          "review_accepted",
+          "required_approvals_approved",
+          "publication_succeeded",
+        ],
+        requiredApprovals: [{ scope: "publish_work_branch", subjectType: "publication_artifact" }],
+      },
+    }),
+  ],
+  [
+    "investigation",
+    2,
+    presetWorkflow({
+      change: { mode: "readonly" },
+      lifecycle: { ...DEFAULT_WORKFLOW.lifecycle, attempt: { maxWorkAttempts: 3, maxReworks: 2 } },
+    }),
+  ],
+  [
+    "code-review",
+    2,
+    presetWorkflow({
+      change: { mode: "readonly" },
+      lifecycle: { ...DEFAULT_WORKFLOW.lifecycle, attempt: { maxWorkAttempts: 3, maxReworks: 2 } },
+    }),
+  ],
+  ["investigation", 3, readonlyPreset()],
+  ["code-review", 3, readonlyPreset()],
+  ["bug-fix", 2, codeChangePreset()],
+  ["feature-change", 2, codeChangePreset()],
+  ["refactor", 2, codeChangePreset()],
+  ["test-improvement", 2, codeChangePreset()],
+  ["build-fix", 2, codeChangePreset()],
+  ["release-change", 2, codeChangePreset()],
+];
 const WORK_STATUSES = new Set<WorkStatus>([
   "queued",
   "running",
@@ -379,6 +484,11 @@ export class WorkOrchestrationStore {
         "  created_at INTEGER NOT NULL,",
         "  PRIMARY KEY(workflow_id,version)",
         ");",
+        "CREATE TABLE IF NOT EXISTS work_repository_workflow_defaults (",
+        "  repository_id TEXT PRIMARY KEY,",
+        "  workflow_id TEXT NOT NULL,",
+        "  updated_at INTEGER NOT NULL",
+        ");",
         "CREATE TABLE IF NOT EXISTS work_items (",
         "  work_item_id TEXT PRIMARY KEY,",
         "  principal_id TEXT NOT NULL,",
@@ -436,6 +546,7 @@ export class WorkOrchestrationStore {
         "  workflow_version INTEGER NOT NULL,",
         "  workspace_id TEXT,",
         "  task_id TEXT,",
+        "  review_task_id TEXT,",
         "  run_count INTEGER NOT NULL DEFAULT 0,",
         "  parent_work_attempt_id TEXT,",
         "  review_context TEXT,",
@@ -573,6 +684,7 @@ export class WorkOrchestrationStore {
     if (!attemptColumns.has("what_should_change"))
       this.db.exec("ALTER TABLE work_attempts ADD COLUMN what_should_change TEXT");
     if (!attemptColumns.has("created_by")) this.db.exec("ALTER TABLE work_attempts ADD COLUMN created_by TEXT");
+    if (!attemptColumns.has("review_task_id")) this.db.exec("ALTER TABLE work_attempts ADD COLUMN review_task_id TEXT");
     const approvalColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_approvals)").all() as Array<{ name: string }>).map(
         (column) => column.name,
@@ -638,11 +750,15 @@ export class WorkOrchestrationStore {
   }
 
   private ensureDefaultWorkflow(): void {
-    this.db
-      .prepare("INSERT OR IGNORE INTO work_workflows(workflow_id,version,definition_json,created_at) VALUES(?,?,?,?)")
-      .run(DEFAULT_WORKFLOW_ID, DEFAULT_WORKFLOW_VERSION, JSON.stringify(DEFAULT_WORKFLOW), Date.now());
+    const insert = this.db.prepare(
+      "INSERT OR IGNORE INTO work_workflows(workflow_id,version,definition_json,created_at) VALUES(?,?,?,?)",
+    );
+    const now = Date.now();
+    insert.run(DEFAULT_WORKFLOW_ID, DEFAULT_WORKFLOW_VERSION, JSON.stringify(DEFAULT_WORKFLOW), now);
+    for (const [workflowId, version, definition] of PLATFORM_PRESET_WORKFLOWS) {
+      insert.run(workflowId, version, JSON.stringify(this.normalizeWorkflowDefinition(definition)), now);
+    }
   }
-
   private normalizeWorkflowDefinition(value: unknown): WorkflowDefinition {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("INVALID_WORKFLOW");
     const definition = structuredClone(value) as WorkflowDefinition;
@@ -658,6 +774,24 @@ export class WorkOrchestrationStore {
     definition.validation.required = normalizeVerificationPolicy(
       (definition.validation as { required?: unknown }).required,
     );
+
+    const rawChange = (definition as { change?: unknown }).change;
+    if (rawChange !== undefined) {
+      if (!rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) throw new Error("INVALID_WORKFLOW");
+      const mode = (rawChange as { mode?: unknown }).mode;
+      const delivery = (rawChange as { delivery?: unknown }).delivery;
+      if (mode !== "readonly" && mode !== "code_change") throw new Error("INVALID_WORKFLOW");
+      if (delivery !== undefined && delivery !== "merge_request") throw new Error("INVALID_WORKFLOW");
+      if (mode === "readonly" && delivery !== undefined) throw new Error("INVALID_WORKFLOW");
+      definition.change = { mode, ...(delivery ? { delivery } : {}) };
+    }
+
+    if (definition.validation.required.some((step) => step.evidenceType === "integration_test")) {
+      definition.validation.requiredEvidence = [
+        ...new Set([...definition.validation.requiredEvidence, "integration_test"]),
+      ];
+    }
+
     const source = (definition as { source?: unknown }).source;
     if (source !== undefined) {
       if (!source || typeof source !== "object" || Array.isArray(source)) throw new Error("INVALID_WORKFLOW");
@@ -668,10 +802,34 @@ export class WorkOrchestrationStore {
         Array.isArray(terminal) ||
         (terminal as { active?: unknown }).active !== "cancel" ||
         (terminal as { waitingReview?: unknown }).waitingReview !== "retain_review"
-      )
+      ) {
         throw new Error("INVALID_WORKFLOW");
+      }
       definition.source = { terminal: { active: "cancel", waitingReview: "retain_review" } };
     }
+
+    const rawReview = (definition as { review?: unknown }).review;
+    if (!rawReview || typeof rawReview !== "object" || Array.isArray(rawReview)) throw new Error("INVALID_WORKFLOW");
+    const legacyHumanReview = (rawReview as { humanReview?: unknown }).humanReview;
+    const reviewRequired =
+      typeof (rawReview as { required?: unknown }).required === "boolean"
+        ? (rawReview as { required: boolean }).required
+        : typeof legacyHumanReview === "boolean"
+          ? legacyHumanReview
+          : true;
+    const reviewerExpertId =
+      typeof (rawReview as { reviewerExpertId?: unknown }).reviewerExpertId === "string"
+        ? (rawReview as { reviewerExpertId: string }).reviewerExpertId.trim()
+        : "";
+    if (reviewerExpertId && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(reviewerExpertId)) {
+      throw new Error("INVALID_WORKFLOW");
+    }
+    definition.review = { required: reviewRequired, ...(reviewerExpertId ? { reviewerExpertId } : {}) };
+    if (reviewerExpertId && !reviewRequired) throw new Error("INVALID_WORKFLOW");
+    if (!reviewRequired && definition.completion?.require?.includes("review_accepted")) {
+      throw new Error("INVALID_WORKFLOW");
+    }
+
     const publication = (definition as { publication?: unknown }).publication;
     if (publication !== undefined) {
       if (
@@ -679,23 +837,49 @@ export class WorkOrchestrationStore {
         typeof publication !== "object" ||
         Array.isArray(publication) ||
         typeof (publication as { required?: unknown }).required !== "boolean" ||
-        (publication as { mode?: unknown }).mode !== "work_branch"
+        (publication as { mode?: unknown }).mode !== "work_branch" ||
+        ((publication as { approvalRequired?: unknown }).approvalRequired !== undefined &&
+          typeof (publication as { approvalRequired?: unknown }).approvalRequired !== "boolean")
       ) {
         throw new Error("INVALID_WORKFLOW");
       }
       definition.publication = {
         required: (publication as { required: boolean }).required,
         mode: "work_branch",
+        approvalRequired: (publication as { approvalRequired?: boolean }).approvalRequired ?? true,
       };
     }
+
     const requiredRuntimeProfile = definition.execution?.requiredRuntimeProfile;
     if (requiredRuntimeProfile !== undefined) {
+      let runtimePolicy;
       try {
-        resolveRuntimeProfilePolicy(requiredRuntimeProfile);
+        runtimePolicy = resolveRuntimeProfilePolicy(requiredRuntimeProfile);
       } catch {
         throw new Error("INVALID_WORKFLOW");
       }
+      if (
+        (definition.change?.mode === "code_change" && runtimePolicy.workspaceAccess !== "read-write") ||
+        (definition.change?.mode === "readonly" && runtimePolicy.workspaceAccess !== "read-only")
+      ) {
+        throw new Error("INVALID_WORKFLOW");
+      }
     }
+    if (definition.change?.mode === "code_change") {
+      if (definition.change.delivery !== "merge_request") throw new Error("INVALID_WORKFLOW");
+      for (const evidenceType of ["build", "unit_test"]) {
+        if (!definition.validation.requiredEvidence.includes(evidenceType)) throw new Error("INVALID_WORKFLOW");
+      }
+      if (!definition.review.required || !definition.completion.require.includes("review_accepted")) {
+        throw new Error("INVALID_WORKFLOW");
+      }
+      if (!definition.publication?.required || definition.publication.mode !== "work_branch") {
+        throw new Error("INVALID_WORKFLOW");
+      }
+      if (!definition.completion.require.includes("publication_succeeded")) throw new Error("INVALID_WORKFLOW");
+      if (!definition.completion.require.includes("change_request_created")) throw new Error("INVALID_WORKFLOW");
+    }
+
     const requireApproval = definition.completion?.require?.includes("required_approvals_approved") ?? false;
     const rawApprovals = (definition.completion as { requiredApprovals?: unknown } | undefined)?.requiredApprovals;
     if (rawApprovals !== undefined && !Array.isArray(rawApprovals)) throw new Error("INVALID_WORKFLOW");
@@ -718,9 +902,10 @@ export class WorkOrchestrationStore {
     }
     if (requireApproval && requiredApprovals.length === 0) throw new Error("INVALID_WORKFLOW");
     if (!requireApproval && requiredApprovals.length > 0) throw new Error("INVALID_WORKFLOW");
+
     const requirePublication = definition.completion?.require?.includes("publication_succeeded") ?? false;
     if (requirePublication !== (definition.publication?.required === true)) throw new Error("INVALID_WORKFLOW");
-    if (definition.publication?.required) {
+    if (definition.publication?.required && definition.publication.approvalRequired !== false) {
       if (!requireApproval) throw new Error("INVALID_WORKFLOW");
       if (
         !requiredApprovals.some(
@@ -730,6 +915,15 @@ export class WorkOrchestrationStore {
         throw new Error("INVALID_WORKFLOW");
       }
     }
+    if (
+      definition.publication?.approvalRequired === false &&
+      requiredApprovals.some(
+        (item) => item.scope === "publish_work_branch" && item.subjectType === "publication_artifact",
+      )
+    ) {
+      throw new Error("INVALID_WORKFLOW");
+    }
+
     if (requiredApprovals.length > 0) {
       definition.completion.requiredApprovals = requiredApprovals as NonNullable<
         WorkflowDefinition["completion"]["requiredApprovals"]
@@ -739,7 +933,6 @@ export class WorkOrchestrationStore {
     }
     return definition;
   }
-
   putWorkflow(
     workflowId: string,
     version: number,
@@ -796,6 +989,47 @@ export class WorkOrchestrationStore {
         createdAt: Number(row.created_at),
       }),
     );
+  }
+
+  putRepositoryWorkflowDefault(repositoryId: string, workflowId: string, now = Date.now()): void {
+    const repository = requiredText(repositoryId, 200);
+    const workflow = requiredText(workflowId, 200);
+    if (!repository || !workflow || !Number.isFinite(now)) throw new Error("INVALID_REPOSITORY_WORKFLOW_DEFAULT");
+    this.getWorkflow(workflow);
+    this.db
+      .prepare(
+        "INSERT INTO work_repository_workflow_defaults(repository_id,workflow_id,updated_at) VALUES(?,?,?) ON CONFLICT(repository_id) DO UPDATE SET workflow_id=excluded.workflow_id,updated_at=excluded.updated_at",
+      )
+      .run(repository, workflow, now);
+  }
+
+  deleteRepositoryWorkflowDefault(repositoryId: string): void {
+    const repository = requiredText(repositoryId, 200);
+    if (!repository) throw new Error("INVALID_REPOSITORY_WORKFLOW_DEFAULT");
+    this.db.prepare("DELETE FROM work_repository_workflow_defaults WHERE repository_id=?").run(repository);
+  }
+
+  getRepositoryWorkflowDefault(repositoryId: string): string | null {
+    const repository = requiredText(repositoryId, 200);
+    if (!repository) throw new Error("INVALID_REPOSITORY_WORKFLOW_DEFAULT");
+    const row = this.db
+      .prepare("SELECT workflow_id FROM work_repository_workflow_defaults WHERE repository_id=?")
+      .get(repository) as { workflow_id?: string } | undefined;
+    return row?.workflow_id ? String(row.workflow_id) : null;
+  }
+
+  listRepositoryWorkflowDefaults(): Array<{ repositoryId: string; workflowId: string; updatedAt: number }> {
+    return (
+      this.db
+        .prepare(
+          "SELECT repository_id,workflow_id,updated_at FROM work_repository_workflow_defaults ORDER BY repository_id",
+        )
+        .all() as Array<{
+        repository_id: string;
+        workflow_id: string;
+        updated_at: number;
+      }>
+    ).map((row) => ({ repositoryId: row.repository_id, workflowId: row.workflow_id, updatedAt: row.updated_at }));
   }
 
   issueSourceControlTokenHash(
@@ -968,7 +1202,10 @@ export class WorkOrchestrationStore {
     }
     if ((sourceScope === null) !== (sourceRef === null)) throw new Error("INVALID_WORK_SOURCE_IDENTITY");
     if (input.priority !== undefined && !Number.isSafeInteger(input.priority)) throw new Error("INVALID_WORK_REQUEST");
-    const workflow = this.getWorkflow(input.workflowId?.trim() || DEFAULT_WORKFLOW_ID);
+    const repositoryDefault = input.repositoryId?.trim()
+      ? this.getRepositoryWorkflowDefault(input.repositoryId.trim())
+      : null;
+    const workflow = this.getWorkflow(input.workflowId?.trim() || repositoryDefault || DEFAULT_WORKFLOW_ID);
     const digest = requestDigest(input, workflow.workflowId);
 
     this.db.exec("BEGIN IMMEDIATE");
@@ -1430,6 +1667,18 @@ export class WorkOrchestrationStore {
     }
   }
 
+  linkAttemptReviewTask(workAttemptId: string, taskId: string): WorkAttemptRecord {
+    const normalizedTaskId = requiredText(taskId, 200);
+    if (!normalizedTaskId) throw new Error("INVALID_TASK_LINK");
+    const current = this.getWorkAttempt(workAttemptId);
+    if (current.reviewTaskId && current.reviewTaskId !== normalizedTaskId)
+      throw new Error("WORK_ATTEMPT_REVIEW_TASK_CONFLICT");
+    this.db
+      .prepare("UPDATE work_attempts SET review_task_id=COALESCE(review_task_id,?) WHERE work_attempt_id=?")
+      .run(normalizedTaskId, workAttemptId);
+    return this.getWorkAttempt(workAttemptId);
+  }
+
   ensureWorkspace(
     workItemId: string,
     workAttemptId: string,
@@ -1757,8 +2006,10 @@ export class WorkOrchestrationStore {
       if (attempt.workItemId !== workItemId) throw new Error("EVIDENCE_ATTEMPT_MISMATCH");
 
       if (!work.currentSubjectRevision || work.currentSubjectRevision !== subjectRevision) {
-        const publicationMatch =
-          type === "publication" ? /^publication:([0-9a-f-]{36}):([a-f0-9]{40,64})$/i.exec(subjectRevision) : null;
+        const publicationBound = type === "publication" || type === "pull_request";
+        const publicationMatch = publicationBound
+          ? /^publication:([0-9a-f-]{36}):([a-f0-9]{40,64})$/i.exec(subjectRevision)
+          : null;
         const publication = publicationMatch
           ? (this.db
               .prepare(
@@ -1766,17 +2017,22 @@ export class WorkOrchestrationStore {
               )
               .get(publicationMatch[1]!, workItemId) as Row | undefined)
           : undefined;
+        const artifactBindingValid =
+          type === "publication"
+            ? String(publication?.artifact_ref ?? "") === artifactRef
+            : type === "pull_request"
+              ? Boolean(artifactRef)
+              : false;
         if (
           !publication ||
           publication.state !== "pushed" ||
           String(publication.commit_sha ?? "").toLowerCase() !== publicationMatch![2]!.toLowerCase() ||
           String(publication.source_subject_revision ?? "") !== work.currentSubjectRevision ||
-          String(publication.artifact_ref ?? "") !== artifactRef
+          !artifactBindingValid
         ) {
           throw new Error("STALE_WORK_SUBJECT");
         }
       }
-
       const existing = this.db
         .prepare(
           "SELECT * FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND source=? AND subject_revision=? AND task_id IS ? AND run_id IS ? ORDER BY created_at DESC LIMIT 1",
@@ -1853,7 +2109,13 @@ export class WorkOrchestrationStore {
     workItemId: string,
     principalId: string,
     scope: string,
-    input: { expectedRevision: number; subjectRevision: string; decision: ReviewDecision; reason?: string },
+    input: {
+      expectedRevision: number;
+      subjectRevision: string;
+      decision: ReviewDecision;
+      reason?: string;
+      actorPrincipalId?: string;
+    },
     now = Date.now(),
   ): ReviewDecisionRecord {
     const subjectRevision = requiredText(input.subjectRevision, 500);
@@ -1876,7 +2138,7 @@ export class WorkOrchestrationStore {
           subjectRevision,
           input.decision,
           input.reason?.trim() || null,
-          principalId,
+          requiredText(input.actorPrincipalId, 200) || principalId,
           now,
         );
       const changed = this.db
@@ -2042,6 +2304,30 @@ export class WorkOrchestrationStore {
     }
   }
 
+  getEffectiveRequiredEvidence(workItemId: string): string[] {
+    const work = this.getWorkInternal(workItemId);
+    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+    const required = new Set(workflow.definition.validation.requiredEvidence);
+    const latestAttempt = this.db
+      .prepare("SELECT task_id FROM work_attempts WHERE work_item_id=? ORDER BY sequence DESC LIMIT 1")
+      .get(workItemId) as { task_id?: string | null } | undefined;
+    if (latestAttempt?.task_id) {
+      const taskTable = this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='expert_tasks'")
+        .get() as { name?: string } | undefined;
+      if (taskTable) {
+        const task = this.db
+          .prepare("SELECT validation_snapshot_json FROM expert_tasks WHERE task_id=?")
+          .get(latestAttempt.task_id) as { validation_snapshot_json?: string | null } | undefined;
+        const steps = normalizeVerificationPolicy(
+          task?.validation_snapshot_json ? JSON.parse(task.validation_snapshot_json) : [],
+        );
+        for (const step of steps) required.add(step.evidenceType);
+      }
+    }
+    return [...required];
+  }
+
   evaluateCompletionGate(workItemId: string, principalId: string, scope: string): CompletionGateResult {
     const work = this.getWork(workItemId, principalId, scope);
     const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
@@ -2053,7 +2339,7 @@ export class WorkOrchestrationStore {
       if (!latestAttempt || latestAttempt.status !== "succeeded") missing.push("latest_work_attempt_succeeded");
     }
     if (workflow.definition.completion.require.includes("required_evidence_passed")) {
-      for (const requiredType of workflow.definition.validation.requiredEvidence) {
+      for (const requiredType of this.getEffectiveRequiredEvidence(workItemId)) {
         const evidence = work.currentSubjectRevision
           ? (this.db
               .prepare(
@@ -2142,6 +2428,27 @@ export class WorkOrchestrationStore {
             .get(workItemId, publicationSubject, String(publication!.artifact_ref ?? "")) as Row | undefined)
         : undefined;
       if (!publication || !evidence) missing.push("publication_succeeded");
+    }
+    if (workflow.definition.completion.require.includes("change_request_created")) {
+      const publication = work.currentSubjectRevision
+        ? (this.db
+            .prepare(
+              "SELECT publication_id,commit_sha FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND state='pushed' AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
+        : undefined;
+      const publicationSubject =
+        publication?.publication_id && publication.commit_sha
+          ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
+          : null;
+      const changeRequestEvidence = publicationSubject
+        ? (this.db
+            .prepare(
+              "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type='pull_request' AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(workItemId, publicationSubject) as Row | undefined)
+        : undefined;
+      if (!changeRequestEvidence) missing.push("change_request_created");
     }
     return {
       ready: missing.length === 0,
@@ -2647,6 +2954,7 @@ export class WorkOrchestrationStore {
       workflowVersion: Number(row.workflow_version),
       workspaceId: row.workspace_id == null ? null : String(row.workspace_id),
       taskId: row.task_id == null ? null : String(row.task_id),
+      reviewTaskId: row.review_task_id == null ? null : String(row.review_task_id),
       runCount: Number(row.run_count),
       parentWorkAttemptId: row.parent_work_attempt_id == null ? null : String(row.parent_work_attempt_id),
       originWorkAttemptId: row.parent_work_attempt_id == null ? null : String(row.parent_work_attempt_id),

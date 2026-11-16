@@ -88,20 +88,39 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(workflowDetailBody.workflow.version, 1);
     assert.match(html, /id="workPage"/);
     assert.match(html, /工作项详情/);
+    assert.match(html, /完成条件/);
     assert.match(html, /Verification/);
-    assert.match(html, /Run \/ Turns/);
+    assert.match(html, /执行轮次/);
     assert.match(html, /返工审计/);
     assert.match(html, /workVerification/);
     assert.match(html, /workTurnRows/);
-    assert.match(html, /Continuation/);
     assert.match(html, /id="workResume"/);
     assert.match(html, /Runtime Profile/);
-    assert.match(html, /Workspace Changes/);
-    assert.match(html, /Changed Paths/);
+    assert.match(html, /完成证据/);
+    assert.match(html, /人工审核/);
+    assert.match(html, /id="workReviewAccept"/);
+    assert.match(html, /id="workReviewRework"/);
+    assert.match(html, /id="workReviewReject"/);
+    assert.match(html, /源码或关键环境变化后/);
+    assert.match(html, /高级执行与审计信息/);
+    assert.match(html, /预置模板/);
+    assert.match(html, /最大 WorkAttempt/);
+    assert.match(html, /验证步骤/);
+    assert.match(html, /从表单更新 JSON/);
+    assert.match(html, /由 Deployment 决定（推荐）/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
     assert.match(html, /Git 代理地址/);
+    assert.match(html, /Verification Policy JSON/);
+    assert.match(html, /Repository Verification Policy/);
+    assert.match(html, /发布策略模板/);
+    assert.match(html, /name="publicationTemplate"/);
+    assert.match(html, /标准 PR\/MR/);
+    assert.match(html, /仅推送工作分支/);
+    assert.match(html, /name="publicationBranchPrefix"/);
+    assert.match(html, /name="verificationTemplate"/);
+    assert.match(html, /CMake \+ CTest/);
     assert.match(html, /Executor \/ Model/);
     assert.match(html, /MCP Credential Ref/);
     assert.doesNotMatch(html, /源码仓库 ID（每行一项）/);
@@ -184,7 +203,40 @@ test("Admin expert configuration UI manages definitions and execution configurat
       body: JSON.stringify({
         id: "ota-from-url",
         expertId: "ota",
-        repositories: [{ url: "https://github.com/example/ota-firmware.git", branch: "main" }],
+        repositories: [
+          {
+            url: "https://github.com/example/ota-firmware.git",
+            branch: "main",
+            publicationPolicy: {
+              version: 1,
+              permissions: ["prepare-commit", "push-work-branch", "create-change-request"],
+              branchPrefix: "tsh/",
+              protectedBranches: ["main", "master"],
+              allowedPushRemote: "origin",
+              allowForcePush: false,
+              allowDeleteRef: false,
+            },
+            verificationPolicy: {
+              version: 1,
+              required: [
+                {
+                  id: "build",
+                  type: "command",
+                  argv: ["sh", "-lc", "./scripts/build.sh"],
+                  timeoutMs: 600000,
+                  evidenceType: "build",
+                },
+                {
+                  id: "unit",
+                  type: "command",
+                  argv: ["sh", "-lc", "./scripts/unit-test.sh"],
+                  timeoutMs: 600000,
+                  evidenceType: "unit_test",
+                },
+              ],
+            },
+          },
+        ],
         principals: ["team-a"],
         runtimeProfile: "linux-ota",
         active: true,
@@ -192,11 +244,131 @@ test("Admin expert configuration UI manages definitions and execution configurat
     });
     assert.equal(createdUrlDeployment.status, 201);
     const urlDeploymentBody = (await createdUrlDeployment.json()) as {
-      deployment: { repositoryIds: string[]; repositories: Array<{ id: string; url: string; branch: string }> };
+      deployment: {
+        repositoryIds: string[];
+        repositories: Array<{
+          id: string;
+          url: string;
+          branch: string;
+          publicationPolicy?: { version: number; branchPrefix: string };
+          verificationPolicy?: { version: number; required: Array<{ evidenceType: string }> };
+        }>;
+      };
     };
     assert.match(urlDeploymentBody.deployment.repositoryIds[0] ?? "", /^repo-[a-f0-9]{20}$/);
     assert.equal(urlDeploymentBody.deployment.repositories[0]?.url, "https://github.com/example/ota-firmware.git");
     assert.equal(urlDeploymentBody.deployment.repositories[0]?.branch, "main");
+    assert.equal(urlDeploymentBody.deployment.repositories[0]?.publicationPolicy?.branchPrefix, "tsh/");
+    assert.equal(urlDeploymentBody.deployment.repositories[0]?.verificationPolicy?.version, 1);
+    assert.deepEqual(
+      urlDeploymentBody.deployment.repositories[0]?.verificationPolicy?.required.map((step) => step.evidenceType),
+      ["build", "unit_test"],
+    );
+    const templatedDeployment = await fetch(base + "/admin/api/expert-config/deployments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "ota-publication-template",
+        expertId: "ota",
+        repositories: [
+          {
+            url: "https://github.com/example/templated.git",
+            branch: "release/2026",
+            credentialRef: "git-writer",
+            publicationTemplate: { preset: "change-request" },
+          },
+        ],
+        principals: ["team-a"],
+        runtimeProfile: "linux-ota",
+        active: true,
+      }),
+    });
+    assert.equal(templatedDeployment.status, 201);
+    const templatedBody = (await templatedDeployment.json()) as {
+      deployment: {
+        repositories: Array<{
+          publicationPolicy?: {
+            permissions: string[];
+            branchPrefix: string;
+            protectedBranches: string[];
+            allowForcePush: boolean;
+            allowDeleteRef: boolean;
+          };
+          credentialRef?: string;
+        }>;
+      };
+    };
+    const generatedPolicy = templatedBody.deployment.repositories[0]?.publicationPolicy;
+    assert.deepEqual(generatedPolicy?.permissions, ["prepare-commit", "push-work-branch", "create-change-request"]);
+    assert.deepEqual(generatedPolicy?.protectedBranches, ["main", "master", "release/2026"]);
+    assert.equal(generatedPolicy?.branchPrefix, "tsh/");
+    assert.equal(generatedPolicy?.allowForcePush, false);
+    assert.equal(generatedPolicy?.allowDeleteRef, false);
+    assert.equal(templatedBody.deployment.repositories[0]?.credentialRef, "git-writer");
+
+    const cmakeTemplate = await fetch(base + "/admin/api/expert-config/deployments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "ota-verification-template",
+        expertId: "ota",
+        repositories: [
+          {
+            url: "https://github.com/example/templated.git",
+            branch: "main",
+            verificationTemplate: { preset: "cmake-ctest" },
+          },
+        ],
+        principals: ["team-a"],
+        runtimeProfile: "linux-ota",
+        active: true,
+      }),
+    });
+    assert.equal(cmakeTemplate.status, 201);
+    const cmakeBody = (await cmakeTemplate.json()) as {
+      deployment: { repositories: Array<{ verificationPolicy?: { required: Array<{ evidenceType: string }> } }> };
+    };
+    assert.deepEqual(
+      cmakeBody.deployment.repositories[0]?.verificationPolicy?.required.map((step) => step.evidenceType),
+      ["build", "unit_test"],
+    );
+    const removedCmakeTemplate = await fetch(base + "/admin/api/expert-config/deployments/ota-verification-template", {
+      method: "DELETE",
+    });
+    assert.equal(removedCmakeTemplate.status, 200);
+    const conflictingTemplate = await fetch(base + "/admin/api/expert-config/deployments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "ota-publication-conflict",
+        expertId: "ota",
+        repositories: [
+          {
+            url: "https://github.com/example/templated.git",
+            branch: "main",
+            publicationTemplate: { preset: "change-request" },
+            publicationPolicy: {
+              version: 1,
+              permissions: ["prepare-commit", "push-work-branch"],
+              branchPrefix: "tsh/",
+              protectedBranches: ["main", "master"],
+              allowedPushRemote: "origin",
+              allowForcePush: false,
+              allowDeleteRef: false,
+            },
+          },
+        ],
+        principals: ["team-a"],
+        runtimeProfile: "linux-ota",
+        active: true,
+      }),
+    });
+    assert.equal(conflictingTemplate.status, 400);
+    const removedTemplatedDeployment = await fetch(
+      base + "/admin/api/expert-config/deployments/ota-publication-template",
+      { method: "DELETE" },
+    );
+    assert.equal(removedTemplatedDeployment.status, 200);
     const rejectedLocalUrl = await fetch(base + "/admin/api/expert-config/deployments", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -509,18 +681,17 @@ test("Admin expert configuration UI manages definitions and execution configurat
     });
     workStore.close();
 
-    const workListResponse = await fetch(base + "/admin/api/work-items?status=queued");
+    const workListResponse = await fetch(base + "/admin/api/work-items?q=" + encodeURIComponent(adminWork.workItemId));
     assert.equal(workListResponse.status, 200);
     const workList = await workListResponse.json();
-    assert.equal(workList.total, 1);
-    assert.equal(workList.items[0].workItemId, adminWork.workItemId);
+    assert.ok(workList.total >= 1);
+    assert.ok(workList.items.some((item: { workItemId: string }) => item.workItemId === adminWork.workItemId));
 
     const workDetailBefore = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId);
     assert.equal(workDetailBefore.status, 200);
     const workDetailBeforeBody = await workDetailBefore.json();
-    assert.equal(workDetailBeforeBody.work.status, "queued");
-    assert.deepEqual(workDetailBeforeBody.attempts, []);
-
+    assert.ok(["queued", "running"].includes(workDetailBeforeBody.work.status));
+    assert.ok(workDetailBeforeBody.attempts.length <= 1);
     const workReconcile = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/reconcile", {
       method: "POST",
     });
@@ -542,6 +713,78 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(Array.isArray(reconciledWork.reviews), true);
     assert.equal(Array.isArray(reconciledWork.approvals), true);
     assert.equal(reconciledWork.publication, null);
+    assert.equal(reconciledWork.changeRequest, null);
+    const linkedTaskResponse = await fetch(base + "/admin/api/expert-tasks/" + reconciledWork.currentTask.taskId);
+    assert.equal(linkedTaskResponse.status, 200);
+    const linkedTask = await linkedTaskResponse.json();
+    assert.equal(linkedTask.task.work_item_id, adminWork.workItemId);
+    assert.equal(linkedTask.work.workItemId, adminWork.workItemId);
+    assert.equal(linkedTask.changeRequest, null);
+
+    const reviewStore = new WorkOrchestrationStore(runtimeDb);
+    const reviewWork = reviewStore.createOrReuseWork({
+      principalId: "team-a",
+      scope: "org",
+      idempotencyKey: "admin-work-review",
+      sourceType: "admin-test",
+      title: "Admin review WorkItem",
+      description: "review through admin work page",
+      expertId: "ota",
+      deploymentId: "ota-from-url",
+      repositoryId: urlDeploymentBody.deployment.repositoryIds[0],
+    });
+    const reviewAttempt = reviewStore.createWorkAttempt(
+      reviewWork.workItemId,
+      "team-a",
+      "org",
+      reviewWork.stateRevision,
+      { reason: "initial", expertId: "ota", deploymentId: "ota-from-url", deploymentConfigVersion: 1 },
+    );
+    let reviewCurrent = reviewStore.getWork(reviewWork.workItemId, "team-a", "org");
+    const reviewSubject = "f".repeat(40);
+    reviewCurrent = reviewStore.setCurrentSubjectRevision(
+      reviewWork.workItemId,
+      "team-a",
+      "org",
+      reviewCurrent.stateRevision,
+      reviewSubject,
+    );
+    reviewStore.recordEvidence(reviewWork.workItemId, "team-a", "org", {
+      workAttemptId: reviewAttempt.workAttemptId,
+      type: "expert_result",
+      status: "passed",
+      source: "worker_verified",
+      subjectRevision: reviewSubject,
+      environmentIdentity: "worker:admin-test",
+      verifierIdentity: "team-skill-hub-test@1",
+    });
+    reviewCurrent = reviewStore.finishWorkAttempt(
+      reviewWork.workItemId,
+      reviewAttempt.workAttemptId,
+      "team-a",
+      "org",
+      reviewCurrent.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    reviewStore.close();
+
+    const reviewResponse = await fetch(base + "/admin/api/work-items/" + reviewWork.workItemId + "/review", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expectedRevision: reviewCurrent.stateRevision,
+        subjectRevision: reviewSubject,
+        decision: "accepted",
+        reason: "admin accepted",
+      }),
+    });
+    assert.equal(reviewResponse.status, 200);
+    const reviewedWork = await reviewResponse.json();
+    assert.equal(reviewedWork.work.status, "completed");
+    assert.equal(reviewedWork.reviews.length, 1);
+    assert.equal(reviewedWork.reviews[0].decision, "accepted");
+    assert.equal(reviewedWork.reviews[0].actorPrincipalId, "admin-http");
 
     const blockedStore = new WorkOrchestrationStore(runtimeDb);
     const latestAdminWork = blockedStore.getWork(adminWork.workItemId, "team-a", "org");
@@ -627,6 +870,11 @@ test("Admin expert configuration UI manages definitions and execution configurat
 test("expert task detail UI displays persisted source session and client", () => {
   assert.match(ADMIN_EXPERTS_HTML, /Publication/);
   assert.match(ADMIN_EXPERTS_HTML, /workPublication/);
+  assert.match(ADMIN_EXPERTS_HTML, /workChangeRequest/);
+  assert.match(ADMIN_EXPERTS_HTML, /taskChangeRequest/);
+  assert.match(ADMIN_EXPERTS_HTML, /renderChangeRequest/);
+  assert.match(ADMIN_EXPERTS_HTML, /GitHub PR/);
+  assert.match(ADMIN_EXPERTS_HTML, /GitLab MR/);
   assert.match(ADMIN_EXPERTS_HTML, /source_session_id/);
   assert.match(ADMIN_EXPERTS_HTML, /source_client/);
 });

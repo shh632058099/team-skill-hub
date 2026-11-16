@@ -86,6 +86,11 @@ test("installer is host-scoped and runtime package uses a systemd template", () 
   assert.match(manual, /\/usr\/sbin\/runuser/);
   assert.match(manual, /\/sbin\/runuser/);
   assert.match(manual, /"\$RUNUSER" --user expert-worker --preserve-environment/);
+  assert.match(manual, /export HOME="\$DATA\/home"/);
+  assert.match(manual, /export USER=expert-worker/);
+  assert.match(manual, /export LOGNAME=expert-worker/);
+  assert.match(manual, /export DOCKER_CONFIG="\$DATA\/docker-config"/);
+  assert.match(manual, /install -d -m 0700 "\$HOME" "\$DOCKER_CONFIG"/);
   assert.match(manual, /USER_MODE/);
   assert.match(manual, /DEFAULT_ETC/);
   assert.match(manual, /DEFAULT_DATA/);
@@ -123,6 +128,11 @@ test("systemd template loads one instance config and isolates writable state", (
   assert.equal(existsSync(templateUrl), true);
   const service = readFileSync(templateUrl, "utf8");
   assert.match(service, /Environment=EXPERT_WORKER_INSTANCE=%i/);
+  assert.match(service, /Environment=HOME=\/var\/lib\/team-skill-hub-worker\/%i\/home/);
+  assert.match(service, /Environment=USER=expert-worker/);
+  assert.match(service, /Environment=LOGNAME=expert-worker/);
+  assert.match(service, /Environment=DOCKER_CONFIG=\/var\/lib\/team-skill-hub-worker\/%i\/docker-config/);
+  assert.match(service, /ExecStartPre=\/usr\/bin\/mkdir -p .*%i\/home .*%i\/docker-config/);
   assert.match(service, /Environment=PATH=\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin/);
   assert.match(service, /EnvironmentFile=\/etc\/team-skill-hub-worker\/workers\/%i\.env/);
   assert.ok(
