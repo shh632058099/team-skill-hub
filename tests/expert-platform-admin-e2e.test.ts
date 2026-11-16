@@ -117,6 +117,8 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /发布策略模板/);
     assert.match(html, /name="publicationTemplate"/);
     assert.match(html, /标准 PR\/MR/);
+    assert.match(html, /保留已有设置（新仓库默认 PR\/MR）/);
+    assert.match(html, /新仓库默认使用标准 PR\/MR/);
     assert.match(html, /仅推送工作分支/);
     assert.match(html, /name="publicationBranchPrefix"/);
     assert.match(html, /name="verificationTemplate"/);
@@ -128,6 +130,10 @@ test("Admin expert configuration UI manages definitions and execution configurat
     const scriptEnd = html.indexOf("</script>", scriptStart + 8);
     assert.ok(scriptStart >= 0 && scriptEnd > scriptStart, "expert admin page must include its controller script");
     const inlineScript = html.slice(scriptStart + 8, scriptEnd);
+    assert.match(
+      inlineScript,
+      /existing\?\(existing\.publicationPolicy\?\{publicationPolicy:existing\.publicationPolicy\}:\{\}\):\{publicationTemplate:\{preset:'change-request'\}\}/,
+    );
     assert.ok(inlineScript, "expert admin page must include its controller script");
     assert.doesNotThrow(
       () => new Script(inlineScript),

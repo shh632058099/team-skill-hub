@@ -186,7 +186,7 @@ Deployment 的仓库 URL 必须使用 `https://`。Token 本身不要写进 JSON
 
 只读分析可以继续使用 SSH key 或只读 HTTPS Token；但需要自动交付 MR/PR 的代码改动 Workflow 有更严格要求：
 
-1. Repository 的发布策略必须允许 `prepare-commit`、`push-work-branch` 和 `create-change-request`。Admin 中优先选择“标准 PR/MR”发布策略，不要只选择“仅推送工作分支”。
+1. Repository 的发布策略必须允许 `prepare-commit`、`push-work-branch` 和 `create-change-request`。Admin 中**新仓库默认使用“标准 PR/MR”**；编辑已有 Deployment 时，URL + 基线分支匹配的已有仓库继续保留原发布策略，只有新增仓库自动套用标准 PR/MR。
 2. Worker 仍通过 Deployment 的同一个 `credentialRef` 解析 Git 凭据；Token 只保存在 Worker 主机环境中，不回传 Hub，也不会提供给 Claude/Codex Agent。
 3. 当前 GitHub/GitLab Change Request Provider 通过托管平台 HTTP API 创建 PR/MR，因此该 `credentialRef` **必须解析为 `type=https-token`**。只有 SSH key 时可以完成 clone/fetch，若 SSH key 本身有写权限也可能完成 Git push，但自动创建 MR/PR 会以 `CHANGE_REQUEST_CREDENTIAL_UNAVAILABLE` fail-close。
 4. HTTPS Token 必须同时具备目标仓库工作分支 push 和创建/查询 PR/MR 所需的最小权限；具体 scope 由 GitHub/GitLab 及组织策略决定。不要为了方便授予组织级 Admin 权限。
