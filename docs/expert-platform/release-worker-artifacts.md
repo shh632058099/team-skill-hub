@@ -10,11 +10,11 @@
 | **默认任务执行 Docker Image**（Claude Code） | `scripts/build-worker-image.sh claude 0.1.0` | `artifacts/worker-runtime/expert-claude-image-0.1.0.tar` | Worker 主机 `docker load` 导入 |
 | **校验信息**                                 | `sha256sum`、`git rev-parse` 等              | 发布清单 / SHA-256 文件                                  | 部署者比对版本与文件完整性     |
 
-**Codex Worker 同样是受支持执行后端：** 发布管理员可执行 `bash scripts/build-worker-image.sh codex 0.1.0`，得到 `expert-worker-image-0.1.0.tar`。若环境同时运行 Claude/Codex Worker，建议同一发布批次同时制作、校验和交付两张镜像。部署步骤、模型密钥和权限边界请参阅 [Claude/Codex 执行器文档](./claude-executor.md)。
+**Codex Worker 同样是受支持执行后端：** 发布管理员可执行 `bash scripts/build-worker-image.sh codex 0.1.0`，得到 `expert-worker-image-0.1.0.tar`。若环境同时运行 Claude/Codex Worker，建议同一发布批次同时制作、校验和交付两张镜像。部署步骤、模型密钥、Git/MCP 凭据与权限边界统一参阅 [新增 Expert / Deployment / Worker 手册](./add-expert.md)。
 
 Runtime **不是 Docker image**，Image 也**不是常驻 Worker 服务**。两者通过 `EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0` 关联。当前发行目录 `artifacts/` 被 Git 忽略：**本地生成不等于已公开发布**。应通过组织批准的制品库/内部文件服务向部署人员提供真实下载地址、校验值和版本；不要编造 GitHub Releases 地址，也不要直接提交大型 tar 到 Git。
 
-从 Work Orchestration Phase 1 起，Worker Runtime 还负责 Workspace owner affinity、`allocating → ready` 生命周期、runtime session id 回传以及 Claude/Codex process-level session resume。因此 **Runtime 与 Hub 的协议兼容性比单纯 CLI 版本更重要**；发布清单应明确兼容的 Hub commit/version、Worker proto/schema 版本与执行镜像版本，不能只写一个 Docker tag。
+从 Work Orchestration Phase 1 起，Worker Runtime 还负责 Workspace owner affinity、`allocating → ready` 生命周期、runtime session id 回传、Claude/Codex process-level session resume，以及 publication pushed 后的 durable Change Request operation。Worker Host 会使用本机 Git HTTPS Token 调用 GitHub/GitLab Provider 创建/恢复 PR/MR，再把经过 head/base 校验的结果回报 Hub。因此 **Runtime 与 Hub 的协议兼容性比单纯 CLI 版本更重要**；发布清单应明确兼容的 Hub commit/version、Worker proto/schema 版本与执行镜像版本，不能只写一个 Docker tag。
 
 > 当前源代码的 `worker-runtime/package.json` 版本为 `0.1.0`。Runtime **由该文件决定版本号**；Image 构建脚本的参数 **独立决定 tag 和 tar 文件名**。打包前务必核对二者相同，不能只改 Image 的版本参数。
 
@@ -121,9 +121,24 @@ worker-artifacts-0.1.0.release.txt
 1. 将四个文件上传到经批准的私有制品库或内部文件服务；为同一版本保留历史文件，限制上传/修改权限。若使用镜像仓库交付，应额外提供镜像 digest 和拉取权限；本文默认交付离线 tar。
 2. **不要**将模型 API Key、Hub bootstrap token、Worker credential、Git 私钥或实际 `worker.env` 放入包中。秘密由 Hub 管理员和 Worker 部署者分别通过安全渠道配置。
 3. 向部署者提供 [add-expert.md](./add-expert.md)，其第 6～8 节只负责领取、`tar`/安装、`docker load`、配置与管理员审批。
-4. 发布管理员确认 Worker 已注册、审批、在线，随后由真实 MCP 客户端下发**只读任务**，确认执行使用正确 Deployment 快照（仓库、Backend、模型、Runtime Profile、MCP Profile/覆盖）、正确镜像，结果回传到 Hub，且未修改 Git 仓库；再至少执行一次 continuation 验收，确认新 Run 仍使用同一 WorkAttempt/ExpertTask/Workspace，并能恢复同一 Claude/Codex runtime session。
+4. 发布管理员确认 Worker 已注册、审批、在线，随后由真实 MCP 客户端先下发**只读任务**，确认执行使用正确 Deployment 快照（仓库、Backend、模型、Runtime Profile、MCP Profile/覆盖）、正确镜像，结果回传到 Hub，且未修改 Git 仓库；再至少执行一次 continuation 验收，确认新 Run 仍使用同一 WorkAttempt/ExpertTask/Workspace，并能恢复同一 Claude/Codex runtime session。
+5. 若该 Runtime/Hub 版本支持代码改动交付，必须再使用专用测试仓库执行一条 `code_change + merge_request` 验收：Review accepted 后自动 prepare/push 工作分支，由 Worker Host 自动创建 GitHub PR / GitLab MR，远端 head SHA 必须等于 publication commit，并生成可信 `pull_request` Evidence；重复 reconciliation 不得创建第二个 MR/PR。
 
 部署端若需要多个 Worker：每个 Worker 必须有不同 `EXPERT_WORKER_ID` 和独立 credential / Workspace 根目录。不要因为主机相同就复用相同的 Worker 身份。Workspace 现在同时承载源码状态和 `.runtime-session/<backend>`；禁止在多个 Worker 之间共享同一个 Workspace/runtime-session 目录。
+
+### Change Request 发布兼容性验收
+
+自动 MR/PR 是 **Hub + Worker Runtime + Git Provider + Worker 本机凭据** 的联合能力，不属于 Claude/Codex 任务容器自身能力。正式发布至少验证：
+
+- Hub proto 与 Worker Runtime 都支持 Change Request claim/complete RPC；旧 Runtime 连新 Hub 时若出现 `UNIMPLEMENTED`，不得把版本标记为兼容。
+- 代码改动 Deployment 使用“标准 PR/MR”发布策略，包含 `prepare-commit`、`push-work-branch`、`create-change-request`。
+- 用于自动 MR/PR 的 `credentialRef` 在 Worker 侧解析为 `https-token`，且 Token 仅存在于 Worker 主机。Runtime 包、镜像、release manifest、日志和 Hub 数据库都不能包含 Token 明文。
+- GitHub/GitLab Provider 的创建和“已存在则查找”路径都要验收；必要时通过“远端已创建、Worker 在回报前重启”的故障注入确认幂等恢复。
+- 成功结果必须严格绑定 publication 的 head commit 和 base branch；故意制造不一致时应 fail-close，而不是记录 `pull_request` passed Evidence。
+- 已经处于 `pushed` 的历史 publication 在升级后可由 reconciliation 补建 Change Request，不重新创建 WorkAttempt/ExpertTask，也不重新 Build/Test/Review/Commit/Push。
+- Admin Work 详情和 Expert Task 详情都能直接打开同一个 GitHub PR / GitLab MR；最终 Merge 仍由代码托管平台的人工/组织策略控制。
+
+发布清单应把“Change Request delivery verified”作为独立验收项；只验证 Worker 能跑 Claude/Codex 任务，不足以证明这套 Runtime 可以完成代码改动 Workflow。
 
 ## 6. 升级、回滚和常见问题
 
@@ -138,7 +153,7 @@ worker-artifacts-0.1.0.release.txt
 
 ### 发布兼容性最低验收项
 
-每个正式 Worker Runtime 发布至少应在目标 Hub 版本上验证：Worker 注册/审批与心跳、Deployment Backend/Runtime Profile 能力匹配、Workspace `allocating → ready` 上报、只读任务执行、workspace-write 隔离、Evidence 绑定、进程退出后的新 Run session resume，以及旧 fencing/旧 Worker 不能完成新 Run。发布包不得包含任何实际 `.runtime-session`、Workspace checkout 或 credential 文件。
+每个正式 Worker Runtime 发布至少应在目标 Hub 版本上验证：Worker 注册/审批与心跳、Deployment Backend/Runtime Profile 能力匹配、Workspace `allocating → ready` 上报、只读任务执行、workspace-write 隔离、Evidence 绑定、进程退出后的新 Run session resume、旧 fencing/旧 Worker 不能完成新 Run，以及代码改动链路的 `prepare/push → create-change-request → head/base 校验 → pull_request Evidence`。发布包不得包含任何实际 `.runtime-session`、Workspace checkout、Git/MCP/模型 credential 或 Token 文件。
 
 ## Codex 执行镜像
 

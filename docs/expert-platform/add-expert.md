@@ -10,13 +10,13 @@
 
 日常使用优先通过 Admin 页面管理专家、执行配置以及 Worker 审批。CLI 仅作为维护或排障备用方式。
 
-**希望使用 Claude Code 执行任务**的部署者请参阅 [Claude Worker 执行后端配置](./claude-executor.md)。本手册默认使用 Claude Code，Codex 需显式选择。
+**Claude Code 与 Codex 两种执行后端都由本文统一说明。** 本手册示例默认使用 Claude Code；Codex 需在 Deployment/Worker 中显式选择对应 Backend、Runtime Profile、执行镜像和模型凭据。
 
 **发布管理员 / CI 维护人员**如需制作 Runtime tar.gz、Docker Image tar、SHA-256 校验清单，请使用独立的 [Worker 制品制作与交付手册](./release-worker-artifacts.md)；部署用户继续按照本文操作即可。
 
 ## 0. 开始之前：明确需要领取什么、准备什么
 
-**需要使用 Claude Code 作为 Worker 执行后端时，另请参阅 [Claude / Codex 执行器部署手册](./claude-executor.md)。**
+**执行后端配置已经合并到本文：** 第 3 节配置 Deployment 的 Backend/Model，第 5、8 节配置 Worker Runtime Profile、执行镜像和本机凭据；发布管理员制作 Runtime/Image 时参阅 [Worker 制品制作与交付手册](./release-worker-artifacts.md)。
 
 **部署者不需要 `team-skill-hub` 源码、npm 构建环境或 Dockerfile。** Worker 由两个相互独立的部分组成：
 
@@ -147,7 +147,7 @@ docker exec team-skill-hub node dist/src/cli/expert-admin.js list-deployments
 
 ## 4. 在 Worker 主机配置 Git 仓库凭据
 
-公开仓库不需要此步骤。私有仓库需要为 Worker 准备只读权限的 Git 凭据。
+公开只读仓库通常不需要此步骤；私有仓库至少需要可读取目标仓库的 Git 凭据。对于 `code_change + merge_request` Workflow，凭据还承担受控工作分支 push 和 GitHub PR / GitLab MR 创建，因此必须按下面的“代码改动与 MR/PR”要求配置写权限。
 
 ### 方案 A：SSH key
 
@@ -181,6 +181,46 @@ EXPERT_GIT_CREDENTIALS_JSON='{"yocto-github-readonly":{"type":"https-token","tok
 ```
 
 Deployment 的仓库 URL 必须使用 `https://`。Token 本身不要写进 JSON、Git URL 或本手册；`tokenEnv` 只能填写环境变量名。建议 Token 仅有目标仓库只读权限。
+
+### 代码改动与 MR/PR：必须使用可写 HTTPS Token
+
+只读分析可以继续使用 SSH key 或只读 HTTPS Token；但需要自动交付 MR/PR 的代码改动 Workflow 有更严格要求：
+
+1. Repository 的发布策略必须允许 `prepare-commit`、`push-work-branch` 和 `create-change-request`。Admin 中优先选择“标准 PR/MR”发布策略，不要只选择“仅推送工作分支”。
+2. Worker 仍通过 Deployment 的同一个 `credentialRef` 解析 Git 凭据；Token 只保存在 Worker 主机环境中，不回传 Hub，也不会提供给 Claude/Codex Agent。
+3. 当前 GitHub/GitLab Change Request Provider 通过托管平台 HTTP API 创建 PR/MR，因此该 `credentialRef` **必须解析为 `type=https-token`**。只有 SSH key 时可以完成 clone/fetch，若 SSH key 本身有写权限也可能完成 Git push，但自动创建 MR/PR 会以 `CHANGE_REQUEST_CREDENTIAL_UNAVAILABLE` fail-close。
+4. HTTPS Token 必须同时具备目标仓库工作分支 push 和创建/查询 PR/MR 所需的最小权限；具体 scope 由 GitHub/GitLab 及组织策略决定。不要为了方便授予组织级 Admin 权限。
+5. Repository URL 必须使用对应的 GitHub/GitLab HTTPS 地址；当前自动 Change Request Provider 不支持任意未知 Git 托管平台。
+
+示例：
+
+```dotenv
+OTA_GIT_WRITE_TOKEN=通过安全方式配置实际Token
+EXPERT_GIT_CREDENTIALS_JSON='{"ota-github-write":{"type":"https-token","tokenEnv":"OTA_GIT_WRITE_TOKEN"}}'
+```
+
+Deployment 中仓库配置：
+
+```text
+credentialRef = ota-github-write
+publicationPolicy = 标准 PR/MR
+```
+
+正常代码改动流程为：
+
+```text
+Implementation
+→ Build / Unit Test
+→ Review accepted
+→ prepare / push work branch
+→ Worker Host 创建 GitHub PR / GitLab MR
+→ 校验远端 head commit 与 publication commit 完全一致
+→ 记录可信 pull_request Evidence
+→ change_request_created completion gate
+→ Work completed
+```
+
+创建 MR/PR 的动作由 **Worker Host Runtime** 执行，不由任务容器里的 Claude/Codex 执行。Agent 不持有 GitHub/GitLab Token，也不应自己调用 `gh pr create`、`glab mr create` 或直接 `curl` 托管平台 API。
 
 如果配置了 Git 代理，代理地址必须从 Worker 主机/Docker 所在网络可达；Windows 上的代理设置不会自动让 WSL2 或 Docker 使用该代理。
 
@@ -445,8 +485,10 @@ ANTHROPIC_AUTH_TOKEN=通过安全方式配置真实模型密钥
 # Worker 仍只负责 credentialRef -> 本地 key 文件路径映射：
 EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
 EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly"}'
-# 可选 Git credential：
-# EXPERT_GIT_CREDENTIALS_JSON='{"git-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/git-readonly"}'
+# Git credential：只读任务可使用 SSH key；自动 PR/MR 推荐/要求使用 https-token 映射。
+# 例如代码改动任务：
+# OTA_GIT_WRITE_TOKEN=通过安全方式配置实际Token
+# EXPERT_GIT_CREDENTIALS_JSON='{"ota-github-write":{"type":"https-token","tokenEnv":"OTA_GIT_WRITE_TOKEN"}}'
 ```
 
 默认 credential/source/repositories 会自动使用 instance-local 路径，通常无需显式填写。
@@ -504,6 +546,25 @@ Work Orchestration 下，Workspace 不再只是一次性的源码 clone。逻辑
 
 对于带 Workspace 的 Claude/Codex 任务，Worker 会在 Workspace 相邻目录维护 `.runtime-session/<backend>`，并仅把它 bind mount 到容器内 `/home/expert/.claude` 或 `/home/expert/.codex`。Hub 持久化的是受约束的 `runtimeSessionId`，后续新 Run 使用 Claude `--resume` 或 Codex `exec resume` 恢复同一 Agent session。不要手工复制、共享或跨 Worker 迁移该目录，也不要把它放进发布制品或 Git。
 
+### 8.1.3 自动创建 GitHub PR / GitLab MR
+
+代码改动 Workflow 在 Review 通过并完成工作分支 push 后，会创建一个 durable Change Request intent。该 intent 由原 publication 的 owner Worker 领取，并通过 Worker Host 内的 Git Provider Adapter 创建或查找已有 PR/MR。
+
+这条链路具有以下约束：
+
+- **幂等恢复：** GitHub 创建返回重复/冲突时会按 head/base 查找已有 PR；GitLab 会按 source/target 查找已有 MR。Worker 或 Hub 在“远端已创建、结果尚未持久化”之间崩溃时，重试应复用同一个 PR/MR，而不是重复创建。
+- **版本绑定：** Provider 返回后必须验证远端 head commit 等于已经 push 的 publication commit，目标分支也必须与 Deployment 快照一致；不一致时以 `CHANGE_REQUEST_HEAD_MISMATCH` / `CHANGE_REQUEST_BASE_MISMATCH` fail-close，不记录通过 Evidence。
+- **可信 Evidence：** 成功后 Hub 记录 `pull_request` Evidence，来源为外部/Worker 验证，不接受 Agent 自报来满足 `change_request_created`。
+- **不自动 Merge：** Provider 只创建、查找或必要时重新打开 Change Request，没有自动 approve/merge 能力；最终 Review/Merge 仍在 GitHub/GitLab 完成。
+- **恢复已有 pushed publication：** 升级到支持 Change Request 的 Runtime/Hub 后，已经处于 `pushed` 且 Review accepted 的 publication 可以由 reconciliation 补建 MR/PR，不需要重新运行 Expert、Build/Test、Review、Commit 或 Push。
+
+创建成功后可在 Admin 查看：
+
+- **Work Items → Work 详情 → 代码变更请求**：显示 GitHub PR / GitLab MR、编号、状态、源分支 → 目标分支、head commit 和可点击链接。
+- **任务运行记录 → Expert Task 详情 → 关联 Work / MR/PR**：显示所属 Work 和同一个 MR/PR 入口。
+
+因此日常验收不需要再手工进入仓库搜索分支或 PR/MR。
+
 ### 8.2 systemd 主机
 
 ```bash
@@ -558,9 +619,11 @@ sudo journalctl -u team-skill-hub-worker@claude-01 -f
 
 升级需要发布方提供**新版本 Runtime 包与配套 Image**，由管理员安排任务排空/维护窗口后重复第 6～7 节；先导入新镜像，确认环境中的 `EXPERT_DOCKER_IMAGE` 指向新 tag，再重启 Worker 服务并完成一条只读任务验收。安装器使用 `/opt/team-skill-hub-worker/releases/<version>/` 与 `current` 软链接，便于保留旧 Runtime 作为回滚候选，但**切换旧版本前需一并恢复与其兼容的镜像 tag、配置和所需数据库/协议兼容性**，不能只改软链接就认定完成回滚。
 
-完成注册后，在 Admin → **专家平台** → **任务运行记录** 中可查看任务状态、Run、Worker 及执行阶段（需要最新 Worker Runtime 上报）。详细说明参见 [任务运行观测手册](./task-observability.md)。
+完成注册后，在 Admin → **专家平台** → **任务运行记录** 中可查看任务状态、Run、Worker 及执行阶段；在 **Work Items** 中查看 WorkAttempt、Evidence、Publication、MR/PR 与 Completion Gate。代码改动任务创建 MR/PR 后，Work 详情和 Expert Task 详情都会提供可点击的 GitHub/GitLab 入口。
 
-## 9. 端到端验收：用 Claude CLI 或 Codex CLI 发一个只读任务
+## 9. 端到端验收
+
+### 9.1 用 Claude CLI 或 Codex CLI 发一个只读任务
 
 先在已连接 Team Skill Hub MCP 的 Claude CLI 或 Codex CLI 会话中调用 `get_server_info`，确认当前 principal；再通过 Admin 执行配置列表或 API 结果取得对应的 `repositories[].id`。不要猜测仓库 ID。
 
@@ -592,6 +655,32 @@ sudo journalctl -u team-skill-hub-worker@claude-01 -f
 - [ ] 仓库没有被修改。
 
 若 `selectionMode=explicit`，说明调用时显式指定了专家，不能算自动路由验收成功。
+
+### 9.2 代码改动与自动 MR/PR 验收
+
+只读链路通过后，再选择一个允许测试写入的仓库验证 `code_change + merge_request`。不要直接在生产分支做首次验收。
+
+前置条件：
+
+- Workflow 的 `change.mode=code_change`、`delivery=merge_request`，Completion 包含 `publication_succeeded` 与 `change_request_created`。
+- Repository 发布策略为“标准 PR/MR”，包含 `prepare-commit`、`push-work-branch`、`create-change-request`。
+- Deployment 的 Git `credentialRef` 在目标 Worker 上解析为可写 `https-token`。
+- Worker Runtime 与 Hub 版本都包含 Change Request gRPC/Store/Provider 支持。
+
+验收时提交一个可明确验证的小型代码改动，并按实际 Workflow 完成 Build/Test 与 Review。通过标准：
+
+- [ ] Review accepted 之前不会 prepare/push 工作分支，也不会创建 MR/PR。
+- [ ] Review accepted 后 publication 最终进入 `pushed`，工作分支名称符合配置的 branch prefix，且没有 force-push 到受保护分支。
+- [ ] 系统自动创建 GitHub PR / GitLab MR；不需要人工执行 `gh pr create` / `glab mr create`。
+- [ ] MR/PR 的 source/head branch 是该 Work 的工作分支，target/base branch 是 Deployment 快照中的目标分支。
+- [ ] MR/PR 的远端 head SHA 与 Work Publication 记录的 commit SHA 完全一致。
+- [ ] Hub 生成非 Agent 自报的 `pull_request` passed Evidence，并绑定 `publication:<publicationId>:<commitSha>`。
+- [ ] `change_request_created` gate 满足后 Work 才进入 `completed`。
+- [ ] Admin 的 **Work 详情**和**Expert Task 详情**都能看到同一个 MR/PR 编号、分支、commit 和链接。
+- [ ] 重复 reconciliation / Worker 重启不会创建第二个 MR/PR。
+- [ ] 最终 Merge 仍需在 GitHub/GitLab 按团队规则人工完成，Team Skill Hub 不自动 Merge。
+
+建议额外做一次恢复验收：先让 publication 已经成功 `pushed`、但在创建 Change Request 前停止 Worker；升级/重启后确认系统仅补建 MR/PR 和 Evidence，WorkAttempt/ExpertTask 数量不增加，也不会重新 Build/Test/Review/Commit/Push。
 
 ### Worker 被强制退出后的 Docker 容器回收
 
@@ -718,6 +807,20 @@ sudo journalctl -u "team-skill-hub-worker@${INSTANCE}" -n 100 --no-pager
 ### `SOURCE_REPOSITORY_CREDENTIAL_NOT_CONFIGURED`
 
 检查 Deployment 中的 `credentialRef` 是否与 `EXPERT_GIT_CREDENTIALS_JSON` 的 key 完全一致、SSH key 文件是否存在，或 HTTPS Token 环境变量是否由 Worker 进程实际继承。不要打印 Token 来排查。
+
+### MR/PR 停在 `change_request_created` 或 Change Request blocked
+
+优先查看 Work 详情的“代码变更请求”状态、retry/error，再按错误码排查：
+
+| 错误码 | 含义 | 处理 |
+| --- | --- | --- |
+| `CHANGE_REQUEST_CREDENTIAL_UNAVAILABLE` | credentialRef 未配置、Token 环境变量为空，或凭据类型不是 `https-token` | 确认 Deployment credentialRef 与 Worker 的 `EXPERT_GIT_CREDENTIALS_JSON` 一致，并使用具备 PR/MR API 权限的 HTTPS Token |
+| `CHANGE_REQUEST_PROVIDER_UNSUPPORTED` | 仓库 Host 不是当前支持的 GitHub/GitLab Provider | 使用支持的 GitHub/GitLab URL，或先实现对应 Provider Adapter；不要手工伪造 Evidence |
+| `CHANGE_REQUEST_CREATE_FAILED` | GitHub/GitLab API 创建、查找或 reopen 失败 | 检查 Token scope、仓库权限、API 网络/TLS/代理以及远端分支是否存在；该错误会按 durable retry 策略有限重试 |
+| `CHANGE_REQUEST_HEAD_MISMATCH` | 找到/创建的 MR/PR head SHA 与 publication commit 不同 | 停止继续完成，检查远端分支是否被外部修改或同名分支是否复用；不要通过修改 Evidence 绕过 |
+| `CHANGE_REQUEST_BASE_MISMATCH` | MR/PR 目标分支与任务快照不一致 | 检查 Deployment branch 和已有 MR/PR；修复目标分支后重新 reconcile |
+
+排障时不要把 Git Token 打印到日志，也不要为了“让 Work 完成”手工插入 `pull_request` Evidence。若远端 MR/PR 已经存在，正常 reconciliation 应通过 provider 查询并恢复，而不是再建一个。
 
 ### Clone/fetch 失败或超时
 
