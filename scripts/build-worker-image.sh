@@ -91,7 +91,14 @@ else
   cleanup() { rm -rf "$TEMP_DIR"; }
   trap cleanup EXIT
   GENERATED_DOCKERFILE="$TEMP_DIR/Dockerfile.legacy"
-  cp "$ROOT/docker/expert-worker/entrypoint.sh" "$TEMP_DIR/entrypoint.sh"
+  case "$BACKEND" in
+    claude)
+      cp "$ROOT/docker/expert-worker/claude-entrypoint.sh" "$TEMP_DIR/claude-entrypoint.sh"
+      ;;
+    codex)
+      cp "$ROOT/docker/expert-worker/entrypoint.sh" "$TEMP_DIR/entrypoint.sh"
+      ;;
+  esac
 
   # Derive the compatibility Dockerfile from the canonical source so CLI
   # versions, package installs, user, entrypoint and CMD cannot drift.

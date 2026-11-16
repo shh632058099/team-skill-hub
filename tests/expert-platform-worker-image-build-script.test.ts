@@ -25,10 +25,24 @@ case "$1 $2" in
   'image inspect') [ \"$MOCK_BASE_PRESENT\" = '1' ] && exit 0 || exit 1 ;;
   build*)
     previous=''
+    context=''
     for arg in "$@"; do
       if [ "$previous" = '-f' ]; then cat "$arg" >> "$DOCKER_CALL_LOG.generated"; fi
       previous="$arg"
+      context="$arg"
     done
+    if [ -n "$context" ]; then
+      if [ -f "$context/claude-entrypoint.sh" ]; then
+        printf '%s\n' 'context claude-entrypoint=yes' >> "$DOCKER_CALL_LOG"
+      else
+        printf '%s\n' 'context claude-entrypoint=no' >> "$DOCKER_CALL_LOG"
+      fi
+      if [ -f "$context/entrypoint.sh" ]; then
+        printf '%s\n' 'context entrypoint=yes' >> "$DOCKER_CALL_LOG"
+      else
+        printf '%s\n' 'context entrypoint=no' >> "$DOCKER_CALL_LOG"
+      fi
+    fi
     ;;
 esac
 `,
@@ -198,6 +212,13 @@ test("legacy mode derives Bullseye Dockerfiles for both backends and honors BASE
         source.includes("CODEX_VERSION") ? /CODEX_VERSION=0\.162\.1/ : /CLAUDE_VERSION=2\.1\.308/,
       );
       assert.match(calls, /run --rm/);
+      if (backend === "claude") {
+        assert.match(calls, /context claude-entrypoint=yes/);
+        assert.match(calls, /context entrypoint=no/);
+      } else {
+        assert.match(calls, /context entrypoint=yes/);
+        assert.match(calls, /context claude-entrypoint=no/);
+      }
       assert.match(calls, /save -o/);
       assert.equal(existsSync(dockerfilePath), false, "temporary generated Dockerfile should be cleaned up");
     }
