@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attach the native Claude session identity to Team Skill Hub Work tools."""
+"""Bind Team Skill Hub Work tools to the native Claude session."""
 import hashlib
 import hmac
 import json
@@ -13,49 +13,92 @@ import uuid
 TOOL = re.compile(r"^mcp__teamSkillHub__(?:submit_work|update_work_source)$")
 
 
+class WorkHookError(Exception):
+    pass
+
+
+def fail(code: str) -> None:
+    print(f"TEAM_SKILL_HUB_WORK_HOOK_ERROR:{code}", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def main() -> None:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        fail("EMPTY_INPUT")
     try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
-            return
-        event = payload.get("hook_event_name")
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        fail("INVALID_JSON")
+    if not isinstance(payload, dict):
+        fail("INVALID_JSON")
+
+    if payload.get("hook_event_name") != "PreToolUse":
+        return
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not TOOL.fullmatch(tool_name):
+        return
+
+    try:
         provided = payload.get("session_id")
         if not isinstance(provided, str):
-            return
-        session_id = str(uuid.UUID(provided))
-        if provided.lower() != session_id:
-            return
+            raise WorkHookError("INVALID_SESSION_ID")
+        try:
+            session_id = str(uuid.UUID(provided))
+        except ValueError as error:
+            raise WorkHookError("INVALID_SESSION_ID") from error
+        if provided != session_id:
+            raise WorkHookError("NON_CANONICAL_SESSION_ID")
 
-        if event == "UserPromptSubmit":
-            return
-        if event != "PreToolUse" or not isinstance(payload.get("tool_name"), str) or not TOOL.fullmatch(payload["tool_name"]):
-            return
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
-            return
+            raise WorkHookError("INVALID_TOOL_INPUT")
         updated = dict(tool_input)
-        updated["clientSessionId"] = session_id
-        updated.pop("clientSessionProof", None)
-        updated.pop("sourceRequestId", None)
-        binding_key = tool_input.get("idempotencyKey") if not payload["tool_name"].endswith("__update_work_source") else tool_input.get("workItemId")
-        config_path = Path(os.environ.get("TEAM_SKILL_HUB_HOOK_CONFIG") or
-                           Path(__file__).resolve().parent / "team-skill-hub.conf")
+        binding_key = (
+            tool_input.get("workItemId")
+            if tool_name.endswith("__update_work_source")
+            else tool_input.get("idempotencyKey")
+        )
+        if not isinstance(binding_key, str) or not binding_key.strip():
+            raise WorkHookError("MISSING_BINDING_KEY")
+
+        config_path = Path(
+            os.environ.get("TEAM_SKILL_HUB_HOOK_CONFIG")
+            or Path(__file__).resolve().parent / "team-skill-hub.conf"
+        )
         key_env = "TEAM_SKILL_HUB_API_KEY"
         if config_path.is_file():
-            for line in config_path.read_text(encoding="utf-8").splitlines():
+            try:
+                lines = config_path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError) as error:
+                raise WorkHookError("CONFIG_READ_FAILED") from error
+            for line in lines:
                 if line.startswith("api_key_env="):
                     candidate = line.partition("=")[2].strip()
                     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
                         key_env = candidate
+
         credential = os.environ.get(key_env, "")
-        if credential and isinstance(binding_key, str):
-            timestamp = str(int(time.time() * 1000))
-            message = f"team-skill-hub/client-session/v1\n{session_id}\n{binding_key}\n{timestamp}"
-            signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
-            updated["clientSessionProof"] = f"{timestamp}.{signature}"
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}, ensure_ascii=False))
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return
+        if not credential:
+            raise WorkHookError("CREDENTIAL_UNAVAILABLE")
+
+        timestamp = str(int(time.time() * 1000))
+        message = f"team-skill-hub/client-session/v1\n{session_id}\n{binding_key}\n{timestamp}"
+        signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
+        updated["clientSessionId"] = session_id
+        updated.pop("clientSessionProof", None)
+        updated.pop("sourceRequestId", None)
+        updated["clientSessionProof"] = f"{timestamp}.{signature}"
+        print(
+            json.dumps(
+                {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}},
+                ensure_ascii=False,
+            )
+        )
+    except WorkHookError as error:
+        fail(str(error))
+    except Exception:
+        fail("PROCESSING_FAILED")
 
 
 if __name__ == "__main__":

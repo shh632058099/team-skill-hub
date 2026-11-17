@@ -64,7 +64,7 @@ fi
 usage() {
   cat >&2 <<EOF
 Usage:
-  $0 init <instance> [--backend claude|codex] [--runtime-profile PROFILE] [--docker-network NETWORK] [--mcp-credential-ref REF]
+  $0 init <instance> [--backend claude|codex] [--access readonly|workspace-write] [--runtime-profile PROFILE] [--docker-network NETWORK] [--mcp-credential-ref REF]
   $0 list [--json]
   $0 <instance> {start|stop|restart|status|logs}
 EOF
@@ -169,14 +169,17 @@ set_env_value() {
 init_instance() {
   local instance=$1
   shift
-  local backend="" runtime_profile="" docker_network="" mcp_credential_ref=""
+  local backend="claude" access="workspace-write" runtime_profile="" docker_network="" mcp_credential_ref=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --backend)
         [[ $# -ge 2 && "$2" =~ ^(claude|codex)$ ]] || { echo "--backend requires claude or codex" >&2; return 2; }
         backend=$2; shift 2 ;;
+      --access)
+        [[ $# -ge 2 && "$2" =~ ^(readonly|workspace-write)$ ]] || { echo "--access requires readonly or workspace-write" >&2; return 2; }
+        access=$2; shift 2 ;;
       --runtime-profile)
-        [[ $# -ge 2 && -n "$2" ]] || { echo "--runtime-profile requires a value" >&2; return 2; }
+        [[ $# -ge 2 && "$2" =~ ^(claude|codex)-(readonly|workspace-write)$ ]] || { echo "--runtime-profile requires a platform Runtime Profile" >&2; return 2; }
         runtime_profile=$2; shift 2 ;;
       --docker-network)
         [[ $# -ge 2 && -n "$2" ]] || { echo "--docker-network requires a value" >&2; return 2; }
@@ -188,12 +191,19 @@ init_instance() {
     esac
   done
   load_instance_context "$instance"
+  if [[ -n "$runtime_profile" ]]; then
+    [[ "$runtime_profile" == "$backend"-* ]] || { echo "runtime profile does not match backend" >&2; return 2; }
+  elif [[ "$access" == "workspace-write" ]]; then
+    runtime_profile="$backend-readonly,$backend-workspace-write"
+  else
+    runtime_profile="$backend-readonly"
+  fi
   [[ -f "$TEMPLATE" ]] || { echo "Missing Worker template: $TEMPLATE" >&2; return 1; }
   [[ ! -e "$CONFIG" ]] || { echo "Worker instance already exists: $instance" >&2; return 1; }
   install -d -m 0750 "$WORKERS_DIR" "$INSTANCES_DIR/$instance/keys" "$DATA"
   install -m 0600 "$TEMPLATE" "$CONFIG"
-  [[ -z "$backend" ]] || set_env_value "$CONFIG" EXPERT_EXECUTOR_BACKEND "$backend"
-  [[ -z "$runtime_profile" ]] || set_env_value "$CONFIG" EXPERT_RUNTIME_PROFILES "$runtime_profile"
+  set_env_value "$CONFIG" EXPERT_EXECUTOR_BACKEND "$backend"
+  set_env_value "$CONFIG" EXPERT_RUNTIME_PROFILES "$runtime_profile"
   [[ -z "$docker_network" ]] || set_env_value "$CONFIG" EXPERT_DOCKER_NETWORK "$docker_network"
   if [[ -n "$mcp_credential_ref" ]]; then
     local mcp_key_file="$INSTANCES_DIR/$instance/keys/$mcp_credential_ref"

@@ -264,7 +264,7 @@ sudo /opt/team-skill-hub-worker/current/worker-control.sh init yocto-claude-01
 # 推荐：创建 Codex v2 Worker 时直接持久化执行约束
 sudo /opt/team-skill-hub-worker/current/worker-control.sh init ota-codex-01 \
   --backend codex \
-  --runtime-profile codex-readonly \
+  --access readonly \
   --docker-network team-skill-hub_default \
   --mcp-credential-ref skillhub-readonly
 sudoedit /etc/team-skill-hub-worker/workers/yocto-claude-01.env
@@ -281,7 +281,7 @@ EXPERT_WORKER_ID=yocto-worker-01
 EXPERT_CAPABILITY=yocto
 EXPERT_WORKER_BOOTSTRAP_TOKEN=与 Hub 配置相同的部署级 Token
 EXPERT_EXECUTOR_BACKEND=claude
-EXPERT_RUNTIME_PROFILES=claude-readonly
+EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
 ```
 
 `EXPERT_WORKER_INSTANCE` 由 controller/systemd 自动注入，不要在 env 中手工配置。
@@ -296,29 +296,27 @@ EXPERT_RUNTIME_PROFILES=claude-readonly
 
 Bootstrap Token 只用于首次登记/审批后的凭据交换。正式 credential 保存后，从该实例 env 中删除 `EXPERT_WORKER_BOOTSTRAP_TOKEN`。
 
-### 5.2.1 显式启用 workspace-write
+### 5.2.1 Runtime Profile 默认值与最小权限
 
-`workspace-write` 属于执行权限，不会因为 Worker 升级、重新安装或新增 Deployment 而自动开启。现有 Worker 保持只读，只有部署者明确修改 `EXPERT_RUNTIME_PROFILES` 后才允许领取对应写入型 Deployment。
-
-只读配置保持：
+新建 Worker 默认使用 `claude` backend，并启用 `workspace-write` 能力；因此默认同时声明：
 
 ```dotenv
-EXPERT_RUNTIME_PROFILES=claude-readonly
-# 或
-EXPERT_RUNTIME_PROFILES=codex-readonly
-```
-
-需要同一 Worker 同时支持只读和隔离 Workspace 写入时，显式配置：
-
-```dotenv
-# Claude
+EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
-
-# Codex
-EXPERT_RUNTIME_PROFILES=codex-readonly,codex-workspace-write
 ```
 
-这不会把 Worker 主机或整个容器改成可写：只有当前 WorkAttempt 的 `/workspace` bind mount 为读写；容器 rootfs、MCP/模型/Git 凭据和配置仍保持只读。Claude 的 `claude-workspace-write` 仅增加 `Edit/Write`，不开放 Bash；Codex 使用 `--sandbox workspace-write`。Build/Test 仍由独立只读 Verification 容器执行。
+这样同一个 Worker 可以领取只读和隔离 Workspace 可写的 Deployment。需要最小权限只读 Worker 时，在初始化时显式选择：
+
+```bash
+worker-control.sh init claude-ro-01 --backend claude --access readonly
+worker-control.sh init codex-ro-01 --backend codex --access readonly
+```
+
+Codex workspace-write Worker 对应 `codex-readonly,codex-workspace-write`。
+
+升级 Worker runtime **不会改写已有实例 env**，因此历史只读 Worker 不会因为升级自动获得写权限；上述默认值只作用于新初始化的实例。
+
+`workspace-write` 不会把 Worker 主机或整个容器改成可写：只有当前 WorkAttempt 的 `/workspace` bind mount 为读写；容器 rootfs、MCP/模型/Git 凭据和配置仍保持只读。Claude 的 `claude-workspace-write` 仅增加 `Edit/Write`，不开放 Bash；Codex 使用 `--sandbox workspace-write`。Build/Test 仍由独立只读 Verification 容器执行。
 
 ### 5.3 网页审批和状态管理
 
@@ -437,7 +435,7 @@ sudo docker image inspect team-skill-hub-expert-claude:0.1.0 \
 
 ```bash
 sudo /opt/team-skill-hub-worker/current/worker-control.sh init claude-01
-sudo /opt/team-skill-hub-worker/current/worker-control.sh init codex-01
+sudo /opt/team-skill-hub-worker/current/worker-control.sh init codex-01 --backend codex
 sudo /opt/team-skill-hub-worker/current/worker-control.sh list
 ```
 
@@ -471,7 +469,7 @@ EXPERT_CAPABILITY=yocto
 EXPERT_ID=yocto
 EXPERT_WORKER_BOOTSTRAP_TOKEN=与Hub部署方安全交付的Token
 EXPERT_EXECUTOR_BACKEND=claude
-EXPERT_RUNTIME_PROFILES=claude-readonly
+EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
 EXPERT_CLAUDE_MAX_TURNS=12
 EXPERT_DOCKER_NETWORK=bridge

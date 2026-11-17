@@ -14,6 +14,7 @@ import { McpWorkAdapter } from "./expert-platform/mcp-work-adapter.js";
 import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
 import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
+import { workWaitRequiresHumanAction, workWaitShouldContinuePolling } from "./expert-platform/work-wait-policy.js";
 
 // The experimental task API is opt-in until an isolated Worker runtime is provisioned.
 const expertRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
@@ -235,6 +236,17 @@ function safeWorkProgressMessage(event: { eventType: string; details: Record<str
     return "新的 Work Evidence 已记录";
   }
   return names[event.eventType] ?? `Work 状态已更新：${event.eventType}`;
+}
+
+function managedWorkClientRequiresBoundSession(client: string | undefined): boolean {
+  const value = client?.trim().toLowerCase() ?? "";
+  return value.startsWith("claude-code") || value === "codex" || value.startsWith("codex/");
+}
+
+function assertManagedWorkSessionBinding(client: string | undefined, effectiveSessionId: string | undefined): void {
+  if (managedWorkClientRequiresBoundSession(client) && !effectiveSessionId) {
+    throw new Error("CLIENT_SESSION_BINDING_REQUIRED");
+  }
 }
 
 export function createSkillHubMcpHandler(appService: SkillHubApplicationService) {
@@ -1528,6 +1540,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             );
             const effectiveSessionId =
               transportSessionId ?? sessionId ?? (trustedClientSession ? clientSessionId : undefined);
+            assertManagedWorkSessionBinding(client, effectiveSessionId);
             const adapter = mcpWorkAdapter!;
             const submitted = adapter.submit(
               {
@@ -1594,6 +1607,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             );
             const effectiveSessionId =
               transportSessionId ?? sessionId ?? (trustedClientSession ? clientSessionId : undefined);
+            assertManagedWorkSessionBinding(client, effectiveSessionId);
             return toolResult(
               mcpWorkAdapter!.updateSource(
                 workItemId,
@@ -1727,7 +1741,15 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               }
 
               const terminal = ["completed", "failed", "cancelled"].includes(detail.work.status);
-              const active = ["queued", "running", "rework"].includes(detail.work.status);
+              const humanActionRequired = workWaitRequiresHumanAction({
+                status: detail.work.status,
+                currentSubjectRevision: detail.work.currentSubjectRevision,
+                reviewTaskStatus: detail.reviewTask?.status,
+                reviews: detail.reviews,
+                gateMissing: detail.gate.missing,
+                publicationCommitSha: detail.publication?.commitSha,
+              });
+              const active = workWaitShouldContinuePolling(detail.work.status, humanActionRequired);
               const timedOut = performance.now() >= deadline;
               const hasIncrementalProgress = page.events.length > 0 || newActivity.length > 0;
               if (
@@ -1755,9 +1777,6 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                         workspaceKey: task.workspaceKey,
                       }
                     : null;
-                const humanActionRequired =
-                  detail.work.status === "blocked" ||
-                  (detail.work.status === "waiting_review" && !detail.reviewTask?.status?.match(/^(queued|running)$/));
                 return toolResult({
                   work: {
                     workItemId: detail.work.workItemId,

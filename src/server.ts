@@ -36,6 +36,7 @@ import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
 import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
+import { RUNTIME_PROFILE_IDS } from "./expert-platform/runtime-profile-policy.js";
 import {
   createWorkerAvailabilityProbe,
   PersistentWorkerRegistry,
@@ -1373,7 +1374,7 @@ export async function startServer(
         .optional()
         .default([]),
       principals: z.array(z.string().trim().min(1).max(200)).max(100),
-      runtimeProfile: z.string().trim().min(1).max(200),
+      runtimeProfile: z.enum(RUNTIME_PROFILE_IDS),
       executor: z
         .object({
           backend: z.enum(["claude", "codex"]),
@@ -1404,6 +1405,13 @@ export async function startServer(
           code: z.ZodIssueCode.custom,
           message: "At least one source repository is required",
           path: ["repositories"],
+        });
+      }
+      if (value.executor && !value.runtimeProfile.startsWith(`${value.executor.backend}-`)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "RUNTIME_PROFILE_BACKEND_MISMATCH",
+          path: ["runtimeProfile"],
         });
       }
       value.repositories.forEach((repository, index) => {

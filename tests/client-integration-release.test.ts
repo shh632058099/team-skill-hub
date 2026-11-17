@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { buildClientIntegrationManifest, loadClientIntegrationRelease } from "../src/client-integration/release.js";
 
@@ -14,10 +14,19 @@ test("loads canonical client integration release metadata", async () => {
   assert.ok(release.hookSchemaVersion > 0);
 });
 
-test("work-first submission hook ships as client integration v16 runtime 1.5.2", async () => {
+test("work-first submission hook ships as client integration v18 runtime 1.5.4", async () => {
   const release = await loadClientIntegrationRelease();
-  assert.equal(release.version, 16);
-  assert.equal(release.hookRuntimeVersion, "1.5.2");
+  assert.equal(release.version, 18);
+  assert.equal(release.hookRuntimeVersion, "1.5.4");
+});
+
+test("Windows Work hooks force UTF-8 stdin and stdout before parsing JSON", async () => {
+  for (const relative of ["../scripts/claude/expert-session-hook.ps1", "../scripts/codex/expert-session-hook.ps1"]) {
+    const source = await readFile(new URL(relative, import.meta.url), "utf8");
+    assert.match(source, /\[Console\]::InputEncoding = \$utf8/);
+    assert.match(source, /\[Console\]::OutputEncoding = \$utf8/);
+    assert.match(source, /\$OutputEncoding = \$utf8/);
+  }
 });
 
 test("rejects invalid version ordering", async () => {

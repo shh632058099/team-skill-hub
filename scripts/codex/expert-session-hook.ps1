@@ -1,4 +1,9 @@
 # Codex PreToolUse: attach the native Codex thread/session identity to Team Skill Hub submissions.
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+
 $isSubmissionTool = $false
 try {
     $raw = [Console]::In.ReadToEnd()

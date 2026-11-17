@@ -184,7 +184,7 @@ test("managed config upgrade migrates legacy ExpertTask hooks to Work-first hook
   }
   await writeFile(
     path.join(releaseRoot, "release.json"),
-    JSON.stringify({ hookRuntimeVersion: "1.5.2", hookSchemaVersion: 1 }),
+    JSON.stringify({ hookRuntimeVersion: "1.5.4", hookSchemaVersion: 1 }),
   );
 
   const { applyManagedConfig, selfCheckManagedConfig } = await import(

@@ -1,6 +1,11 @@
-export type RuntimeProfileId =
-  "codex-readonly" | "codex-workspace-write" | "claude-readonly" | "claude-workspace-write";
+export const RUNTIME_PROFILE_IDS = [
+  "codex-readonly",
+  "codex-workspace-write",
+  "claude-readonly",
+  "claude-workspace-write",
+] as const;
 
+export type RuntimeProfileId = (typeof RUNTIME_PROFILE_IDS)[number];
 export type RuntimeProfilePolicy = {
   id: RuntimeProfileId;
   backend: "codex" | "claude";

@@ -114,12 +114,12 @@ Set the Runtime path once (use the default or the directory passed to `--install
 ```bash
 WORKER_INSTALL_DIR=/opt/team-skill-hub-worker
 sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init claude-01
-sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init codex-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init codex-01 --backend codex
 
 # Recommended v2 Codex worker initialization:
 sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" init ota-codex-01 \
   --backend codex \
-  --runtime-profile codex-readonly \
+  --access readonly \
   --docker-network team-skill-hub_default \
   --mcp-credential-ref skillhub-readonly
 ```
@@ -199,7 +199,7 @@ EXPERT_WORKER_ID=ota-claude-worker-01
 EXPERT_CAPABILITY=ota
 EXPERT_WORKER_BOOTSTRAP_TOKEN=replace-with-deployment-bootstrap-token
 EXPERT_EXECUTOR_BACKEND=claude
-EXPERT_RUNTIME_PROFILES=claude-readonly
+EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
@@ -215,31 +215,25 @@ Put MCP/Git credential files under:
 
 Never share repository checkouts between Worker instances.
 
-## Workspace-write Runtime Profiles
+## Runtime Profile defaults
 
-Runtime Profile advertisement is an explicit security boundary. Upgrading or reinstalling the Worker does **not** automatically add write capability.
-
-A read-only Worker remains:
+New Worker instances default to `claude` backend with `workspace-write` capability. A workspace-write capable Worker advertises both profiles so it can execute readonly and writable Deployments:
 
 ```dotenv
-EXPERT_RUNTIME_PROFILES=claude-readonly
-```
-
-or:
-
-```dotenv
-EXPERT_RUNTIME_PROFILES=codex-readonly
-```
-
-To intentionally allow an instance to execute both read-only and isolated workspace-write Deployments, the operator must explicitly opt in:
-
-```dotenv
-# Claude instance
+EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
-
-# Codex instance
-EXPERT_RUNTIME_PROFILES=codex-readonly,codex-workspace-write
 ```
+
+For a least-privilege readonly-only Worker, initialize explicitly:
+
+```bash
+worker-control.sh init claude-ro-01 --backend claude --access readonly
+worker-control.sh init codex-ro-01 --backend codex --access readonly
+```
+
+which produces `claude-readonly` or `codex-readonly` respectively. A Codex workspace-write Worker advertises `codex-readonly,codex-workspace-write`.
+
+Existing Worker env files are not rewritten during upgrade, so previously readonly instances remain readonly until explicitly reconfigured.
 
 `*-workspace-write` allows only the assigned WorkAttempt Workspace to be mounted read-write. The task container root filesystem and credential/config mounts remain read-only. Claude write mode allows `Read,Glob,Grep,Edit,Write` but not Bash; Codex uses `--sandbox workspace-write`. Verification still runs in a separate read-only/no-network container.
 
@@ -250,11 +244,11 @@ A typical host may run:
 ```text
 claude-01
   EXPERT_EXECUTOR_BACKEND=claude
-  EXPERT_RUNTIME_PROFILES=claude-readonly
+  EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
 
 codex-01
   EXPERT_EXECUTOR_BACKEND=codex
-  EXPERT_RUNTIME_PROFILES=codex-readonly
+  EXPERT_RUNTIME_PROFILES=codex-readonly,codex-workspace-write
 ```
 
 They share the Runtime and Docker Engine but use separate instance configs, credentials, repository roots, logs, and process state.

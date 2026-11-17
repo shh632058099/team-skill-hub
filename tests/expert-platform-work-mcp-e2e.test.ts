@@ -63,6 +63,7 @@ async function callMcpWithoutSessionHeader(
   id: number,
   name: string,
   args: Record<string, unknown>,
+  client = "codex-proof-test",
 ): Promise<Record<string, any>> {
   const response = await fetch(url, {
     method: "POST",
@@ -70,7 +71,7 @@ async function callMcpWithoutSessionHeader(
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
       "x-skill-hub-api-key": apiKey,
-      "x-skill-hub-client": "codex-proof-test",
+      "x-skill-hub-client": client,
     },
     body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
   });
@@ -231,6 +232,27 @@ test("MCP Work API drives durable work through review, rework, authorization and
         `missing MCP tool ${name}`,
       );
     }
+
+    await assert.rejects(
+      () =>
+        callMcpWithoutSessionHeader(
+          mcpUrl,
+          apiKey,
+          900,
+          "submit_work",
+          {
+            title: "Managed client without hook binding",
+            description: "Must fail closed instead of creating an unbound Work",
+            idempotencyKey: "managed-client-unbound",
+            expertId: "ota",
+            routingMode: "explicit",
+            repositoryId: "ota-repo",
+            deploymentId: "ota-default",
+          },
+          "claude-code_2.1.326 (sdk-cli)",
+        ),
+      /CLIENT_SESSION_BINDING_REQUIRED/,
+    );
 
     const signedSessionId = "11111111-1111-4111-8111-111111111111";
     const signedIdempotencyKey = "mcp-signed-session-work";

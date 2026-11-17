@@ -108,6 +108,10 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /验证步骤/);
     assert.match(html, /从表单更新 JSON/);
     assert.match(html, /由 Deployment 决定（推荐）/);
+    assert.match(html, /执行权限/);
+    assert.match(html, /Workspace 可写/);
+    assert.match(html, /实际 Runtime Profile/);
+    assert.match(html, /value="claude-workspace-write"/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
@@ -197,11 +201,49 @@ test("Admin expert configuration UI manages definitions and execution configurat
         expertId: "ota",
         repositoryIds: ["product-a-ota"],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: true,
       }),
     });
     assert.equal(createdDeployment.status, 201);
+
+    const rejectedUnknownRuntimeProfile = await fetch(base + "/admin/api/expert-config/deployments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "bad-runtime-profile",
+        expertId: "ota",
+        repositoryIds: ["product-a-ota"],
+        principals: ["team-a"],
+        runtimeProfile: "linux-ota",
+        active: true,
+      }),
+    });
+    assert.equal(rejectedUnknownRuntimeProfile.status, 400);
+
+    const rejectedBackendMismatch = await fetch(base + "/admin/api/expert-config/deployments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "bad-runtime-backend",
+        expertId: "ota",
+        repositoryIds: ["product-a-ota"],
+        principals: ["team-a"],
+        runtimeProfile: "claude-workspace-write",
+        executor: {
+          backend: "codex",
+          modelConfig: {
+            providerId: "router",
+            model: "test-model",
+            baseUrl: "https://router.example/v1",
+            wireApi: "responses",
+            allowedEnvNames: ["OPENAI_API_KEY"],
+          },
+        },
+        active: true,
+      }),
+    });
+    assert.equal(rejectedBackendMismatch.status, 400);
 
     const createdUrlDeployment = await fetch(base + "/admin/api/expert-config/deployments", {
       method: "POST",
@@ -244,7 +286,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
           },
         ],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: true,
       }),
     });
@@ -285,7 +327,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
           },
         ],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: true,
       }),
     });
@@ -326,7 +368,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
           },
         ],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: true,
       }),
     });
@@ -365,7 +407,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
           },
         ],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: true,
       }),
     });
@@ -383,7 +425,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
         expertId: "ota",
         repositories: [{ url: "https://127.0.0.1/private.git", branch: "main" }],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: true,
       }),
     });
@@ -397,7 +439,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
         expertId: "ota",
         repositoryIds: ["product-a-ota"],
         principals: ["team-a"],
-        runtimeProfile: "linux-ota",
+        runtimeProfile: "claude-workspace-write",
         active: false,
       }),
     });
@@ -413,7 +455,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
       deployment: { principals: string[]; runtimeProfile: string; active: boolean };
     };
     assert.deepEqual(principalsOnlyBody.deployment.principals, []);
-    assert.equal(principalsOnlyBody.deployment.runtimeProfile, "linux-ota");
+    assert.equal(principalsOnlyBody.deployment.runtimeProfile, "claude-workspace-write");
     assert.equal(principalsOnlyBody.deployment.active, false);
 
     const enrolledWorker = await fetch(base + "/admin/api/expert-workers", {
@@ -714,7 +756,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.deepEqual(reconciledWork.verification.requiredEvidence, ["expert_result"]);
     assert.equal(Array.isArray(reconciledWork.verification.requiredSteps), true);
     assert.equal(Array.isArray(reconciledWork.verification.results), true);
-    assert.deepEqual(reconciledWork.runtime, { requiredProfile: null, effectiveProfile: "linux-ota" });
+    assert.deepEqual(reconciledWork.runtime, { requiredProfile: null, effectiveProfile: "claude-workspace-write" });
     assert.equal(reconciledWork.workspaceChangeSummary, null);
     assert.equal(Array.isArray(reconciledWork.reviews), true);
     assert.equal(Array.isArray(reconciledWork.approvals), true);
