@@ -77,6 +77,8 @@ export interface WorkSubmission {
   sourceScope?: string;
   sourceRef?: string;
   sourceUrl?: string;
+  sourceRequestId?: string;
+  sourceRequestSlot?: string;
   title: string;
   description: string;
   workflowId?: string;
@@ -95,6 +97,8 @@ export interface WorkItemRecord {
   sourceScope: string | null;
   sourceRef: string | null;
   sourceUrl: string | null;
+  sourceRequestId: string | null;
+  sourceRequestSlot: string | null;
   title: string;
   description: string;
   status: WorkStatus;
@@ -124,7 +128,7 @@ export interface WorkItemRecord {
   blockedByType: string | null;
   blockedByRef: string | null;
   reusedExistingWork?: boolean;
-  deduplicationReason?: "idempotency_key" | "source_identity";
+  deduplicationReason?: "idempotency_key" | "same_source_request" | "source_identity";
 }
 
 export interface WorkOrchestrationClaim {
@@ -499,6 +503,8 @@ export class WorkOrchestrationStore {
         "  source_scope TEXT,",
         "  source_ref TEXT,",
         "  source_url TEXT,",
+        "  source_request_id TEXT,",
+        "  source_request_slot TEXT,",
         "  title TEXT NOT NULL,",
         "  description TEXT NOT NULL,",
         "  status TEXT NOT NULL CHECK(status IN ('queued','running','blocked','waiting_review','rework','completed','failed','cancelled')),",
@@ -533,6 +539,7 @@ export class WorkOrchestrationStore {
         "  ON work_items(principal_id,scope,source_type,source_scope,source_ref)",
         "  WHERE source_scope IS NOT NULL AND source_ref IS NOT NULL;",
         "CREATE INDEX IF NOT EXISTS idx_work_status_due ON work_items(status,next_action_at);",
+
         "CREATE TABLE IF NOT EXISTS work_attempts (",
         "  work_attempt_id TEXT PRIMARY KEY,",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
@@ -675,6 +682,12 @@ export class WorkOrchestrationStore {
     if (!workColumns.has("resume_condition")) this.db.exec("ALTER TABLE work_items ADD COLUMN resume_condition TEXT");
     if (!workColumns.has("blocked_by_type")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_by_type TEXT");
     if (!workColumns.has("blocked_by_ref")) this.db.exec("ALTER TABLE work_items ADD COLUMN blocked_by_ref TEXT");
+    if (!workColumns.has("source_request_id")) this.db.exec("ALTER TABLE work_items ADD COLUMN source_request_id TEXT");
+    if (!workColumns.has("source_request_slot"))
+      this.db.exec("ALTER TABLE work_items ADD COLUMN source_request_slot TEXT");
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_work_source_request ON work_items(principal_id,scope,source_type,source_scope,source_request_id,source_request_slot,status)",
+    );
     const attemptColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_attempts)").all() as Array<{ name: string }>).map(
         (column) => column.name,
@@ -1197,10 +1210,15 @@ export class WorkOrchestrationStore {
     const sourceScope = optionalText(input.sourceScope, 500);
     const sourceRef = optionalText(input.sourceRef, 500);
     const sourceUrl = optionalText(input.sourceUrl, 2_000);
+    const sourceRequestId = optionalText(input.sourceRequestId, 100);
+    const sourceRequestSlot = optionalText(input.sourceRequestSlot, 1_000);
     if (!principalId || !scope || !idempotencyKey || !sourceType || !title || !description || !Number.isFinite(now)) {
       throw new Error("INVALID_WORK_REQUEST");
     }
     if ((sourceScope === null) !== (sourceRef === null)) throw new Error("INVALID_WORK_SOURCE_IDENTITY");
+    if ((sourceRequestId === null) !== (sourceRequestSlot === null)) throw new Error("INVALID_WORK_SOURCE_REQUEST");
+    if (sourceRequestId !== null && !/^srq_[a-f0-9]{64}$/.test(sourceRequestId))
+      throw new Error("INVALID_WORK_SOURCE_REQUEST");
     if (input.priority !== undefined && !Number.isSafeInteger(input.priority)) throw new Error("INVALID_WORK_REQUEST");
     const repositoryDefault = input.repositoryId?.trim()
       ? this.getRepositoryWorkflowDefault(input.repositoryId.trim())
@@ -1221,6 +1239,26 @@ export class WorkOrchestrationStore {
           reusedExistingWork: true,
           deduplicationReason: "idempotency_key",
         };
+      }
+
+      if (sourceScope && sourceRequestId && sourceRequestSlot) {
+        const requestExisting = this.db
+          .prepare(
+            `SELECT * FROM work_items
+             WHERE principal_id=? AND scope=? AND source_type=? AND source_scope=?
+               AND source_request_id=? AND source_request_slot=?
+               AND status NOT IN ('completed','failed','cancelled')
+             ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+          )
+          .get(principalId, scope, sourceType, sourceScope, sourceRequestId, sourceRequestSlot) as Row | undefined;
+        if (requestExisting) {
+          this.db.exec("COMMIT");
+          return {
+            ...this.fromWorkRow(requestExisting),
+            reusedExistingWork: true,
+            deduplicationReason: "same_source_request",
+          };
+        }
       }
 
       if (sourceScope && sourceRef) {
@@ -1244,9 +1282,9 @@ export class WorkOrchestrationStore {
         .prepare(
           [
             "INSERT INTO work_items(",
-            "work_item_id,principal_id,scope,idempotency_key,request_digest,source_type,source_scope,source_ref,source_url,",
-            "title,description,status,state_revision,workflow_id,workflow_version,orchestration_epoch,priority,requested_expert_id,requested_deployment_id,repository_id,created_at,updated_at",
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,1,?,?,?,?,?,?)",
+            "work_item_id,principal_id,scope,idempotency_key,request_digest,source_type,source_scope,source_ref,source_url,source_request_id,source_request_slot," +
+              "title,description,status,state_revision,workflow_id,workflow_version,orchestration_epoch,priority,requested_expert_id,requested_deployment_id,repository_id,created_at,updated_at",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,1,?,?,?,?,?,?)",
           ].join(" "),
         )
         .run(
@@ -1259,6 +1297,8 @@ export class WorkOrchestrationStore {
           sourceScope,
           sourceRef,
           sourceUrl,
+          sourceRequestId,
+          sourceRequestSlot,
           title,
           description,
           workflow.workflowId,
@@ -2909,6 +2949,8 @@ export class WorkOrchestrationStore {
       sourceScope: row.source_scope == null ? null : String(row.source_scope),
       sourceRef: row.source_ref == null ? null : String(row.source_ref),
       sourceUrl: row.source_url == null ? null : String(row.source_url),
+      sourceRequestId: row.source_request_id == null ? null : String(row.source_request_id),
+      sourceRequestSlot: row.source_request_slot == null ? null : String(row.source_request_slot),
       title: String(row.title),
       description: String(row.description),
       status: String(row.status) as WorkStatus,

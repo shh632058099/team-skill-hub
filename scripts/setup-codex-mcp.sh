@@ -243,6 +243,7 @@ if os.environ.get("SERVER_NAME") == "teamSkillHub":
         handlers=[h for h in (group.get("hooks",[]) or []) if "expert-session-hook" not in str(h.get("command","")) and "expert-session-hook" not in str(h.get("commandWindows",""))]
         if handlers:
             g=dict(group);g["hooks"]=handlers;kept.append(g)
+    kept.append({"hooks":[{"type":"command","command":f'python3 "{session_py}"',"commandWindows":f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{session_ps}"',"async":False,"timeout":2}]})
     hooks["UserPromptSubmit"]=kept
 client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
 kept=[]
@@ -264,6 +265,7 @@ for(const event of events){const handler={type:"command",command:`bash "${proces
 if(process.env.SERVER_NAME==="teamSkillHub"){
  const kept=[];
  for(const group of (root.hooks.UserPromptSubmit||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.commandWindows||"").includes("expert-session-hook"));if(hs.length)kept.push({...group,hooks:hs})}
+ kept.push({hooks:[{type:"command",command:'python3 "'+process.env.SESSION_HOOK_PY.replaceAll("\\","/")+'"',commandWindows:'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+process.env.SESSION_HOOK_PS+'"',async:false,timeout:2}]});
  root.hooks.UserPromptSubmit=kept;
 }const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client")&&!String(h.commandWindows||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client codex`,timeout:2}]});root.hooks.SessionStart=sk;
 root.description ||= "Codex lifecycle hooks including Team Skill Hub client events.";

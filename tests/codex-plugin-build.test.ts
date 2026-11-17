@@ -58,13 +58,20 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.equal(hooks.hooks.PreToolUse[1].matcher, "^mcp__[A-Za-z0-9_-]+__(?:submit_work|update_work_source)$");
     assert.equal(hooks.hooks.PreToolUse[1].hooks[0].async, false);
     assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /codex\/expert-session-hook\.py/);
+    assert.ok(
+      hooks.hooks.UserPromptSubmit.some((group: any) =>
+        (group.hooks ?? []).some(
+          (hook: any) => /codex\/expert-session-hook\.py/.test(String(hook.command ?? "")) && hook.async === false,
+        ),
+      ),
+    );
     await stat(path.join(out, "hooks", "codex", "expert-session-hook.py"));
     await stat(path.join(out, "hooks", "codex", "expert-session-hook.ps1"));
 
     const conf = await readFile(path.join(out, "hooks", "team-skill-hub.conf"), "utf8");
     assert.match(conf, /event_url=https:\/\/hub\.example\.test\/client-events/);
     assert.match(conf, /api_key_env=TEST_TEAM_HUB_TOKEN/);
-    assert.match(conf, /runtime_version=1\.5\.4/);
+    assert.match(conf, /runtime_version=1\.5\.5/);
     assert.match(conf, /hook_schema_version=1/);
 
     const catalog = JSON.parse(

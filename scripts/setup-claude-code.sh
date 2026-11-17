@@ -158,6 +158,7 @@ if os.environ["SERVER_NAME"] == "teamSkillHub":
         handlers=[h for h in (group.get("hooks",[]) or []) if "team-skill-hub-expert-session.py" not in str(h.get("command",""))]
         if handlers:
             copy=dict(group); copy["hooks"]=handlers; prompt_kept.append(copy)
+    prompt_kept.append({"hooks":[{"type":"command","command":command,"timeout":2}]})
     hooks["UserPromptSubmit"]=prompt_kept
 client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
 kept=[]
@@ -183,6 +184,9 @@ const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[
 if(server==="teamSkillHub"){
  const groups=[];for(const group of (root.hooks.PreToolUse||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.command||"").includes("team-skill-hub-expert-session"));if(hs.length)groups.push({...group,hooks:hs})}
  groups.push({matcher:"^mcp__teamSkillHub__(submit_work|update_work_source)$",hooks:[{type:"command",command:`python3 "${process.env.HOOKS_DIR.replaceAll("\\","/")}/team-skill-hub-expert-session.py"`,timeout:5}]});root.hooks.PreToolUse=groups;
+ const sessionCommand=groups[groups.length-1].hooks[0].command;
+ const prompt=[];for(const group of (root.hooks.UserPromptSubmit||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.command||"").includes("team-skill-hub-expert-session"));if(hs.length)prompt.push({...group,hooks:hs})}
+ prompt.push({hooks:[{type:"command",command:sessionCommand,timeout:2}]});root.hooks.UserPromptSubmit=prompt;
 }
 const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});sk.push({hooks:[{type:"command",command:`"${client}" session-start-display --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");

@@ -224,6 +224,7 @@ if ($ServerName -eq 'teamSkillHub') {
     $handlers = @($group['hooks']) | Where-Object { -not ([string]$_['command'] -like '*team-skill-hub-expert-session*') }
     if ($handlers.Count -gt 0) { $copy=@{}; foreach($key in $group.Keys){$copy[$key]=$group[$key]}; $copy['hooks']=@($handlers); $promptKept += ,$copy }
   }
+  $promptKept += ,@{ hooks=@(@{type='command';command=$sessionCommand;timeout=2}) }
   $root['hooks']['UserPromptSubmit'] = @($promptKept)
 }
 

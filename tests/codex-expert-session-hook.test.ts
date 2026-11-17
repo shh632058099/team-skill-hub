@@ -73,7 +73,7 @@ test("Codex deprecated ExpertTask submission tools are not intercepted", async (
   }
 });
 
-test("Codex UserPromptSubmit no longer maintains legacy ExpertTask request state", async () => {
+test("Codex UserPromptSubmit persists Work source request state", async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), "codex-request-state-disabled-"));
   const session = "01a18fc5-3678-7ac2-920f-de4a707e5a1b";
   try {
@@ -91,6 +91,9 @@ test("Codex UserPromptSubmit no longer maintains legacy ExpertTask request state
     });
     assert.equal(code, 0);
     assert.equal(output, "");
+    const state = JSON.parse(await readFile(path.join(temp, session + ".json"), "utf8"));
+    assert.equal(state.session_id, session);
+    assert.match(state.source_request_id, /^srq_[a-f0-9]{64}$/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -113,6 +116,20 @@ test("Codex hook signs submit_work and update_work_source with the native sessio
     return JSON.parse(output).hookSpecificOutput;
   };
   try {
+    {
+      const prompt = spawn("python3", ["scripts/codex/expert-session-hook.py"], {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const code = await new Promise<number>((resolve, reject) => {
+        prompt.on("error", reject);
+        prompt.on("close", resolve);
+        prompt.stdin.end(
+          JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: session, turn_id: "turn-1" }),
+        );
+      });
+      assert.equal(code, 0);
+    }
     for (const [tool, input] of [
       ["mcp__teamSkillHub__submit_work", { title: "x", description: "y", idempotencyKey: "work-key" }],
       [
@@ -124,6 +141,8 @@ test("Codex hook signs submit_work and update_work_source with the native sessio
       assert.equal(result.permissionDecision, "allow");
       assert.equal(result.updatedInput.clientSessionId, session);
       assert.match(result.updatedInput.clientSessionProof, /^\d{13}\.[a-f0-9]{64}$/);
+      if (tool.endsWith("__submit_work")) assert.match(result.updatedInput.sourceRequestId, /^srq_[a-f0-9]{64}$/);
+      else assert.equal(result.updatedInput.sourceRequestId, undefined);
     }
   } finally {
     await rm(temp, { recursive: true, force: true });

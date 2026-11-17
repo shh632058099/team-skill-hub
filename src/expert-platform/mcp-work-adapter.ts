@@ -14,11 +14,21 @@ export interface McpWorkContext {
   client: string;
   sessionId?: string;
   trustedSession: boolean;
+  sourceRequestId?: string;
+  sourceRequestSlot?: string;
 }
 
 export interface McpWorkSubmitInput extends Omit<
   SubmitWorkInput,
-  "principalId" | "scope" | "sourceType" | "sourceScope" | "sourceRef" | "sourceSessionId" | "sourceClient"
+  | "principalId"
+  | "scope"
+  | "sourceType"
+  | "sourceScope"
+  | "sourceRef"
+  | "sourceSessionId"
+  | "sourceClient"
+  | "sourceRequestId"
+  | "sourceRequestSlot"
 > {}
 
 export interface McpSourceUpdateInput {
@@ -67,6 +77,9 @@ export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, Mcp
       ...input,
       identity: { sourceType: "mcp", sourceScope, sourceRef },
       ...(context.trustedSession && context.sessionId ? { sourceSessionId: context.sessionId } : {}),
+      ...(context.sourceRequestId && context.sourceRequestSlot
+        ? { sourceRequestId: context.sourceRequestId, sourceRequestSlot: context.sourceRequestSlot }
+        : {}),
       sourceClient: context.client,
       observation: {
         state: "active",
@@ -112,7 +125,13 @@ export class McpWorkAdapter implements WorkSourceAdapter<McpWorkSubmitInput, Mcp
     const detail = this.ingestion.submit(
       this,
       input,
-      { client: context.client, sessionId: context.sessionId, trustedSession: context.trustedSession },
+      {
+        client: context.client,
+        sessionId: context.sessionId,
+        trustedSession: context.trustedSession,
+        sourceRequestId: context.sourceRequestId,
+        sourceRequestSlot: context.sourceRequestSlot,
+      },
       { principalId: context.principalId, scope: context.scope },
       now,
     );

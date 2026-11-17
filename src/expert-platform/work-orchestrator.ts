@@ -342,7 +342,10 @@ export class WorkOrchestrator {
 
   stageWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
     const work = this.workStore.createOrReuseWork(input, now);
-    return this.detail(work.workItemId, input.principalId, input.scope);
+    const detail = this.detail(work.workItemId, input.principalId, input.scope);
+    if (work.reusedExistingWork !== undefined) detail.work.reusedExistingWork = work.reusedExistingWork;
+    if (work.deduplicationReason !== undefined) detail.work.deduplicationReason = work.deduplicationReason;
+    return detail;
   }
 
   submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {

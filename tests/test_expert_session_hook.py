@@ -31,6 +31,11 @@ class SessionHookTests(unittest.TestCase):
     def test_work_tools_get_native_session_and_proof_bound_to_correct_key(self):
         with tempfile.TemporaryDirectory() as state_dir:
             env = dict(os.environ, TEAM_SKILL_HUB_REQUEST_STATE_DIR=state_dir, TEAM_SKILL_HUB_API_KEY='hook-secret')
+            prompt = invoke(
+                {'hook_event_name': 'UserPromptSubmit', 'session_id': SESSION, 'prompt_id': 'turn-1'},
+                env,
+            )
+            self.assertEqual(prompt.returncode, 0, prompt.stderr)
             for tool_name, tool_input in (
                 ('submit_work', {'title': 'x', 'description': 'y', 'idempotencyKey': 'work-key'}),
                 ('update_work_source', {'workItemId': '11111111-1111-4111-8111-111111111111', 'state': 'terminal'}),
@@ -42,6 +47,10 @@ class SessionHookTests(unittest.TestCase):
                 updated = json.loads(p.stdout)['hookSpecificOutput']['updatedInput']
                 self.assertEqual(updated['clientSessionId'], SESSION)
                 self.assertRegex(updated['clientSessionProof'], r'^\d{13}\.[a-f0-9]{64}$')
+                if tool_name == 'submit_work':
+                    self.assertRegex(updated['sourceRequestId'], r'^srq_[a-f0-9]{64}$')
+                else:
+                    self.assertNotIn('sourceRequestId', updated)
 
     def test_deprecated_expert_submit_tools_are_not_intercepted(self):
         for name in ('submit_expert_task', 'submit_expert_task_auto'):
@@ -50,8 +59,27 @@ class SessionHookTests(unittest.TestCase):
                     'tool_name': f'mcp__teamSkillHub__{name}', 'session_id': SESSION,
                     'tool_input': {'problem': 'legacy', 'idempotencyKey': 'k'}}))
 
-    def test_user_prompt_and_other_tools_are_untouched(self):
-        self.assertIsNone(apply({'hook_event_name': 'UserPromptSubmit', 'session_id': SESSION, 'prompt_id': 'turn-1'}))
+    def test_user_prompt_persists_turn_identity_and_other_tools_are_untouched(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            env = dict(os.environ, TEAM_SKILL_HUB_REQUEST_STATE_DIR=state_dir, TEAM_SKILL_HUB_API_KEY='hook-secret')
+            first = invoke({'hook_event_name': 'UserPromptSubmit', 'session_id': SESSION, 'prompt_id': 'turn-1'}, env)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            state = json.loads((Path(state_dir) / f'{SESSION}.json').read_text())
+            first_id = state['source_request_id']
+            self.assertRegex(first_id, r'^srq_[a-f0-9]{64}$')
+
+            submit = invoke(
+                {'hook_event_name': 'PreToolUse', 'tool_name': 'mcp__teamSkillHub__submit_work',
+                 'session_id': SESSION, 'tool_input': {'title': 'x', 'description': 'y', 'idempotencyKey': 'one'}},
+                env,
+            )
+            self.assertEqual(json.loads(submit.stdout)['hookSpecificOutput']['updatedInput']['sourceRequestId'], first_id)
+
+            second = invoke({'hook_event_name': 'UserPromptSubmit', 'session_id': SESSION, 'prompt_id': 'turn-2'}, env)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            second_id = json.loads((Path(state_dir) / f'{SESSION}.json').read_text())['source_request_id']
+            self.assertNotEqual(second_id, first_id)
+
         for tool in ('Bash', 'mcp__teamSkillHub__wait_work', 'mcp__other__submit_work'):
             self.assertIsNone(apply({'hook_event_name':'PreToolUse','tool_name': tool,
                 'session_id': SESSION,'tool_input': {}}))

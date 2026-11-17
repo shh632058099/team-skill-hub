@@ -238,19 +238,24 @@ export async function applyManagedConfig(context) {
     const session = commandHook(`${sessionLauncher} session-start --client codex`, `${windowsLauncher} session-start --client codex`);
     mergeHook(hooks, "SessionStart", "team-skill-hub-client", session);
     const codexHooksDir = path.join(codex.config_home, "hooks");
+    const codexSessionHook = {
+      type: "command",
+      command: `python3 "${path.join(codexHooksDir, "expert-session-hook.py").replaceAll("\\", "/")}"`,
+      commandWindows: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.win32.join(path.win32.normalize(codex.config_home), "hooks", "expert-session-hook.ps1")}"`,
+      async: false,
+      timeout: 5,
+    };
     replaceManagedToolHook(
       hooks,
       "PreToolUse",
       ["expert-session-hook", "team-skill-hub-expert-session"],
       `^mcp__${codex.server_name}__(submit_work|update_work_source)$`,
-      {
-        type: "command",
-        command: `python3 "${path.join(codexHooksDir, "expert-session-hook.py").replaceAll("\\", "/")}"`,
-        commandWindows: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.win32.join(path.win32.normalize(codex.config_home), "hooks", "expert-session-hook.ps1")}"`,
-        timeout: 5,
-      },
+      codexSessionHook,
     );
-    removeManagedHooks(hooks, "UserPromptSubmit", ["expert-session-hook", "team-skill-hub-expert-session"]);
+    mergeHook(hooks, "UserPromptSubmit", "expert-session-hook", {
+      ...codexSessionHook,
+      timeout: 2,
+    });
     await writeAtomic(configFile, config);
     await writeAtomic(agentsFile, agents);
     await writeAtomic(hooksFile, JSON.stringify(hooks, null, 2) + "\n");
@@ -281,6 +286,12 @@ export async function applyManagedConfig(context) {
         matcher: "^mcp__teamSkillHub__(submit_work|update_work_source)$",
         hooks: [{ type: "command", command, timeout: 5 }],
       });
+      mergeHook(claudeSettings, "UserPromptSubmit", "team-skill-hub-expert-session", {
+        type: "command",
+        command,
+        async: false,
+        timeout: 2,
+      });
     }
     await writeAtomic(settingsFile, JSON.stringify(claudeSettings, null, 2) + "\n");
     await writeAtomic(mdFile, await renderGuidance(await readText(mdFile), claude.server_name, "claude", context.releaseRoot, clientRoot));
@@ -310,12 +321,14 @@ export async function selfCheckManagedConfig(context) {
     if (managedPreTool.length !== 1 || managedPreTool[0]?.matcher !== expectedMatcher) {
       throw new Error("Codex Work hook self-check failed");
     }
-    const legacyPrompt = (hooks.hooks?.UserPromptSubmit || []).some((group) =>
+    const managedPrompt = (hooks.hooks?.UserPromptSubmit || []).filter((group) =>
       (group.hooks || []).some((hook) =>
         [String(hook.command || ""), String(hook.commandWindows || "")].some((command) => command.includes("expert-session-hook")),
       ),
     );
-    if (legacyPrompt) throw new Error("Codex legacy prompt hook self-check failed");
+    if (managedPrompt.length !== 1 || managedPrompt[0]?.hooks?.length !== 1 || managedPrompt[0]?.hooks?.[0]?.async !== false) {
+      throw new Error("Codex source-request prompt hook self-check failed");
+    }
     if (context.releaseRoot) {
       const hookFile = path.join(
         state.clients.codex.config_home,
@@ -342,10 +355,12 @@ export async function selfCheckManagedConfig(context) {
       ) {
         throw new Error("Claude Work hook self-check failed");
       }
-      const legacyPrompt = (settings.hooks?.UserPromptSubmit || []).some((group) =>
+      const managedPrompt = (settings.hooks?.UserPromptSubmit || []).filter((group) =>
         (group.hooks || []).some((hook) => String(hook.command || "").includes("team-skill-hub-expert-session")),
       );
-      if (legacyPrompt) throw new Error("Claude legacy prompt hook self-check failed");
+      if (managedPrompt.length !== 1 || managedPrompt[0]?.hooks?.length !== 1 || managedPrompt[0]?.hooks?.[0]?.async !== false) {
+        throw new Error("Claude source-request prompt hook self-check failed");
+      }
       if (context.releaseRoot) {
         const hookFile = path.join(
           state.clients.claude.config_home,

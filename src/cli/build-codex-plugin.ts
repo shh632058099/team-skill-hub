@@ -107,6 +107,19 @@ async function main(): Promise<void> {
     };
     hooks[event] = [{ hooks: [handler] }];
   }
+  hooks.UserPromptSubmit!.push({
+    hooks: [
+      {
+        type: "command",
+        command: 'python3 "$PLUGIN_ROOT/hooks/codex/expert-session-hook.py"',
+        commandWindows:
+          'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:PLUGIN_ROOT\\hooks\\codex\\expert-session-hook.ps1"',
+        async: false,
+        timeout: 2,
+      },
+    ],
+  });
+
   for (const event of ["PreToolUse", "PreCompact", "PostCompact"]) {
     const handler = {
       type: "command",

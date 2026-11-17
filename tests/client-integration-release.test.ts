@@ -14,10 +14,10 @@ test("loads canonical client integration release metadata", async () => {
   assert.ok(release.hookSchemaVersion > 0);
 });
 
-test("work-first submission hook ships as client integration v18 runtime 1.5.4", async () => {
+test("work source-request dedup hook ships as client integration v19 runtime 1.5.5", async () => {
   const release = await loadClientIntegrationRelease();
-  assert.equal(release.version, 18);
-  assert.equal(release.hookRuntimeVersion, "1.5.4");
+  assert.equal(release.version, 19);
+  assert.equal(release.hookRuntimeVersion, "1.5.5");
 });
 
 test("Windows Work hooks force UTF-8 stdin and stdout before parsing JSON", async () => {

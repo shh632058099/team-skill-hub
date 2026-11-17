@@ -344,6 +344,41 @@ test("source observation schema is added to existing runtime databases without r
   }
 });
 
+test("source request dedup columns and index migrate after legacy work_items schema", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "source-request-schema-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    initial.close();
+
+    const legacy = new DatabaseSync(file);
+    try {
+      legacy.exec("DROP INDEX IF EXISTS idx_work_source_request;");
+      legacy.exec("ALTER TABLE work_items DROP COLUMN source_request_slot;");
+      legacy.exec("ALTER TABLE work_items DROP COLUMN source_request_id;");
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = new WorkOrchestrationStore(file);
+    const db = new DatabaseSync(file);
+    try {
+      const columns = db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>;
+      assert.ok(columns.some((column) => column.name === "source_request_id"));
+      assert.ok(columns.some((column) => column.name === "source_request_slot"));
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_work_source_request'")
+        .all();
+      assert.equal(indexes.length, 1);
+    } finally {
+      db.close();
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("legacy single source control capability migrates into multi-token storage", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "source-control-migration-"));
   const file = path.join(dir, "runtime.db");
@@ -742,6 +777,64 @@ test("stable source identity reuses one work item across delivery retries", () =
 
     assert.equal(again.workItemId, first.workItemId);
     assert.equal(again.deduplicationReason, "source_identity");
+  });
+});
+
+test("native source request reuses an active Work across regenerated idempotency keys", () => {
+  withStore((store) => {
+    const common = {
+      principalId: "alice",
+      scope: "team-a",
+      sourceType: "mcp",
+      sourceScope: "claude-code/session-1",
+      sourceRequestId: "srq_" + "a".repeat(64),
+      sourceRequestSlot: JSON.stringify(["explicit", "ota", "repo-a", "deployment-a", "feature-change"]),
+      workflowId: "code-fix-default",
+      expertId: "ota",
+      repositoryId: "repo-a",
+      deploymentId: "deployment-a",
+    };
+    const first = store.createOrReuseWork({
+      ...common,
+      idempotencyKey: "work-first",
+      sourceRef: "work-first",
+      title: "Fix OTA rollback",
+      description: "First phrasing of the request",
+    });
+    const replay = store.createOrReuseWork({
+      ...common,
+      idempotencyKey: "work-second",
+      sourceRef: "work-second",
+      title: "Repair rollback path",
+      description: "Same native user turn, rephrased by the model",
+    });
+
+    assert.equal(replay.workItemId, first.workItemId);
+    assert.equal(replay.reusedExistingWork, true);
+    assert.equal(replay.deduplicationReason, "same_source_request");
+    assert.equal(replay.sourceRequestId, common.sourceRequestId);
+    assert.equal(replay.sourceRequestSlot, common.sourceRequestSlot);
+
+    const otherSlot = store.createOrReuseWork({
+      ...common,
+      idempotencyKey: "work-other-slot",
+      sourceRef: "work-other-slot",
+      sourceRequestSlot: JSON.stringify(["explicit", "ota", "repo-a", "deployment-b", "feature-change"]),
+      deploymentId: "deployment-b",
+      title: "A distinct explicit delegation",
+      description: "Same turn but another deployment slot",
+    });
+    assert.notEqual(otherSlot.workItemId, first.workItemId);
+
+    const nextTurn = store.createOrReuseWork({
+      ...common,
+      idempotencyKey: "work-next-turn",
+      sourceRef: "work-next-turn",
+      sourceRequestId: "srq_" + "b".repeat(64),
+      title: "A later user request",
+      description: "Same slot in a different native user turn",
+    });
+    assert.notEqual(nextTurn.workItemId, first.workItemId);
   });
 });
 

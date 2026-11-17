@@ -184,7 +184,7 @@ test("managed config upgrade migrates legacy ExpertTask hooks to Work-first hook
   }
   await writeFile(
     path.join(releaseRoot, "release.json"),
-    JSON.stringify({ hookRuntimeVersion: "1.5.4", hookSchemaVersion: 1 }),
+    JSON.stringify({ hookRuntimeVersion: "1.5.5", hookSchemaVersion: 1 }),
   );
 
   const { applyManagedConfig, selfCheckManagedConfig } = await import(
@@ -213,26 +213,24 @@ test("managed config upgrade migrates legacy ExpertTask hooks to Work-first hook
   );
   assert.equal(codexPre.length, 1);
   assert.equal(codexPre[0].matcher, "^mcp__teamSkillHub__(submit_work|update_work_source)$");
-  assert.equal(
-    (codexHooks.hooks.UserPromptSubmit ?? []).some((group: { hooks?: Array<{ command?: string }> }) =>
+  const codexPrompt = (codexHooks.hooks.UserPromptSubmit ?? []).filter(
+    (group: { hooks?: Array<{ command?: string; async?: boolean }> }) =>
       (group.hooks ?? []).some((hook) => hook.command?.includes("expert-session-hook")),
-    ),
-    false,
   );
-
+  assert.equal(codexPrompt.length, 1);
+  assert.equal(codexPrompt[0].hooks[0].async, false);
   const claudeSettings = JSON.parse(await readFile(path.join(claude, "settings.json"), "utf8"));
   const claudePre = claudeSettings.hooks.PreToolUse.filter((group: { matcher?: string }) =>
     group.matcher?.includes("submit_work"),
   );
   assert.equal(claudePre.length, 1);
   assert.equal(claudePre[0].matcher, "^mcp__teamSkillHub__(submit_work|update_work_source)$");
-  assert.equal(
-    (claudeSettings.hooks.UserPromptSubmit ?? []).some((group: { hooks?: Array<{ command?: string }> }) =>
+  const claudePrompt = (claudeSettings.hooks.UserPromptSubmit ?? []).filter(
+    (group: { hooks?: Array<{ command?: string; async?: boolean }> }) =>
       (group.hooks ?? []).some((hook) => hook.command?.includes("team-skill-hub-expert-session")),
-    ),
-    false,
   );
-
+  assert.equal(claudePrompt.length, 1);
+  assert.equal(claudePrompt[0].hooks[0].async, false);
   const installedClaudeHook = await readFile(path.join(claude, "hooks", "team-skill-hub-expert-session.py"), "utf8");
   const installedCodexHook = await readFile(path.join(codex, "hooks", "expert-session-hook.py"), "utf8");
   for (const source of [installedClaudeHook, installedCodexHook]) {

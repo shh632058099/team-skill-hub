@@ -233,11 +233,14 @@ foreach ($Event in $Events) {
     $TeamGroup = [ordered]@{ hooks = @($TeamHandler) }
     if ($Event -in @("PreToolUse","PreCompact","PostCompact")) { $TeamGroup.matcher = "^__team_skill_hub_reserved__$" }
     $Kept += [pscustomobject]$TeamGroup
-    if ($Event -eq "PreToolUse") {
+    if ($Event -in @("PreToolUse","UserPromptSubmit")) {
         $SessionHandler = [pscustomobject]@{ type="command"; command=('python3 "' + $SessionHookPy + '"'); commandWindows=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionHookPs + '"'); async=$false; timeout=2 }
-        $Kept += [pscustomobject]@{ matcher='^mcp__[A-Za-z0-9_-]+__(?:submit_work|update_work_source)$'; hooks=@($SessionHandler) }
-    }
-    if ($null -ne $Prop) { $HooksRoot.hooks.$Event = @($Kept) }
+        if ($Event -eq "PreToolUse") {
+            $Kept += [pscustomobject]@{ matcher='^mcp__[A-Za-z0-9_-]+__(?:submit_work|update_work_source)$'; hooks=@($SessionHandler) }
+        } else {
+            $Kept += [pscustomobject]@{ hooks=@($SessionHandler) }
+        }
+    }    if ($null -ne $Prop) { $HooksRoot.hooks.$Event = @($Kept) }
     else { Add-Member -InputObject $HooksRoot.hooks -MemberType NoteProperty -Name $Event -Value @($Kept) }
 }
 $SessionKept = @()

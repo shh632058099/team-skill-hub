@@ -71,7 +71,15 @@ export class WorkSourceIngestion {
       },
       now,
     );
-    if (!sameIdentity(staged.work, normalized.identity)) throw new Error("SOURCE_ADAPTER_IDENTITY_MISMATCH");
+    if (!sameIdentity(staged.work, normalized.identity)) {
+      if (staged.work.reusedExistingWork && staged.work.deduplicationReason === "same_source_request") {
+        const reconciled = this.orchestrator.reconcileWork(staged.work.workItemId, actor.principalId, actor.scope, now);
+        reconciled.work.reusedExistingWork = true;
+        reconciled.work.deduplicationReason = "same_source_request";
+        return reconciled;
+      }
+      throw new Error("SOURCE_ADAPTER_IDENTITY_MISMATCH");
+    }
     const observation = this.store.recordSourceObservation(
       {
         workItemId: staged.work.workItemId,

@@ -249,6 +249,29 @@ function assertManagedWorkSessionBinding(client: string | undefined, effectiveSe
   }
 }
 
+function assertManagedWorkRequestBinding(
+  client: string | undefined,
+  effectiveSessionId: string | undefined,
+  trustedSourceRequest: boolean,
+): void {
+  if (!managedWorkClientRequiresBoundSession(client)) return;
+  if (!effectiveSessionId) throw new Error("CLIENT_SESSION_BINDING_REQUIRED");
+  if (!trustedSourceRequest) throw new Error("CLIENT_SOURCE_REQUEST_BINDING_REQUIRED");
+}
+
+function workSourceRequestSlot(
+  routingMode: "auto" | "explicit",
+  workflowId: string | undefined,
+  expertId: string | undefined,
+  repositoryId: string | undefined,
+  deploymentId: string | undefined,
+): string {
+  const workflow = workflowId?.trim() || null;
+  return routingMode === "explicit"
+    ? JSON.stringify(["explicit", expertId ?? null, repositoryId ?? null, deploymentId ?? null, workflow])
+    : JSON.stringify(["auto", workflow]);
+}
+
 export function createSkillHubMcpHandler(appService: SkillHubApplicationService) {
   return createMcpHandler(({ requestInfo }) => {
     const principal = appService.authenticateRequest(requestInfo?.headers);
@@ -1508,6 +1531,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 .uuid()
                 .optional()
                 .describe("Trusted client hook session UUID; do not fabricate."),
+              sourceRequestId: z
+                .string()
+                .regex(/^srq_[a-f0-9]{64}$/)
+                .optional()
+                .describe("Trusted hook-injected identity for the current native user turn; do not fabricate."),
               clientSessionProof: z
                 .string()
                 .max(100)
@@ -1526,21 +1554,41 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             deploymentId,
             priority,
             clientSessionId,
+            sourceRequestId,
             clientSessionProof,
           }) => {
             const normalizedExpertId = normalizeOptionalMcpIdentifier(expertId);
             const normalizedRepositoryId = normalizeOptionalMcpIdentifier(repositoryId);
             const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
             const explicitRouting = routingMode === "explicit";
+            const sourceRequestSlot = workSourceRequestSlot(
+              routingMode,
+              workflowId,
+              normalizedExpertId,
+              explicitRouting ? normalizedRepositoryId : undefined,
+              explicitRouting ? normalizedDeploymentId : undefined,
+            );
             const trustedClientSession = verifyClientSessionProof(
               credential,
               clientSessionId,
               idempotencyKey,
               clientSessionProof,
             );
+            const trustedSourceRequest =
+              sourceRequestId !== undefined &&
+              verifyClientSessionProof(
+                credential,
+                clientSessionId,
+                idempotencyKey,
+                clientSessionProof,
+                Date.now(),
+                sourceRequestId,
+              );
             const effectiveSessionId =
-              transportSessionId ?? sessionId ?? (trustedClientSession ? clientSessionId : undefined);
-            assertManagedWorkSessionBinding(client, effectiveSessionId);
+              transportSessionId ??
+              sessionId ??
+              (trustedClientSession || trustedSourceRequest ? clientSessionId : undefined);
+            assertManagedWorkRequestBinding(client, effectiveSessionId, trustedSourceRequest);
             const adapter = mcpWorkAdapter!;
             const submitted = adapter.submit(
               {
@@ -1562,7 +1610,9 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 scope: principal.tenantId,
                 client: client?.slice(0, 200) || "mcp",
                 ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
-                trustedSession: Boolean(transportSessionId ?? sessionId) || trustedClientSession,
+                trustedSession:
+                  Boolean(transportSessionId ?? sessionId) || trustedClientSession || trustedSourceRequest,
+                ...(trustedSourceRequest && sourceRequestId ? { sourceRequestId, sourceRequestSlot } : {}),
               },
             );
             return toolResult({

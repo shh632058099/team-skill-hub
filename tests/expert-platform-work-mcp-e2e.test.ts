@@ -41,7 +41,7 @@ async function callMcp(
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
       "x-skill-hub-api-key": apiKey,
-      "x-skill-hub-client": "claude-code-test",
+      "x-skill-hub-client": "mcp-e2e-test",
       "x-skill-hub-session-id": "mcp-e2e-session",
     },
     body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }),
@@ -254,6 +254,72 @@ test("MCP Work API drives durable work through review, rework, authorization and
       /CLIENT_SESSION_BINDING_REQUIRED/,
     );
 
+    const managedSessionId = "22222222-2222-4222-8222-222222222222";
+    const managedClient = "claude-code_2.1.326 (sdk-cli)";
+    const v1OnlyKey = "managed-v1-only";
+    const v1OnlyAt = Date.now();
+    const v1OnlyProof = `${v1OnlyAt}.${createHmac("sha256", apiKey)
+      .update(`team-skill-hub/client-session/v1\n${managedSessionId}\n${v1OnlyKey}\n${v1OnlyAt}`)
+      .digest("hex")}`;
+    await assert.rejects(
+      () =>
+        callMcpWithoutSessionHeader(
+          mcpUrl,
+          apiKey,
+          903,
+          "submit_work",
+          {
+            title: "Managed Work missing native turn identity",
+            description: "A managed client must not fall back to session-only dedup",
+            idempotencyKey: v1OnlyKey,
+            routingMode: "explicit",
+            expertId: "ota",
+            repositoryId: "ota-repo",
+            deploymentId: "__missing_turn_dedup__",
+            clientSessionId: managedSessionId,
+            clientSessionProof: v1OnlyProof,
+          },
+          managedClient,
+        ),
+      /CLIENT_SOURCE_REQUEST_BINDING_REQUIRED/,
+    );
+
+    const sourceRequestId = "srq_" + "e".repeat(64);
+    const submitWithTurn = async (id: number, key: string, title: string, requestId = sourceRequestId) => {
+      const at = Date.now();
+      const proof = `${at}.${createHmac("sha256", apiKey)
+        .update(`team-skill-hub/client-session/v2\n${managedSessionId}\n${requestId}\n${key}\n${at}`)
+        .digest("hex")}`;
+      return callMcpWithoutSessionHeader(
+        mcpUrl,
+        apiKey,
+        id,
+        "submit_work",
+        {
+          title,
+          description: title + " description",
+          idempotencyKey: key,
+          routingMode: "explicit",
+          expertId: "ota",
+          repositoryId: "ota-repo",
+          deploymentId: "__missing_turn_dedup__",
+          clientSessionId: managedSessionId,
+          sourceRequestId: requestId,
+          clientSessionProof: proof,
+        },
+        managedClient,
+      );
+    };
+    const turnFirst = await submitWithTurn(904, "turn-work-first", "First phrasing");
+    const turnReplay = await submitWithTurn(905, "turn-work-second", "Completely rephrased same native turn");
+    assert.equal(turnReplay.workItemId, turnFirst.workItemId);
+    assert.equal(turnReplay.work.reusedExistingWork, true);
+    assert.equal(turnReplay.work.deduplicationReason, "same_source_request");
+    assert.equal(turnReplay.work.sourceRequestId, sourceRequestId);
+
+    const nextTurn = await submitWithTurn(906, "turn-work-third", "Later native user turn", "srq_" + "f".repeat(64));
+    assert.notEqual(nextTurn.workItemId, turnFirst.workItemId);
+
     const signedSessionId = "11111111-1111-4111-8111-111111111111";
     const signedIdempotencyKey = "mcp-signed-session-work";
     const signedAt = Date.now();
@@ -304,7 +370,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.match(workId, /^[0-9a-f-]{36}$/i);
     assert.equal(submitted.work.status, "running");
     assert.equal(submitted.work.sourceType, "mcp");
-    assert.equal(submitted.work.sourceScope, "claude-code-test/mcp-e2e-session");
+    assert.equal(submitted.work.sourceScope, "mcp-e2e-test/mcp-e2e-session");
     assert.equal(submitted.work.sourceRef, "mcp-work-1");
     assert.equal(submitted.sourceObservations.length, 1);
     assert.equal(submitted.sourceObservations[0].state, "active");
