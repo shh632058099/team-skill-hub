@@ -215,7 +215,7 @@ if ($ServerName -eq 'teamSkillHub') {
     }
   }
   $sessionCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $SessionGate + '"'
-  $kept += ,@{ matcher='^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$'; hooks=@(@{type='command';command=$sessionCommand;timeout=5}) }
+  $kept += ,@{ matcher='^mcp__teamSkillHub__(submit_work|update_work_source)$'; hooks=@(@{type='command';command=$sessionCommand;timeout=5}) }
   $root['hooks']['PreToolUse'] = @($kept)
   $promptKept = @()
   foreach ($groupValue in @($root['hooks']['UserPromptSubmit'])) {
@@ -224,7 +224,6 @@ if ($ServerName -eq 'teamSkillHub') {
     $handlers = @($group['hooks']) | Where-Object { -not ([string]$_['command'] -like '*team-skill-hub-expert-session*') }
     if ($handlers.Count -gt 0) { $copy=@{}; foreach($key in $group.Keys){$copy[$key]=$group[$key]}; $copy['hooks']=@($handlers); $promptKept += ,$copy }
   }
-  $promptKept += ,@{ hooks=@(@{type='command';command=$sessionCommand;timeout=2}) }
   $root['hooks']['UserPromptSubmit'] = @($promptKept)
 }
 
@@ -261,8 +260,8 @@ $ClaudeBlock = @(
     "7. If a retrieved Team Skill Hub asset is clearly outdated or incorrect, use ``submit_feedback`` with a concise evidence-based reason.",
     "8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, call ``get_knowledge_submission_spec`` immediately before submission, follow the returned current rules/template, then call ``submit_knowledge_candidate`` with the returned ``spec_version``. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.",
     "9. When creating or submitting any Skill, including a Skill that contains only one ``SKILL.md``, use ``submit_skill_bundle``. Use ``import_type=skill`` for one Skill root and ``import_type=collection`` only for an explicit multi-Skill namespace snapshot. Never substitute ``submit_knowledge_candidate`` for a Skill. If ``submit_skill_bundle`` is not currently loaded in Claude Code, use ToolSearch to load that MCP tool before submitting.",
-    "10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.",
-    "11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run ``powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ClientLauncher`" upgrade``; after a required update, restart Claude Code before relying on new integration behavior.",
+    "10. For delegated Expert Platform execution, submit all new work with ``submit_work`` and follow it with ``wait_work`` / ``get_work``. ``wait_work`` is the compact incremental progress API and defaults to a 30-second long poll: start live activity tracking with ``afterActivityEventId=0``, then keep passing ``nextEventId`` + ``nextActivityEventId``. When ``terminal=true`` or ``humanActionRequired=true``, call ``get_work`` once for the full result, Evidence, Workspace and verification details. ``submit_expert_task`` and ``submit_expert_task_auto`` are deprecated compatibility tools and must not be used for new requests.",
+    "11. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.",    "12. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run ``powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ClientLauncher`" upgrade``; after a required update, restart Claude Code before relying on new integration behavior.",
     "",
     "Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.",
     "",

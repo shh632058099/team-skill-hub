@@ -55,10 +55,7 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /PLUGIN_ROOT/);
     assert.match(hooks.hooks.SessionStart[0].hooks[0].commandWindows, /PLUGIN_ROOT/);
     assert.equal(hooks.hooks.PreToolUse[0].matcher, "^__team_skill_hub_reserved__$");
-    assert.equal(
-      hooks.hooks.PreToolUse[1].matcher,
-      "^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$",
-    );
+    assert.equal(hooks.hooks.PreToolUse[1].matcher, "^mcp__[A-Za-z0-9_-]+__(?:submit_work|update_work_source)$");
     assert.equal(hooks.hooks.PreToolUse[1].hooks[0].async, false);
     assert.match(hooks.hooks.PreToolUse[1].hooks[0].command, /codex\/expert-session-hook\.py/);
     await stat(path.join(out, "hooks", "codex", "expert-session-hook.py"));
@@ -67,13 +64,20 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     const conf = await readFile(path.join(out, "hooks", "team-skill-hub.conf"), "utf8");
     assert.match(conf, /event_url=https:\/\/hub\.example\.test\/client-events/);
     assert.match(conf, /api_key_env=TEST_TEAM_HUB_TOKEN/);
-    assert.match(conf, /runtime_version=1\.5\.1/);
+    assert.match(conf, /runtime_version=1\.5\.2/);
     assert.match(conf, /hook_schema_version=1/);
 
     const catalog = JSON.parse(
       await readFile(path.join(marketplace, ".agents", "plugins", "marketplace.json"), "utf8"),
     );
     assert.equal(catalog.plugins[0].source.path, "./plugins/team-skill-hub");
+
+    const skill = await readFile(path.join(out, "skills", "team-skill-hub", "SKILL.md"), "utf8");
+    assert.match(skill, /afterActivityEventId=0/);
+    assert.match(skill, /nextActivityEventId/);
+    assert.match(skill, /30-second default long poll/);
+    assert.match(skill, /humanActionRequired=true/);
+    assert.match(skill, /get_work once/);
 
     const serialized = [
       await readFile(path.join(out, "plugin.json"), "utf8"),

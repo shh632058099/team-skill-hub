@@ -56,27 +56,12 @@ def main() -> None:
         state_root = Path(os.environ.get("TEAM_SKILL_HUB_REQUEST_STATE_DIR") or Path.home() / ".team-skill-hub" / "request-state" / "codex")
         state_path = state_root / f"{session_id}.json"
         if event == "UserPromptSubmit":
-            try:
-                state_path.unlink()
-            except FileNotFoundError:
-                pass
-            turn_id = payload.get("turn_id")
-            if isinstance(turn_id, str) and turn_id.strip() and len(turn_id) <= 200:
-                material = f"team-skill-hub/source-request/v1\ncodex\n{session_id}\n{turn_id.strip()}".encode()
-                request_id = "srq_" + hashlib.sha256(material).hexdigest()
-                state_root.mkdir(parents=True, exist_ok=True)
-                temporary = state_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps({"session_id": session_id, "turn_id": turn_id.strip(), "source_request_id": request_id}), encoding="utf-8")
-                os.chmod(temporary, 0o600)
-                temporary.replace(state_path)
             return
         if event != "PreToolUse":
             return
         tool_name = payload.get("tool_name")
         server_name, key_env = configuration()
         allowed_tools = {
-            f"mcp__{server_name}__submit_expert_task",
-            f"mcp__{server_name}__submit_expert_task_auto",
             f"mcp__{server_name}__submit_work",
             f"mcp__{server_name}__update_work_source",
         }
@@ -88,7 +73,6 @@ def main() -> None:
             emit("deny", "Team Skill Hub cannot attach the native Codex session identity; submission was blocked.")
             return
         is_update_work_source = tool_name == f"mcp__{server_name}__update_work_source"
-        is_expert_submit = tool_name in {f"mcp__{server_name}__submit_expert_task", f"mcp__{server_name}__submit_expert_task_auto"}
         binding_key = tool_input.get("workItemId") if is_update_work_source else tool_input.get("idempotencyKey")
         if not isinstance(binding_key, str) or not binding_key.strip():
             emit("deny", "Team Skill Hub requires a stable binding key before session identity can be attached.")
@@ -104,26 +88,7 @@ def main() -> None:
         updated.pop("sourceRequestId", None)
         updated.pop("clientSessionProof", None)
         updated["clientSessionId"] = session_id
-        turn_id = payload.get("turn_id")
-        source_request_id = None
-        if isinstance(turn_id, str) and turn_id.strip() and len(turn_id) <= 200:
-            material = f"team-skill-hub/source-request/v1\ncodex\n{session_id}\n{turn_id.strip()}".encode()
-            source_request_id = "srq_" + hashlib.sha256(material).hexdigest()
-        else:
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-                if state.get("session_id") == session_id:
-                    source_request_id = state.get("source_request_id")
-            except (OSError, ValueError, TypeError):
-                pass
-        if isinstance(source_request_id, str) and re.fullmatch(r"srq_[a-f0-9]{64}", source_request_id) and is_expert_submit:
-            updated["sourceRequestId"] = source_request_id
-        else:
-            source_request_id = None
-        if source_request_id and is_expert_submit:
-            message = f"team-skill-hub/client-session/v2\n{session_id}\n{source_request_id}\n{binding_key}\n{timestamp}"
-        else:
-            message = f"team-skill-hub/client-session/v1\n{session_id}\n{binding_key}\n{timestamp}"
+        message = f"team-skill-hub/client-session/v1\n{session_id}\n{binding_key}\n{timestamp}"
         signature = hmac.new(credential.encode(), message.encode(), hashlib.sha256).hexdigest()
         updated["clientSessionProof"] = f"{timestamp}.{signature}"
         emit("allow", updated=updated)
@@ -131,7 +96,7 @@ def main() -> None:
         # Never allow a target submission through without a verified session proof.
         if isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse":
             tool_name = payload.get("tool_name")
-            if isinstance(tool_name, str) and tool_name.endswith(("__submit_expert_task", "__submit_expert_task_auto", "__submit_work", "__update_work_source")):
+            if isinstance(tool_name, str) and tool_name.endswith(("__submit_work", "__update_work_source")):
                 emit("deny", "Team Skill Hub could not safely attach the native Codex session identity; submission was blocked.")
         # A malformed hook event must not interrupt unrelated Codex operations.
         return

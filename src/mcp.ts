@@ -198,6 +198,45 @@ function safeExpertActivityMessage(event: { type: string; tool: string | null; c
   return names[event.type] ?? "任务状态已更新";
 }
 
+function safeWorkProgressMessage(event: { eventType: string; details: Record<string, unknown> | null }): string {
+  const names: Record<string, string> = {
+    "work.created": "Work 已创建",
+    "work.queued": "Work 已进入队列",
+    "work.running": "Work 正在执行",
+    "work.rework": "Work 已进入返工",
+    "work.waiting_review": "Work 正在等待 Review",
+    "work.blocked": "Work 已阻塞",
+    "work.resumed": "Work 已恢复执行",
+    "work.completed": "Work 已完成",
+    "work.failed": "Work 执行失败",
+    "work.cancelled": "Work 已取消",
+    "work_attempt.created": "新的 WorkAttempt 已创建",
+    "work_attempt.succeeded": "WorkAttempt 已成功",
+    "work_attempt.failed": "WorkAttempt 执行失败",
+    "review.requested": "已请求 Review",
+    "review.decided": "Review 已产生结论",
+    "rework.started": "返工已开始",
+    "run.retry_scheduled": "已安排执行重试",
+    "run.continued": "已继续同一 WorkAttempt",
+    "source.observed": "已收到外部来源状态",
+    "source.reconciled": "外部来源状态已完成协调",
+    "work.subject_changed": "Work 源码版本已更新",
+    "approval.invalidated": "旧授权已失效",
+    "evidence.staled": "旧 Evidence 已失效",
+  };
+  if (event.eventType === "evidence.recorded") {
+    const type = typeof event.details?.type === "string" ? event.details.type : "";
+    if (type === "publication") return "工作分支发布已验证";
+    if (type === "pull_request") return "PR/MR 已创建并验证";
+    if (type === "build") return "Build 验证已记录";
+    if (type === "unit_test") return "单元测试验证已记录";
+    if (type === "integration_test") return "集成测试验证已记录";
+    if (type === "code_review") return "Code Review 验证已记录";
+    return "新的 Work Evidence 已记录";
+  }
+  return names[event.eventType] ?? `Work 状态已更新：${event.eventType}`;
+}
+
 export function createSkillHubMcpHandler(appService: SkillHubApplicationService) {
   return createMcpHandler(({ requestInfo }) => {
     const principal = appService.authenticateRequest(requestInfo?.headers);
@@ -1133,7 +1172,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "list_available_experts",
         {
           description:
-            "List active Expert Platform experts and repositories authorized for the current principal. Call this ONLY when the user explicitly names an Expert and you need to map its display name to expertId, or when the user asks to list available experts. For ordinary technical analysis requests where the user did not name an Expert, do NOT call this tool: call submit_expert_task directly and omit expertId so the Hub performs automatic routing. This catalog is separate from Skill Hub skills and agents returned by discover, resolve_agent, or list_agents. Map an explicitly named Expert to the returned expertId, and use only repositoryIds returned here; never pass a Skill Hub agent name or Skill Hub publishing repository ID as an Expert Platform ID.",
+            "List active Expert Platform experts and repositories authorized for the current principal. Use this only when the user explicitly names an Expert, asks to list available experts, or you need exact IDs for submit_work with routingMode=explicit. New work must be submitted with submit_work; submit_expert_task and submit_expert_task_auto are deprecated compatibility tools.",
           inputSchema: z.object({}),
         },
         async () => toolResult({ experts: expertDispatchService!.listAvailable(principal.id) }),
@@ -1143,7 +1182,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task_auto",
         {
           description:
-            "DEFAULT Expert Platform delegation tool for natural-language specialist work. This tool ALWAYS automatically chooses the Expert, and requires NO expertId or selectionMode. Use for OTA, drivers, code review, Yocto and other specialist analysis unless the user explicitly named a specific Expert Platform Expert. Never call submit_expert_task_auto and submit_expert_task for the same user request. Before submitting, check the conversation context: if this session already has a queued/running task for the same user intent, do NOT submit again; call wait_expert_task with that existing taskId. Use a fresh idempotencyKey only for a genuinely new task; when retrying the same call after an error or uncertain outcome, reuse the original idempotencyKey (never generate a new key for a retry). The response includes reusedExistingTask/deduplicationReason when an existing task was reused. When activeSessionTaskId is returned, it identifies the oldest queued/running task in this session (including the newly submitted task); if it already covers the same user intent, wait on that task instead of submitting another. A genuinely different user request may be submitted as a separate task; the session queue serializes it. Provide the user's problem. Native session and source-request identity are injected by the installed Claude Code or Codex CLI hooks and authenticated by the hook proof; do not invent clientSessionId or sourceRequestId. repositoryId is optional and must be a real ID from list_available_experts, never a placeholder. Returns a taskId immediately; when the user wants results, automatically call wait_expert_task with its cursor until terminal, then get_expert_task_result on success. Share actual progress while waiting.",
+            "DEPRECATED compatibility-only ExpertTask submission tool. New Claude/Codex/MCP clients MUST use submit_work so the Hub owns the durable Work lifecycle, routing, evidence, review, rework, publication and completion gates. Keep this tool only for older integrations that have not migrated yet.",
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
@@ -1205,7 +1244,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         "submit_expert_task",
         {
           description:
-            'Use submit_expert_task_auto INSTEAD for ordinary natural-language analysis; only use this tool when an explicit expertId or repositoryId is required. Delegate a technical investigation to the Expert Platform when the user asks for specialist analysis, source-code root-cause investigation, a focused subsystem review, or analysis that should run asynchronously. Use this tool when an authorized Expert should do the investigation instead of completing the full specialist analysis in the current chat. Put the user\'s question in problem. CRITICAL ROUTING RULE: if the user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId; never use magic expertId strings such as __AUTO__, auto, AUTO_SELECT, or automatic. The Hub will automatically route using the problem and eligible expert capabilities. If the user explicitly names an Expert, set selectionMode="explicit", call list_available_experts first and pass the matching Expert Platform expertId. Never silently substitute a different expert for an explicit request. Use only a repositoryId returned by list_available_experts when one is needed; do not pass Skill Hub publishing repository IDs. Never call submit_expert_task_auto and submit_expert_task for the same user request. Before submitting, check the conversation context: if this session already has a queued/running task for the same user intent, do NOT submit again; call wait_expert_task with that existing taskId. Use a fresh idempotencyKey only for a genuinely new task; when retrying the same call after an error or uncertain outcome, reuse the original idempotencyKey (never generate a new key for a retry). The response includes reusedExistingTask/deduplicationReason when an existing task was reused. When activeSessionTaskId is returned, it identifies the oldest queued/running task in this session (including the newly submitted task); if it already covers the same user intent, wait on that task instead of submitting another. A genuinely different user request may be submitted as a separate task; the session queue serializes it. This queues a read-only task for a Worker, which executes asynchronously. Return taskId and selectionMode; for a result-seeking request automatically call wait_expert_task in bounded windows and pass nextEventId each time until terminal, then get_expert_task_result after succeeded. Do not require the user to ask again. Use a fresh idempotencyKey for a new task; reuse the same key only when retrying the same request. Claude Code and Codex CLI hooks inject native session and source-request identity when installed; do not invent or generate clientSessionId or sourceRequestId.',
+            "DEPRECATED compatibility-only ExpertTask submission tool. New clients MUST use submit_work, including explicit expert/repository/deployment routing via routingMode=explicit. Keep this tool only for older integrations that still expect a direct ExpertTask taskId.",
           inputSchema: z.object({
             problem: z.string().trim().min(1).max(10000),
             idempotencyKey: z.string().min(1).max(200),
@@ -1436,7 +1475,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review and rework. Prefer this over submit_expert_task when the user wants the platform to own the work lifecycle rather than only run one specialist task. MCP submissions are normalized through the MCP Work Adapter into durable source identity and source observations before entering WorkOrchestrator. External tracker adapters are separate. The response exposes top-level workItemId, status, and an opaque sourceControlToken for later update_work_source calls; retain the token in tool context, treat it as secret, and never display it to the user. Reuse the same idempotencyKey when retrying an uncertain submission; a retry reuses the WorkItem and rotates sourceControlToken, so use the newest token. workflowId optionally selects a registered workflow; omit it to use the platform default, and the Hub pins the selected workflow version at submission. Use routingMode=auto by default. For Work orchestration, do not invent deployment IDs or labels such as writable/read-only: the Workflow constrains workspace access and the Hub selects an eligible Deployment, preferring the executor backend that matches the submitting CLI when several remain. Use routingMode=explicit only when the user supplied exact IDs or exact currently-active IDs were just returned by Team Skill Hub. In auto mode, deploymentId/repositoryId placeholders are ignored.",
+              "PRIMARY submission tool for all new Expert Platform work. Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review, rework, publication and completion. Use this instead of deprecated submit_expert_task / submit_expert_task_auto for both automatic and explicit routing.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
@@ -1586,45 +1625,178 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "wait_work",
           {
             description:
-              "Wait for durable WorkItem progress. Reconciles the linked ExpertTask before returning, includes Run/Turn history, current Workspace, verification summary, cursor-based Work events and nextEventId, and stops early when the Work leaves running/queued/rework or becomes terminal.",
+              "DEFAULT follow-up after submit_work. Wait for durable WorkItem progress using a compact incremental response. Pass afterActivityEventId=0 on the first activity-aware call, then repeat with nextEventId + nextActivityEventId to stream Worker/model/tool and Reviewer activity; omitting afterActivityEventId preserves legacy Work-only waiting. With an MCP progressToken it emits notifications/progress while waiting. Without a progressToken, activity-aware calls return as soon as a new Work or activity event appears. When terminal=true or humanActionRequired=true, call get_work once for the full Work snapshot, result, Evidence, Workspace and verification details.",
             inputSchema: z.object({
               workItemId: z.string().uuid(),
               afterEventId: z.number().int().min(0).default(0),
-              timeoutMs: z.number().int().min(0).max(30000).default(15000),
+              afterActivityEventId: z.number().int().min(0).optional(),
+              timeoutMs: z.number().int().min(0).max(30000).default(30000),
               limit: z.number().int().min(1).max(100).default(50),
             }),
           },
-          async ({ workItemId, afterEventId, timeoutMs, limit }, ctx) => {
+          async ({ workItemId, afterEventId, afterActivityEventId, timeoutMs, limit }, ctx) => {
             workOrchestrator.getWork(workItemId, principal.id, principal.tenantId);
             const signal: AbortSignal = ctx.mcpReq.signal;
+            const token = ctx.mcpReq._meta?.progressToken;
             const deadline = performance.now() + timeoutMs;
             let cursor = afterEventId;
+            const trackActivity = afterActivityEventId !== undefined || token !== undefined;
+            let activityCursor = afterActivityEventId ?? 0;
+            let notificationIndex = 0;
+            let lastNotify = Number.NEGATIVE_INFINITY;
             const collected: ReturnType<WorkOrchestrator["getEvents"]>["events"] = [];
+            const activityEvents: Array<{
+              eventId: number;
+              taskId: string;
+              role: "execution" | "review";
+              runId: string | null;
+              type: string;
+              details: string;
+              tool: string | null;
+              count: number | null;
+              timestampMs: number;
+            }> = [];
             let detail = workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId);
+
+            const readActivity = (after: number, remaining: number) => {
+              const refs = [
+                ...(detail.currentTask ? [{ task: detail.currentTask, role: "execution" as const }] : []),
+                ...(detail.reviewTask ? [{ task: detail.reviewTask, role: "review" as const }] : []),
+              ];
+              const seen = new Set<string>();
+              return refs
+                .filter(({ task }) => {
+                  if (seen.has(task.taskId)) return false;
+                  seen.add(task.taskId);
+                  return true;
+                })
+                .flatMap(({ task, role }) =>
+                  expertTaskStore
+                    .ownerEvents(task.taskId, principal.id, principal.tenantId, after, Math.max(1, remaining))
+                    .events.map((event) => ({ ...event, taskId: task.taskId, role })),
+                )
+                .sort((a, b) => a.eventId - b.eventId)
+                .slice(0, remaining);
+            };
+
             while (true) {
               if (signal.aborted) throw new Error("WAIT_CANCELLED");
+              const workRemaining = Math.max(1, limit - collected.length);
               const page = workOrchestrator.getEvents(
                 workItemId,
                 principal.id,
                 principal.tenantId,
                 cursor,
-                Math.max(1, limit - collected.length),
+                workRemaining,
               );
               collected.push(...page.events);
               cursor = page.nextEventId;
+
               detail = workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId);
+              const activityRemaining = Math.max(1, limit - activityEvents.length);
+              const newActivity = trackActivity ? readActivity(activityCursor, activityRemaining) : [];
+              activityEvents.push(...newActivity);
+              if (newActivity.length) activityCursor = newActivity[newActivity.length - 1]!.eventId;
+
+              if (
+                token !== undefined &&
+                (page.events.length || newActivity.length) &&
+                performance.now() - lastNotify >= 1000
+              ) {
+                lastNotify = performance.now();
+                const latestWork = page.events.at(-1);
+                const latestActivity = newActivity.at(-1);
+                const useActivity =
+                  latestActivity !== undefined &&
+                  (latestWork === undefined || latestActivity.timestampMs >= latestWork.createdAt);
+                const message = useActivity
+                  ? `${latestActivity!.role === "review" ? "Reviewer" : "Worker"}：${safeExpertActivityMessage(latestActivity!)}`
+                  : safeWorkProgressMessage(latestWork!);
+                try {
+                  await ctx.mcpReq.notify({
+                    method: "notifications/progress",
+                    params: {
+                      progressToken: token,
+                      progress: ++notificationIndex,
+                      message,
+                    },
+                  });
+                } catch {
+                  /* notification is best-effort */
+                }
+              }
+
               const terminal = ["completed", "failed", "cancelled"].includes(detail.work.status);
               const active = ["queued", "running", "rework"].includes(detail.work.status);
               const timedOut = performance.now() >= deadline;
-              if (terminal || !active || collected.length >= limit || timedOut) {
+              const hasIncrementalProgress = page.events.length > 0 || newActivity.length > 0;
+              if (
+                terminal ||
+                !active ||
+                collected.length >= limit ||
+                activityEvents.length >= limit ||
+                timedOut ||
+                (token === undefined && hasIncrementalProgress)
+              ) {
+                const moreWork = workOrchestrator.getEvents(workItemId, principal.id, principal.tenantId, cursor, 1)
+                  .events.length;
+                const moreActivity = trackActivity ? readActivity(activityCursor, 1).length : 0;
+                const compactTask = (task: typeof detail.currentTask) =>
+                  task
+                    ? {
+                        taskId: task.taskId,
+                        status: task.status,
+                        expertId: task.expertId,
+                        repositoryId: task.repositoryId,
+                        deploymentId: task.deploymentId,
+                        runId: task.runId,
+                        runtimeSessionId: task.runtimeSessionId,
+                        commitSha: task.commitSha,
+                        workspaceKey: task.workspaceKey,
+                      }
+                    : null;
+                const humanActionRequired =
+                  detail.work.status === "blocked" ||
+                  (detail.work.status === "waiting_review" && !detail.reviewTask?.status?.match(/^(queued|running)$/));
                 return toolResult({
-                  ...detail,
+                  work: {
+                    workItemId: detail.work.workItemId,
+                    status: detail.work.status,
+                    stateRevision: detail.work.stateRevision,
+                    workflowId: detail.work.workflowId,
+                    workflowVersion: detail.work.workflowVersion,
+                    activeWorkAttemptId: detail.work.activeWorkAttemptId,
+                    currentSubjectRevision: detail.work.currentSubjectRevision,
+                    requestedExpertId: detail.work.requestedExpertId,
+                    requestedDeploymentId: detail.work.requestedDeploymentId,
+                    repositoryId: detail.work.repositoryId,
+                    blockedReason: detail.work.blockedReason,
+                    blockedContext: detail.work.blockedContext,
+                    resumeCondition: detail.work.resumeCondition,
+                    blockedByType: detail.work.blockedByType,
+                    blockedByRef: detail.work.blockedByRef,
+                    nextActionType: detail.work.nextActionType,
+                    updatedAt: detail.work.updatedAt,
+                    completedAt: detail.work.completedAt,
+                  },
+                  currentTask: compactTask(detail.currentTask),
+                  reviewTask: compactTask(detail.reviewTask),
+                  gate: {
+                    ready: detail.gate.ready,
+                    missing: detail.gate.missing,
+                  },
                   events: collected,
                   nextEventId: cursor,
+                  hasMore: moreWork > 0,
+                  activityEvents,
+                  nextActivityEventId: activityCursor,
+                  activityHasMore: moreActivity > 0,
                   terminal,
+                  humanActionRequired,
                   timedOut: timedOut && !terminal,
                 });
               }
+
               const remaining = Math.max(0, deadline - performance.now());
               await new Promise<void>((resolve, reject) => {
                 const timer = setTimeout(
@@ -1644,7 +1816,6 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             }
           },
         );
-
         registerTool(
           "review_work",
           {

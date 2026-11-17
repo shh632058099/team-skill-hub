@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     hooks[event] = [{ matcher: "^__team_skill_hub_reserved__$", hooks: [handler] }];
     if (event === "PreToolUse") {
       hooks[event].push({
-        matcher: "^mcp__[A-Za-z0-9_-]+__(?:submit_expert_task(?:_auto)?|submit_work|update_work_source)$",
+        matcher: "^mcp__[A-Za-z0-9_-]+__(?:submit_work|update_work_source)$",
         hooks: [
           {
             type: "command",
@@ -186,7 +186,8 @@ async function main(): Promise<void> {
     "3. Prefer relevant team assets over generic assumptions while respecting repository visibility and client compatibility.",
     "4. Submit concise evidence-based feedback when retrieved guidance is clearly outdated or incorrect.",
     "5. Submit a Knowledge Candidate for durable verified team-specific knowledge that is missing. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.",
-    "6. Do not invoke repository sync, rollback, or administrative operations unless the user explicitly asks for that operational action.",
+    "6. Submit all new delegated Expert Platform work with submit_work. Use compact wait_work (30-second default long poll) for progress: start with afterActivityEventId=0, keep passing nextEventId + nextActivityEventId, and call get_work once when terminal=true or humanActionRequired=true. submit_expert_task and submit_expert_task_auto are deprecated compatibility tools.",
+    "7. Do not invoke repository sync, rollback, or administrative operations unless the user explicitly asks for that operational action.",
     "",
   ].join("\n");
   await writeFile(path.join(opts.out, "skills", "team-skill-hub", "SKILL.md"), skill);

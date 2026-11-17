@@ -256,32 +256,35 @@ async function extractPackage(archive, destination) {
   }
 }
 
-async function stageLauncherReplacement(releaseRoot, state) {
+export async function stageLauncherReplacement(releaseRoot, state, platform = process.platform) {
   const binDir = path.join(clientRoot(), "bin");
   await mkdir(binDir, { recursive: true });
   for (const name of ["team-skill-hub-client", "team-skill-hub-client.ps1"]) {
-    if (process.platform === "win32" && name !== "team-skill-hub-client.ps1") continue;
     const source = path.join(releaseRoot, "runtime", name);
     if (!(await stat(source).then(() => true, () => false))) continue;
     const target = path.join(binDir, name);
     const next = `${target}.next`;
-    await copyFile(source, next);
-    if (process.platform !== "win32") {
-      await rename(next, target);
-      if (name === "team-skill-hub-client") await execFileAsync("chmod", ["+x", target]);
+    if (platform === "win32") {
+      await rm(next, { force: true });
+      if (!(await stat(target).then(() => true, () => false))) {
+        await copyFile(source, target);
+      }
+      continue;
     }
+    await copyFile(source, next);
+    await rename(next, target);
+    if (name === "team-skill-hub-client") await execFileAsync("chmod", ["+x", target]);
   }
-  if (process.platform === "win32") state.pending_launcher_version = state.installed_version;
-  else delete state.pending_launcher_version;
+  delete state.pending_launcher_version;
 }
 
 async function clearAppliedPendingLauncherState() {
   const state = await readState();
   if (!state?.pending_launcher_version) return;
-  const next = path.join(clientRoot(), "bin", "team-skill-hub-client.ps1.next");
-  if (!(await stat(next).then(() => true, () => false))) {
-    const updated = { ...state }; delete updated.pending_launcher_version; await writeStateAtomic(updated);
-  }
+  await rm(path.join(clientRoot(), "bin", "team-skill-hub-client.ps1.next"), { force: true });
+  const updated = { ...state };
+  delete updated.pending_launcher_version;
+  await writeStateAtomic(updated);
 }
 
 export async function upgradeToLatest() {

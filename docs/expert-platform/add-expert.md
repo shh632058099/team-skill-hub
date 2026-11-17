@@ -48,15 +48,15 @@ Worker 主机（Linux）
 
 ### 0.2 Worker 主机资源与依赖
 
-| 类别      | 基线与检查事项                                                                                                                                                                                                     |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 系统      | 支持 Node.js 24 和 Docker Engine 的 Linux 主机；systemd **可选**。默认检测 systemd；也可通过安装参数 `--no-systemd` 强制手动模式；CPU 架构需与交付镜像一致                                                         |
-| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库、多个 Worker instance 或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                                   |
-| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                                                                      |
+| 类别      | 基线与检查事项                                                                                                                                                                                                                                            |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 系统      | 支持 Node.js 24 和 Docker Engine 的 Linux 主机；systemd **可选**。默认检测 systemd；也可通过安装参数 `--no-systemd` 强制手动模式；CPU 架构需与交付镜像一致                                                                                                |
+| CPU / RAM | **起步容量建议**：专用主机至少 2 vCPU、4 GiB RAM；构建/大型仓库、多个 Worker instance 或多个并行执行容器需要增加资源。这不是系统强制最小值，实际以任务并发和镜像资源限制压测决定                                                                          |
+| 磁盘      | **起步容量建议**：至少预留 10 GiB 空闲空间，另按 Git 仓库大小、Docker 镜像/层、执行日志与并发任务增加容量；不要把存储大小固定等同于示例包大小                                                                                                             |
 | 软件      | Node.js **24.x**、Docker Engine（服务运行、可通过本机 Docker socket 访问）、`tar`、`git`；系统模式安装需要 sudo/root；普通用户模式不需要 root，直接使用当前账号可执行的 Node.js 24。系统模式固定使用 `expert-worker` 身份运行，普通用户模式由当前账号运行 |
-| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API / MCP；如需代理/DNS/CA，分别验证                                                                                                |
-| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                                                               |
-| 数据目录  | 系统模式使用 `/opt/team-skill-hub-worker`、`/etc/team-skill-hub-worker`、`/var/lib/team-skill-hub-worker`；普通用户模式全部放在 `$HOME/team-skill-hub-worker`（或指定安装目录）下                    |
+| 网络      | Worker → Hub gRPC（示例 TCP 7443）；Worker → Git 仓库；**执行容器** → 所选模型 API / MCP；如需代理/DNS/CA，分别验证                                                                                                                                       |
+| 安全      | 专用可信主机或隔离 VM；Docker `docker` 组权限近似 root；私网 ACL / 防火墙，跨不可信网络使用 TLS/mTLS                                                                                                                                                      |
+| 数据目录  | 系统模式使用 `/opt/team-skill-hub-worker`、`/etc/team-skill-hub-worker`、`/var/lib/team-skill-hub-worker`；普通用户模式全部放在 `$HOME/team-skill-hub-worker`（或指定安装目录）下                                                                         |
 
 **常见部署模式：** 一台 Worker 主机只安装一套共享 Runtime，但可以创建并同时运行多个独立 Worker instance。每个 instance 有独立的 `EXPERT_WORKER_ID`、credential、key 文件、日志和 Git checkout，例如同一台主机同时运行 `claude-01` 与 `codex-01`。任务执行容器仍由各 Worker instance 按任务拉起。**Hub 与 Worker 不必同机**，也不需要把 Hub 的 Docker Compose 或源码放到 Worker 主机。
 
@@ -99,25 +99,25 @@ command -v systemctl      # 可选：仅 systemd 主机需要
 
 在“执行配置”区域选择创建执行配置，将刚才创建的专家绑定到可访问仓库。
 
-| 字段                    | 示例                                                 | 填写原则                                                                                      |
-| ----------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| 执行配置 ID             | `yocto-default`                                      | 唯一、稳定的标识                                                                              |
-| 专家配置                | `yocto · Yocto 构建专家`                             | 选择第 2 步创建的专家                                                                         |
-| 源码仓库地址            | `https://github.com/your-org/yocto-layer.git`        | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码                                   |
-| 分支                    | `main`                                               | 与仓库地址逐行对应；留空默认 `main`                                                           |
-| 仓库凭据引用            | `yocto-github-readonly`                              | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                                          |
-| Git 代理地址            | `http://proxy-host:7890`                             | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息                          |
-| 允许调用者 Principal ID | `实际的 principal.id`                                | 每行一个；只授权确实需要使用此 Deployment 的调用者                                            |
-| Runtime Profile         | `linux-yocto`                                        | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`                                       |
-| 启用执行配置            | 勾选                                                 | 只有启用的 Deployment 才能参与任务派发                                                        |
-| Backend / Model         | `codex` + Responses 或 `claude` + Anthropic Messages | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名                      |
-| 模型 Credential Ref     | `model-readonly`                                     | Worker 本地模型凭据映射，不存 Key 明文                                                        |
-| MCP Profile             | `default`                                            | 推荐配置：默认只选择 Admin 全局 Profile；任务派发时解析为不可变任务快照                                     |
-| MCP URL                 | `http://hub.internal:8080/mcp`                       | **仅自定义覆盖时填写**；否则继承 Profile。必须从任务容器网络可达，不能用 127.0.0.1 指向外部 Hub              |
-| MCP Credential Ref      | `skillhub-readonly`                                  | **仅自定义覆盖时填写**；否则继承 Profile。Worker 只保存 credentialRef → 本地 key 文件映射，不保存明文到 Hub |
-| MCP Allowed Tools       | 从 Admin 动态工具列表中选择                          | **仅自定义覆盖时填写**；必须是 Profile 允许工具的子集；实际权限仍由 Credential 对应 principal/role 决定     |
-| MCP Required            | 继承 / 必需 / 非必需                                 | 默认继承 Profile；仅在 Deployment 有特殊失败策略时覆盖                                                       |
-可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。
+| 字段                                                                                                                     | 示例                                                 | 填写原则                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 执行配置 ID                                                                                                              | `yocto-default`                                      | 唯一、稳定的标识                                                                                            |
+| 专家配置                                                                                                                 | `yocto · Yocto 构建专家`                             | 选择第 2 步创建的专家                                                                                       |
+| 源码仓库地址                                                                                                             | `https://github.com/your-org/yocto-layer.git`        | 填完整 Git clone URL；不要在 URL 中嵌入用户名、Token 或密码                                                 |
+| 分支                                                                                                                     | `main`                                               | 与仓库地址逐行对应；留空默认 `main`                                                                         |
+| 仓库凭据引用                                                                                                             | `yocto-github-readonly`                              | 私有仓库填写 Worker 侧配置的凭据引用；公开仓库可留空                                                        |
+| Git 代理地址                                                                                                             | `http://proxy-host:7890`                             | 可选；必须是 Worker 可访问的 HTTP/HTTPS 代理，URL 中不能包含认证信息                                        |
+| 允许调用者 Principal ID                                                                                                  | `实际的 principal.id`                                | 每行一个；只授权确实需要使用此 Deployment 的调用者                                                          |
+| Runtime Profile                                                                                                          | `linux-yocto`                                        | 描述所需运行环境的标签，例如 `linux-yocto`、`linux-ota`                                                     |
+| 启用执行配置                                                                                                             | 勾选                                                 | 只有启用的 Deployment 才能参与任务派发                                                                      |
+| Backend / Model                                                                                                          | `codex` + Responses 或 `claude` + Anthropic Messages | 每个 Deployment 单独配置 Backend、Provider、Model、Base URL 和环境变量名                                    |
+| 模型 Credential Ref                                                                                                      | `model-readonly`                                     | Worker 本地模型凭据映射，不存 Key 明文                                                                      |
+| MCP Profile                                                                                                              | `default`                                            | 推荐配置：默认只选择 Admin 全局 Profile；任务派发时解析为不可变任务快照                                     |
+| MCP URL                                                                                                                  | `http://hub.internal:8080/mcp`                       | **仅自定义覆盖时填写**；否则继承 Profile。必须从任务容器网络可达，不能用 127.0.0.1 指向外部 Hub             |
+| MCP Credential Ref                                                                                                       | `skillhub-readonly`                                  | **仅自定义覆盖时填写**；否则继承 Profile。Worker 只保存 credentialRef → 本地 key 文件映射，不保存明文到 Hub |
+| MCP Allowed Tools                                                                                                        | 从 Admin 动态工具列表中选择                          | **仅自定义覆盖时填写**；必须是 Profile 允许工具的子集；实际权限仍由 Credential 对应 principal/role 决定     |
+| MCP Required                                                                                                             | 继承 / 必需 / 非必需                                 | 默认继承 Profile；仅在 Deployment 有特殊失败策略时覆盖                                                      |
+| 可以为一个 Deployment 填多组仓库：仓库 URL、分支、凭据引用、代理地址分别按行对应。不要在凭据引用或代理地址字段里填密钥。 |
 
 点击“保存执行配置”后，确认列表中的专家、仓库 URL、分支、调用者、Runtime Profile 和启用状态正确。
 
@@ -511,6 +511,7 @@ skillhub-readonly
 EXPERT_MCP_URL=http://team-skill-hub:8080/mcp
 EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-worker/instances/claude-01/keys/skillhub-readonly"}'
 ```
+
 真正的 API Key 写入 instance 私有文件，不放到 env：
 
 ```bash
@@ -627,34 +628,35 @@ sudo journalctl -u team-skill-hub-worker@claude-01 -f
 
 先在已连接 Team Skill Hub MCP 的 Claude CLI 或 Codex CLI 会话中调用 `get_server_info`，确认当前 principal；再通过 Admin 执行配置列表或 API 结果取得对应的 `repositories[].id`。不要猜测仓库 ID。
 
-提交任务时使用实际生成的 `repositoryId`，并且先做只读分析：
+提交任务时统一使用 `submit_work`。只读验收选择只读 Workflow，并使用自动路由；不要再用 `submit_expert_task` / `submit_expert_task_auto` 创建新的验收任务：
 
 ```json
 {
-  "problem": "请只读分析这个仓库的目录结构、主要模块、构建方式和测试组织，并指出三个有具体源码依据的技术风险。每个结论必须引用真实文件路径和函数；不要修改文件、构建、运行测试、提交代码或创建 PR。",
+  "title": "只读仓库结构与风险分析",
+  "description": "请只读分析这个仓库的目录结构、主要模块、构建方式和测试组织，并指出三个有具体源码依据的技术风险。每个结论必须引用真实文件路径和函数；不要修改文件、构建、运行测试、提交代码或创建 PR。",
   "idempotencyKey": "yocto-readonly-review-请替换为本次唯一值",
-  "repositoryId": "替换为Deployment中repositories[].id的实际值"
+  "workflowId": "替换为当前只读 Workflow ID",
+  "routingMode": "auto"
 }
 ```
 
-调用 `submit_expert_task` 时**不要传 `expertId`**，用于验收自动路由。然后：
+然后：
 
-1. 记录返回的 `taskId`、`expertId`、`selectionMode` 和 `repositoryId`。
-2. 轮询 `get_expert_task_status`，直到 `succeeded` 或 `failed`。
-3. 只有任务 `succeeded` 后才调用 `get_expert_task_result`。
-4. 检查结果是否引用真实文件路径、函数和行号，并确认分析使用了预期分支/Commit。
-5. 检查仓库没有被修改。只读任务不应触发修复、提交或 PR。
+1. 记录返回的 `workItemId`、状态和实际路由结果。
+2. 调用 `wait_work` 等待状态推进。它默认使用 30 秒 long-poll，并只返回轻量增量状态；首次需要实时 Worker/model/tool 进度时传 `afterActivityEventId=0`，后续每次同时回传上一轮的 `nextEventId` 与 `nextActivityEventId`。支持 MCP progress notification 的客户端会持续收到实时提示；不支持时则在出现新 Work/Activity event 后尽快返回。当 `terminal=true` 或 `humanActionRequired=true` 时，再调用一次 `get_work` 获取完整结果、Evidence、Workspace 与验证详情。3. 确认 WorkAttempt 内创建了 ExpertTask，Worker 执行成功且 Completion Gate 最终满足。
+3. 检查结果是否引用真实文件路径、函数和行号，并确认分析使用了预期仓库/分支/Commit。
+4. 检查仓库没有被修改。只读 Workflow 不应触发工作分支、提交或 PR/MR。
 
 ### 通过标准
 
 - [ ] Admin 中专家配置和执行配置均启用。
 - [ ] Worker 已注册、审批并使用有效 credential 连接 Hub。
-- [ ] Worker 领取了任务，任务状态经历 `queued → running → succeeded`。
-- [ ] 未指定 `expertId` 时返回 `selectionMode=auto`，且自动选择的是预期专家。
-- [ ] 返回的仓库标识与执行配置一致，结果引用真实源码。
+- [ ] `submit_work` 创建了 WorkItem，WorkAttempt 内部创建 ExpertTask，Worker 正常领取并执行。
+- [ ] `routingMode=auto` 时 Hub 自动选择预期 Expert / Deployment / Repository。
+- [ ] Work 结果与 Evidence 对应实际执行配置和源码版本，结果引用真实源码。
 - [ ] 仓库没有被修改。
 
-若 `selectionMode=explicit`，说明调用时显式指定了专家，不能算自动路由验收成功。
+若使用 `routingMode=explicit`，说明调用时显式指定了 Expert/Deployment/Repository，不能算自动路由验收成功。旧 `submit_expert_task*` 仅用于兼容历史客户端，不作为新版本验收入口。
 
 ### 9.2 代码改动与自动 MR/PR 验收
 
@@ -812,13 +814,13 @@ sudo journalctl -u "team-skill-hub-worker@${INSTANCE}" -n 100 --no-pager
 
 优先查看 Work 详情的“代码变更请求”状态、retry/error，再按错误码排查：
 
-| 错误码 | 含义 | 处理 |
-| --- | --- | --- |
+| 错误码                                  | 含义                                                                   | 处理                                                                                                                   |
+| --------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `CHANGE_REQUEST_CREDENTIAL_UNAVAILABLE` | credentialRef 未配置、Token 环境变量为空，或凭据类型不是 `https-token` | 确认 Deployment credentialRef 与 Worker 的 `EXPERT_GIT_CREDENTIALS_JSON` 一致，并使用具备 PR/MR API 权限的 HTTPS Token |
-| `CHANGE_REQUEST_PROVIDER_UNSUPPORTED` | 仓库 Host 不是当前支持的 GitHub/GitLab Provider | 使用支持的 GitHub/GitLab URL，或先实现对应 Provider Adapter；不要手工伪造 Evidence |
-| `CHANGE_REQUEST_CREATE_FAILED` | GitHub/GitLab API 创建、查找或 reopen 失败 | 检查 Token scope、仓库权限、API 网络/TLS/代理以及远端分支是否存在；该错误会按 durable retry 策略有限重试 |
-| `CHANGE_REQUEST_HEAD_MISMATCH` | 找到/创建的 MR/PR head SHA 与 publication commit 不同 | 停止继续完成，检查远端分支是否被外部修改或同名分支是否复用；不要通过修改 Evidence 绕过 |
-| `CHANGE_REQUEST_BASE_MISMATCH` | MR/PR 目标分支与任务快照不一致 | 检查 Deployment branch 和已有 MR/PR；修复目标分支后重新 reconcile |
+| `CHANGE_REQUEST_PROVIDER_UNSUPPORTED`   | 仓库 Host 不是当前支持的 GitHub/GitLab Provider                        | 使用支持的 GitHub/GitLab URL，或先实现对应 Provider Adapter；不要手工伪造 Evidence                                     |
+| `CHANGE_REQUEST_CREATE_FAILED`          | GitHub/GitLab API 创建、查找或 reopen 失败                             | 检查 Token scope、仓库权限、API 网络/TLS/代理以及远端分支是否存在；该错误会按 durable retry 策略有限重试               |
+| `CHANGE_REQUEST_HEAD_MISMATCH`          | 找到/创建的 MR/PR head SHA 与 publication commit 不同                  | 停止继续完成，检查远端分支是否被外部修改或同名分支是否复用；不要通过修改 Evidence 绕过                                 |
+| `CHANGE_REQUEST_BASE_MISMATCH`          | MR/PR 目标分支与任务快照不一致                                         | 检查 Deployment branch 和已有 MR/PR；修复目标分支后重新 reconcile                                                      |
 
 排障时不要把 Git Token 打印到日志，也不要为了“让 Work 完成”手工插入 `pull_request` Evidence。若远端 MR/PR 已经存在，正常 reconciliation 应通过 provider 查询并恢复，而不是再建一个。
 

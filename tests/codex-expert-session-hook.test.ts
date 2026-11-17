@@ -24,8 +24,8 @@ test("Codex submission hook denies when config decoding fails", async () => {
         JSON.stringify({
           hook_event_name: "PreToolUse",
           session_id: "01a18fc5-3678-7ac2-920f-de4a707e5a1b",
-          tool_name: "mcp__teamSkillHub__submit_expert_task_auto",
-          tool_input: { problem: "test", idempotencyKey: "test-key" },
+          tool_name: "mcp__teamSkillHub__submit_work",
+          tool_input: { title: "test", description: "test", idempotencyKey: "test-key" },
         }),
       );
     });
@@ -46,79 +46,55 @@ test("Codex setup hook merge has no unconditional Node-only merge step", async (
   );
 });
 
-test("Codex UserPromptSubmit identity is reused by PreToolUse and signed with v2", async () => {
-  const temp = await mkdtemp(path.join(os.tmpdir(), "codex-request-state-"));
+test("Codex deprecated ExpertTask submission tools are not intercepted", async () => {
   const session = "01a18fc5-3678-7ac2-920f-de4a707e5a1b";
-  const env = { ...process.env, TEAM_SKILL_HUB_REQUEST_STATE_DIR: temp, TEAM_SKILL_HUB_API_KEY: "test-secret" };
-  const runHook = async (payload: object) => {
-    const child = spawn("python3", ["scripts/codex/expert-session-hook.py"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  for (const tool_name of ["mcp__teamSkillHub__submit_expert_task", "mcp__teamSkillHub__submit_expert_task_auto"]) {
+    const child = spawn("python3", ["scripts/codex/expert-session-hook.py"], {
+      env: { ...process.env, TEAM_SKILL_HUB_API_KEY: "test-secret" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     let output = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => (output += chunk));
     const code = await new Promise<number>((resolve, reject) => {
       child.on("error", reject);
       child.on("close", resolve);
-      child.stdin.end(JSON.stringify(payload));
+      child.stdin.end(
+        JSON.stringify({
+          hook_event_name: "PreToolUse",
+          session_id: session,
+          tool_name,
+          tool_input: { problem: "legacy", idempotencyKey: "legacy-key" },
+        }),
+      );
     });
     assert.equal(code, 0);
-    return output ? JSON.parse(output).hookSpecificOutput : undefined;
-  };
-  try {
-    await runHook({ hook_event_name: "UserPromptSubmit", session_id: session, turn_id: "turn-native-1" });
-    const result = await runHook({
-      hook_event_name: "PreToolUse",
-      session_id: session,
-      tool_name: "mcp__teamSkillHub__submit_expert_task_auto",
-      tool_input: { problem: "rephrased", idempotencyKey: "different-key" },
-    });
-    assert.match(result.updatedInput.sourceRequestId, /^srq_[a-f0-9]{64}$/);
-    assert.match(result.updatedInput.clientSessionProof, /^\d{13}\.[a-f0-9]{64}$/);
-    assert.equal(result.permissionDecision, "allow");
-    const replay = await runHook({
-      hook_event_name: "PreToolUse",
-      session_id: session,
-      tool_name: "mcp__teamSkillHub__submit_expert_task_auto",
-      tool_input: { problem: "changed words", idempotencyKey: "another-key" },
-    });
-    assert.equal(replay.updatedInput.sourceRequestId, result.updatedInput.sourceRequestId);
-  } finally {
-    await rm(temp, { recursive: true, force: true });
+    assert.equal(output, "");
   }
 });
 
-test("Codex prompt without turn_id clears prior request state", async () => {
-  const temp = await mkdtemp(path.join(os.tmpdir(), "codex-request-state-reset-"));
+test("Codex UserPromptSubmit no longer maintains legacy ExpertTask request state", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "codex-request-state-disabled-"));
   const session = "01a18fc5-3678-7ac2-920f-de4a707e5a1b";
-  const env = { ...process.env, TEAM_SKILL_HUB_REQUEST_STATE_DIR: temp, TEAM_SKILL_HUB_API_KEY: "test-secret" };
-  const runHook = async (payload: object) => {
-    const child = spawn("python3", ["scripts/codex/expert-session-hook.py"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  try {
+    const child = spawn("python3", ["scripts/codex/expert-session-hook.py"], {
+      env: { ...process.env, TEAM_SKILL_HUB_REQUEST_STATE_DIR: temp, TEAM_SKILL_HUB_API_KEY: "test-secret" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     let output = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => (output += chunk));
     const code = await new Promise<number>((resolve, reject) => {
       child.on("error", reject);
       child.on("close", resolve);
-      child.stdin.end(JSON.stringify(payload));
+      child.stdin.end(JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: session, turn_id: "turn-1" }));
     });
     assert.equal(code, 0);
-    return output ? JSON.parse(output).hookSpecificOutput : undefined;
-  };
-  try {
-    await runHook({ hook_event_name: "UserPromptSubmit", session_id: session, turn_id: "turn-old" });
-    await runHook({ hook_event_name: "UserPromptSubmit", session_id: session });
-    const result = await runHook({
-      hook_event_name: "PreToolUse",
-      session_id: session,
-      tool_name: "mcp__teamSkillHub__submit_expert_task_auto",
-      tool_input: { problem: "new", idempotencyKey: "new" },
-    });
-    assert.equal(result.updatedInput.sourceRequestId, undefined);
-    assert.match(result.updatedInput.clientSessionProof, /^\d{13}\.[a-f0-9]{64}$/);
+    assert.equal(output, "");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
 });
-
 test("Codex hook signs submit_work and update_work_source with the native session", async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), "codex-work-hook-"));
   const session = "01a18fc5-3678-7ac2-920f-de4a707e5a1b";

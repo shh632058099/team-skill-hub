@@ -318,37 +318,121 @@ test("MCP Work API drives durable work through review, rework, authorization and
 
     const claim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
     assert.equal(claim.taskId, taskId);
+
+    const baseline = await callMcp(mcpUrl, apiKey, 40, "wait_work", {
+      workItemId: workId,
+      afterEventId: 0,
+      afterActivityEventId: 0,
+      timeoutMs: 0,
+    });
+    assert.ok(Number(baseline.nextEventId) > 0);
+    assert.ok(Number(baseline.nextActivityEventId) > 0);
+
+    const legacyWait = await callMcp(mcpUrl, apiKey, 43, "wait_work", {
+      workItemId: workId,
+      afterEventId: baseline.nextEventId,
+      timeoutMs: 250,
+    });
+    assert.equal(legacyWait.timedOut, true);
+    assert.deepEqual(legacyWait.activityEvents, []);
+    assert.equal(legacyWait.nextActivityEventId, 0);
+
+    const incrementalWait = callMcp(mcpUrl, apiKey, 41, "wait_work", {
+      workItemId: workId,
+      afterEventId: baseline.nextEventId,
+      afterActivityEventId: baseline.nextActivityEventId,
+      timeoutMs: 3_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
     tasks.recordActivity(claim, "model.started", 1, "", 0, 1_100);
-    tasks.recordActivity(claim, "model.completed", 2, "", 0, 1_200);
+    const incremental = await incrementalWait;
+    assert.equal(incremental.work.status, "running");
+    assert.equal(incremental.timedOut, false);
+    assert.ok(
+      incremental.activityEvents.some(
+        (event: { type?: string; role?: string; taskId?: string }) =>
+          event.type === "model.started" && event.role === "execution" && event.taskId === taskId,
+      ),
+    );
+    assert.ok(Number(incremental.nextActivityEventId) > Number(baseline.nextActivityEventId));
+
+    const notifiedProgress = fetch(mcpUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "x-skill-hub-api-key": apiKey,
+        "x-skill-hub-client": "claude-code-test",
+        "x-skill-hub-session-id": "mcp-e2e-session",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 42,
+        method: "tools/call",
+        params: {
+          name: "wait_work",
+          arguments: {
+            workItemId: workId,
+            afterEventId: incremental.nextEventId,
+            afterActivityEventId: incremental.nextActivityEventId,
+            timeoutMs: 5_000,
+          },
+          _meta: { progressToken: "progress-work-e2e" },
+        },
+      }),
+    }).then(async (response) => {
+      assert.equal(response.status, 200);
+      return await response.text();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    tasks.recordActivity(claim, "tool.activity", 2, "Grep", 1, 1_200);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    tasks.recordActivity(claim, "model.completed", 3, "", 0, 1_300);
     tasks.complete(claim, "OTA analysis complete", 2_000, { commitSha: "a".repeat(40) });
+
+    const notifications = await notifiedProgress;
+    assert.match(notifications, /notifications\/progress/);
+    assert.match(notifications, /progress-work-e2e/);
+    assert.match(notifications, /Worker/);
 
     const waiting = await callMcp(mcpUrl, apiKey, 5, "wait_work", {
       workItemId: workId,
       afterEventId: 0,
+      afterActivityEventId: 0,
       timeoutMs: 500,
     });
     assert.equal(waiting.work.status, "waiting_review");
-    assert.equal(waiting.evidence[0].subjectRevision, "a".repeat(40));
-    assert.equal(waiting.turns.length, 1);
-    assert.equal(waiting.turns[0].runId, claim.runId);
-    assert.equal(waiting.turns[0].status, "succeeded");
-    assert.equal(waiting.workspace.workspaceKey, submitted.currentTask.workspaceKey);
-    assert.deepEqual(waiting.verification.requiredEvidence, ["expert_result"]);
-    assert.deepEqual(waiting.verification.requiredSteps, []);
-    assert.deepEqual(waiting.verification.results, []);
-    assert.equal(waiting.verification.passed, 0);
-    assert.equal(waiting.verification.failed, 0);
+    assert.equal(waiting.humanActionRequired, true);
+    assert.equal(waiting.evidence, undefined);
+    assert.equal(waiting.turns, undefined);
+    assert.equal(waiting.workspace, undefined);
+    assert.equal(waiting.verification, undefined);
     assert.ok(Array.isArray(waiting.events));
     assert.ok(Number(waiting.nextEventId) > 0);
+    assert.ok(Array.isArray(waiting.activityEvents));
+    assert.ok(Number(waiting.nextActivityEventId) > 0);
+
+    const fullWaiting = await callMcp(mcpUrl, apiKey, 44, "get_work", { workItemId: workId });
+    assert.equal(fullWaiting.evidence[0].subjectRevision, "a".repeat(40));
+    assert.equal(fullWaiting.turns.length, 1);
+    assert.equal(fullWaiting.turns[0].runId, claim.runId);
+    assert.equal(fullWaiting.turns[0].status, "succeeded");
+    assert.equal(fullWaiting.workspace.workspaceKey, submitted.currentTask.workspaceKey);
+    assert.deepEqual(fullWaiting.verification.requiredEvidence, ["expert_result"]);
+    assert.deepEqual(fullWaiting.verification.requiredSteps, []);
+    assert.deepEqual(fullWaiting.verification.results, []);
+    assert.equal(fullWaiting.verification.passed, 0);
+    assert.equal(fullWaiting.verification.failed, 0);
 
     const completed = await callMcp(mcpUrl, apiKey, 6, "review_work", {
       workItemId: workId,
-      expectedRevision: waiting.work.stateRevision,
+      expectedRevision: fullWaiting.work.stateRevision,
       subjectRevision: "a".repeat(40),
       decision: "accepted",
       reason: "verified",
     });
     assert.equal(completed.work.status, "completed");
+    assert.equal(completed.gate.ready, true);
     assert.equal(completed.gate.ready, true);
 
     const workflowBound = await callMcp(mcpUrl, apiKey, 59, "submit_work", {

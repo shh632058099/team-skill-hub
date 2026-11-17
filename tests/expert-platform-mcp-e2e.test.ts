@@ -157,30 +157,23 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
       /MCP_TOOL_FORBIDDEN_FOR_PRINCIPAL/,
     );
     const catalogDescription = listedTools.find((tool) => tool.name === "list_available_experts")?.description ?? "";
+    assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task"));
     assert.ok(listedTools.some((tool) => tool.name === "submit_expert_task_auto"));
+    assert.ok(listedTools.some((tool) => tool.name === "submit_work"));
     const submitDescription = listedTools.find((tool) => tool.name === "submit_expert_task")?.description ?? "";
     const submitAutoDescription =
       listedTools.find((tool) => tool.name === "submit_expert_task_auto")?.description ?? "";
-    assert.match(catalogDescription, /ONLY when the user explicitly names an Expert/i);
-    assert.match(catalogDescription, /do NOT call this tool/i);
-    assert.match(catalogDescription, /separate from Skill Hub skills and agents/i);
-    assert.match(catalogDescription, /returned expertId/i);
-    assert.match(submitDescription, /delegate.*specialist analysis/i);
+    const submitWorkDescription = listedTools.find((tool) => tool.name === "submit_work")?.description ?? "";
+    assert.match(catalogDescription, /submit_work/i);
+    assert.match(catalogDescription, /routingMode=explicit/i);
+    assert.match(catalogDescription, /deprecated compatibility/i);
     for (const description of [submitDescription, submitAutoDescription]) {
-      assert.match(description, /Never call submit_expert_task_auto and submit_expert_task for the same user request/i);
-      assert.match(description, /reuse the original idempotencyKey/i);
-      assert.match(description, /activeSessionTaskId/i);
-      assert.match(description, /wait_expert_task/i);
-      assert.match(description, /Codex CLI/i);
+      assert.match(description, /DEPRECATED compatibility-only/i);
+      assert.match(description, /submit_work/i);
     }
-    assert.match(submitDescription, /CRITICAL ROUTING RULE/i);
-    assert.match(submitDescription, /selectionMode="auto"/i);
-    assert.match(submitDescription, /never use magic expertId strings/i);
-    assert.match(
-      submitDescription,
-      /user did NOT explicitly name an Expert, set selectionMode="auto" and OMIT expertId/i,
-    );
-
+    assert.match(submitWorkDescription, /PRIMARY submission tool/i);
+    assert.match(submitWorkDescription, /submit_expert_task/i);
+    assert.match(submitWorkDescription, /automatic and explicit routing/i);
     experts = new ExpertStore(runtimeDb);
     experts.putDefinition({
       id: "ota",

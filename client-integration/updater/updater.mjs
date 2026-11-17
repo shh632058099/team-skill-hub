@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const BEGIN = "<!-- BEGIN TEAM-SKILL-HUB -->";
@@ -8,13 +8,34 @@ const MCP_END = "# END TEAM-SKILL-HUB MCP";
 
 async function exists(file) { return stat(file).then(() => true, () => false); }
 async function readText(file, fallback = "") { return (await exists(file)) ? readFile(file, "utf8") : fallback; }
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const RENAME_RETRY_DELAYS_MS = [50, 100, 200, 400, 800];
+
+export async function renameWithRetry(source, target, renameImpl = rename, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
+  let attempt = 0;
+  while (true) {
+    try {
+      await renameImpl(source, target);
+      return;
+    } catch (error) {
+      const code = typeof error?.code === "string" ? error.code : "";
+      if (!TRANSIENT_RENAME_CODES.has(code) || attempt >= RENAME_RETRY_DELAYS_MS.length) throw error;
+      await sleepImpl(RENAME_RETRY_DELAYS_MS[attempt++]);
+    }
+  }
+}
+
 async function writeAtomic(file, text) {
   await mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(temp, text);
-  await rename(temp, file);
-}
-function replaceBlock(content, begin, end, block) {
+  try {
+    await renameWithRetry(temp, file);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {});
+    throw error;
+  }
+}function replaceBlock(content, begin, end, block) {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const out = []; let skipping = false;
   for (const line of lines) {
@@ -25,10 +46,15 @@ function replaceBlock(content, begin, end, block) {
   const base = out.join("\n").trimEnd();
   return (base ? base + "\n\n" : "") + block.trimEnd() + "\n";
 }
-function launcherCommand(clientRoot) {
-  if (process.platform === "win32") return `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.join(clientRoot, "bin", "team-skill-hub-client.ps1")}"`;
+export function windowsLauncherCommand(clientRoot) {
+  const root = path.win32.normalize(clientRoot);
+  return `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.win32.join(root, "bin", "team-skill-hub-client.ps1")}"`;
+}
+export function launcherCommand(clientRoot, platform = process.platform) {
+  if (platform === "win32") return windowsLauncherCommand(clientRoot);
   return `"${path.join(clientRoot, "bin", "team-skill-hub-client")}"`;
 }
+
 function fallbackGuidance(serverName, clientRoot) {
   return `${BEGIN}\n## Team Skill Hub\n\nUse the \`${serverName}\` MCP server proactively for team-specific engineering work.\n\nWhen Team Skill Hub reports a client integration update, never upgrade silently. Only when the user explicitly asks to upgrade, run \`${launcherCommand(clientRoot)} upgrade\`; after a required update, restart the CLI before relying on new integration behavior.\n${END}`;
 }
@@ -101,6 +127,22 @@ function mergeHook(root, event, marker, handler) {
   kept.push({ hooks: [handler] });
   root.hooks[event] = kept;
 }
+function removeManagedHooks(root, event, markers) {
+  root.hooks ||= {};
+  const kept = [];
+  for (const group of root.hooks[event] || []) {
+    const hooks = (group.hooks || []).filter((hook) => {
+      const commands = [String(hook.command || ""), String(hook.commandWindows || "")];
+      return !markers.some((marker) => commands.some((command) => command.includes(marker)));
+    });
+    if (hooks.length) kept.push({ ...group, hooks });
+  }
+  root.hooks[event] = kept;
+}
+function replaceManagedToolHook(root, event, markers, matcher, handler) {
+  removeManagedHooks(root, event, markers);
+  root.hooks[event].push({ matcher, hooks: [handler] });
+}
 async function readKeyValueFile(file) {
   const values = {};
   const raw = await readText(file);
@@ -123,12 +165,20 @@ async function updateHookFiles(context) {
   if (codex) {
     const hooksDir = path.join(codex.config_home, "hooks");
     await mkdir(hooksDir, { recursive: true });
-    for (const name of ["team-skill-hub-hook.sh", "team-skill-hub-hook.ps1"]) {
-      const source = path.join(releaseRoot, "scripts", name);
-      if (await exists(source)) await copyFile(source, path.join(hooksDir, name));
+    const copies = [
+      ["scripts/team-skill-hub-hook.sh", "team-skill-hub-hook.sh"],
+      ["scripts/team-skill-hub-hook.ps1", "team-skill-hub-hook.ps1"],
+      ["scripts/codex/expert-session-hook.py", "expert-session-hook.py"],
+      ["scripts/codex/expert-session-hook.ps1", "expert-session-hook.ps1"],
+    ];
+    for (const [sourceRel, targetName] of copies) {
+      const source = path.join(releaseRoot, sourceRel);
+      const target = path.join(hooksDir, targetName);
+      if (await exists(source)) {
+        await copyFile(source, target);
+        if (targetName.endsWith(".sh") || targetName.endsWith(".py")) await chmod(target, 0o755).catch(() => {});
+      }
     }
-    const sh = path.join(hooksDir, "team-skill-hub-hook.sh");
-    if (await exists(sh)) await chmod(sh, 0o755).catch(() => {});
     const conf = path.join(hooksDir, "team-skill-hub.conf");
     const old = await readKeyValueFile(conf);
     const eventUrl = `${String(state.hub_base_url).replace(/\/$/, "")}/client-events`;
@@ -138,9 +188,20 @@ async function updateHookFiles(context) {
   if (claude) {
     const hooksDir = path.join(claude.config_home, "hooks");
     await mkdir(hooksDir, { recursive: true });
-    const stopSource = path.join(releaseRoot, "scripts", "team-skill-hub-claude-stop.sh");
-    const stopTarget = path.join(hooksDir, "team-skill-hub-claude-stop.sh");
-    if (await exists(stopSource)) { await copyFile(stopSource, stopTarget); await chmod(stopTarget, 0o755).catch(() => {}); }
+    const copies = [
+      ["scripts/team-skill-hub-claude-stop.sh", "team-skill-hub-claude-stop.sh"],
+      ["scripts/claude/stop-hook.ps1", "team-skill-hub-claude-stop.ps1"],
+      ["scripts/claude/expert-session-hook.py", "team-skill-hub-expert-session.py"],
+      ["scripts/claude/expert-session-hook.ps1", "team-skill-hub-expert-session.ps1"],
+    ];
+    for (const [sourceRel, targetName] of copies) {
+      const source = path.join(releaseRoot, sourceRel);
+      const target = path.join(hooksDir, targetName);
+      if (await exists(source)) {
+        await copyFile(source, target);
+        if (targetName.endsWith(".sh") || targetName.endsWith(".py")) await chmod(target, 0o755).catch(() => {});
+      }
+    }
     const conf = path.join(hooksDir, "team-skill-hub.conf");
     const old = await readKeyValueFile(conf);
     const base = String(state.hub_base_url).replace(/\/$/, "");
@@ -161,7 +222,7 @@ export async function applyManagedConfig(context) {
   }
   const launcher = path.join(clientRoot, "bin", "team-skill-hub-client").replaceAll("\\", "/");
   const sessionLauncher = launcherCommand(clientRoot);
-  const windowsLauncher = `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.join(clientRoot, "bin", "team-skill-hub-client.ps1")}"`;
+  const windowsLauncher = windowsLauncherCommand(clientRoot);
   const mcpUrl = `${String(state.hub_base_url).replace(/\/$/, "")}/mcp`;
   if (codex) {
     await mkdir(codex.config_home, { recursive: true });
@@ -176,6 +237,20 @@ export async function applyManagedConfig(context) {
     try { hooks = hooksRaw.trim() ? JSON.parse(hooksRaw) : {}; } catch { throw new Error(`Existing Codex hooks.json is invalid JSON: ${hooksFile}`); }
     const session = commandHook(`${sessionLauncher} session-start --client codex`, `${windowsLauncher} session-start --client codex`);
     mergeHook(hooks, "SessionStart", "team-skill-hub-client", session);
+    const codexHooksDir = path.join(codex.config_home, "hooks");
+    replaceManagedToolHook(
+      hooks,
+      "PreToolUse",
+      ["expert-session-hook", "team-skill-hub-expert-session"],
+      `^mcp__${codex.server_name}__(submit_work|update_work_source)$`,
+      {
+        type: "command",
+        command: `python3 "${path.join(codexHooksDir, "expert-session-hook.py").replaceAll("\\", "/")}"`,
+        commandWindows: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.win32.join(path.win32.normalize(codex.config_home), "hooks", "expert-session-hook.ps1")}"`,
+        timeout: 5,
+      },
+    );
+    removeManagedHooks(hooks, "UserPromptSubmit", ["expert-session-hook", "team-skill-hub-expert-session"]);
     await writeAtomic(configFile, config);
     await writeAtomic(agentsFile, agents);
     await writeAtomic(hooksFile, JSON.stringify(hooks, null, 2) + "\n");
@@ -194,6 +269,19 @@ export async function applyManagedConfig(context) {
     const display = { type: "command", command: `${sessionLauncher} session-start-display --client claude`, timeout: 2 };
     mergeHook(claudeSettings, "SessionStart", "session-start-display --client claude", display);
     mergeHook(claudeSettings, "SessionStart", "session-start --client claude", session);
+    removeManagedHooks(claudeSettings, "PreToolUse", ["expert-session-hook", "team-skill-hub-expert-session"]);
+    removeManagedHooks(claudeSettings, "UserPromptSubmit", ["expert-session-hook", "team-skill-hub-expert-session"]);
+    if (claude.server_name === "teamSkillHub") {
+      const claudeHooksDir = path.join(claude.config_home, "hooks");
+      const command =
+        process.platform === "win32"
+          ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.win32.join(path.win32.normalize(claude.config_home), "hooks", "team-skill-hub-expert-session.ps1")}"`
+          : `python3 "${path.join(claudeHooksDir, "team-skill-hub-expert-session.py").replaceAll("\\", "/")}"`;
+      claudeSettings.hooks.PreToolUse.push({
+        matcher: "^mcp__teamSkillHub__(submit_work|update_work_source)$",
+        hooks: [{ type: "command", command, timeout: 5 }],
+      });
+    }
     await writeAtomic(settingsFile, JSON.stringify(claudeSettings, null, 2) + "\n");
     await writeAtomic(mdFile, await renderGuidance(await readText(mdFile), claude.server_name, "claude", context.releaseRoot, clientRoot));
   }
@@ -211,10 +299,65 @@ export async function selfCheckManagedConfig(context) {
     const root = path.resolve(context.clientRoot).replaceAll("\\", "/");
     if (!config.includes(JSON.stringify(root))) throw new Error("Codex writable root self-check failed");
   }
+  if (state.clients?.codex?.enabled) {
+    const hooks = JSON.parse(await readFile(path.join(state.clients.codex.config_home, "hooks.json"), "utf8"));
+    const managedPreTool = (hooks.hooks?.PreToolUse || []).filter((group) =>
+      (group.hooks || []).some((hook) =>
+        [String(hook.command || ""), String(hook.commandWindows || "")].some((command) => command.includes("expert-session-hook")),
+      ),
+    );
+    const expectedMatcher = `^mcp__${state.clients.codex.server_name}__(submit_work|update_work_source)$`;
+    if (managedPreTool.length !== 1 || managedPreTool[0]?.matcher !== expectedMatcher) {
+      throw new Error("Codex Work hook self-check failed");
+    }
+    const legacyPrompt = (hooks.hooks?.UserPromptSubmit || []).some((group) =>
+      (group.hooks || []).some((hook) =>
+        [String(hook.command || ""), String(hook.commandWindows || "")].some((command) => command.includes("expert-session-hook")),
+      ),
+    );
+    if (legacyPrompt) throw new Error("Codex legacy prompt hook self-check failed");
+    if (context.releaseRoot) {
+      const hookFile = path.join(
+        state.clients.codex.config_home,
+        "hooks",
+        process.platform === "win32" ? "expert-session-hook.ps1" : "expert-session-hook.py",
+      );
+      const hookSource = await readFile(hookFile, "utf8");
+      if (!hookSource.includes("submit_work") || hookSource.includes("submit_expert_task")) {
+        throw new Error("Codex Work hook runtime self-check failed");
+      }
+    }
+  }
   if (state.clients?.claude?.enabled) {
     const settings = JSON.parse(await readFile(path.join(state.clients.claude.config_home, "settings.json"), "utf8"));
     const rule = `mcp__${state.clients.claude.server_name}__*`;
     if (!settings.permissions?.allow?.includes(rule)) throw new Error("Claude permission self-check failed");
+    if (state.clients.claude.server_name === "teamSkillHub") {
+      const managedPreTool = (settings.hooks?.PreToolUse || []).filter((group) =>
+        (group.hooks || []).some((hook) => String(hook.command || "").includes("team-skill-hub-expert-session")),
+      );
+      if (
+        managedPreTool.length !== 1 ||
+        managedPreTool[0]?.matcher !== "^mcp__teamSkillHub__(submit_work|update_work_source)$"
+      ) {
+        throw new Error("Claude Work hook self-check failed");
+      }
+      const legacyPrompt = (settings.hooks?.UserPromptSubmit || []).some((group) =>
+        (group.hooks || []).some((hook) => String(hook.command || "").includes("team-skill-hub-expert-session")),
+      );
+      if (legacyPrompt) throw new Error("Claude legacy prompt hook self-check failed");
+      if (context.releaseRoot) {
+        const hookFile = path.join(
+          state.clients.claude.config_home,
+          "hooks",
+          process.platform === "win32" ? "team-skill-hub-expert-session.ps1" : "team-skill-hub-expert-session.py",
+        );
+        const hookSource = await readFile(hookFile, "utf8");
+        if (!hookSource.includes("submit_work") || hookSource.includes("submit_expert_task")) {
+          throw new Error("Claude Work hook runtime self-check failed");
+        }
+      }
+    }
   }
   return true;
 }

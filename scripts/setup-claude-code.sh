@@ -144,7 +144,7 @@ kept.append({"hooks":[{"type":"command","command":'bash "$HOME/.claude/hooks/tea
 hooks["Stop"]=kept
 if os.environ["SERVER_NAME"] == "teamSkillHub":
     # Preserve all unrelated PreToolUse handlers, replace only our managed hook.
-    matcher=r"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$"
+    matcher=r"^mcp__teamSkillHub__(submit_work|update_work_source)$"
     kept=[]
     for group in hooks.get("PreToolUse",[]) or []:
         handlers=[h for h in (group.get("hooks",[]) or []) if "expert-session-hook" not in str(h.get("command","")) and "team-skill-hub-expert-session" not in str(h.get("command",""))]
@@ -158,7 +158,6 @@ if os.environ["SERVER_NAME"] == "teamSkillHub":
         handlers=[h for h in (group.get("hooks",[]) or []) if "team-skill-hub-expert-session.py" not in str(h.get("command",""))]
         if handlers:
             copy=dict(group); copy["hooks"]=handlers; prompt_kept.append(copy)
-    prompt_kept.append({"hooks":[{"type":"command","command":command,"timeout":2}]})
     hooks["UserPromptSubmit"]=prompt_kept
 client=os.environ["CLIENT_LAUNCHER"].replace("\\","/")
 kept=[]
@@ -183,7 +182,7 @@ for(const event of ["SessionStart","UserPromptSubmit","PostToolUse","SessionEnd"
 const kept=[];for(const group of (root.hooks.Stop||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-claude-stop"));if(hs.length)kept.push({...group,hooks:hs})}kept.push({hooks:[{type:"command",command:'bash "$HOME/.claude/hooks/team-skill-hub-claude-stop.sh"',timeout:4}]});root.hooks.Stop=kept;
 if(server==="teamSkillHub"){
  const groups=[];for(const group of (root.hooks.PreToolUse||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("expert-session-hook")&&!String(h.command||"").includes("team-skill-hub-expert-session"));if(hs.length)groups.push({...group,hooks:hs})}
- groups.push({matcher:"^mcp__teamSkillHub__(submit_expert_task|submit_expert_task_auto|submit_work|update_work_source)$",hooks:[{type:"command",command:`python3 "${process.env.HOOKS_DIR.replaceAll("\\","/")}/team-skill-hub-expert-session.py"`,timeout:5}]});root.hooks.PreToolUse=groups;
+ groups.push({matcher:"^mcp__teamSkillHub__(submit_work|update_work_source)$",hooks:[{type:"command",command:`python3 "${process.env.HOOKS_DIR.replaceAll("\\","/")}/team-skill-hub-expert-session.py"`,timeout:5}]});root.hooks.PreToolUse=groups;
 }
 const client=process.env.CLIENT_LAUNCHER.replaceAll("\\","/");const sk=[];for(const group of (root.hooks.SessionStart||[])){const hs=(group.hooks||[]).filter(h=>!String(h.command||"").includes("team-skill-hub-client"));if(hs.length)sk.push({...group,hooks:hs})}sk.push({hooks:[{type:"command",command:`"${client}" session-start --client claude`,timeout:2}]});sk.push({hooks:[{type:"command",command:`"${client}" session-start-display --client claude`,timeout:2}]});root.hooks.SessionStart=sk;
 fs.writeFileSync(path,JSON.stringify(root,null,2)+"\n","utf8");
@@ -232,8 +231,9 @@ For team-specific engineering tasks and questions, including short questions con
 7. If a retrieved Team Skill Hub asset is clearly outdated or incorrect, use \`submit_feedback\` with a concise evidence-based reason.
 8. When work uncovers durable, verified team-specific knowledge that is missing from the Hub, call \`get_knowledge_submission_spec\` immediately before submission, follow the returned current rules/template, then call \`submit_knowledge_candidate\` with the returned \`spec_version\`. Do not submit raw notes/transcripts, secrets, credentials, customer-sensitive data, or speculative conclusions.
 9. When creating or submitting any Skill, including a Skill that contains only one \`SKILL.md\`, use \`submit_skill_bundle\`. Use \`import_type=skill\` for one Skill root and \`import_type=collection\` only for an explicit multi-Skill namespace snapshot. Never substitute \`submit_knowledge_candidate\` for a Skill. If \`submit_skill_bundle\` is not currently loaded in Claude Code, use ToolSearch to load that MCP tool before submitting.
-10. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
-11. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run \`"$CLIENT_LAUNCHER" upgrade\`; after a required update, restart Claude Code before relying on new integration behavior.
+10. For delegated Expert Platform execution, submit all new work with \`submit_work\` and follow it with \`wait_work\` / \`get_work\`. \`wait_work\` is the compact incremental progress API and defaults to a 30-second long poll: start live activity tracking with \`afterActivityEventId=0\`, then keep passing \`nextEventId\` + \`nextActivityEventId\`. When \`terminal=true\` or \`humanActionRequired=true\`, call \`get_work\` once for the full result, Evidence, Workspace and verification details. \`submit_expert_task\` and \`submit_expert_task_auto\` are deprecated compatibility tools for older integrations and must not be used for new requests.
+11. Do not call repository sync, rollback, or administrative operations unless the user explicitly requests that operational action.
+12. When SessionStart reports a Team Skill Hub client integration update, never upgrade silently. Only when the user explicitly asks to upgrade Team Skill Hub, run \`"$CLIENT_LAUNCHER" upgrade\`; after a required update, restart Claude Code before relying on new integration behavior.
 
 Typical triggers include OTA, Yocto, embedded Linux, firmware, CI/CD, testing, CVE management, release engineering, platform tooling, and project-specific design/API questions.
 
