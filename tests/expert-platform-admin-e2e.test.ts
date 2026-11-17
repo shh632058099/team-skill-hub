@@ -112,6 +112,11 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /Workspace 可写/);
     assert.match(html, /实际 Runtime Profile/);
     assert.match(html, /value="claude-workspace-write"/);
+    assert.match(html, /runtimeProfileMigration/);
+    assert.match(html, /当前历史 Runtime Profile/);
+    assert.match(html, /保存前请确认“执行 Backend”和“执行权限”/);
+    assert.match(html, /还需补齐/);
+    assert.doesNotMatch(html, /请新建标准执行配置完成迁移后再停用旧配置/);
     assert.match(html, /注册 Worker/);
     assert.match(html, /仅本次显示/);
     assert.match(html, /Git 仓库地址/);
@@ -164,6 +169,59 @@ test("Admin expert configuration UI manages definitions and execution configurat
       }),
     });
     assert.equal(createdDefinition.status, 201);
+    const legacyStore = new ExpertStore(runtimeDb);
+    legacyStore.putDeployment({
+      id: "msgbx-worker-01",
+      expertId: "ota",
+      repositoryIds: ["legacy-msgbx-repo"],
+      repositories: [],
+      principals: ["team-a"],
+      runtimeProfile: "linux-msgbox",
+      active: true,
+    });
+    legacyStore.close();
+
+    const legacyDisabled = await fetch(base + "/admin/api/expert-config/deployments/msgbx-worker-01/active", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ active: false }),
+    });
+    assert.equal(legacyDisabled.status, 200);
+    const legacyDisabledBody = (await legacyDisabled.json()) as {
+      deployment: { runtimeProfile: string; active: boolean };
+    };
+    assert.equal(legacyDisabledBody.deployment.runtimeProfile, "linux-msgbox");
+    assert.equal(legacyDisabledBody.deployment.active, false);
+
+    const legacyMigrated = await fetch(base + "/admin/api/expert-config/deployments/msgbx-worker-01", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "msgbx-worker-01",
+        expertId: "ota",
+        repositoryIds: ["legacy-msgbx-repo"],
+        repositories: [],
+        principals: ["team-a"],
+        runtimeProfile: "claude-workspace-write",
+        executor: {
+          backend: "claude",
+          modelConfig: {
+            providerId: "router",
+            model: "sonnet",
+            baseUrl: "https://router.example/v1",
+            wireApi: "anthropic-messages",
+            allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+          },
+        },
+        active: false,
+      }),
+    });
+    assert.equal(legacyMigrated.status, 200);
+    const legacyMigratedBody = (await legacyMigrated.json()) as {
+      deployment: { runtimeProfile: string; active: boolean; executor?: { backend: string } };
+    };
+    assert.equal(legacyMigratedBody.deployment.runtimeProfile, "claude-workspace-write");
+    assert.equal(legacyMigratedBody.deployment.executor?.backend, "claude");
     const definitionsBody = (await createdDefinition.json()) as {
       definition: { id: string; modelConfig?: { providerId: string; baseUrl: string; credentialRef?: string } };
     };
@@ -898,6 +956,11 @@ test("Admin expert configuration UI manages definitions and execution configurat
       method: "DELETE",
     });
     assert.equal(deletedUrlDeployment.status, 200);
+    const deletedMigratedLegacyDeployment = await fetch(base + "/admin/api/expert-config/deployments/msgbx-worker-01", {
+      method: "DELETE",
+    });
+    assert.equal(deletedMigratedLegacyDeployment.status, 200);
+
     const deletedDefinition = await fetch(base + "/admin/api/expert-config/definitions/ota", { method: "DELETE" });
     assert.equal(deletedDefinition.status, 200);
     assert.equal((await deletedDefinition.json()).deleted, true);

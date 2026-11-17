@@ -1698,6 +1698,31 @@ export async function startServer(
     },
   );
 
+  app.put<{ Params: { id: string }; Body: { active: boolean } }>(
+    "/admin/api/expert-config/deployments/:id/active",
+    async (request, reply) => {
+      if (!hasAdminAccess(request)) {
+        reply.code(403);
+        return { error: "admin API access denied" };
+      }
+      const parsed = z.object({ active: z.boolean() }).safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "INVALID_EXPERT_DEPLOYMENT", issues: parsed.error.issues };
+      }
+      try {
+        const deployment = withExpertStore((store) => {
+          const current = store.getDeployment(request.params.id);
+          store.putDeployment({ ...current, active: parsed.data.active });
+          return store.getDeployment(request.params.id);
+        });
+        return { deployment };
+      } catch (error) {
+        return expertAdminError(error, reply);
+      }
+    },
+  );
+
   app.put<{ Params: { id: string }; Body: { principals: string[] } }>(
     "/admin/api/expert-config/deployments/:id/principals",
     async (request, reply) => {
