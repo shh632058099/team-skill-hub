@@ -199,7 +199,7 @@ async function main(): Promise<void> {
     "3. Prefer relevant team assets over generic assumptions while respecting repository visibility and client compatibility.",
     "4. Submit concise evidence-based feedback when retrieved guidance is clearly outdated or incorrect.",
     "5. Submit a Knowledge Candidate for durable verified team-specific knowledge that is missing. Never submit secrets, credentials, customer-sensitive data, or speculative conclusions.",
-    "6. Submit all new delegated Expert Platform work with submit_work. Use compact wait_work (30-second default long poll) for progress: start with afterActivityEventId=0, keep passing nextEventId + nextActivityEventId, and call get_work once when terminal=true or humanActionRequired=true. submit_expert_task and submit_expert_task_auto are deprecated compatibility tools.",
+    "6. Submit all new delegated Expert Platform work with submit_work. After submit_work succeeds, must not return to the user yet; execute the returned followUp exactly. If followUp.tool=wait_work, call wait_work with followUp.arguments and continue using each returned followUp; active submissions start activity tracking with afterActivityEventId=0. If followUp.tool=get_work because the Work is terminal or humanActionRequired=true, call get_work once before replying. wait_work uses a 30-second default long poll and nextEventId + nextActivityEventId cursors when activity tracking is enabled. submit_expert_task and submit_expert_task_auto are deprecated compatibility tools.",
     "7. Do not invoke repository sync, rollback, or administrative operations unless the user explicitly asks for that operational action.",
     "",
   ].join("\n");

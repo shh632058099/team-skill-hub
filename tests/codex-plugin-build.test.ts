@@ -85,6 +85,10 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.match(skill, /30-second default long poll/);
     assert.match(skill, /humanActionRequired=true/);
     assert.match(skill, /get_work once/);
+    assert.match(skill, /After submit_work succeeds.*must not return to the user/i);
+    assert.match(skill, /execute the returned followUp/i);
+    assert.match(skill, /followUp\.tool=wait_work/i);
+    assert.match(skill, /followUp\.tool=get_work/i);
 
     const serialized = [
       await readFile(path.join(out, "plugin.json"), "utf8"),

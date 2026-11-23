@@ -233,6 +233,14 @@ test("MCP Work API drives durable work through review, rework, authorization and
       );
     }
 
+    const submitWorkTool = tools.find((tool) => tool.name === "submit_work");
+    const waitWorkTool = tools.find((tool) => tool.name === "wait_work");
+    assert.match(submitWorkTool?.description ?? "", /must execute.*followUp/i);
+    assert.match(submitWorkTool?.description ?? "", /followUp\.tool.*wait_work/i);
+    assert.match(submitWorkTool?.description ?? "", /followUp\.tool.*get_work/i);
+    assert.match(waitWorkTool?.description ?? "", /MUST continue calling wait_work/i);
+    assert.match(waitWorkTool?.description ?? "", /followUp/i);
+
     await assert.rejects(
       () =>
         callMcpWithoutSessionHeader(
@@ -376,6 +384,16 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(submitted.sourceObservations[0].state, "active");
     assert.equal(submitted.sourceObservations[0].reconciliationAction, "noop");
     assert.equal(submitted.attempts.length, 1);
+    assert.deepEqual(submitted.followUp, {
+      required: true,
+      tool: "wait_work",
+      arguments: {
+        workItemId: workId,
+        afterEventId: 0,
+        afterActivityEventId: 0,
+        timeoutMs: 30_000,
+      },
+    });
 
     const replay = await callMcp(mcpUrl, apiKey, 2, "submit_work", {
       title: "Inspect OTA rollback",
@@ -415,6 +433,16 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.ok(Number(baseline.nextEventId) > 0);
     assert.ok(Number(baseline.nextActivityEventId) > 0);
+    assert.deepEqual(baseline.followUp, {
+      required: true,
+      tool: "wait_work",
+      arguments: {
+        workItemId: workId,
+        afterEventId: baseline.nextEventId,
+        afterActivityEventId: baseline.nextActivityEventId,
+        timeoutMs: 30_000,
+      },
+    });
 
     const legacyWait = await callMcp(mcpUrl, apiKey, 43, "wait_work", {
       workItemId: workId,
@@ -424,6 +452,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(legacyWait.timedOut, true);
     assert.deepEqual(legacyWait.activityEvents, []);
     assert.equal(legacyWait.nextActivityEventId, 0);
+    assert.equal(Object.hasOwn(legacyWait.followUp.arguments, "afterActivityEventId"), false);
 
     const incrementalWait = callMcp(mcpUrl, apiKey, 41, "wait_work", {
       workItemId: workId,
@@ -443,6 +472,14 @@ test("MCP Work API drives durable work through review, rework, authorization and
       ),
     );
     assert.ok(Number(incremental.nextActivityEventId) > Number(baseline.nextActivityEventId));
+    assert.equal(incremental.followUp.required, true);
+    assert.equal(incremental.followUp.tool, "wait_work");
+    assert.deepEqual(incremental.followUp.arguments, {
+      workItemId: workId,
+      afterEventId: incremental.nextEventId,
+      afterActivityEventId: incremental.nextActivityEventId,
+      timeoutMs: 30_000,
+    });
 
     const notifiedProgress = fetch(mcpUrl, {
       method: "POST",
@@ -499,6 +536,11 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.ok(Number(waiting.nextEventId) > 0);
     assert.ok(Array.isArray(waiting.activityEvents));
     assert.ok(Number(waiting.nextActivityEventId) > 0);
+    assert.deepEqual(waiting.followUp, {
+      required: true,
+      tool: "get_work",
+      arguments: { workItemId: workId },
+    });
 
     const fullWaiting = await callMcp(mcpUrl, apiKey, 44, "get_work", { workItemId: workId });
     assert.equal(fullWaiting.evidence[0].subjectRevision, "a".repeat(40));
@@ -522,6 +564,34 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(completed.work.status, "completed");
     assert.equal(completed.gate.ready, true);
     assert.equal(completed.gate.ready, true);
+    const completedWait = await callMcp(mcpUrl, apiKey, 45, "wait_work", {
+      workItemId: workId,
+      afterEventId: waiting.nextEventId,
+      afterActivityEventId: waiting.nextActivityEventId,
+      timeoutMs: 0,
+    });
+    assert.equal(completedWait.terminal, true);
+    assert.deepEqual(completedWait.followUp, {
+      required: true,
+      tool: "get_work",
+      arguments: { workItemId: workId },
+    });
+
+    const completedReplay = await callMcp(mcpUrl, apiKey, 46, "submit_work", {
+      title: "Inspect OTA rollback",
+      description: "Inspect OTA rollback handling after power loss",
+      idempotencyKey: "mcp-work-1",
+      expertId: "ota",
+      routingMode: "explicit",
+      repositoryId: "ota-repo",
+      deploymentId: "ota-default",
+    });
+    assert.equal(completedReplay.work.status, "completed");
+    assert.deepEqual(completedReplay.followUp, {
+      required: true,
+      tool: "get_work",
+      arguments: { workItemId: workId },
+    });
 
     const workflowBound = await callMcp(mcpUrl, apiKey, 59, "submit_work", {
       title: "Workflow-bound MCP work",

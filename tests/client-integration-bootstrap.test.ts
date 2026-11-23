@@ -132,6 +132,10 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     assert.match(guidance, /30-second long poll/);
     assert.match(guidance, /humanActionRequired=true/);
     assert.match(guidance, /call `get_work` once/);
+    assert.match(guidance, /After `submit_work` succeeds.*must not return to the user/i);
+    assert.match(guidance, /execute the returned `followUp`/i);
+    assert.match(guidance, /`followUp\.tool=wait_work`/i);
+    assert.match(guidance, /`followUp\.tool=get_work`/i);
     assert.match(guidance, /all repositories visible to the current API Token \/ Principal/i);
     assert.match(guidance, /do not pre-list, infer, guess, or pass repository IDs/i);
     assert.match(guidance, /discover_scoped/);
@@ -156,6 +160,10 @@ test("all Codex and Claude setup variants carry caller-visible repository guidan
     assert.match(source, /discover_scoped/, relative);
     assert.match(source, /list_skill_repositories/, relative);
     assert.match(source, /Never derive scoped search from cwd, Git remote, project name, or task context/i, relative);
+    assert.match(source, /After .*submit_work.* succeeds.*must not return to the user/i, relative);
+    assert.match(source, /execute the returned .*followUp/i, relative);
+    assert.match(source, /followUp\.tool=wait_work/i, relative);
+    assert.match(source, /followUp\.tool=get_work/i, relative);
   }
 });
 

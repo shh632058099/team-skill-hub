@@ -1529,7 +1529,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "PRIMARY submission tool for all new Expert Platform work. Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review, rework, publication and completion. Use this instead of deprecated submit_expert_task / submit_expert_task_auto for both automatic and explicit routing.",
+              "PRIMARY submission tool for all new Expert Platform work. Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review, rework, publication and completion. Use this instead of deprecated submit_expert_task / submit_expert_task_auto for both automatic and explicit routing. After a successful submission, you MUST execute the returned followUp and must not return to the user yet: if followUp.tool=wait_work, call wait_work with followUp.arguments and continue following each response; if followUp.tool=get_work, call get_work with followUp.arguments once before replying.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
@@ -1634,10 +1634,35 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 ...(trustedSourceRequest && sourceRequestId ? { sourceRequestId, sourceRequestSlot } : {}),
               },
             );
+            const submittedHumanActionRequired = workWaitRequiresHumanAction({
+              status: submitted.work.status,
+              currentSubjectRevision: submitted.work.currentSubjectRevision,
+              reviewTaskStatus: submitted.reviewTask?.status,
+              reviews: submitted.reviews,
+              gateMissing: submitted.gate.missing,
+              publicationCommitSha: submitted.publication?.commitSha,
+            });
+            const continueWaiting = workWaitShouldContinuePolling(submitted.work.status, submittedHumanActionRequired);
             return toolResult({
               ...submitted,
               workItemId: submitted.work.workItemId,
               status: submitted.work.status,
+              followUp: continueWaiting
+                ? {
+                    required: true,
+                    tool: "wait_work",
+                    arguments: {
+                      workItemId: submitted.work.workItemId,
+                      afterEventId: 0,
+                      afterActivityEventId: 0,
+                      timeoutMs: 30_000,
+                    },
+                  }
+                : {
+                    required: true,
+                    tool: "get_work",
+                    arguments: { workItemId: submitted.work.workItemId },
+                  },
             });
           },
         );
@@ -1708,7 +1733,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "wait_work",
           {
             description:
-              "DEFAULT follow-up after submit_work. Wait for durable WorkItem progress using a compact incremental response. Pass afterActivityEventId=0 on the first activity-aware call, then repeat with nextEventId + nextActivityEventId to stream Worker/model/tool and Reviewer activity; omitting afterActivityEventId preserves legacy Work-only waiting. With an MCP progressToken it emits notifications/progress while waiting. Without a progressToken, activity-aware calls return as soon as a new Work or activity event appears. When terminal=true or humanActionRequired=true, call get_work once for the full Work snapshot, result, Evidence, Workspace and verification details.",
+              "MANDATORY follow-up after submit_work. Wait for durable WorkItem progress using a compact incremental response. Start with afterActivityEventId=0, then use the returned followUp.arguments exactly. While followUp.tool=wait_work, you MUST continue calling wait_work and must not return to the user while the Work is still active. Pass nextEventId + nextActivityEventId to stream Worker/model/tool and Reviewer activity; omitting afterActivityEventId preserves legacy Work-only waiting. With an MCP progressToken it emits notifications/progress while waiting. Without a progressToken, activity-aware calls return as soon as a new Work or activity event appears. When the response switches followUp.tool to get_work because terminal=true or humanActionRequired=true, call get_work once for the full Work snapshot, result, Evidence, Workspace and verification details before replying to the user.",
             inputSchema: z.object({
               workItemId: z.string().uuid(),
               afterEventId: z.number().int().min(0).default(0),
@@ -1879,6 +1904,22 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                   activityEvents,
                   nextActivityEventId: activityCursor,
                   activityHasMore: moreActivity > 0,
+                  followUp: active
+                    ? {
+                        required: true,
+                        tool: "wait_work",
+                        arguments: {
+                          workItemId,
+                          afterEventId: cursor,
+                          ...(trackActivity ? { afterActivityEventId: activityCursor } : {}),
+                          timeoutMs: 30_000,
+                        },
+                      }
+                    : {
+                        required: true,
+                        tool: "get_work",
+                        arguments: { workItemId },
+                      },
                   terminal,
                   humanActionRequired,
                   timedOut: timedOut && !terminal,
