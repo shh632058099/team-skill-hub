@@ -139,6 +139,14 @@ test("Admin expert configuration UI manages definitions and execution configurat
     const scriptEnd = html.indexOf("</script>", scriptStart + 8);
     assert.ok(scriptStart >= 0 && scriptEnd > scriptStart, "expert admin page must include its controller script");
     const inlineScript = html.slice(scriptStart + 8, scriptEnd);
+    assert.match(inlineScript, /function nextCopyId\(base,items\)/);
+    assert.match(inlineScript, /openDefinitionEditor\(x,true\)/);
+    assert.match(inlineScript, /openDeploymentEditor\(x,true\)/);
+    assert.match(inlineScript, /copy\.textContent='复制'/);
+    assert.match(inlineScript, /f\.elements\.active\.checked=copy\?false:x\.active/);
+    assert.match(inlineScript, /state\.cloningDefinitionModelConfig/);
+    assert.match(inlineScript, /verificationTemplate\.value=copy\?'custom':'keep'/);
+    assert.match(inlineScript, /publicationTemplate\.value=copy\?'custom':'keep'/);
     assert.match(
       inlineScript,
       /existing\?\(existing\.publicationPolicy\?\{publicationPolicy:existing\.publicationPolicy\}:\{\}\):\{publicationTemplate:\{preset:'change-request'\}\}/,
