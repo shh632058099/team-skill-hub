@@ -132,10 +132,31 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     assert.match(guidance, /30-second long poll/);
     assert.match(guidance, /humanActionRequired=true/);
     assert.match(guidance, /call `get_work` once/);
+    assert.match(guidance, /all repositories visible to the current API Token \/ Principal/i);
+    assert.match(guidance, /do not pre-list, infer, guess, or pass repository IDs/i);
+    assert.match(guidance, /discover_scoped/);
+    assert.match(guidance, /list_skill_repositories/);
+    assert.match(guidance, /Never derive scoped search from cwd, Git remote, project name, or task context/i);
     assert.doesNotMatch(guidance, /## 问题/);
     assert.doesNotMatch(guidance, /exact six-section/i);
   }
   assert.ok(releaseVersion >= 7, "single-file remote bootstrap requires client integration v7 or newer");
+});
+
+test("all Codex and Claude setup variants carry caller-visible repository guidance", async () => {
+  for (const relative of [
+    "scripts/setup-codex-mcp.sh",
+    "scripts/setup-codex-mcp.ps1",
+    "scripts/setup-claude-code.sh",
+    "scripts/setup-claude-code.ps1",
+  ]) {
+    const source = await readFile(relative, "utf8");
+    assert.match(source, /all repositories visible to the current API Token \/ Principal/i, relative);
+    assert.match(source, /do not pre-list, infer, guess, or pass repository IDs/i, relative);
+    assert.match(source, /discover_scoped/, relative);
+    assert.match(source, /list_skill_repositories/, relative);
+    assert.match(source, /Never derive scoped search from cwd, Git remote, project name, or task context/i, relative);
+  }
 });
 
 test("second client targeting a different Hub fails before setup mutation", async () => {

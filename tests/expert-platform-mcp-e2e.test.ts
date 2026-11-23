@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -13,6 +13,7 @@ import { PersistentWorkerRegistry } from "../src/expert-platform/persistent-work
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { runRemoteWorkerOnce } from "../src/expert-platform/remote-worker.js";
 import { MemoryRegistryStore } from "../src/registry.js";
+import { LocalRepositoryProvider } from "../src/repository.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
 import { ApiKeyAuthenticationProvider, StaticRolePermissionProvider } from "../src/security.js";
 import type { AppConfig } from "../src/types.js";
@@ -22,7 +23,11 @@ interface McpResponse {
   result?: {
     content?: Array<{ type: string; text?: string }>;
     isError?: boolean;
-    tools?: Array<{ name: string; description?: string }>;
+    tools?: Array<{
+      name: string;
+      description?: string;
+      inputSchema?: { properties?: Record<string, unknown>; required?: string[] };
+    }>;
   };
   error?: { message?: string };
 }
@@ -54,7 +59,10 @@ async function callMcp(
   return JSON.parse(content) as Record<string, unknown>;
 }
 
-async function listMcpTools(url: string, apiKey: string): Promise<Array<{ name: string; description?: string }>> {
+async function listMcpTools(
+  url: string,
+  apiKey: string,
+): Promise<NonNullable<NonNullable<McpResponse["result"]>["tools"]>> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -94,6 +102,33 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     // Import only after setting EXPERT_RUNTIME_DB: the MCP module opens its persistent stores at module load.
     const { startServer } = await import("../src/server.js");
     const apiKey = "expert-mcp-e2e-key";
+    const teamSkillRoot = path.join(root, "team-skills");
+    const sharedSkillDir = path.join(teamSkillRoot, "shared", "diagnostics");
+    mkdirSync(sharedSkillDir, { recursive: true });
+    writeFileSync(
+      path.join(sharedSkillDir, "SKILL.md"),
+      `---
+schema_version: 1
+name: shared-diagnostics
+version: 1.0.0
+description: Shared diagnostics and recovery workflow.
+metadata:
+  audience: [developer]
+  domain: [diagnostics]
+  category: [troubleshooting]
+  keywords: [shared, diagnostics, recovery]
+  visibility: [internal]
+  maturity: stable
+  owner: platform-team
+  priority: 80
+  depends_on: []
+  compatibility:
+    codex: true
+---
+# Shared diagnostics
+`,
+      "utf8",
+    );
     const auth = new ApiKeyAuthenticationProvider({
       [apiKey]: { id: "ota-test-client", roles: ["developer", "internal"], tenantId: "rd" },
       "other-expert-test-key": { id: "other-client", roles: ["developer", "internal"], tenantId: "rd" },
@@ -105,11 +140,26 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
       dataDir,
       defaultRoles: [],
       authentication: { mode: "api-key", apiKeys: {} },
-      repositories: [],
+      repositories: [
+        {
+          id: "team-skills",
+          name: "Team Skills",
+          provider: "local",
+          gitAuth: { type: "none" },
+          webhookAliases: [],
+          path: teamSkillRoot,
+          enabled: true,
+          audience: ["developer"],
+          visibility: ["internal"],
+          pollingIntervalSeconds: 0,
+          readRoles: ["developer", "internal", "worker-mcp-readonly"],
+          syncRoles: ["developer"],
+        },
+      ],
     };
     const service = new SkillHubApplicationService(
       config,
-      [],
+      [new LocalRepositoryProvider()],
       new MemoryRegistryStore(),
       search,
       new SearchRoutingStrategy(search),
@@ -130,6 +180,53 @@ test("MCP routes an OTA task through the persisted Expert, gRPC Worker and resul
     assert.ok(readonlyTools.some((item) => item.name === "search_knowledge"));
     assert.ok(readonlyTools.some((item) => item.name === "discover"));
     assert.ok(readonlyTools.some((item) => item.name === "get_server_info"));
+    for (const name of [
+      "discover",
+      "list_skills",
+      "search_skills",
+      "resolve_skill",
+      "list_knowledge_sources",
+      "search_knowledge",
+    ]) {
+      const tool = readonlyTools.find((item) => item.name === name);
+      assert.ok(tool, `${name} should be listed`);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(tool.inputSchema?.properties ?? {}, "repositories"),
+        false,
+        `${name} must not expose repository narrowing on the default search path`,
+      );
+    }
+    const scopedDiscover = readonlyTools.find((item) => item.name === "discover_scoped");
+    assert.ok(scopedDiscover, "explicit repository narrowing should use discover_scoped");
+    assert.ok(scopedDiscover.inputSchema?.required?.includes("repositories"));
+    assert.match(
+      readonlyTools.find((item) => item.name === "list_skill_repositories")?.description ?? "",
+      /not.*(?:preflight|prerequisite)|only.*explicit/i,
+    );
+    const legacyDiscover = await callMcp(mcpUrl, apiKey, 981, "discover", {
+      query: "shared diagnostics recovery",
+      repositories: ["agent-guessed-wrong-repository"],
+    });
+    assert.equal((legacyDiscover.skills as Array<{ name: string }>)[0]?.name, "shared-diagnostics");
+    const legacySkillSearch = await callMcp(mcpUrl, apiKey, 982, "search_skills", {
+      query: "shared diagnostics recovery",
+      repositories: ["agent-guessed-wrong-repository"],
+    });
+    assert.equal((legacySkillSearch.results as Array<{ name: string }>)[0]?.name, "shared-diagnostics");
+
+    const explicitlyScoped = await callMcp(mcpUrl, apiKey, 983, "discover_scoped", {
+      query: "shared diagnostics recovery",
+      repositories: ["team-skills"],
+    });
+    assert.equal((explicitlyScoped.skills as Array<{ name: string }>)[0]?.name, "shared-diagnostics");
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 984, "discover_scoped", {
+          query: "shared diagnostics recovery",
+          repositories: ["agent-guessed-wrong-repository"],
+        }),
+      /REPOSITORY_SCOPE_NOT_VISIBLE:agent-guessed-wrong-repository/,
+    );
     // Tool discovery is no longer a hard-coded permission boundary. The credential principal and
     // each application handler decide whether an invocation is authorized.
     assert.ok(readonlyTools.some((item) => item.name === "submit_expert_task"));

@@ -14,12 +14,11 @@ test("loads canonical client integration release metadata", async () => {
   assert.ok(release.hookSchemaVersion > 0);
 });
 
-test("work source-request dedup hook ships as client integration v19 runtime 1.5.5", async () => {
+test("caller-visible search guidance ships as client integration v20 with unchanged hook runtime 1.5.5", async () => {
   const release = await loadClientIntegrationRelease();
-  assert.equal(release.version, 19);
+  assert.equal(release.version, 20);
   assert.equal(release.hookRuntimeVersion, "1.5.5");
 });
-
 test("Windows Work hooks force UTF-8 stdin and stdout before parsing JSON", async () => {
   for (const relative of ["../scripts/claude/expert-session-hook.ps1", "../scripts/codex/expert-session-hook.ps1"]) {
     const source = await readFile(new URL(relative, import.meta.url), "utf8");

@@ -45,7 +45,6 @@ const workOrchestrator =
 const mcpWorkAdapter =
   workOrchestrationStore && workOrchestrator ? new McpWorkAdapter(workOrchestrationStore, workOrchestrator) : null;
 const filterSchema = {
-  repositories: z.array(z.string()).optional(),
   domain: z.string().optional(),
   category: z.string().optional(),
   audience: z.string().optional(),
@@ -123,6 +122,54 @@ function compactTool(tool: ReturnType<SkillHubApplicationService["listTools"]>[n
   };
 }
 
+function compactDiscovery(result: ReturnType<SkillHubApplicationService["discover"]>) {
+  return {
+    selected: result.selected,
+    ambiguous: result.ambiguous,
+    skills: result.skills.map((item) => ({
+      ...compactSkill(item.skill),
+      score: item.score,
+      confidence: item.confidence,
+      coverage: item.coverage,
+      reason: item.reason,
+    })),
+    knowledge: result.knowledge.map((item) => ({
+      repository: item.chunk.repositoryId,
+      revision: item.chunk.revision,
+      path: item.chunk.relativePath,
+      title: item.chunk.title,
+      metadata: item.chunk.metadata,
+      chunk_index: item.chunk.chunkIndex,
+      content: item.chunk.content,
+      score: item.score,
+      confidence: item.confidence,
+      coverage: item.coverage,
+      reason: item.reason,
+    })),
+    prompts: result.prompts.map((item) => ({
+      ...compactPrompt(item.artifact),
+      score: item.score,
+      confidence: item.confidence,
+      coverage: item.coverage,
+      reason: item.reason,
+    })),
+    agents: result.agents.map((item) => ({
+      ...compactAgent(item.artifact),
+      score: item.score,
+      confidence: item.confidence,
+      coverage: item.coverage,
+      reason: item.reason,
+    })),
+    tools: result.tools.map((item) => ({
+      ...compactTool(item.artifact),
+      score: item.score,
+      confidence: item.confidence,
+      coverage: item.coverage,
+      reason: item.reason,
+    })),
+  };
+}
+
 function toolResult(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -138,6 +185,7 @@ function normalizeOptionalMcpIdentifier(value: string | undefined): string | und
 const WORKER_MCP_READ_ONLY_TOOLS = new Set([
   "get_server_info",
   "discover",
+  "discover_scoped",
   "project_recommendations",
   "list_skill_repositories",
   "resolve_agent_tools",
@@ -399,64 +447,34 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       "discover",
       {
         description:
-          "Discover the most relevant visible team Skills, Knowledge, Prompts, and Agents for one task in a single request.",
+          "Discover the most relevant caller-visible team Skills, Knowledge, Prompts, Agents, and Tools. Repository scope is determined automatically from the API Token permissions; do not pre-list, infer, or guess repositories.",
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          repositories: z.array(z.string()).optional(),
           client: z.string().min(1).optional(),
         }),
       },
-      async ({ query, top_k, repositories, client }) => {
-        const result = appService.discover(query, { topK: top_k ?? 5, repositories, client }, principal);
-        return toolResult({
-          selected: result.selected,
-          ambiguous: result.ambiguous,
-          skills: result.skills.map((item) => ({
-            ...compactSkill(item.skill),
-            score: item.score,
-            confidence: item.confidence,
-            coverage: item.coverage,
-            reason: item.reason,
-          })),
-          knowledge: result.knowledge.map((item) => ({
-            repository: item.chunk.repositoryId,
-            revision: item.chunk.revision,
-            path: item.chunk.relativePath,
-            title: item.chunk.title,
-            metadata: item.chunk.metadata,
-            chunk_index: item.chunk.chunkIndex,
-            content: item.chunk.content,
-            score: item.score,
-            confidence: item.confidence,
-            coverage: item.coverage,
-            reason: item.reason,
-          })),
-          prompts: result.prompts.map((item) => ({
-            ...compactPrompt(item.artifact),
-            score: item.score,
-            confidence: item.confidence,
-            coverage: item.coverage,
-            reason: item.reason,
-          })),
-          agents: result.agents.map((item) => ({
-            ...compactAgent(item.artifact),
-            score: item.score,
-            confidence: item.confidence,
-            coverage: item.coverage,
-            reason: item.reason,
-          })),
-          tools: result.tools.map((item) => ({
-            ...compactTool(item.artifact),
-            score: item.score,
-            confidence: item.confidence,
-            coverage: item.coverage,
-            reason: item.reason,
-          })),
-        });
-      },
+      async ({ query, top_k, client }) =>
+        toolResult(compactDiscovery(appService.discover(query, { topK: top_k ?? 5, client }, principal))),
     );
 
+    registerTool(
+      "discover_scoped",
+      {
+        description:
+          "Discover within specific Team Skill Hub repositories ONLY when the user explicitly requested repository-limited search. Never infer repository scope from cwd, git remote, project name, task context, or model preference. If the user explicitly names a library but its repository ID is unknown, list visible repositories only to resolve that explicit request.",
+        inputSchema: z.object({
+          query: z.string().min(1),
+          repositories: z.array(z.string().min(1)).min(1),
+          top_k: z.number().int().min(1).max(20).optional(),
+          client: z.string().min(1).optional(),
+        }),
+      },
+      async ({ query, repositories, top_k, client }) =>
+        toolResult(
+          compactDiscovery(appService.discoverScoped(query, { repositories, topK: top_k ?? 5, client }, principal)),
+        ),
+    );
     registerTool(
       "project_recommendations",
       {
@@ -525,7 +543,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "list_skill_repositories",
       {
-        description: "List skill repositories visible to the current caller.",
+        description:
+          "List skill repositories visible to the current caller. This is not a prerequisite or preflight step for normal discover/search; use it only when the user asks about repositories or explicitly requests repository-limited search.",
         inputSchema: z.object({}),
       },
       async () => toolResult({ repositories: appService.listRepositories(principal) }),
@@ -560,7 +579,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "list_skills",
       {
-        description: "List visible skills with optional metadata filters.",
+        description:
+          "List caller-visible skills with optional metadata filters. Repository scope is derived automatically from the API Token permissions.",
         inputSchema: z.object(filterSchema),
       },
       async (filters) => toolResult({ skills: appService.listSkills(filters, principal).map(compactSkill) }),
@@ -569,7 +589,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "search_skills",
       {
-        description: "Search team skills by natural-language query and metadata.",
+        description:
+          "Search caller-visible team skills by natural-language query and metadata. Repository scope is derived automatically from the API Token permissions; do not pre-list or guess repositories.",
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
@@ -589,7 +610,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "resolve_skill",
       {
-        description: "Choose the best matching team skill for a task.",
+        description:
+          "Choose the best matching caller-visible team skill for a task. Repository scope is derived automatically from the API Token permissions; do not pre-list or guess repositories.",
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(10).optional(),
@@ -655,13 +677,12 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
     registerTool(
       "list_knowledge_sources",
       {
-        description: "List repository knowledge documents visible to the current caller.",
-        inputSchema: z.object({
-          repositories: z.array(z.string()).optional(),
-        }),
+        description:
+          "List knowledge sources visible to the current caller across all repositories allowed by the API Token. Repository selection is automatic.",
+        inputSchema: z.object({}),
       },
-      async ({ repositories }) => {
-        const documents = appService.listKnowledgeDocuments(principal, repositories);
+      async () => {
+        const documents = appService.listKnowledgeDocuments(principal);
         const grouped = new Map<string, { repository: string; documents: number; chunks: number; paths: string[] }>();
         for (const document of documents) {
           const current = grouped.get(document.repositoryId) ?? {
@@ -678,16 +699,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         return toolResult({ sources: [...grouped.values()] });
       },
     );
-
     registerTool(
       "search_knowledge",
       {
         description:
-          "Search internal repository documentation and text knowledge. Use this for current project facts, designs, APIs, troubleshooting notes, and other document-grounded context.",
+          "Search caller-visible internal documentation and text knowledge across all repositories allowed by the API Token. Use this for current project facts, designs, APIs, troubleshooting notes, and other document-grounded context; do not pre-list or guess repositories.",
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
-          repositories: z.array(z.string()).optional(),
           applicability: z
             .object({
               product: z.string().optional(),
@@ -702,13 +721,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             .optional(),
         }),
       },
-      async ({ query, top_k, repositories, applicability }) =>
+      async ({ query, top_k, applicability }) =>
         toolResult({
           results: appService
             .searchKnowledge(
               query,
               top_k ?? 5,
-              repositories,
+              undefined,
               principal,
               applicability
                 ? {

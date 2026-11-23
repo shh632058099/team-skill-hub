@@ -550,6 +550,21 @@ test("api-key principals isolate developer and customer repositories", async () 
     service.listRepositories(customer).map((item) => item.id),
     ["customer-skills"],
   );
+  const devDiscovery = service.discover("Customer OTA troubleshooting", { topK: 5 }, dev);
+  assert.equal(
+    devDiscovery.skills.some((item) => item.skill.repositoryId === "customer-skills"),
+    false,
+    "default discovery must remain bounded by the caller-visible repositories",
+  );
+  assert.throws(
+    () => service.discoverScoped("Customer OTA troubleshooting", { repositories: ["customer-skills"], topK: 5 }, dev),
+    /REPOSITORY_SCOPE_NOT_VISIBLE:customer-skills/,
+  );
+  assert.equal(
+    service.discoverScoped("Customer OTA troubleshooting", { repositories: ["customer-skills"], topK: 5 }, customer)
+      .skills[0]?.skill.name,
+    "ota-customer-troubleshooting",
+  );
   assert.throws(() => service.getSkill("customer-skills", "ota-customer-troubleshooting", dev), /Skill not found/);
   assert.equal(
     service.getSkill("customer-skills", "ota-customer-troubleshooting", customer).name,
@@ -703,6 +718,120 @@ test("prompt and agent registries load, search and resolve repository artifacts"
   assert.equal(discovered.knowledge[0]?.chunk.relativePath, "docs/ota-review-context.md");
   assert.equal(discovered.tools[0]?.artifact.name, "git");
   assert.deepEqual(service.discover("OTA review", { repositories: ["not-visible"] }).skills, []);
+  assert.equal(
+    service.discoverScoped("OTA review", { repositories: ["rd-skills"], topK: 5, client: "codex" }).skills[0]?.skill
+      .name,
+    "ota-code-review",
+  );
+  assert.throws(
+    () => service.discoverScoped("OTA review", { repositories: ["not-visible"] }),
+    /REPOSITORY_SCOPE_NOT_VISIBLE:not-visible/,
+  );
+  assert.throws(() => service.discoverScoped("OTA review", { repositories: [] }), /INVALID_REPOSITORY_SCOPE/);
+  search.close();
+});
+
+test("project recommendations prefer project repositories without hiding stronger cross-repository skills", async () => {
+  const projectRoot = await makeKnowledgeOnlyRoot();
+  const sharedSkillRoot = await makeSkillRoot();
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "skill-hub-project-preference-"));
+  const projectRepository: RepositoryConfig = {
+    ...repo,
+    id: "project-a",
+    name: "Project A",
+    path: projectRoot,
+    pollingIntervalSeconds: 0,
+  };
+  const sharedRepository: RepositoryConfig = {
+    ...repo,
+    id: "shared-skills",
+    name: "Shared Skills",
+    path: sharedSkillRoot,
+    pollingIntervalSeconds: 0,
+  };
+  const search = new SqliteFtsSearchBackend();
+  const service = new SkillHubApplicationService(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: ["developer", "internal"],
+      authentication: { mode: "development", apiKeys: {} },
+      repositories: [projectRepository, sharedRepository],
+      projects: [
+        {
+          id: "project-a-profile",
+          name: "Project A",
+          repositoryPatterns: ["project-a"],
+          owners: [],
+          preferredSkillRepositories: ["project-a"],
+          preferredKnowledgeRepositories: ["project-a"],
+          tools: [],
+          environments: [],
+          product: "project-a",
+          aliases: [],
+        },
+      ],
+    },
+    [new LocalRepositoryProvider()],
+    new MemoryRegistryStore(),
+    search,
+    new SearchRoutingStrategy(search),
+    new DevelopmentAuthenticationProvider(["developer", "internal"]),
+    new StaticRolePermissionProvider(),
+    [new RequiredFieldsRule(), new UniqueNameRule(), new RepositoryVisibilityRule()],
+    new LoggingEventSink(),
+  );
+  await service.initialize();
+
+  const defaultDiscovery = service.discover("OTA review APIs call chains", { topK: 3, client: "codex" });
+  const defaultSharedSkill = defaultDiscovery.skills.find(
+    (item) => item.skill.repositoryId === "shared-skills" && item.skill.name === "ota-code-review",
+  );
+  assert.ok(defaultSharedSkill, "default discovery must search every caller-visible repository");
+
+  const preferredDiscovery = service.discover("OTA review APIs call chains", {
+    topK: 3,
+    client: "codex",
+    preferredRepositories: ["project-a"],
+  });
+  const preferredSharedSkill = preferredDiscovery.skills.find(
+    (item) => item.skill.repositoryId === "shared-skills" && item.skill.name === "ota-code-review",
+  );
+  assert.ok(preferredSharedSkill, "repository preference must not hard-filter non-preferred visible repositories");
+  assert.equal(preferredSharedSkill.score, defaultSharedSkill.score);
+  assert.equal(
+    preferredSharedSkill.confidence,
+    defaultSharedSkill.confidence,
+    "repository preference must not mutate the raw discovery confidence",
+  );
+
+  const projectOnly = service.discoverScoped("OTA review APIs call chains", {
+    repositories: ["project-a"],
+    topK: 3,
+    client: "codex",
+  });
+  assert.equal(
+    projectOnly.skills.some((item) => item.skill.repositoryId === "shared-skills"),
+    false,
+    "explicit scoped discovery must apply the requested hard repository scope",
+  );
+
+  const recommendations = service.recommendProjectContext({
+    cwd: projectRoot,
+    task: "OTA review APIs call chains",
+    client: "codex",
+    topK: 3,
+  });
+  assert.equal(recommendations.project?.repositoryId, "project-a");
+  assert.equal(
+    recommendations.recommendations.skills.some(
+      (item) => item.skill.repositoryId === "shared-skills" && item.skill.name === "ota-code-review",
+    ),
+    true,
+    "project preference must not hide a stronger caller-visible skill from another repository",
+  );
+  assert.match(recommendations.reason, /all caller-visible repositories/i);
   search.close();
 });
 

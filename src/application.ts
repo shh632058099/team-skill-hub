@@ -1728,17 +1728,38 @@ export class SkillHubApplicationService {
     return tool;
   }
 
+  discoverScoped(
+    query: string,
+    options: { repositories: string[]; topK?: number; client?: string },
+    principal?: Principal,
+  ) {
+    const resolvedPrincipal = this.principal(principal);
+    const requested = [...new Set(options.repositories.map((id) => id.trim()).filter(Boolean))];
+    if (requested.length === 0) throw new Error("INVALID_REPOSITORY_SCOPE");
+    const allowed = new Set(this.allowedRepositories(resolvedPrincipal).map((repository) => repository.id));
+    for (const repositoryId of requested) {
+      if (!allowed.has(repositoryId)) throw new Error(`REPOSITORY_SCOPE_NOT_VISIBLE:${repositoryId}`);
+    }
+    return this.discover(
+      query,
+      { topK: options.topK, repositories: requested, client: options.client },
+      resolvedPrincipal,
+    );
+  }
+
   discover(
     query: string,
     options: {
       topK?: number;
       repositories?: string[];
+      preferredRepositories?: string[];
       client?: string;
     } = {},
     principal?: Principal,
   ) {
     const resolvedPrincipal = this.principal(principal);
     const topK = Math.max(1, Math.min(options.topK ?? 5, 20));
+    const candidateLimit = Math.min(20, Math.max(topK, topK * 3));
     const allowedIds = this.allowedRepositories(resolvedPrincipal).map((repository) => repository.id);
     const repositories = options.repositories?.length
       ? options.repositories.filter((id) => allowedIds.includes(id))
@@ -1747,34 +1768,77 @@ export class SkillHubApplicationService {
       return { selected: null, ambiguous: false, skills: [], knowledge: [], prompts: [], agents: [], tools: [] };
     }
 
-    const skills = this.searchSkills(query, { repositories, client: options.client }, topK, resolvedPrincipal)
-      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 12) }))
-      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
-    const knowledge = this.searchKnowledge(query, topK, repositories, resolvedPrincipal)
-      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 24) }))
-      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
     const repositorySet = new Set(repositories);
-    const prompts = searchArtifacts(
-      query,
-      this.listPrompts(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
-      topK,
-    )
-      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
-      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
-    const agents = searchArtifacts(
-      query,
-      this.listAgents(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
-      topK,
-    )
-      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
-      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
-    const tools = searchArtifacts(
-      query,
-      this.listTools(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
-      topK,
-    )
-      .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
-      .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage));
+    const preferredRepositories = new Set((options.preferredRepositories ?? []).filter((id) => repositorySet.has(id)));
+    const rankingConfidence = (repositoryId: string, confidence: number) =>
+      Math.min(1, confidence + (preferredRepositories.has(repositoryId) ? 0.03 : 0));
+    const rankPreferred = <T>(
+      items: T[],
+      repositoryId: (item: T) => string,
+      confidence: (item: T) => number,
+      score: (item: T) => number,
+    ) =>
+      items
+        .sort(
+          (a, b) =>
+            rankingConfidence(repositoryId(b), confidence(b)) - rankingConfidence(repositoryId(a), confidence(a)) ||
+            score(b) - score(a),
+        )
+        .slice(0, topK);
+
+    const skills = rankPreferred(
+      this.searchSkills(query, { repositories, client: options.client }, candidateLimit, resolvedPrincipal)
+        .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 12) }))
+        .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage)),
+      (item) => item.skill.repositoryId,
+      (item) => item.confidence,
+      (item) => item.score,
+    );
+    const knowledge = rankPreferred(
+      this.searchKnowledge(query, candidateLimit, repositories, resolvedPrincipal)
+        .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 24) }))
+        .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage)),
+      (item) => item.chunk.repositoryId,
+      (item) => item.confidence,
+      (item) => item.score,
+    );
+    const prompts = rankPreferred(
+      searchArtifacts(
+        query,
+        this.listPrompts(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
+        candidateLimit,
+      )
+        .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+        .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage)),
+      (item) => item.artifact.repositoryId,
+      (item) => item.confidence,
+      (item) => item.score,
+    );
+    const agents = rankPreferred(
+      searchArtifacts(
+        query,
+        this.listAgents(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
+        candidateLimit,
+      )
+        .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+        .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage)),
+      (item) => item.artifact.repositoryId,
+      (item) => item.confidence,
+      (item) => item.score,
+    );
+    const tools = rankPreferred(
+      searchArtifacts(
+        query,
+        this.listTools(options.client, resolvedPrincipal).filter((item) => repositorySet.has(item.repositoryId)),
+        candidateLimit,
+      )
+        .map((item) => ({ ...item, confidence: discoveryConfidence(item.score, item.coverage, 10) }))
+        .filter((item) => isDiscoveryRelevant(item.confidence, item.coverage)),
+      (item) => item.artifact.repositoryId,
+      (item) => item.confidence,
+      (item) => item.score,
+    );
+
     const knowledgeForSelection = knowledge.filter(
       (item, index, items) =>
         items.findIndex(
@@ -1790,6 +1854,7 @@ export class SkillHubApplicationService {
         name: item.skill.name,
         score: item.score,
         confidence: item.confidence,
+        rankingConfidence: rankingConfidence(item.skill.repositoryId, item.confidence),
       })),
       ...knowledgeForSelection.map((item) => ({
         type: "knowledge" as const,
@@ -1798,6 +1863,7 @@ export class SkillHubApplicationService {
         chunkIndex: item.chunk.chunkIndex,
         score: item.score,
         confidence: item.confidence,
+        rankingConfidence: rankingConfidence(item.chunk.repositoryId, item.confidence),
       })),
       ...prompts.map((item) => ({
         type: "prompt" as const,
@@ -1805,6 +1871,7 @@ export class SkillHubApplicationService {
         name: item.artifact.name,
         score: item.score,
         confidence: item.confidence,
+        rankingConfidence: rankingConfidence(item.artifact.repositoryId, item.confidence),
       })),
       ...agents.map((item) => ({
         type: "agent" as const,
@@ -1812,6 +1879,7 @@ export class SkillHubApplicationService {
         name: item.artifact.name,
         score: item.score,
         confidence: item.confidence,
+        rankingConfidence: rankingConfidence(item.artifact.repositoryId, item.confidence),
       })),
       ...tools.map((item) => ({
         type: "tool" as const,
@@ -1819,17 +1887,21 @@ export class SkillHubApplicationService {
         name: item.artifact.name,
         score: item.score,
         confidence: item.confidence,
+        rankingConfidence: rankingConfidence(item.artifact.repositoryId, item.confidence),
       })),
-    ].sort((a, b) => b.confidence - a.confidence || b.score - a.score);
+    ].sort((a, b) => b.rankingConfidence - a.rankingConfidence || b.score - a.score);
     const top = candidates[0];
     const second = candidates[1];
-    const selected =
+    const selectedRanked =
       top &&
-      ((!second && top.confidence >= 0.5) ||
-        (Boolean(second) && top.confidence >= 0.55 && top.confidence - second!.confidence >= 0.12))
+      ((!second && top.rankingConfidence >= 0.5) ||
+        (Boolean(second) && top.rankingConfidence >= 0.55 && top.rankingConfidence - second!.rankingConfidence >= 0.12))
         ? top
         : null;
-    const ambiguous = Boolean(top && !selected && top.confidence >= 0.4);
+    const selected = selectedRanked
+      ? (({ rankingConfidence: _rankingConfidence, ...candidate }) => candidate)(selectedRanked)
+      : null;
+    const ambiguous = Boolean(top && !selected && top.rankingConfidence >= 0.4);
     this.metrics.increment("discover_total", {
       matched: String(skills.length + knowledge.length + prompts.length + agents.length + tools.length > 0),
     });
@@ -1899,7 +1971,7 @@ export class SkillHubApplicationService {
       query,
       {
         topK: Math.max(1, Math.min(input.topK ?? 3, 5)),
-        repositories: preferredRepositories,
+        preferredRepositories,
         client: input.client,
       },
       resolvedPrincipal,
@@ -1914,8 +1986,8 @@ export class SkillHubApplicationService {
       profile,
       query,
       reason: profile
-        ? `recommendations use project profile ${profile.id} within caller-visible repositories`
-        : `recommendations restricted to identified project repository ${project.repositoryId}`,
+        ? `recommendations search all caller-visible repositories and use project profile ${profile.id} as a ranking preference`
+        : `recommendations search all caller-visible repositories and prefer identified project repository ${project.repositoryId}`,
       recommendations: { ...recommendations, tools: projectTools },
     };
   }
