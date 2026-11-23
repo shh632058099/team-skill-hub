@@ -1534,7 +1534,15 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
               idempotencyKey: z.string().trim().min(1).max(200),
-              workflowId: z.string().trim().min(1).max(200).optional(),
+              workflowId: z
+                .string()
+                .trim()
+                .min(1)
+                .max(200)
+                .optional()
+                .describe(
+                  "Omit for read-only investigation work. Omitted workflowId defaults to investigation. For any request that modifies repository files, explicitly choose a code-change workflow such as bug-fix, feature-change, refactor, test-improvement, build-fix, or release-change.",
+                ),
               routingMode: z
                 .enum(["auto", "explicit"])
                 .default("auto")
@@ -1580,9 +1588,10 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             const normalizedRepositoryId = normalizeOptionalMcpIdentifier(repositoryId);
             const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
             const explicitRouting = routingMode === "explicit";
+            const effectiveWorkflowId = workflowId ?? "investigation";
             const sourceRequestSlot = workSourceRequestSlot(
               routingMode,
-              workflowId,
+              effectiveWorkflowId,
               normalizedExpertId,
               explicitRouting ? normalizedRepositoryId : undefined,
               explicitRouting ? normalizedDeploymentId : undefined,
@@ -1614,7 +1623,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 idempotencyKey,
                 title,
                 description,
-                ...(workflowId === undefined ? {} : { workflowId }),
+                workflowId: effectiveWorkflowId,
                 ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
                 ...(explicitRouting && normalizedRepositoryId !== undefined
                   ? { repositoryId: normalizedRepositoryId }

@@ -346,6 +346,9 @@ test("MCP Work API drives durable work through review, rework, authorization and
       clientSessionProof: signedProof,
     });
     assert.equal(signedSubmission.work.sourceScope, `codex-proof-test/${signedSessionId}`);
+    assert.equal(signedSubmission.work.workflowId, "investigation");
+    assert.equal(signedSubmission.work.workflowVersion, 3);
+    assert.deepEqual(signedSubmission.currentTask.validationSnapshot, []);
     const signedWorkId = String(signedSubmission.work.workItemId);
     const updateAt = Date.now();
     const updateProof = `${updateAt}.${createHmac("sha256", apiKey)
@@ -365,6 +368,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       title: "Inspect OTA rollback",
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
+      workflowId: "code-fix-default",
       expertId: "ota",
       routingMode: "explicit",
       repositoryId: "ota-repo",
@@ -399,6 +403,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       title: "Inspect OTA rollback",
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
+      workflowId: "code-fix-default",
       expertId: "ota",
       routingMode: "explicit",
       repositoryId: "ota-repo",
@@ -413,6 +418,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
           title: "Conflicting work",
           description: "Different payload",
           idempotencyKey: "mcp-work-1",
+          workflowId: "code-fix-default",
           expertId: "ota",
           routingMode: "explicit",
           repositoryId: "ota-repo",
@@ -581,6 +587,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       title: "Inspect OTA rollback",
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
+      workflowId: "code-fix-default",
       expertId: "ota",
       routingMode: "explicit",
       repositoryId: "ota-repo",
@@ -1024,6 +1031,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       title: "Inspect OTA retry",
       description: "Inspect OTA retry path",
       idempotencyKey: "mcp-work-rework",
+      workflowId: "code-fix-default",
       expertId: "ota",
       routingMode: "explicit",
       repositoryId: "ota-repo",

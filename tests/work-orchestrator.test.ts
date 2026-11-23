@@ -404,6 +404,32 @@ test("repository verification policy is pinned into code-change task and makes i
         },
       },
     });
+    experts.putDeployment({
+      id: "ota-read",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [
+        {
+          id: "ota-repo",
+          url: "https://example.test/ota.git",
+          branch: "main",
+          verificationPolicy: { version: 1, required: steps },
+        } as any,
+      ],
+      principals: ["alice"],
+      runtimeProfile: "claude-readonly",
+      active: true,
+      executor: {
+        backend: "claude",
+        modelConfig: {
+          providerId: "router",
+          model: "model",
+          baseUrl: "https://router.example/v1",
+          wireApi: "anthropic-messages",
+          allowedEnvNames: ["ANTHROPIC_AUTH_TOKEN"],
+        },
+      },
+    });
     const orchestrator = new WorkOrchestrator(
       work,
       tasks,
@@ -438,12 +464,153 @@ test("repository verification policy is pinned into code-change task and makes i
       ],
     });
     assert.deepEqual(tasks.get(detail.currentTask!.taskId, "alice", "team-a").validationSnapshot, steps);
+
+    const readonlyStep = {
+      id: "metadata-check",
+      type: "command",
+      argv: ["sh", "-lc", "test -f CMakeLists.txt"],
+      timeoutMs: 30_000,
+      evidenceType: "metadata_check",
+    };
+    const investigation = work.getWorkflow("investigation").definition;
+    work.putWorkflow(
+      "readonly-with-local-check",
+      1,
+      {
+        ...investigation,
+        validation: {
+          requiredEvidence: ["expert_result", "metadata_check"],
+          required: [readonlyStep],
+        },
+      },
+      500,
+    );
+    const readonly = orchestrator.submitWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "readonly-repository-verification-policy",
+      sourceType: "mcp",
+      sourceScope: "claude-code/readonly-repository-verification-policy",
+      sourceRef: "readonly-repository-verification-policy",
+      title: "Count source lines",
+      description: "count source lines without modifying files",
+      workflowId: "readonly-with-local-check",
+      expertId: "ota",
+    });
+    assert.equal(readonly.currentTask?.deploymentId, "ota-read");
+    assert.deepEqual(readonly.currentTask?.validationSnapshot, [readonlyStep]);
   } finally {
     publications.close();
     work.close();
     tasks.close();
     experts.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("verification command-not-found blocks as environment failure instead of continuing the agent", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    const buildStep = {
+      id: "build",
+      type: "command",
+      argv: ["sh", "-lc", "missing-build-command"],
+      timeoutMs: 30_000,
+      evidenceType: "build",
+    };
+    f.work.putWorkflow(
+      "readonly-verified",
+      1,
+      {
+        ...base,
+        validation: { requiredEvidence: ["expert_result", "build"], required: [buildStep] },
+      },
+      100,
+    );
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "verification-exit-127",
+      workflowId: "readonly-verified",
+    });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    const subjectRevision = "f".repeat(40);
+    f.tasks.complete(claim, "counted source lines", 2_000, { commitSha: subjectRevision }, [
+      {
+        stepId: "build",
+        type: "command",
+        evidenceType: "build",
+        status: "failed",
+        exitCode: 127,
+        durationMs: 10,
+        errorCode: "VERIFICATION_EXIT_NONZERO",
+        subjectRevision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker@1",
+      },
+    ]);
+
+    const reconciled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(reconciled.work.status, "blocked");
+    assert.equal(reconciled.work.blockedReason, "verification_environment");
+    assert.equal(reconciled.work.blockedContext, "build:VERIFICATION_EXIT_127");
+    assert.equal(reconciled.work.nextActionType, null);
+    assert.equal(reconciled.currentTask?.continuationCount, 0);
+  } finally {
+    f.close();
+  }
+});
+
+test("verification process failure blocks as environment failure instead of continuing the agent", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    const buildStep = {
+      id: "build",
+      type: "command",
+      argv: ["sh", "-lc", "cmake --build /tmp/build"],
+      timeoutMs: 30_000,
+      evidenceType: "build",
+    };
+    f.work.putWorkflow(
+      "readonly-process-verified",
+      1,
+      {
+        ...base,
+        validation: { requiredEvidence: ["expert_result", "build"], required: [buildStep] },
+      },
+      100,
+    );
+    const detail = f.orchestrator.submitWork({
+      ...submission,
+      idempotencyKey: "verification-process-failed",
+      workflowId: "readonly-process-verified",
+    });
+    const claim = f.tasks.claim("worker-a", 1_000, 30_000, "ota")!;
+    const subjectRevision = "e".repeat(40);
+    f.tasks.complete(claim, "counted source lines", 2_000, { commitSha: subjectRevision }, [
+      {
+        stepId: "build",
+        type: "command",
+        evidenceType: "build",
+        status: "failed",
+        exitCode: null,
+        durationMs: 10,
+        errorCode: "VERIFICATION_PROCESS_FAILED",
+        subjectRevision,
+        environmentIdentity: "worker:worker-a",
+        verifierIdentity: "team-skill-hub-worker@1",
+      },
+    ]);
+
+    const reconciled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);
+    assert.equal(reconciled.work.status, "blocked");
+    assert.equal(reconciled.work.blockedReason, "verification_environment");
+    assert.equal(reconciled.work.blockedContext, "build:VERIFICATION_PROCESS_FAILED");
+    assert.equal(reconciled.work.nextActionType, null);
+    assert.equal(reconciled.currentTask?.continuationCount, 0);
+  } finally {
+    f.close();
   }
 });
 
@@ -1240,10 +1407,17 @@ test("continuation respects the workflow agent-turn budget", () => {
     }
 
     assert.equal(f.tasks.get(detail.currentTask!.taskId, "alice", "team-a").continuationCount, 19);
-    assert.throws(
-      () => f.orchestrator.requestContinuation(detail.work.workItemId, "alice", "team-a", "one-too-many", 10_000),
-      /WORK_CONTINUATION_LIMIT_REACHED/,
+    const limited = f.orchestrator.requestContinuation(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "one-too-many",
+      10_000,
     );
+    assert.equal(limited.work.status, "blocked");
+    assert.equal(limited.work.blockedReason, "continuation_limit");
+    assert.equal(limited.work.blockedContext, "WORK_CONTINUATION_LIMIT_REACHED");
+    assert.equal(limited.work.nextActionType, null);
   } finally {
     f.close();
   }

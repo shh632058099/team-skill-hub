@@ -219,7 +219,10 @@ function effectiveVerificationSteps(
   workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
   resolved: ResolvedDispatch,
 ): VerificationPolicyStep[] {
-  const repositorySteps = resolved.deploymentSnapshot?.repository?.verificationPolicy?.required ?? [];
+  const repositorySteps =
+    workflow.definition.change?.mode === "code_change"
+      ? (resolved.deploymentSnapshot?.repository?.verificationPolicy?.required ?? [])
+      : [];
   let steps: VerificationPolicyStep[];
   try {
     steps = normalizeVerificationPolicy([...workflow.definition.validation.required, ...repositorySteps]);
@@ -492,7 +495,22 @@ export class WorkOrchestrator {
       this.tasks.listRunTurns(task.taskId, principalId, scope).length,
     );
     if (consumedTurns >= workflow.definition.lifecycle.continuation.maxTurnsPerRun) {
-      throw new Error("WORK_CONTINUATION_LIMIT_REACHED");
+      this.workStore.blockWork(
+        work.workItemId,
+        work.principalId,
+        work.scope,
+        work.stateRevision,
+        "continuation_limit",
+        "WORK_CONTINUATION_LIMIT_REACHED",
+        now,
+        {
+          resumeCondition: "manual",
+          blockedByType: "continuation",
+          blockedByRef: attempt.workAttemptId,
+        },
+        fence,
+      );
+      return this.detail(workItemId, principalId, scope);
     }
     if (work.nextActionType !== null) {
       if (work.nextActionType === "continuation" && work.nextActionContext === normalizedReason)
@@ -1832,6 +1850,35 @@ export class WorkOrchestrator {
       return !verification || verification.status !== "passed";
     });
     if (requiredVerificationFailed) {
+      const environmentFailure = task.validationSnapshot
+        .map((step) => verificationByStep.get(step.id))
+        .find(
+          (verification) =>
+            verification?.status === "failed" &&
+            (verification.exitCode === 127 || verification.errorCode === "VERIFICATION_PROCESS_FAILED"),
+        );
+      if (environmentFailure) {
+        const context =
+          environmentFailure.exitCode === 127
+            ? `${environmentFailure.stepId}:VERIFICATION_EXIT_127`
+            : `${environmentFailure.stepId}:${environmentFailure.errorCode}`;
+        this.workStore.blockWork(
+          current.workItemId,
+          current.principalId,
+          current.scope,
+          current.stateRevision,
+          "verification_environment",
+          context,
+          now,
+          {
+            resumeCondition: "manual",
+            blockedByType: "verification",
+            blockedByRef: environmentFailure.stepId,
+          },
+          fence,
+        );
+        return this.detail(current.workItemId, current.principalId, current.scope);
+      }
       return this.requestContinuation(
         current.workItemId,
         current.principalId,
@@ -1841,7 +1888,6 @@ export class WorkOrchestrator {
         fence,
       );
     }
-
     current = this.workStore.getWork(current.workItemId, current.principalId, current.scope);
     const evidenceGate = this.workStore.evaluateCompletionGate(current.workItemId, current.principalId, current.scope);
     const missingRequiredEvidence = evidenceGate.missing.filter((item) => item.startsWith("required_evidence:"));
