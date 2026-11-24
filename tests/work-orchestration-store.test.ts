@@ -71,6 +71,16 @@ test("platform presets preserve history and publish stricter development and rea
       assert.equal(workflow.review.required, false);
       assert.equal(workflow.completion.require.includes("review_accepted"), false);
     }
+
+    const reviewFixVerify = store.getWorkflow("review-fix-verify");
+    assert.equal(reviewFixVerify.version, 1);
+    assert.equal(reviewFixVerify.definition.graph.mode, "dynamic-dag");
+    assert.deepEqual(reviewFixVerify.definition.change, { mode: "conditional_code_change" });
+    assert.equal(reviewFixVerify.definition.review.required, true);
+    assert.equal(reviewFixVerify.definition.review.reviewerExpertId, undefined);
+    assert.deepEqual(reviewFixVerify.definition.validation.requiredEvidence, ["build", "unit_test"]);
+    assert.equal(reviewFixVerify.definition.publication?.required, false);
+    assert.match(reviewFixVerify.definition.selection?.summary ?? "", /review.*fix.*verify/i);
   });
 });
 

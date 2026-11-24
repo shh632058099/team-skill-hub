@@ -8,7 +8,7 @@ import type { AppConfig, KnowledgePublishingConfig, KnowledgeSourceConfig } from
 import type { KnowledgeSubmissionSpec } from "./knowledge-submission-spec.js";
 import type { AutoCandidatePolicy } from "./auto-candidate/types.js";
 import type { SkillHubApplicationService } from "./application.js";
-import { createSkillHubMcpHandler, listSkillHubMcpTools } from "./mcp.js";
+import { createSkillHubMcpHandler, listSkillHubMcpTools, type McpExpertRuntime } from "./mcp.js";
 import {
   ADMIN_API_KEYS_HTML,
   ADMIN_GOVERNANCE_HTML,
@@ -33,8 +33,16 @@ import { ExpertTaskStore } from "./expert-platform/task-store.js";
 import { ExpertDispatchService } from "./expert-platform/expert-dispatch-service.js";
 import { WorkOrchestrationStore, type WorkStatus } from "./expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "./expert-platform/work-orchestrator.js";
+import { McpWorkAdapter } from "./expert-platform/mcp-work-adapter.js";
 import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
+import { WorkDagPlannerCoordinator, WorkDagScheduler } from "./expert-platform/work-dag-engine.js";
+import { WorkDagSeedPlanner } from "./expert-platform/work-dag-planners.js";
+import { createConfiguredWorkDagPlanner } from "./expert-platform/work-dag-model-client.js";
+import { WorkDagRuntime } from "./expert-platform/work-dag-runtime-service.js";
+import { createExpertTaskDagAdapters } from "./expert-platform/work-dag-expert-adapters.js";
+import { createControlDagAdapters } from "./expert-platform/work-dag-control-adapters.js";
+import { createDeliveryDagAdapters } from "./expert-platform/work-dag-delivery-adapters.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import { RUNTIME_PROFILE_IDS } from "./expert-platform/runtime-profile-policy.js";
 import {
@@ -224,11 +232,10 @@ export async function startServer(
       }
     },
   );
-  const mcpHandler = createSkillHubMcpHandler(service);
-  const nodeHandler = toNodeHandler(mcpHandler);
 
   const workRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
   let workReconcileTimer: ReturnType<typeof setInterval> | undefined;
+  let mcpExpertRuntime: McpExpertRuntime | undefined;
   let workRuntimeResources:
     | {
         work: WorkOrchestrationStore;
@@ -237,6 +244,7 @@ export async function startServer(
         tasks: ExpertTaskStore;
         experts: ExpertStore;
         orchestrator: WorkOrchestrator;
+        dagRuntime: WorkDagRuntime;
       }
     | undefined;
   if (workRuntimeDb) {
@@ -247,15 +255,39 @@ export async function startServer(
     const experts = new ExpertStore(workRuntimeDb);
     const registryDb =
       process.env.EXPERT_WORKER_REGISTRY_DB?.trim() || path.join(path.dirname(workRuntimeDb), "expert-workers.sqlite");
+    const dispatch = new ExpertDispatchService(experts, tasks);
     const orchestrator = new WorkOrchestrator(
       work,
       tasks,
-      new ExpertDispatchService(experts, tasks),
+      dispatch,
       createWorkerAvailabilityProbe(registryDb),
       publications,
       changeRequests,
     );
-    workRuntimeResources = { work, publications, changeRequests, tasks, experts, orchestrator };
+    mcpExpertRuntime = {
+      expertTaskStore: tasks,
+      expertStore: experts,
+      expertDispatchService: dispatch,
+      workOrchestrationStore: work,
+      workPublicationStore: publications,
+      workChangeRequestStore: changeRequests,
+      workOrchestrator: orchestrator,
+      mcpWorkAdapter: new McpWorkAdapter(work, orchestrator),
+    };
+    const dagScheduler = new WorkDagScheduler(work, [
+      ...createExpertTaskDagAdapters(work, tasks, dispatch),
+      ...createControlDagAdapters(work, publications),
+      ...createDeliveryDagAdapters(work, publications, changeRequests, orchestrator),
+    ]);
+    const configuredDagPlanner = createConfiguredWorkDagPlanner(process.env);
+    const dagPlanner = configuredDagPlanner?.planner ?? new WorkDagSeedPlanner();
+    const dagPlannerTimeoutMs = configuredDagPlanner?.timeoutMs ?? 30_000;
+    const dagRuntime = new WorkDagRuntime(
+      work,
+      new WorkDagPlannerCoordinator(work, dagPlanner, dagPlannerTimeoutMs),
+      dagScheduler,
+    );
+    workRuntimeResources = { work, publications, changeRequests, tasks, experts, orchestrator, dagRuntime };
     app.addHook("onClose", async () => {
       if (workReconcileTimer) clearInterval(workReconcileTimer);
       work.close();
@@ -265,6 +297,9 @@ export async function startServer(
       experts.close();
     });
   }
+
+  const mcpHandler = createSkillHubMcpHandler(service, mcpExpertRuntime);
+  const nodeHandler = toNodeHandler(mcpHandler);
 
   const adminLoginRequired = process.env.ADMIN_LOGIN_REQUIRED === "true";
   const adminSessionCookieSecure = process.env.ADMIN_SESSION_COOKIE_SECURE === "true";
@@ -1551,7 +1586,7 @@ export async function startServer(
       return { error: "admin API access denied" };
     }
     try {
-      return { tools: await listSkillHubMcpTools(service) };
+      return { tools: await listSkillHubMcpTools(service, mcpExpertRuntime) };
     } catch (error) {
       return expertAdminError(error, reply);
     }
@@ -1579,7 +1614,9 @@ export async function startServer(
         reply.code(400);
         return { error: "INVALID_EXPERT_MCP_PROFILE", issues: parsed.error.issues };
       }
-      const availableMcpTools = new Set((await listSkillHubMcpTools(service)).map((tool) => tool.name));
+      const availableMcpTools = new Set(
+        (await listSkillHubMcpTools(service, mcpExpertRuntime)).map((tool) => tool.name),
+      );
       const unavailableTools = parsed.data.allowedTools.filter((tool) => !availableMcpTools.has(tool));
       if (unavailableTools.length) {
         reply.code(400);
@@ -1609,7 +1646,7 @@ export async function startServer(
     const unavailable = deployment.mcp.allowedTools?.filter((tool) => !profile.allowedTools.includes(tool)) ?? [];
     if (unavailable.length) return `MCP_PROFILE_TOOL_NOT_ALLOWED:${unavailable.join(",")}`;
     if (deployment.mcp.urlOverride) {
-      const available = new Set((await listSkillHubMcpTools(service)).map((tool) => tool.name));
+      const available = new Set((await listSkillHubMcpTools(service, mcpExpertRuntime)).map((tool) => tool.name));
       const missing = (deployment.mcp.allowedTools ?? []).filter((tool) => !available.has(tool));
       if (missing.length) return missing;
     }
@@ -4143,10 +4180,14 @@ export async function startServer(
       Math.min(Number(process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS ?? 1000) || 1000, 60_000),
     );
     const limit = Math.max(1, Math.min(Number(process.env.EXPERT_WORK_RECONCILE_LIMIT ?? 100) || 100, 500));
-    const reconcile = (startup: boolean) => {
+    let reconciling = false;
+    const reconcile = async (startup: boolean) => {
+      if (reconciling) return;
+      reconciling = true;
       try {
         if (startup) workRuntimeResources!.orchestrator.reconcileStartup(Date.now(), limit);
         else workRuntimeResources!.orchestrator.reconcileActive(Date.now(), limit);
+        await workRuntimeResources!.dagRuntime.reconcileActive(Date.now(), limit);
       } catch (error) {
         console.warn(
           JSON.stringify({
@@ -4155,10 +4196,12 @@ export async function startServer(
             error: error instanceof Error ? error.message : String(error),
           }),
         );
+      } finally {
+        reconciling = false;
       }
     };
-    reconcile(true);
-    workReconcileTimer = setInterval(() => reconcile(false), intervalMs);
+    void reconcile(true);
+    workReconcileTimer = setInterval(() => void reconcile(false), intervalMs);
     workReconcileTimer.unref?.();
   }
   return app;

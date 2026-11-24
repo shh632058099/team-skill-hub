@@ -30,6 +30,32 @@ test("idempotent submissions preserve task identity and reject changed input", (
   }
 });
 
+test("task execution kind defaults to agent and verification kind is durable through claim", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-kind-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.db"));
+    const agent = store.submit({ principalId: "alice", scope: "team-a", idempotencyKey: "agent", problem: "analyze" });
+    assert.equal(agent.executionKind, "agent");
+    const verification = store.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "verify",
+      problem: "verify only",
+      executionKind: "verification",
+    });
+    assert.equal(verification.executionKind, "verification");
+    const claimedAgent = store.claim("worker", 100, 10)!;
+    assert.equal(claimedAgent.executionKind, "agent");
+    store.complete(claimedAgent, "done", 101);
+    const claimedVerification = store.claim("worker", 102, 10)!;
+    assert.equal(claimedVerification.taskId, verification.taskId);
+    assert.equal(claimedVerification.executionKind, "verification");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("admin task history returns creation timestamps newest first", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-time-order-"));
   const file = path.join(dir, "runtime.db");
@@ -721,6 +747,7 @@ test("successful work task can schedule a fenced continuation on the same task",
     assert.equal(second.taskId, task.taskId);
     assert.notEqual(second.runId, first.runId);
     assert.equal(second.fencing, first.fencing + 1);
+    assert.match(second.problem, /verification_failed/);
     store.complete(second, "second result", 500);
 
     assert.throws(() => store.scheduleContinuation(task.taskId, first.runId, "stale", 600), /STALE_RUN/);

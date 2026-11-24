@@ -88,6 +88,40 @@ test("change request claim is owner-affine, fenced and completes with exact comm
   }
 });
 
+test("change request cancellation fences pending and creating operations", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-change-request-cancel-"));
+  try {
+    const store = new WorkChangeRequestStore(path.join(dir, "runtime.sqlite"));
+    const pending = store.createOrReuse(
+      { ...fixture(), publicationId: "pub-pending", idempotencyKey: "publication:pub-pending" },
+      1000,
+    );
+    const cancelledPending = store.cancelForWork("work-1", 1050);
+    assert.ok(cancelledPending.cancelledChangeRequestIds.includes(pending.changeRequestId));
+    assert.deepEqual(cancelledPending.outcomeUnknownChangeRequestIds, []);
+    assert.equal(store.get(pending.changeRequestId).state, "blocked");
+    assert.equal(store.get(pending.changeRequestId).lastErrorCode, "WORK_CANCELLED");
+
+    const creating = store.createOrReuse(
+      { ...fixture(), publicationId: "pub-creating", idempotencyKey: "publication:pub-creating" },
+      1100,
+    );
+    const claim = store.claim("worker-1", 1200, 1000)!;
+    assert.equal(claim.changeRequestId, creating.changeRequestId);
+    const cancelledCreating = store.cancelForWork("work-1", 1250);
+    assert.ok(cancelledCreating.outcomeUnknownChangeRequestIds.includes(creating.changeRequestId));
+    assert.equal(store.get(creating.changeRequestId).state, "blocked");
+    assert.equal(store.get(creating.changeRequestId).lastErrorCode, "WORK_CANCELLED_OUTCOME_UNKNOWN");
+    assert.throws(
+      () => store.complete(claim, { success: false, errorCode: "X" }, 1300),
+      /STALE_CHANGE_REQUEST_OPERATION/,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("change request rejects provider result for a different pushed commit", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-change-request-mismatch-"));
   try {

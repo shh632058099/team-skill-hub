@@ -424,6 +424,56 @@ export class WorkPublicationStore {
     ).map((row) => this.fromRow(row));
   }
 
+  cancelForWork(
+    workItemId: string,
+    now = Date.now(),
+  ): {
+    cancelledPublicationIds: string[];
+    outcomeUnknownPublicationIds: string[];
+  } {
+    const id = requiredText(workItemId, 200);
+    if (!Number.isFinite(now)) throw new Error("INVALID_PUBLICATION");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db
+        .prepare(
+          "SELECT * FROM work_publications WHERE work_item_id=? AND state IN ('preparing','prepared','approved','pushing','blocked') ORDER BY created_at,publication_id",
+        )
+        .all(id) as Row[];
+      const cancelledPublicationIds: string[] = [];
+      const outcomeUnknownPublicationIds: string[] = [];
+
+      for (const row of rows) {
+        const current = this.fromRow(row);
+        const fencing = Number(row.operation_fencing ?? 0) + 1;
+        if (current.state === "pushing") {
+          const changed = this.db
+            .prepare(
+              "UPDATE work_publications SET state='failed',last_error_code='WORK_CANCELLED_OUTCOME_UNKNOWN',last_error_context='Publication push was in flight when Work was cancelled; reconcile remote outcome manually.',operation_fencing=?,operation_lease_until=NULL,operation_claimed_worker_id=NULL,next_attempt_at=NULL,updated_at=? WHERE publication_id=? AND operation_fencing=? AND state='pushing'",
+            )
+            .run(fencing, now, current.publicationId, Number(row.operation_fencing ?? 0));
+          if (changed.changes !== 1) throw new Error("STALE_PUBLICATION_OPERATION");
+          outcomeUnknownPublicationIds.push(current.publicationId);
+          continue;
+        }
+
+        const changed = this.db
+          .prepare(
+            "UPDATE work_publications SET state='cancelled',last_error_code='WORK_CANCELLED',last_error_context=NULL,operation_fencing=?,operation_lease_until=NULL,operation_claimed_worker_id=NULL,next_attempt_at=NULL,updated_at=? WHERE publication_id=? AND operation_fencing=? AND state IN ('preparing','prepared','approved','blocked')",
+          )
+          .run(fencing, now, current.publicationId, Number(row.operation_fencing ?? 0));
+        if (changed.changes !== 1) throw new Error("STALE_PUBLICATION_OPERATION");
+        cancelledPublicationIds.push(current.publicationId);
+      }
+
+      this.db.exec("COMMIT");
+      return { cancelledPublicationIds, outcomeUnknownPublicationIds };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   transitionPublication(
     publicationId: string,
     nextState: WorkPublicationState,

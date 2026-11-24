@@ -12,6 +12,9 @@ import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-se
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
 import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
+import { WorkChangeRequestStore } from "../src/expert-platform/work-change-request-store.js";
+import { McpWorkAdapter } from "../src/expert-platform/mcp-work-adapter.js";
+import { createSkillHubMcpHandler, listSkillHubMcpTools } from "../src/mcp.js";
 import { PersistentWorkerRegistry } from "../src/expert-platform/persistent-worker-registry.js";
 import { MemoryRegistryStore } from "../src/registry.js";
 import { SearchRoutingStrategy, SqliteFtsSearchBackend } from "../src/search.js";
@@ -95,6 +98,7 @@ async function listMcpTools(url: string, apiKey: string): Promise<Array<{ name: 
     },
     body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
   });
+
   assert.equal(response.status, 200);
   const body = await response.text();
   const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
@@ -102,6 +106,472 @@ async function listMcpTools(url: string, apiKey: string): Promise<Array<{ name: 
   assert.ok(rpc.result?.tools);
   return rpc.result!.tools!;
 }
+
+test("MCP handler prefers an injected app-scoped Expert runtime over opening EXPERT_RUNTIME_DB again", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mcp-runtime-injection-"));
+  const injectedDb = path.join(root, "injected.sqlite");
+  const fallbackDb = path.join(root, "fallback.sqlite");
+  const oldRuntimeDb = process.env.EXPERT_RUNTIME_DB;
+  process.env.EXPERT_RUNTIME_DB = fallbackDb;
+
+  const tasks = new ExpertTaskStore(injectedDb);
+  const experts = new ExpertStore(injectedDb);
+  const works = new WorkOrchestrationStore(injectedDb);
+  const publications = new WorkPublicationStore(injectedDb);
+  const changeRequests = new WorkChangeRequestStore(injectedDb);
+  try {
+    const dispatch = new ExpertDispatchService(experts, tasks);
+    const orchestrator = new WorkOrchestrator(works, tasks, dispatch, () => true, publications, changeRequests);
+    const base = works.getWorkflow("investigation").definition;
+    works.putWorkflow("runtime-injection", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      review: { required: false },
+      change: { mode: "readonly" },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const work = works.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "runtime-injection-work",
+      sourceType: "mcp",
+      title: "Injected runtime",
+      description: "must be read from injected runtime",
+      workflowId: "runtime-injection",
+    });
+    works.ensureRequirementSnapshot(work.workItemId);
+
+    const appService = {
+      authenticateRequest() {
+        return { id: "alice", roles: ["developer", "internal"], tenantId: "team-a" };
+      },
+      newMcpTraceId() {
+        return "trace-runtime-injection";
+      },
+      getKnowledgeMatchThreshold() {
+        return 0.5;
+      },
+      async recordMcpCall(input: any) {
+        return { id: 1, traceId: input.traceId, sessionId: input.sessionId ?? null };
+      },
+    } as any;
+    const expertRuntime = {
+      expertTaskStore: tasks,
+      expertStore: experts,
+      expertDispatchService: dispatch,
+      workOrchestrationStore: works,
+      workPublicationStore: publications,
+      workChangeRequestStore: changeRequests,
+      workOrchestrator: orchestrator,
+      mcpWorkAdapter: new McpWorkAdapter(works, orchestrator),
+    };
+    const handler = createSkillHubMcpHandler(appService, expertRuntime);
+    const response = await handler.fetch(
+      new Request("http://team-skill-hub.local/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "get_work", arguments: { workItemId: work.workItemId } },
+        }),
+      }),
+    );
+    assert.equal(response.status, 200);
+    const raw = await response.text();
+    const dataLine = raw.split("\n").find((line) => line.startsWith("data: "));
+    const rpc = JSON.parse(dataLine ? dataLine.slice(6) : raw) as McpResponse;
+    assert.notEqual(rpc.result?.isError, true);
+    const text = rpc.result?.content?.find((item) => item.type === "text")?.text;
+    assert.ok(text);
+    assert.equal(JSON.parse(text).work.workItemId, work.workItemId);
+    delete process.env.EXPERT_RUNTIME_DB;
+    const catalog = await listSkillHubMcpTools(appService, expertRuntime);
+    assert.ok(catalog.some((tool) => tool.name === "get_work"));
+    const discoverTool = catalog.find((tool) => tool.name === "discover")!;
+    const workflowsTool = catalog.find((tool) => tool.name === "list_workflows")!;
+    const submitTool = catalog.find((tool) => tool.name === "submit_work")!;
+    assert.match(discoverTool.description ?? "", /not.*execution tool|不是.*执行入口/i);
+    assert.match(discoverTool.description ?? "", /list_workflows.*submit_work/i);
+    assert.match(workflowsTool.description ?? "", /Team Skill Hub.*submit_work/i);
+    assert.match(submitTool.description ?? "", /Team Skill Hub.*execute|使用 Team Skill Hub.*执行/i);
+    process.env.EXPERT_RUNTIME_DB = fallbackDb;
+  } finally {
+    works.close();
+    publications.close();
+    changeRequests.close();
+    tasks.close();
+    experts.close();
+    if (oldRuntimeDb === undefined) delete process.env.EXPERT_RUNTIME_DB;
+    else process.env.EXPERT_RUNTIME_DB = oldRuntimeDb;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP dynamic DAG control plane versions requirements, signals waits, and resolves unknown outcomes", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "work-dag-mcp-control-"));
+  const runtimeDb = path.join(root, "runtime.sqlite");
+  const dataDir = path.join(root, "app-data");
+  const oldRuntimeDb = process.env.EXPERT_RUNTIME_DB;
+  const oldInterval = process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS;
+  process.env.EXPERT_RUNTIME_DB = runtimeDb;
+  process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS = "600000";
+
+  let app: Awaited<ReturnType<typeof StartServer>> | undefined;
+  let observer: WorkOrchestrationStore | undefined;
+  try {
+    const { startServer } = await import("../src/server.js");
+    const apiKey = "dag-control-alice";
+    const otherKey = "dag-control-bob";
+    const auth = new ApiKeyAuthenticationProvider({
+      [apiKey]: { id: "alice", roles: ["developer", "internal"], tenantId: "team-a" },
+      [otherKey]: { id: "bob", roles: ["developer", "internal"], tenantId: "team-a" },
+    });
+    const search = new SqliteFtsSearchBackend();
+    const config: AppConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir,
+      defaultRoles: [],
+      authentication: { mode: "api-key", apiKeys: {} },
+      repositories: [],
+    };
+    const service = new SkillHubApplicationService(
+      config,
+      [],
+      new MemoryRegistryStore(),
+      search,
+      new SearchRoutingStrategy(search),
+      auth,
+      new StaticRolePermissionProvider(),
+      [],
+      new LoggingEventSink(),
+    );
+    await service.initialize();
+    app = await startServer(config, service);
+    const address = app.server.address();
+    assert.ok(address && typeof address !== "string");
+    const mcpUrl = `http://127.0.0.1:${address.port}/mcp`;
+
+    observer = new WorkOrchestrationStore(runtimeDb);
+    const base = observer.getWorkflow("investigation").definition;
+    observer.putWorkflow("mcp-dynamic", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      review: { required: false },
+      change: { mode: "readonly" },
+      completion: { require: ["no_unresolved_blocker"] },
+      planning: {
+        maxReplans: 8,
+        replanPolicy: [
+          "always_after_agent_turn",
+          "on_new_information",
+          "on_failure",
+          "on_review_rework",
+          "on_blocker_resolution",
+          "on_user_update",
+          "manual",
+        ],
+      },
+      graph: { mode: "dynamic-dag" },
+    });
+
+    const tools = await listMcpTools(mcpUrl, apiKey);
+    for (const name of [
+      "update_work_requirements",
+      "request_work_replan",
+      "signal_work_wait",
+      "resolve_work_dag_unknown",
+    ]) {
+      assert.ok(
+        tools.some((tool) => tool.name === name),
+        `missing MCP tool ${name}`,
+      );
+    }
+
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 2000, "submit_work", {
+          title: "Invalid lifecycle aliases",
+          description: "The workflow already owns review and verification lifecycle semantics.",
+          idempotencyKey: "dag-control-invalid-lifecycle-aliases",
+          workflowId: "mcp-dynamic",
+          routingMode: "explicit",
+          expertId: "noop",
+          repositoryId: "repo",
+          deploymentId: "dep",
+          requirements: [
+            {
+              id: "user:review",
+              strength: "required",
+              condition: { kind: "always" },
+              satisfaction: { kind: "evidence", type: "review" },
+            },
+            {
+              id: "user:no-publish",
+              strength: "required",
+              condition: { kind: "always" },
+              satisfaction: { kind: "fact", key: "publication_required", equals: false },
+            },
+          ],
+        }),
+      /WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS/,
+    );
+
+    const initialRequirements = [
+      {
+        id: "user:ctest",
+        strength: "required",
+        condition: { kind: "always" },
+        satisfaction: { kind: "evidence", type: "ctest" },
+      },
+    ];
+    const submitted = await callMcp(mcpUrl, apiKey, 2001, "submit_work", {
+      title: "Dynamic requirement control",
+      description: "Exercise typed requirements over MCP",
+      idempotencyKey: "dag-control-requirements",
+      workflowId: "mcp-dynamic",
+      routingMode: "explicit",
+      expertId: "noop",
+      repositoryId: "repo",
+      deploymentId: "dep",
+      requirements: initialRequirements,
+    });
+    const workId = String(submitted.work.workItemId);
+    assert.equal(submitted.work.status, "queued");
+    assert.equal(submitted.dag.requirementRevision, 2);
+    assert.deepEqual(
+      submitted.dag.requirementSnapshot.requirements.map((item: any) => item.id),
+      ["user:ctest"],
+    );
+
+    const replay = await callMcp(mcpUrl, apiKey, 2002, "submit_work", {
+      title: "Dynamic requirement control",
+      description: "Exercise typed requirements over MCP",
+      idempotencyKey: "dag-control-requirements",
+      workflowId: "mcp-dynamic",
+      routingMode: "explicit",
+      expertId: "noop",
+      repositoryId: "repo",
+      deploymentId: "dep",
+      requirements: initialRequirements,
+    });
+    assert.equal(replay.work.workItemId, workId);
+    assert.equal(replay.dag.requirementRevision, 2);
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 2003, "submit_work", {
+          title: "Dynamic requirement control",
+          description: "Exercise typed requirements over MCP",
+          idempotencyKey: "dag-control-requirements",
+          workflowId: "mcp-dynamic",
+          routingMode: "explicit",
+          expertId: "noop",
+          repositoryId: "repo",
+          deploymentId: "dep",
+          requirements: [
+            {
+              id: "user:build",
+              strength: "required",
+              condition: { kind: "always" },
+              satisfaction: { kind: "evidence", type: "build" },
+            },
+          ],
+        }),
+      /WORK_IDEMPOTENCY_CONFLICT/,
+    );
+
+    const current = observer.getWorkInternal(workId);
+    const updated = await callMcp(mcpUrl, apiKey, 2004, "update_work_requirements", {
+      workItemId: workId,
+      expectedRevision: current.stateRevision,
+      expectedRequirementRevision: current.currentRequirementRevision,
+      requirements: [],
+    });
+    assert.equal(updated.dag.requirementRevision, 3);
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 2005, "update_work_requirements", {
+          workItemId: workId,
+          expectedRevision: current.stateRevision,
+          expectedRequirementRevision: current.currentRequirementRevision,
+          requirements: [],
+        }),
+      /STALE_WORK_REVISION|STALE_REQUIREMENT_REVISION/,
+    );
+
+    let work = observer.getWorkInternal(workId);
+    const plannerInput = observer.getDagPlannerInput(workId);
+    const waitProposal = observer.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "alice",
+        scope: "team-a",
+        expectedWorkRevision: plannerInput.frozen.workRevision,
+        expectedDagRevision: plannerInput.frozen.dagRevision,
+        expectedRequirementRevision: plannerInput.frozen.requirementRevision,
+        plannerIdentity: "mcp-test",
+        plannerVersion: "1",
+        plannerInputDigest: plannerInput.digest,
+        reasonCode: "manual",
+        graph: {
+          nodes: [
+            {
+              id: "wait",
+              kind: "wait",
+              capability: "external_ready",
+              subject: null,
+              resource: null,
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [],
+        },
+      },
+      3000,
+    );
+    assert.equal(waitProposal.status, "accepted");
+    work = observer.getWorkInternal(workId);
+    let waitExecution = observer.claimDagNode(
+      workId,
+      "alice",
+      "team-a",
+      "wait",
+      "hub",
+      work.stateRevision,
+      1,
+      3001,
+      10000,
+    );
+    waitExecution = observer.startDagNodeExecution(waitExecution.nodeExecutionId, "hub", waitExecution.fence, 3002);
+    const correlation = "dag-wait:" + waitExecution.idempotencyKey;
+    observer.setDagExecutionExternalRef(waitExecution.nodeExecutionId, "hub", waitExecution.fence, correlation, 3003);
+    observer.ensureDagWait(waitExecution.nodeExecutionId, "external_ready", correlation, null, 3004);
+
+    const signaled = await callMcp(mcpUrl, apiKey, 2006, "signal_work_wait", {
+      workItemId: workId,
+      correlationKey: correlation,
+      eventId: "event-1",
+      payload: { ready: true },
+    });
+    assert.equal(signaled.wait.state, "signaled");
+    const replaySignal = await callMcp(mcpUrl, apiKey, 2007, "signal_work_wait", {
+      workItemId: workId,
+      correlationKey: correlation,
+      eventId: "event-1",
+      payload: { ready: true },
+    });
+    assert.equal(replaySignal.wait.signalDigest, signaled.wait.signalDigest);
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, otherKey, 2008, "signal_work_wait", {
+          workItemId: workId,
+          correlationKey: correlation,
+          eventId: "event-bob",
+          payload: { ready: true },
+        }),
+      /WORK_NOT_FOUND/,
+    );
+
+    const unknownSubmitted = await callMcp(mcpUrl, apiKey, 2009, "submit_work", {
+      title: "Unknown outcome control",
+      description: "Exercise manual outcome reconciliation",
+      idempotencyKey: "dag-control-unknown",
+      workflowId: "mcp-dynamic",
+      routingMode: "explicit",
+      expertId: "noop",
+      repositoryId: "repo",
+      deploymentId: "dep",
+      requirements: [],
+    });
+    const unknownWorkId = String(unknownSubmitted.work.workItemId);
+    const unknownInput = observer.getDagPlannerInput(unknownWorkId);
+    observer.submitDagProposal(
+      {
+        workItemId: unknownWorkId,
+        principalId: "alice",
+        scope: "team-a",
+        expectedWorkRevision: unknownInput.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: unknownInput.frozen.requirementRevision,
+        plannerIdentity: "mcp-test",
+        plannerVersion: "1",
+        plannerInputDigest: unknownInput.digest,
+        reasonCode: "manual",
+        graph: {
+          nodes: [
+            {
+              id: "agent",
+              kind: "agent",
+              capability: "analysis",
+              subject: null,
+              resource: "workspace",
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [],
+        },
+      },
+      4000,
+    );
+    work = observer.getWorkInternal(unknownWorkId);
+    let unknownExecution = observer.claimDagNode(
+      unknownWorkId,
+      "alice",
+      "team-a",
+      "agent",
+      "hub",
+      work.stateRevision,
+      1,
+      4001,
+      10000,
+    );
+    unknownExecution = observer.startDagNodeExecution(
+      unknownExecution.nodeExecutionId,
+      "hub",
+      unknownExecution.fence,
+      4002,
+    );
+    unknownExecution = observer.markDagExecutionOutcomeUnknown(
+      unknownExecution.nodeExecutionId,
+      "external:op-1",
+      "remote result unknown",
+      4003,
+    );
+    work = observer.getWorkInternal(unknownWorkId);
+    const resolved = await callMcp(mcpUrl, apiKey, 2010, "resolve_work_dag_unknown", {
+      workItemId: unknownWorkId,
+      nodeExecutionId: unknownExecution.nodeExecutionId,
+      expectedRevision: work.stateRevision,
+      outcome: "failed",
+      reason: "remote provider confirmed failure",
+    });
+    assert.equal(resolved.resolvedExecution.state, "failed");
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, otherKey, 2011, "resolve_work_dag_unknown", {
+          workItemId: unknownWorkId,
+          nodeExecutionId: unknownExecution.nodeExecutionId,
+          expectedRevision: resolved.work.stateRevision,
+          outcome: "failed",
+          reason: "unauthorized",
+        }),
+      /WORK_NOT_FOUND/,
+    );
+  } finally {
+    observer?.close();
+    if (app) await app.close();
+    if (oldRuntimeDb === undefined) delete process.env.EXPERT_RUNTIME_DB;
+    else process.env.EXPERT_RUNTIME_DB = oldRuntimeDb;
+    if (oldInterval === undefined) delete process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS;
+    else process.env.EXPERT_WORK_RECONCILE_INTERVAL_MS = oldInterval;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("MCP Work API drives durable work through review, rework, authorization and cancellation", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "work-mcp-e2e-"));

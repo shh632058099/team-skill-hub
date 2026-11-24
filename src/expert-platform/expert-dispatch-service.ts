@@ -1,6 +1,7 @@
 import type { ExpertStore } from "./expert-store.js";
 import { routeExpert } from "./router.js";
 import type { DeploymentTaskSnapshot, ExpertTaskFeedbackInput, ExpertTaskStore, TaskRecord } from "./task-store.js";
+import type { TaskExecutionKind } from "./task-store.js";
 import type { VerificationPolicyStep } from "./verification-policy.js";
 import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 
@@ -22,6 +23,7 @@ export interface DispatchInput {
   workflowVersion?: number;
   workspaceKey?: string;
   validationSnapshot?: VerificationPolicyStep[];
+  executionKind?: TaskExecutionKind;
   requiredRuntimeProfile?: string;
   requiredWorkspaceAccess?: "read-only" | "read-write";
   preferredBackend?: "claude" | "codex";
@@ -256,6 +258,7 @@ export class ExpertDispatchService {
       workflowVersion: input.workflowVersion,
       workspaceKey: input.workspaceKey,
       validationSnapshot: input.validationSnapshot,
+      executionKind: input.executionKind,
       problem: input.problem,
       expertId: resolved.expertId,
       repositoryId: resolved.repositoryId,

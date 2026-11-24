@@ -148,6 +148,86 @@ test("Docker Codex executor runs codex JSONL through docker with read-only sourc
   assert.equal(seen?.signal, signal);
 });
 
+test("verification-only execution skips the model and runs pinned verification", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-verification-only-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "marker.txt"), "verified\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "init",
+    ]);
+    const commitSha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    let modelCalls = 0;
+    let verificationCalls = 0;
+    const executor = createDockerCodexExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: [],
+      timeoutMs: 1_000,
+      runProcess: async () => {
+        modelCalls++;
+        throw new Error("MODEL_MUST_NOT_RUN");
+      },
+      runVerificationPolicy: async (_workspace, policy) => {
+        verificationCalls++;
+        return policy.map((step) => ({
+          stepId: step.id,
+          type: step.type,
+          evidenceType: step.evidenceType,
+          status: "passed" as const,
+          exitCode: 0,
+          durationMs: 1,
+          errorCode: null,
+        }));
+      },
+      onStage: async () => undefined,
+    });
+    const result = await executor(
+      {
+        ...claim,
+        executionKind: "verification",
+        repositoryId: "repo-test",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-verify-a1",
+        validationSnapshot: [
+          { id: "ctest", type: "command", argv: ["ctest"], timeoutMs: 2_000, evidenceType: "ctest" },
+        ],
+      },
+      new AbortController().signal,
+    );
+    assert.equal(modelCalls, 0);
+    assert.equal(verificationCalls, 1);
+    assert.equal(typeof result, "object");
+    assert.equal((result as { result: string }).result, "Verification completed");
+    assert.equal((result as { source: { commitSha: string } }).source.commitSha, commitSha);
+    assert.equal(
+      (result as { verificationResults: Array<{ subjectRevision: string }> }).verificationResults[0]!.subjectRevision,
+      commitSha,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Docker executor runs pinned verification in the prepared workspace and returns revision-bound results", async () => {
   const { execFileSync } = await import("node:child_process");
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");

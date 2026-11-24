@@ -88,6 +88,30 @@ test("selection mode rejects contradictory or incomplete expert selection", () =
   );
 });
 
+test("automatic routing may fall back to the sole authorized expert when no lexical keyword matches", () => {
+  assert.deepEqual(
+    routeExpert(
+      [
+        {
+          id: "ota",
+          capabilities: ["ota"],
+          keywords: ["upgrade"],
+          repositories: ["ota-source"],
+          principals: ["alice"],
+          active: true,
+        },
+      ],
+      {
+        principal: "alice",
+        problem: "review the code, fix blocking issues, then verify",
+        repositoryId: "ota-source",
+        selectionMode: "auto",
+      },
+    ),
+    { expertId: "ota", selectionMode: "auto" },
+  );
+});
+
 test("automatic routing selects code-review for review requests and refuses unmatched problems", () => {
   assert.deepEqual(
     routeExpert(deployments, {

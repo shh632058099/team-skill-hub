@@ -339,6 +339,61 @@ export function createDockerCodexExecutor(options: DockerCodexExecutorOptions) {
       );
     }
     const sourcePath = preparedRepository?.path ?? options.sourcePath;
+    if (claim.executionKind === "verification") {
+      if (!preparedRepository) throw new Error("VERIFICATION_WORKSPACE_UNAVAILABLE");
+      if ((claim.validationSnapshot?.length ?? 0) === 0) throw new Error("VERIFICATION_POLICY_REQUIRED");
+      const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
+      let workspaceChangeSummary: WorkspaceChangeSummary | undefined;
+      if (workspaceAccess === "read-write") {
+        workspaceChangeSummary = await computeWorkspaceChangeSummary(
+          preparedRepository.path,
+          preparedRepository.commitSha,
+        );
+        grantExecutionContainerAccess(preparedRepository.path, "read-only");
+      }
+      const verificationRunner = options.runVerificationPolicy ?? runVerificationPolicy;
+      const rawVerification = await verificationRunner(
+        preparedRepository.path,
+        claim.validationSnapshot ?? [],
+        signal,
+        {
+          image: options.image,
+          containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
+          primaryGroupId: workerGroupId,
+          supplementalGroupId: workerGroupId,
+          tmpfsSizeMb: options.verificationTmpfsMb ?? 1024,
+        },
+      );
+      const validationPolicyHash = createHash("sha256")
+        .update(JSON.stringify(claim.validationSnapshot ?? []))
+        .digest("hex")
+        .slice(0, 16);
+      const verificationEnvironmentIdentity = [
+        `worker:${claim.workerId}`,
+        `backend:${backend}`,
+        `profile:${runtimeProfile ?? "legacy"}`,
+        `image:${options.image}`,
+      ].join("|");
+      const verifierIdentity = `team-skill-hub-worker@1|policy:${validationPolicyHash}`;
+      const verificationResults = rawVerification.map((verification) => ({
+        ...verification,
+        subjectRevision: workspaceChangeSummary
+          ? `workspace:${workspaceChangeSummary.contentRevision}`
+          : preparedRepository.commitSha,
+        environmentIdentity: verificationEnvironmentIdentity,
+        verifierIdentity,
+      }));
+      return {
+        result: "Verification completed",
+        source: {
+          repositoryUrl: claim.repositoryUrl,
+          repositoryBranch: claim.repositoryBranch,
+          commitSha: preparedRepository.commitSha,
+        },
+        verificationResults,
+        ...(workspaceChangeSummary ? { workspaceChangeSummary } : {}),
+      };
+    }
     let runtimeStatePath: string | undefined;
     let runtimeStateTarget: "/home/expert/.codex" | "/home/expert/.claude" | undefined;
     if (preparedRepository && claim.workspaceKey) {

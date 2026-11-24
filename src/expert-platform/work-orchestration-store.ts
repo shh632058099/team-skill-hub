@@ -4,6 +4,51 @@ import path from "node:path";
 import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 import { resolveRuntimeProfilePolicy, type RuntimeProfileId } from "./runtime-profile-policy.js";
 import { DatabaseSync } from "node:sqlite";
+import type { ShadowDagProjection } from "./work-dag-shadow.js";
+import {
+  executionKey,
+  completion,
+  evaluatePredicate,
+  readyNodes,
+  stableDigest,
+  type DagContext,
+  type DagExecution,
+  type DagGraph,
+  type DagNode,
+  type DagObligation,
+} from "./work-dag.js";
+import {
+  plannerInputDigest,
+  WORK_DAG_POLICY_VALIDATOR_VERSION,
+  validateDagProposal,
+  detectPlanDeadlock,
+  type PlannerFrozenInput,
+} from "./work-dag-policy.js";
+import {
+  graphSemanticDigest,
+  resultDigest,
+  type DagNodeResult,
+  type WorkDagArtifactRecord,
+  type WorkDagDecisionRecord,
+  type WorkDagFactRecord,
+  type WorkDagLateResultRecord,
+  type WorkDagEvidenceRecord,
+  type WorkDagNodeExecutionRecord,
+  type WorkDagPlannerInput,
+  type WorkDagProposalRecord,
+  type WorkDagReplanRequestRecord,
+  type WorkDagWaitRecord,
+  type WorkDagRevisionRecord,
+} from "./work-dag-runtime.js";
+import {
+  effectiveObligations,
+  evidenceRequirementSemanticsDigest,
+  effectiveRequirementDigest,
+  normalizeWorkRequirements,
+  policyIdentity,
+  type RequirementSnapshot,
+  type WorkRequirement,
+} from "./work-dag-requirements.js";
 
 export type WorkStatus =
   "queued" | "running" | "blocked" | "waiting_review" | "rework" | "completed" | "failed" | "cancelled";
@@ -41,10 +86,22 @@ export interface WorkflowDefinition {
   };
   validation: { requiredEvidence: string[]; required: VerificationPolicyStep[] };
   review: { required: boolean; reviewerExpertId?: string };
-  change?: { mode: "readonly" | "code_change"; delivery?: "merge_request" };
+  change?: { mode: "readonly" | "code_change" | "conditional_code_change"; delivery?: "merge_request" };
   selection?: { summary: string; useWhen: string[]; notWhen: string[] };
   source?: { terminal: { active: "cancel"; waitingReview: "retain_review" } };
   publication?: { required: boolean; mode: "work_branch"; approvalRequired?: boolean };
+  planning?: {
+    maxReplans: number;
+    replanPolicy: Array<
+      | "always_after_agent_turn"
+      | "on_new_information"
+      | "on_failure"
+      | "on_review_rework"
+      | "on_blocker_resolution"
+      | "on_user_update"
+      | "manual"
+    >;
+  };
   completion: {
     require: Array<
       | "latest_work_attempt_succeeded"
@@ -60,7 +117,7 @@ export interface WorkflowDefinition {
       | { scope: "publish_work_branch"; subjectType: "publication_artifact" }
     >;
   };
-  graph: { mode: "single-node" };
+  graph: { mode: "single-node" | "dynamic-dag" };
 }
 
 export interface WorkflowDefinitionRecord {
@@ -73,7 +130,7 @@ export interface WorkflowDefinitionRecord {
 export interface SelectableWorkflowRecord {
   workflowId: string;
   version: number;
-  changeMode: "readonly" | "code_change" | null;
+  changeMode: "readonly" | "code_change" | "conditional_code_change" | null;
   delivery: "merge_request" | null;
   summary: string;
   useWhen: string[];
@@ -98,6 +155,7 @@ export interface WorkSubmission {
   expertId?: string;
   deploymentId?: string;
   repositoryId?: string;
+  requirementsDigest?: string;
 }
 
 export interface WorkItemRecord {
@@ -117,6 +175,8 @@ export interface WorkItemRecord {
   stateRevision: number;
   workflowId: string;
   workflowVersion: number;
+  currentRequirementRevision: number;
+  currentDagRevision: number;
   activeWorkAttemptId: string | null;
   orchestrationEpoch: number;
   orchestrationOwnerId: string | null;
@@ -381,6 +441,37 @@ function readonlyPreset(selection?: NonNullable<WorkflowDefinition["selection"]>
   });
 }
 
+function conditionalReviewFixPreset(selection?: NonNullable<WorkflowDefinition["selection"]>): WorkflowDefinition {
+  return presetWorkflow({
+    ...(selection ? { selection } : {}),
+    change: { mode: "conditional_code_change" },
+    validation: { requiredEvidence: ["build", "unit_test"], required: [] },
+    review: { required: true },
+    publication: { required: false, mode: "work_branch", approvalRequired: false },
+    completion: {
+      require: [
+        "latest_work_attempt_succeeded",
+        "required_evidence_passed",
+        "no_unresolved_blocker",
+        "review_accepted",
+      ],
+    },
+    planning: {
+      maxReplans: 12,
+      replanPolicy: [
+        "always_after_agent_turn",
+        "on_new_information",
+        "on_failure",
+        "on_review_rework",
+        "on_blocker_resolution",
+        "on_user_update",
+        "manual",
+      ],
+    },
+    graph: { mode: "dynamic-dag" },
+  });
+}
+
 const PLATFORM_PRESET_WORKFLOWS: ReadonlyArray<readonly [string, number, WorkflowDefinition]> = [
   [
     "investigation",
@@ -457,6 +548,23 @@ const PLATFORM_PRESET_WORKFLOWS: ReadonlyArray<readonly [string, number, Workflo
       summary: "Readonly code review that produces findings without modifying repository files.",
       useWhen: ["the primary requested outcome is review findings, risks, or maintainability feedback without edits"],
       notWhen: ["the user asks to fix findings or otherwise modify repository files"],
+    }),
+  ],
+  [
+    "review-fix-verify",
+    1,
+    conditionalReviewFixPreset({
+      summary:
+        "Review code first. Only if review finds a blocking issue, fix it, then build/test to verify and review the repaired result.",
+      useWhen: [
+        "review code first, fix blocking findings if any, then verify the repaired result",
+        "review一下，有问题就修，修完验证",
+        "review, fix if needed, then verify",
+      ],
+      notWhen: [
+        "the user requests readonly review findings and explicitly forbids fixes",
+        "the primary outcome is a known bug fix or feature implementation rather than review-first conditional repair",
+      ],
     }),
   ],
   [
@@ -562,6 +670,7 @@ function requestDigest(input: WorkSubmission, workflowId: string): string {
         expertId: input.expertId?.trim() || null,
         deploymentId: input.deploymentId?.trim() || null,
         repositoryId: input.repositoryId?.trim() || null,
+        requirementsDigest: input.requirementsDigest?.trim() || null,
       }),
     )
     .digest("hex");
@@ -607,6 +716,8 @@ export class WorkOrchestrationStore {
         "  state_revision INTEGER NOT NULL DEFAULT 1,",
         "  workflow_id TEXT NOT NULL,",
         "  workflow_version INTEGER NOT NULL,",
+        "  current_requirement_revision INTEGER NOT NULL DEFAULT 0,",
+        "  current_dag_revision INTEGER NOT NULL DEFAULT 0,",
         "  active_work_attempt_id TEXT,",
         "  orchestration_epoch INTEGER NOT NULL DEFAULT 1,",
         "  orchestration_owner_id TEXT,",
@@ -752,6 +863,104 @@ export class WorkOrchestrationStore {
         ");",
         "CREATE INDEX IF NOT EXISTS idx_work_approval_item ON work_approvals(work_item_id,stale);",
         "CREATE INDEX IF NOT EXISTS idx_work_event_item ON work_events(work_item_id,event_id);",
+        "CREATE TABLE IF NOT EXISTS work_shadow_dags (",
+        "  work_item_id TEXT PRIMARY KEY REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  state_revision INTEGER NOT NULL,",
+        "  source_digest TEXT NOT NULL,",
+        "  semantic_digest TEXT NOT NULL,",
+        "  projection_json TEXT NOT NULL,",
+        "  updated_at INTEGER NOT NULL",
+        ");",
+        "CREATE TABLE IF NOT EXISTS work_requirement_snapshots (",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  revision INTEGER NOT NULL,",
+        "  resolver_version TEXT NOT NULL,",
+        "  requirements_json TEXT NOT NULL,",
+        "  policy_ref TEXT NOT NULL,",
+        "  policy_digest TEXT NOT NULL,",
+        "  effective_digest TEXT NOT NULL,",
+        "  created_at INTEGER NOT NULL,",
+        "  PRIMARY KEY(work_item_id,revision)",
+        ");",
+        "CREATE TABLE IF NOT EXISTS work_dag_revisions (",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  revision INTEGER NOT NULL, parent_revision INTEGER, attempt_id TEXT,",
+        "  planner_identity TEXT NOT NULL, planner_version TEXT NOT NULL, validator_version TEXT NOT NULL DEFAULT 'work-dag-policy@1', policy_revision TEXT NOT NULL,",
+        "  requirement_revision INTEGER NOT NULL, reason_code TEXT NOT NULL, planner_input_digest TEXT NOT NULL,",
+        "  graph_json TEXT NOT NULL, semantic_digest TEXT NOT NULL, created_at INTEGER NOT NULL,",
+        "  PRIMARY KEY(work_item_id,revision)",
+        ");",
+        "CREATE TABLE IF NOT EXISTS work_dag_proposals (",
+        "  proposal_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  parent_revision INTEGER NOT NULL, expected_work_revision INTEGER NOT NULL, expected_requirement_revision INTEGER NOT NULL,",
+        "  attempt_id TEXT, planner_identity TEXT NOT NULL, planner_version TEXT NOT NULL, validator_version TEXT NOT NULL DEFAULT 'work-dag-policy@1', planner_input_digest TEXT NOT NULL,",
+        "  reason_code TEXT NOT NULL, graph_json TEXT NOT NULL,",
+        "  status TEXT NOT NULL CHECK(status IN ('proposed','accepted','rejected','stale','noop')),",
+        "  decision_codes_json TEXT NOT NULL, accepted_revision INTEGER, created_at INTEGER NOT NULL, decided_at INTEGER",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_proposal_item ON work_dag_proposals(work_item_id,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_dag_replan_requests (",
+        "  request_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  requested_by TEXT NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','consumed')),",
+        "  proposal_id TEXT, created_at INTEGER NOT NULL, consumed_at INTEGER",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_replan_request_item ON work_dag_replan_requests(work_item_id,state,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_dag_executions (",
+        "  node_execution_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  node_id TEXT NOT NULL, created_dag_revision INTEGER NOT NULL, generation INTEGER NOT NULL,",
+        "  state TEXT NOT NULL CHECK(state IN ('pending','claimed','running','succeeded','failed','cancelled','superseded','external_outcome_unknown')),",
+        "  fence INTEGER NOT NULL DEFAULT 0, idempotency_key TEXT NOT NULL UNIQUE, subject_revision TEXT, resource_identity TEXT,",
+        "  claim_owner TEXT, claim_lease_until INTEGER, started_at INTEGER, finished_at INTEGER, result_json TEXT, result_digest TEXT, external_ref TEXT,",
+        "  superseded_by_node_id TEXT, superseded_dag_revision INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,",
+        "  UNIQUE(work_item_id,node_id,generation)",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_execution_item ON work_dag_executions(work_item_id,node_id,generation);",
+        "CREATE TABLE IF NOT EXISTS work_dag_late_results (",
+        "  late_result_id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  node_execution_id TEXT NOT NULL, node_id TEXT NOT NULL, owner_id TEXT NOT NULL, fence INTEGER NOT NULL,",
+        "  current_state TEXT NOT NULL, current_fence INTEGER NOT NULL, disposition TEXT NOT NULL,",
+        "  result_json TEXT NOT NULL, result_digest TEXT NOT NULL, created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_late_result_item ON work_dag_late_results(work_item_id,late_result_id);",
+        "CREATE TABLE IF NOT EXISTS work_dag_facts (",
+        "  fact_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  fact_key TEXT NOT NULL, value_json TEXT NOT NULL, subject_revision TEXT, source_execution_id TEXT NOT NULL, created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_fact_item ON work_dag_facts(work_item_id,fact_key,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_dag_evidence (",
+        "  evidence_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  evidence_type TEXT NOT NULL, passed INTEGER NOT NULL CHECK(passed IN (0,1)), subject_revision TEXT,",
+        "  verifier_identity TEXT NOT NULL, artifact_ref TEXT, source_execution_id TEXT NOT NULL, requirement_semantics_digest TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_evidence_item ON work_dag_evidence(work_item_id,evidence_type,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_dag_artifacts (",
+        "  artifact_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  artifact_type TEXT NOT NULL, artifact_ref TEXT NOT NULL, subject_revision TEXT, source_execution_id TEXT NOT NULL, created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_artifact_item ON work_dag_artifacts(work_item_id,artifact_type,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_dag_decisions (",
+        "  decision_id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  work_state_revision INTEGER NOT NULL, dag_revision INTEGER NOT NULL, requirement_revision INTEGER NOT NULL,",
+        "  subject_revision TEXT, action TEXT NOT NULL, node_id TEXT, reason_code TEXT NOT NULL, requirement_ids_json TEXT NOT NULL,",
+        "  policy_ref TEXT NOT NULL, idempotency_ref TEXT, result_ref TEXT, created_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_decision_item ON work_dag_decisions(work_item_id,decision_id);",
+        "CREATE TABLE IF NOT EXISTS work_dag_supersessions (",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  node_id TEXT NOT NULL, dag_revision INTEGER NOT NULL, superseded_by_node_id TEXT, reason_code TEXT NOT NULL, created_at INTEGER NOT NULL,",
+        "  PRIMARY KEY(work_item_id,node_id,dag_revision)",
+        ");",
+        "CREATE TABLE IF NOT EXISTS work_dag_waits (",
+        "  wait_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        "  node_execution_id TEXT NOT NULL UNIQUE, correlation_key TEXT NOT NULL UNIQUE, capability TEXT NOT NULL,",
+        "  state TEXT NOT NULL CHECK(state IN ('waiting','signaled','expired','cancelled')), expires_at INTEGER,",
+        "  signal_event_id TEXT, signal_digest TEXT, signal_payload_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL",
+        ");",
+        "CREATE INDEX IF NOT EXISTS idx_work_dag_wait_item ON work_dag_waits(work_item_id,state);",
+        "CREATE TABLE IF NOT EXISTS work_dag_wait_events (",
+        "  event_id TEXT PRIMARY KEY, correlation_key TEXT NOT NULL, payload_digest TEXT NOT NULL, payload_json TEXT NOT NULL,",
+        "  disposition TEXT NOT NULL, created_at INTEGER NOT NULL",
+        ");",
       ].join("\n"),
     );
     this.ensureDefaultWorkflow();
@@ -762,6 +971,48 @@ export class WorkOrchestrationStore {
     const workColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).map((column) => column.name),
     );
+    if (!workColumns.has("current_requirement_revision")) {
+      this.db.exec("ALTER TABLE work_items ADD COLUMN current_requirement_revision INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!workColumns.has("current_dag_revision")) {
+      this.db.exec("ALTER TABLE work_items ADD COLUMN current_dag_revision INTEGER NOT NULL DEFAULT 0");
+    }
+    const dagExecutionColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_dag_executions)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!dagExecutionColumns.has("external_ref")) {
+      this.db.exec("ALTER TABLE work_dag_executions ADD COLUMN external_ref TEXT");
+    }
+    const dagRevisionColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_dag_revisions)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!dagRevisionColumns.has("validator_version")) {
+      this.db.exec(
+        "ALTER TABLE work_dag_revisions ADD COLUMN validator_version TEXT NOT NULL DEFAULT 'work-dag-policy@1'",
+      );
+    }
+    const dagProposalColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_dag_proposals)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!dagProposalColumns.has("validator_version")) {
+      this.db.exec(
+        "ALTER TABLE work_dag_proposals ADD COLUMN validator_version TEXT NOT NULL DEFAULT 'work-dag-policy@1'",
+      );
+    }
+    const dagEvidenceColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_dag_evidence)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!dagEvidenceColumns.has("requirement_semantics_digest")) {
+      this.db.exec("ALTER TABLE work_dag_evidence ADD COLUMN requirement_semantics_digest TEXT NOT NULL DEFAULT ''");
+    }
     if (!workColumns.has("next_action_context")) {
       this.db.exec("ALTER TABLE work_items ADD COLUMN next_action_context TEXT");
     }
@@ -889,7 +1140,8 @@ export class WorkOrchestrationStore {
       if (!rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) throw new Error("INVALID_WORKFLOW");
       const mode = (rawChange as { mode?: unknown }).mode;
       const delivery = (rawChange as { delivery?: unknown }).delivery;
-      if (mode !== "readonly" && mode !== "code_change") throw new Error("INVALID_WORKFLOW");
+      if (mode !== "readonly" && mode !== "code_change" && mode !== "conditional_code_change")
+        throw new Error("INVALID_WORKFLOW");
       if (delivery !== undefined && delivery !== "merge_request") throw new Error("INVALID_WORKFLOW");
       if (mode === "readonly" && delivery !== undefined) throw new Error("INVALID_WORKFLOW");
       definition.change = { mode, ...(delivery ? { delivery } : {}) };
@@ -944,6 +1196,42 @@ export class WorkOrchestrationStore {
       definition.source = { terminal: { active: "cancel", waitingReview: "retain_review" } };
     }
 
+    const rawPlanning = (definition as { planning?: unknown }).planning;
+    if (rawPlanning !== undefined) {
+      if (!rawPlanning || typeof rawPlanning !== "object" || Array.isArray(rawPlanning)) {
+        throw new Error("INVALID_WORKFLOW");
+      }
+      const maxReplans = (rawPlanning as { maxReplans?: unknown }).maxReplans;
+      const replanPolicy = (rawPlanning as { replanPolicy?: unknown }).replanPolicy;
+      const allowed = new Set([
+        "always_after_agent_turn",
+        "on_new_information",
+        "on_failure",
+        "on_review_rework",
+        "on_blocker_resolution",
+        "on_user_update",
+        "manual",
+      ]);
+      if (
+        !Number.isSafeInteger(maxReplans) ||
+        Number(maxReplans) < 1 ||
+        Number(maxReplans) > 100 ||
+        !Array.isArray(replanPolicy) ||
+        replanPolicy.length > 20 ||
+        replanPolicy.some((item) => typeof item !== "string" || !allowed.has(item))
+      ) {
+        throw new Error("INVALID_WORKFLOW");
+      }
+      definition.planning = {
+        maxReplans: Number(maxReplans),
+        replanPolicy: [...new Set(replanPolicy)] as NonNullable<WorkflowDefinition["planning"]>["replanPolicy"],
+      };
+    }
+
+    const graphMode = (definition as { graph?: { mode?: unknown } }).graph?.mode;
+    if (graphMode !== "single-node" && graphMode !== "dynamic-dag") throw new Error("INVALID_WORKFLOW");
+    definition.graph = { mode: graphMode };
+
     const rawReview = (definition as { review?: unknown }).review;
     if (!rawReview || typeof rawReview !== "object" || Array.isArray(rawReview)) throw new Error("INVALID_WORKFLOW");
     const legacyHumanReview = (rawReview as { humanReview?: unknown }).humanReview;
@@ -995,27 +1283,38 @@ export class WorkOrchestrationStore {
         throw new Error("INVALID_WORKFLOW");
       }
       if (
-        (definition.change?.mode === "code_change" && runtimePolicy.workspaceAccess !== "read-write") ||
+        ((definition.change?.mode === "code_change" || definition.change?.mode === "conditional_code_change") &&
+          runtimePolicy.workspaceAccess !== "read-write") ||
         (definition.change?.mode === "readonly" && runtimePolicy.workspaceAccess !== "read-only")
       ) {
         throw new Error("INVALID_WORKFLOW");
       }
     }
-    if (definition.change?.mode === "code_change") {
-      if (definition.change.delivery !== "merge_request") throw new Error("INVALID_WORKFLOW");
+    if (definition.change?.mode === "code_change" || definition.change?.mode === "conditional_code_change") {
       for (const evidenceType of ["build", "unit_test"]) {
         if (!definition.validation.requiredEvidence.includes(evidenceType)) throw new Error("INVALID_WORKFLOW");
       }
       if (!definition.review.required || !definition.completion.require.includes("review_accepted")) {
         throw new Error("INVALID_WORKFLOW");
       }
-      if (!definition.publication?.required || definition.publication.mode !== "work_branch") {
+      const conditional = definition.change.mode === "conditional_code_change";
+
+      const mergeRequestDelivery = definition.change.delivery === "merge_request";
+      if (!conditional && !mergeRequestDelivery) throw new Error("INVALID_WORKFLOW");
+      if (mergeRequestDelivery) {
+        if (!definition.publication?.required || definition.publication.mode !== "work_branch") {
+          throw new Error("INVALID_WORKFLOW");
+        }
+        if (!definition.completion.require.includes("publication_succeeded")) throw new Error("INVALID_WORKFLOW");
+        if (!definition.completion.require.includes("change_request_created")) throw new Error("INVALID_WORKFLOW");
+      } else if (
+        definition.publication?.required ||
+        definition.completion.require.includes("publication_succeeded") ||
+        definition.completion.require.includes("change_request_created")
+      ) {
         throw new Error("INVALID_WORKFLOW");
       }
-      if (!definition.completion.require.includes("publication_succeeded")) throw new Error("INVALID_WORKFLOW");
-      if (!definition.completion.require.includes("change_request_created")) throw new Error("INVALID_WORKFLOW");
     }
-
     const requireApproval = definition.completion?.require?.includes("required_approvals_approved") ?? false;
     const rawApprovals = (definition.completion as { requiredApprovals?: unknown } | undefined)?.requiredApprovals;
     if (rawApprovals !== undefined && !Array.isArray(rawApprovals)) throw new Error("INVALID_WORKFLOW");
@@ -1703,6 +2002,16 @@ export class WorkOrchestrationStore {
       if (sequence > workflow.definition.lifecycle.attempt.maxWorkAttempts) {
         throw new Error("WORK_ATTEMPT_LIMIT_REACHED");
       }
+      if (input.reason === "human_rework" || input.reason === "review_rework") {
+        const reworkRow = this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM work_attempts WHERE work_item_id=? AND reason IN ('human_rework','review_rework')",
+          )
+          .get(workItemId) as { n: number };
+        if (Number(reworkRow.n) >= workflow.definition.lifecycle.attempt.maxReworks) {
+          throw new Error("WORK_REWORK_LIMIT_REACHED");
+        }
+      }
 
       const staleEvidence = this.db
         .prepare("UPDATE work_evidence SET stale=1 WHERE work_item_id=? AND stale=0")
@@ -1822,10 +2131,21 @@ export class WorkOrchestrationStore {
   }
 
   getAttemptByTask(taskId: string): WorkAttemptRecord | null {
-    const row = this.db.prepare("SELECT * FROM work_attempts WHERE task_id=?").get(taskId) as Row | undefined;
-    return row ? this.fromAttemptRow(row) : null;
+    const direct = this.db
+      .prepare("SELECT * FROM work_attempts WHERE task_id=? OR review_task_id=?")
+      .get(taskId, taskId) as Row | undefined;
+    if (direct) return this.fromAttemptRow(direct);
+    const hasExpertTasks = this.db
+      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='expert_tasks'")
+      .get() as Row | undefined;
+    if (!hasExpertTasks) return null;
+    const linked = this.db
+      .prepare(
+        "SELECT a.* FROM work_attempts AS a JOIN expert_tasks AS t ON t.work_attempt_id=a.work_attempt_id WHERE t.task_id=? LIMIT 1",
+      )
+      .get(taskId) as Row | undefined;
+    return linked ? this.fromAttemptRow(linked) : null;
   }
-
   getActiveAttempt(workItemId: string): WorkAttemptRecord | null {
     const row = this.db
       .prepare("SELECT * FROM work_attempts WHERE work_item_id=? AND status='active'")
@@ -2757,6 +3077,22 @@ export class WorkOrchestrationStore {
         }),
         now,
       );
+      const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
+      if (workflow.definition.graph.mode === "dynamic-dag") {
+        this.db
+          .prepare(
+            "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+          )
+          .run(
+            randomUUID(),
+            workItemId,
+            "blocker.resolved",
+            JSON.stringify(true),
+            current.currentSubjectRevision,
+            "control:resume:" + (current.stateRevision + 1),
+            now,
+          );
+      }
       const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
       this.db.exec("COMMIT");
       return this.fromWorkRow(row);
@@ -2977,6 +3313,1910 @@ export class WorkOrchestrationStore {
     ).map((row) => this.fromApprovalRow(row));
   }
 
+  getRequirementSnapshot(workItemId: string, revision?: number): RequirementSnapshot {
+    const row =
+      revision === undefined
+        ? (this.db
+            .prepare("SELECT * FROM work_requirement_snapshots WHERE work_item_id=? ORDER BY revision DESC LIMIT 1")
+            .get(workItemId) as Row | undefined)
+        : (this.db
+            .prepare("SELECT * FROM work_requirement_snapshots WHERE work_item_id=? AND revision=?")
+            .get(workItemId, revision) as Row | undefined);
+    if (!row) throw new Error("REQUIREMENT_SNAPSHOT_NOT_FOUND");
+    return this.fromRequirementSnapshotRow(row);
+  }
+
+  listRequirementSnapshots(workItemId: string): RequirementSnapshot[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_requirement_snapshots WHERE work_item_id=? ORDER BY revision")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromRequirementSnapshotRow(row));
+  }
+
+  ensureRequirementSnapshot(workItemId: string, now = Date.now(), resolverVersion = "typed-v1"): RequirementSnapshot {
+    const existingWork = this.getWorkInternal(workItemId);
+    if (existingWork.currentRequirementRevision > 0) {
+      return this.getRequirementSnapshot(workItemId, existingWork.currentRequirementRevision);
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWorkInternal(workItemId);
+      if (work.currentRequirementRevision > 0) {
+        const existing = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+        this.db.exec("COMMIT");
+        return existing;
+      }
+      const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+      const requirements: WorkRequirement[] = [];
+      const policy = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
+      const snapshot: RequirementSnapshot = {
+        workItemId,
+        revision: 1,
+        resolverVersion,
+        requirements,
+        policyRef: policy.policyRef,
+        policyDigest: policy.policyDigest,
+        effectiveDigest: effectiveRequirementDigest(
+          workflow.workflowId,
+          workflow.version,
+          workflow.definition,
+          requirements,
+        ),
+        createdAt: now,
+      };
+      this.db
+        .prepare(
+          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_version,requirements_json,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          workItemId,
+          snapshot.revision,
+          snapshot.resolverVersion,
+          JSON.stringify(snapshot.requirements),
+          snapshot.policyRef,
+          snapshot.policyDigest,
+          snapshot.effectiveDigest,
+          now,
+        );
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET current_requirement_revision=1 WHERE work_item_id=? AND current_requirement_revision=0",
+        )
+        .run(workItemId);
+      if (changed.changes !== 1) throw new Error("STALE_REQUIREMENT_REVISION");
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "requirement.snapshot_created",
+        JSON.stringify({ revision: 1, effectiveDigest: snapshot.effectiveDigest }),
+        now,
+      );
+      this.db.exec("COMMIT");
+      return snapshot;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  updateRequirementSnapshot(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedWorkRevision: number,
+    expectedRequirementRevision: number,
+    requirements: readonly WorkRequirement[],
+    resolverVersion = "typed-v1",
+    now = Date.now(),
+  ): { work: WorkItemRecord; snapshot: RequirementSnapshot } {
+    const normalized = normalizeWorkRequirements(requirements);
+    if (this.getWorkInternal(workItemId).currentRequirementRevision === 0) {
+      this.ensureRequirementSnapshot(workItemId, now, resolverVersion);
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getWork(workItemId, principalId, scope);
+      if (TERMINAL_WORK_STATUSES.has(current.status)) {
+        throw new Error("WORK_ALREADY_TERMINAL");
+      }
+      if (current.stateRevision !== expectedWorkRevision) throw new Error("STALE_WORK_REVISION");
+      if (current.currentRequirementRevision !== expectedRequirementRevision) {
+        throw new Error("STALE_REQUIREMENT_REVISION");
+      }
+      const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
+      effectiveObligations(workflow.definition, normalized);
+      const policy = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
+      const nextRevision = expectedRequirementRevision + 1;
+      const snapshot: RequirementSnapshot = {
+        workItemId,
+        revision: nextRevision,
+        resolverVersion,
+        requirements: normalized,
+        policyRef: policy.policyRef,
+        policyDigest: policy.policyDigest,
+        effectiveDigest: effectiveRequirementDigest(
+          workflow.workflowId,
+          workflow.version,
+          workflow.definition,
+          normalized,
+        ),
+        createdAt: now,
+      };
+      this.db
+        .prepare(
+          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_version,requirements_json,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          workItemId,
+          nextRevision,
+          resolverVersion,
+          JSON.stringify(normalized),
+          snapshot.policyRef,
+          snapshot.policyDigest,
+          snapshot.effectiveDigest,
+          now,
+        );
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET current_requirement_revision=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND current_requirement_revision=?",
+        )
+        .run(nextRevision, now, workItemId, principalId, scope, expectedWorkRevision, expectedRequirementRevision);
+      if (changed.changes !== 1) throw new Error("STALE_REQUIREMENT_REVISION");
+      this.event(
+        workItemId,
+        current.activeWorkAttemptId,
+        "requirement.updated",
+        JSON.stringify({
+          previousRevision: expectedRequirementRevision,
+          revision: nextRevision,
+          effectiveDigest: snapshot.effectiveDigest,
+        }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return { work: this.fromWorkRow(row), snapshot };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getEffectiveDagObligations(workItemId: string): DagObligation[] {
+    let work = this.getWorkInternal(workItemId);
+    if (work.currentRequirementRevision === 0) {
+      this.ensureRequirementSnapshot(workItemId);
+      work = this.getWorkInternal(workItemId);
+    }
+    const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+    const identity = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
+    if (snapshot.policyRef !== identity.policyRef || snapshot.policyDigest !== identity.policyDigest) {
+      throw new Error("REQUIREMENT_POLICY_BINDING_MISMATCH");
+    }
+    return effectiveObligations(workflow.definition, snapshot.requirements);
+  }
+
+  getDagRevision(workItemId: string, revision?: number): WorkDagRevisionRecord {
+    const row =
+      revision === undefined
+        ? (this.db
+            .prepare("SELECT * FROM work_dag_revisions WHERE work_item_id=? ORDER BY revision DESC LIMIT 1")
+            .get(workItemId) as Row | undefined)
+        : (this.db
+            .prepare("SELECT * FROM work_dag_revisions WHERE work_item_id=? AND revision=?")
+            .get(workItemId, revision) as Row | undefined);
+    if (!row) throw new Error("DAG_REVISION_NOT_FOUND");
+    return this.fromDagRevisionRow(row);
+  }
+
+  listDagRevisions(workItemId: string): WorkDagRevisionRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_revisions WHERE work_item_id=? ORDER BY revision")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromDagRevisionRow(row));
+  }
+
+  listDagProposals(workItemId: string): WorkDagProposalRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_proposals WHERE work_item_id=? ORDER BY created_at,proposal_id")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromDagProposalRow(row));
+  }
+
+  listDagReplanRequests(workItemId: string): WorkDagReplanRequestRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_replan_requests WHERE work_item_id=? ORDER BY created_at,request_id")
+        .all(workItemId) as Row[]
+    ).map((row) => ({
+      requestId: String(row.request_id),
+      workItemId: String(row.work_item_id),
+      requestedBy: String(row.requested_by),
+      reason: String(row.reason),
+      state: String(row.state) as WorkDagReplanRequestRecord["state"],
+      proposalId: row.proposal_id == null ? null : String(row.proposal_id),
+      createdAt: Number(row.created_at),
+      consumedAt: row.consumed_at == null ? null : Number(row.consumed_at),
+    }));
+  }
+
+  requestDagReplan(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedWorkRevision: number,
+    reason: string,
+    now = Date.now(),
+  ): WorkDagReplanRequestRecord {
+    const normalizedReason = requiredText(reason, 2_000);
+    if (!normalizedReason) throw new Error("INVALID_DAG_REPLAN_REQUEST");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== expectedWorkRevision) throw new Error("STALE_WORK_REVISION");
+      if (TERMINAL_WORK_STATUSES.has(work.status)) throw new Error("WORK_ALREADY_TERMINAL");
+      const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+      if (workflow.definition.graph.mode !== "dynamic-dag") {
+        throw new Error("WORK_REPLAN_REQUIRES_DYNAMIC_DAG");
+      }
+      const existing = this.db
+        .prepare(
+          "SELECT * FROM work_dag_replan_requests WHERE work_item_id=? AND state='pending' ORDER BY created_at,request_id LIMIT 1",
+        )
+        .get(workItemId) as Row | undefined;
+      if (existing) {
+        this.db.exec("COMMIT");
+        return this.fromDagReplanRequestRow(existing);
+      }
+      const requestId = randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_replan_requests(request_id,work_item_id,requested_by,reason,state,proposal_id,created_at,consumed_at) VALUES(?,?,?,?,'pending',NULL,?,NULL)",
+        )
+        .run(requestId, workItemId, principalId, normalizedReason, now);
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "dag.replan_requested",
+        JSON.stringify({ requestId, requestedBy: principalId, reason: normalizedReason }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_dag_replan_requests WHERE request_id=?").get(requestId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagReplanRequestRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  consumeDagReplanRequest(requestId: string, proposalId: string | null, now = Date.now()): WorkDagReplanRequestRecord {
+    const changed = this.db
+      .prepare(
+        "UPDATE work_dag_replan_requests SET state='consumed',proposal_id=?,consumed_at=? WHERE request_id=? AND state='pending'",
+      )
+      .run(proposalId, now, requestId);
+    if (changed.changes !== 1) throw new Error("DAG_REPLAN_REQUEST_NOT_PENDING");
+    const row = this.db.prepare("SELECT * FROM work_dag_replan_requests WHERE request_id=?").get(requestId) as Row;
+    return this.fromDagReplanRequestRow(row);
+  }
+
+  listDagExecutions(workItemId: string): WorkDagNodeExecutionRecord[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM work_dag_executions WHERE work_item_id=? ORDER BY created_dag_revision,node_id,generation",
+        )
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromDagExecutionRow(row));
+  }
+
+  listDagLateResults(workItemId: string): WorkDagLateResultRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_late_results WHERE work_item_id=? ORDER BY late_result_id")
+        .all(workItemId) as Row[]
+    ).map((row) => ({
+      lateResultId: Number(row.late_result_id),
+      workItemId: String(row.work_item_id),
+      nodeExecutionId: String(row.node_execution_id),
+      nodeId: String(row.node_id),
+      ownerId: String(row.owner_id),
+      fence: Number(row.fence),
+      currentState: String(row.current_state) as WorkDagLateResultRecord["currentState"],
+      currentFence: Number(row.current_fence),
+      disposition: String(row.disposition) as WorkDagLateResultRecord["disposition"],
+      result: JSON.parse(String(row.result_json)) as DagNodeResult,
+      resultDigest: String(row.result_digest),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  listDagFacts(workItemId: string): WorkDagFactRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_facts WHERE work_item_id=? ORDER BY created_at,fact_id")
+        .all(workItemId) as Row[]
+    ).map((row) => ({
+      factId: String(row.fact_id),
+      workItemId: String(row.work_item_id),
+      key: String(row.fact_key),
+      value: JSON.parse(String(row.value_json)) as WorkDagFactRecord["value"],
+      subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      sourceExecutionId: String(row.source_execution_id),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  listDagEvidence(workItemId: string): WorkDagEvidenceRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_evidence WHERE work_item_id=? ORDER BY created_at,evidence_id")
+        .all(workItemId) as Row[]
+    ).map((row) => ({
+      evidenceId: String(row.evidence_id),
+      workItemId: String(row.work_item_id),
+      type: String(row.evidence_type),
+      passed: Number(row.passed) === 1,
+      subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      verifierIdentity: String(row.verifier_identity),
+      artifactRef: row.artifact_ref == null ? null : String(row.artifact_ref),
+      sourceExecutionId: String(row.source_execution_id),
+      requirementSemanticsDigest: String(row.requirement_semantics_digest ?? ""),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  listDagArtifacts(workItemId: string): WorkDagArtifactRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_artifacts WHERE work_item_id=? ORDER BY created_at,artifact_id")
+        .all(workItemId) as Row[]
+    ).map((row) => ({
+      artifactId: String(row.artifact_id),
+      workItemId: String(row.work_item_id),
+      type: String(row.artifact_type),
+      ref: String(row.artifact_ref),
+      subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      sourceExecutionId: String(row.source_execution_id),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  listDagDecisions(workItemId: string): WorkDagDecisionRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_decisions WHERE work_item_id=? ORDER BY decision_id")
+        .all(workItemId) as Row[]
+    ).map((row) => ({
+      decisionId: Number(row.decision_id),
+      workItemId: String(row.work_item_id),
+      workStateRevision: Number(row.work_state_revision),
+      dagRevision: Number(row.dag_revision),
+      requirementRevision: Number(row.requirement_revision),
+      subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      action: String(row.action),
+      nodeId: row.node_id == null ? null : String(row.node_id),
+      reasonCode: String(row.reason_code),
+      requirementIds: JSON.parse(String(row.requirement_ids_json)) as string[],
+      policyRef: String(row.policy_ref),
+      idempotencyRef: row.idempotency_ref == null ? null : String(row.idempotency_ref),
+      resultRef: row.result_ref == null ? null : String(row.result_ref),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  getDagContext(workItemId: string): DagContext {
+    const work = this.getWorkInternal(workItemId);
+    const requirementSnapshot =
+      work.currentRequirementRevision > 0
+        ? this.getRequirementSnapshot(workItemId, work.currentRequirementRevision)
+        : null;
+    const requirementWorkflow = requirementSnapshot ? this.getWorkflow(work.workflowId, work.workflowVersion) : null;
+    const facts: Record<string, WorkDagFactRecord["value"]> = {};
+    for (const fact of this.listDagFacts(workItemId)) facts[fact.key] = fact.value;
+
+    const gate = this.evaluateCompletionGate(workItemId, work.principalId, work.scope);
+    facts["attempt.latest_succeeded"] = !gate.missing.includes("latest_work_attempt_succeeded");
+    facts["review.accepted"] = !gate.missing.includes("review_accepted");
+    facts["approval.required_approved"] = !gate.missing.some((item) => item.startsWith("required_approval:"));
+    facts["publication.succeeded"] = !gate.missing.includes("publication_succeeded");
+    facts["change_request.created"] = !gate.missing.includes("change_request_created");
+
+    return {
+      subject: work.currentSubjectRevision,
+      facts,
+      evidence: [
+        ...this.listEvidence(workItemId).map((evidence) => ({
+          type: evidence.type,
+          subject: evidence.subjectRevision,
+          passed: evidence.status === "passed" && evidence.source !== "agent_reported",
+          stale: evidence.stale,
+          createdAt: evidence.createdAt,
+        })),
+        ...this.listDagEvidence(workItemId).map((evidence) => ({
+          type: evidence.type,
+          subject: evidence.subjectRevision,
+          passed: evidence.passed,
+          stale:
+            (evidence.subjectRevision !== null && evidence.subjectRevision !== work.currentSubjectRevision) ||
+            !requirementSnapshot ||
+            !requirementWorkflow ||
+            evidence.requirementSemanticsDigest !==
+              evidenceRequirementSemanticsDigest(
+                requirementWorkflow.definition,
+                requirementSnapshot.requirements,
+                evidence.type,
+              ),
+          createdAt: evidence.createdAt,
+        })),
+      ],
+      artifacts: this.listDagArtifacts(workItemId).map((artifact) => ({
+        type: artifact.type,
+        subject: artifact.subjectRevision,
+      })),
+      blockers: work.status === "blocked" ? [work.blockedReason ?? "work.blocked"] : [],
+      cancelled: work.status === "cancelled",
+    };
+  }
+
+  getDagPlannerInput(workItemId: string): WorkDagPlannerInput {
+    let work = this.getWorkInternal(workItemId);
+    if (work.currentRequirementRevision === 0) {
+      this.ensureRequirementSnapshot(workItemId);
+      work = this.getWorkInternal(workItemId);
+    }
+    const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+    const attempts = this.listAttempts(workItemId);
+    const latestAttempt = attempts.at(-1) ?? null;
+    const context = this.getDagContext(workItemId);
+    const frozen: PlannerFrozenInput = {
+      workRevision: work.stateRevision,
+      dagRevision: work.currentDagRevision,
+      requirementRevision: work.currentRequirementRevision,
+      policyIdentity: snapshot.policyRef + ":" + snapshot.policyDigest,
+      deploymentIdentity: latestAttempt
+        ? latestAttempt.deploymentId + "@" + latestAttempt.deploymentConfigVersion
+        : null,
+      subjectRevision: work.currentSubjectRevision,
+      factsDigest: stableDigest({
+        facts: context.facts,
+        blockers: context.blockers,
+        cancelled: context.cancelled,
+        artifacts: this.listDagArtifacts(workItemId),
+      }),
+      evidenceDigest: stableDigest({
+        legacy: this.listEvidence(workItemId).map((item) => ({
+          id: item.evidenceId,
+          type: item.type,
+          status: item.status,
+          subject: item.subjectRevision,
+          stale: item.stale,
+          source: item.source,
+          artifact: item.artifactRef,
+        })),
+        dag: this.listDagEvidence(workItemId),
+      }),
+      executionDigest: stableDigest(
+        this.listDagExecutions(workItemId).map((execution) => ({
+          nodeExecutionId: execution.nodeExecutionId,
+          nodeId: execution.nodeId,
+          generation: execution.generation,
+          state: execution.state,
+          fence: execution.fence,
+          externalRef: execution.externalRef,
+          result: execution.result,
+        })),
+      ),
+    };
+    return {
+      frozen,
+      digest: plannerInputDigest(frozen),
+      currentGraph: work.currentDagRevision > 0 ? this.getDagRevision(workItemId, work.currentDagRevision).graph : null,
+      obligations: this.getEffectiveDagObligations(workItemId),
+    };
+  }
+
+  submitDagProposal(
+    input: {
+      workItemId: string;
+      principalId: string;
+      scope: string;
+      expectedWorkRevision: number;
+      expectedDagRevision: number;
+      expectedRequirementRevision: number;
+      attemptId?: string | null;
+      plannerIdentity: string;
+      plannerVersion: string;
+      plannerInputDigest: string;
+      reasonCode: string;
+      graph: DagGraph;
+    },
+    now = Date.now(),
+  ): WorkDagProposalRecord {
+    const plannerIdentity = requiredText(input.plannerIdentity, 200);
+    const plannerVersion = requiredText(input.plannerVersion, 200);
+    const reasonCode = requiredText(input.reasonCode, 200);
+    if (!plannerIdentity || !plannerVersion || !reasonCode) throw new Error("INVALID_DAG_PROPOSAL");
+    const proposalId = randomUUID();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getWork(input.workItemId, input.principalId, input.scope);
+      const currentInput = this.getDagPlannerInput(input.workItemId);
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_proposals(proposal_id,work_item_id,parent_revision,expected_work_revision,expected_requirement_revision,attempt_id,planner_identity,planner_version,validator_version,planner_input_digest,reason_code,graph_json,status,decision_codes_json,accepted_revision,created_at,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'proposed','[]',NULL,?,NULL)",
+        )
+        .run(
+          proposalId,
+          input.workItemId,
+          input.expectedDagRevision,
+          input.expectedWorkRevision,
+          input.expectedRequirementRevision,
+          input.attemptId ?? null,
+          plannerIdentity,
+          plannerVersion,
+          WORK_DAG_POLICY_VALIDATOR_VERSION,
+          input.plannerInputDigest,
+          reasonCode,
+          JSON.stringify(input.graph),
+          now,
+        );
+
+      const finish = (
+        status: WorkDagProposalRecord["status"],
+        codes: string[],
+        acceptedRevision: number | null,
+      ): WorkDagProposalRecord => {
+        this.db
+          .prepare(
+            "UPDATE work_dag_proposals SET status=?,decision_codes_json=?,accepted_revision=?,decided_at=? WHERE proposal_id=?",
+          )
+          .run(status, JSON.stringify(codes), acceptedRevision, now, proposalId);
+        const row = this.db.prepare("SELECT * FROM work_dag_proposals WHERE proposal_id=?").get(proposalId) as Row;
+        this.db.exec("COMMIT");
+        return this.fromDagProposalRow(row);
+      };
+
+      if (
+        current.stateRevision !== input.expectedWorkRevision ||
+        current.currentDagRevision !== input.expectedDagRevision ||
+        current.currentRequirementRevision !== input.expectedRequirementRevision ||
+        currentInput.digest !== input.plannerInputDigest
+      ) {
+        return finish("stale", ["PLAN_STALE_INPUT"], null);
+      }
+
+      const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
+      const obligations = this.getEffectiveDagObligations(input.workItemId);
+      const dagContext = this.getDagContext(input.workItemId);
+      const dagExecutions: DagExecution[] = this.listDagExecutions(input.workItemId).map((execution) => ({
+        nodeId: execution.nodeId,
+        generation: execution.generation,
+        state: execution.state,
+        fence: execution.fence,
+        key: execution.idempotencyKey,
+      }));
+      const outstandingObligations = obligations.filter((obligation) => {
+        const condition = evaluatePredicate(obligation.condition, dagContext, dagExecutions);
+        if (condition !== true) return false;
+        return evaluatePredicate(obligation.satisfaction, dagContext, dagExecutions) !== true;
+      });
+      const validationCodes: string[] = [];
+      if (workflow.definition.graph.mode !== "dynamic-dag") validationCodes.push("PLAN_DYNAMIC_DAG_NOT_ENABLED");
+      validationCodes.push(
+        ...validateDagProposal(input.graph, workflow.definition, outstandingObligations, { outstandingOnly: true })
+          .codes,
+      );
+      const subjectBoundKinds = new Set(["verification", "review", "publication", "approval", "change_request"]);
+      for (const node of input.graph.nodes) {
+        if (
+          (node.subject !== null && node.subject !== current.currentSubjectRevision) ||
+          (subjectBoundKinds.has(node.kind) &&
+            current.currentSubjectRevision !== null &&
+            node.subject !== current.currentSubjectRevision)
+        ) {
+          validationCodes.push("PLAN_INVALID_SUBJECT_BINDING");
+        }
+      }
+
+      const previous =
+        current.currentDagRevision > 0 ? this.getDagRevision(input.workItemId, current.currentDagRevision) : null;
+      const previousNodes = new Map(previous?.graph.nodes.map((node) => [node.id, node]) ?? []);
+      const proposedNodes = new Map(input.graph.nodes.map((node) => [node.id, node]));
+      const executions = this.listDagExecutions(input.workItemId);
+      const latestExecution = new Map<string, WorkDagNodeExecutionRecord>();
+      for (const execution of executions) {
+        const old = latestExecution.get(execution.nodeId);
+        if (!old || old.generation < execution.generation) latestExecution.set(execution.nodeId, execution);
+      }
+
+      for (const [id, node] of proposedNodes) {
+        const previousNode = previousNodes.get(id);
+        if (previousNode && stableDigest(previousNode) !== stableDigest(node)) {
+          validationCodes.push("PLAN_LOGICAL_NODE_REDEFINED");
+        } else if (!previousNode && executions.some((execution) => execution.nodeId === id)) {
+          validationCodes.push("PLAN_LOGICAL_NODE_REUSED");
+        }
+      }
+      for (const [id, previousNode] of previousNodes) {
+        if (proposedNodes.has(id)) continue;
+        const execution = latestExecution.get(id);
+        const wait =
+          execution?.state === "running" && previousNode.kind === "wait"
+            ? this.getDagWaitByExecution(execution.nodeExecutionId)
+            : null;
+        const cancellableRunningWait =
+          previousNode.kind === "wait" && execution?.state === "running" && wait?.state === "waiting";
+        if (
+          execution &&
+          (execution.state === "claimed" ||
+            execution.state === "external_outcome_unknown" ||
+            (execution.state === "running" && !cancellableRunningWait))
+        ) {
+          validationCodes.push("PLAN_RUNNING_NODE_SUPERSESSION");
+        }
+      }
+      const uniqueCodes = [...new Set(validationCodes)];
+      if (uniqueCodes.length > 0) return finish("rejected", uniqueCodes, null);
+
+      const semanticDigest = graphSemanticDigest(input.graph);
+      if (previous?.semanticDigest === semanticDigest) return finish("noop", [], null);
+
+      const nextRevision = current.currentDagRevision + 1;
+      const snapshot = this.getRequirementSnapshot(input.workItemId, current.currentRequirementRevision);
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_revisions(work_item_id,revision,parent_revision,attempt_id,planner_identity,planner_version,validator_version,policy_revision,requirement_revision,reason_code,planner_input_digest,graph_json,semantic_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          input.workItemId,
+          nextRevision,
+          current.currentDagRevision > 0 ? current.currentDagRevision : null,
+          input.attemptId ?? current.activeWorkAttemptId,
+          plannerIdentity,
+          plannerVersion,
+          WORK_DAG_POLICY_VALIDATOR_VERSION,
+          snapshot.policyRef + ":" + snapshot.policyDigest,
+          current.currentRequirementRevision,
+          reasonCode,
+          input.plannerInputDigest,
+          JSON.stringify(input.graph),
+          semanticDigest,
+          now,
+        );
+
+      const newNodes = input.graph.nodes.filter((node) => !previousNodes.has(node.id));
+      const supersededBy = newNodes.length === 1 ? newNodes[0]!.id : null;
+      for (const [id] of previousNodes) {
+        if (proposedNodes.has(id)) continue;
+        const execution = latestExecution.get(id);
+        this.db
+          .prepare(
+            "INSERT INTO work_dag_supersessions(work_item_id,node_id,dag_revision,superseded_by_node_id,reason_code,created_at) VALUES(?,?,?,?,?,?)",
+          )
+          .run(input.workItemId, id, nextRevision, supersededBy, reasonCode, now);
+        if (execution?.state === "pending") {
+          this.db
+            .prepare(
+              "UPDATE work_dag_executions SET state='superseded',finished_at=?,superseded_by_node_id=?,superseded_dag_revision=?,updated_at=? WHERE node_execution_id=? AND state='pending'",
+            )
+            .run(now, supersededBy, nextRevision, now, execution.nodeExecutionId);
+        }
+        if (execution?.state === "running" && previousNodes.get(id)?.kind === "wait") {
+          const wait = this.getDagWaitByExecution(execution.nodeExecutionId);
+          if (wait?.state === "waiting") {
+            const changedExecution = this.db
+              .prepare(
+                "UPDATE work_dag_executions SET state='superseded',fence=fence+1,claim_owner=NULL,claim_lease_until=NULL,finished_at=?,superseded_by_node_id=?,superseded_dag_revision=?,updated_at=? WHERE node_execution_id=? AND state='running'",
+              )
+              .run(now, supersededBy, nextRevision, now, execution.nodeExecutionId);
+            if (changedExecution.changes !== 1) throw new Error("STALE_DAG_INSTALL");
+            this.db
+              .prepare("UPDATE work_dag_waits SET state='cancelled',updated_at=? WHERE wait_id=? AND state='waiting'")
+              .run(now, wait.waitId);
+          }
+        }
+      }
+
+      for (const node of newNodes) {
+        const generation = 1;
+        const idempotencyKey = executionKey(input.workItemId, node, generation);
+        this.db
+          .prepare(
+            "INSERT INTO work_dag_executions(node_execution_id,work_item_id,node_id,created_dag_revision,generation,state,fence,idempotency_key,subject_revision,resource_identity,claim_owner,claim_lease_until,started_at,finished_at,result_json,result_digest,superseded_by_node_id,superseded_dag_revision,created_at,updated_at) VALUES(?,?,?,?,?,'pending',0,?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,?)",
+          )
+          .run(
+            randomUUID(),
+            input.workItemId,
+            node.id,
+            nextRevision,
+            generation,
+            idempotencyKey,
+            node.subject,
+            node.resource,
+            now,
+            now,
+          );
+      }
+
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET current_dag_revision=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND current_dag_revision=? AND current_requirement_revision=?",
+        )
+        .run(
+          nextRevision,
+          now,
+          input.workItemId,
+          input.principalId,
+          input.scope,
+          input.expectedWorkRevision,
+          input.expectedDagRevision,
+          input.expectedRequirementRevision,
+        );
+      if (changed.changes !== 1) throw new Error("STALE_DAG_INSTALL");
+
+      this.db
+        .prepare(
+          "UPDATE work_dag_proposals SET status='accepted',decision_codes_json='[]',accepted_revision=?,decided_at=? WHERE proposal_id=?",
+        )
+        .run(nextRevision, now, proposalId);
+      this.recordDagDecisionInternal(
+        input.workItemId,
+        input.expectedWorkRevision + 1,
+        nextRevision,
+        input.expectedRequirementRevision,
+        current.currentSubjectRevision,
+        "plan.accepted",
+        null,
+        reasonCode,
+        obligations.map((item) => item.id),
+        snapshot.policyRef,
+        null,
+        "proposal:" + proposalId,
+        now,
+      );
+      this.event(
+        input.workItemId,
+        input.attemptId ?? current.activeWorkAttemptId,
+        "dag.revision_accepted",
+        JSON.stringify({ revision: nextRevision, parentRevision: current.currentDagRevision, reasonCode, proposalId }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_dag_proposals WHERE proposal_id=?").get(proposalId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagProposalRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  claimDagNode(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    nodeId: string,
+    ownerId: string,
+    expectedWorkRevision: number,
+    expectedDagRevision: number,
+    now = Date.now(),
+    leaseMs = 30_000,
+  ): WorkDagNodeExecutionRecord {
+    const owner = requiredText(ownerId, 200);
+    if (!owner || !Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error("INVALID_DAG_CLAIM");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (work.stateRevision !== expectedWorkRevision || work.currentDagRevision !== expectedDagRevision) {
+        throw new Error("STALE_DAG_CLAIM");
+      }
+      if (TERMINAL_WORK_STATUSES.has(work.status) || work.status === "blocked") throw new Error("DAG_NODE_NOT_READY");
+      const revision = this.getDagRevision(workItemId, expectedDagRevision);
+      const node = revision.graph.nodes.find((candidate) => candidate.id === nodeId);
+      if (!node) throw new Error("DAG_NODE_NOT_FOUND");
+      const executions = this.listDagExecutions(workItemId);
+      const dagExecutions: DagExecution[] = executions.map((execution) => ({
+        nodeId: execution.nodeId,
+        generation: execution.generation,
+        state: execution.state,
+        fence: execution.fence,
+        key: execution.idempotencyKey,
+      }));
+      const ready = readyNodes(revision.graph, dagExecutions, this.getDagContext(workItemId));
+      if (!ready.some((candidate) => candidate.id === nodeId)) {
+        const currentExecution = executions
+          .filter((execution) => execution.nodeId === nodeId)
+          .sort((a, b) => b.generation - a.generation)[0];
+        if (currentExecution && currentExecution.state !== "pending") throw new Error("DAG_NODE_NOT_PENDING");
+        throw new Error("DAG_NODE_NOT_READY");
+      }
+      const execution = executions
+        .filter((candidate) => candidate.nodeId === nodeId)
+        .sort((a, b) => b.generation - a.generation)[0];
+      if (!execution || execution.state !== "pending") throw new Error("DAG_NODE_NOT_PENDING");
+      const nextFence = execution.fence + 1;
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET state='claimed',fence=?,claim_owner=?,claim_lease_until=?,updated_at=? WHERE node_execution_id=? AND state='pending' AND fence=?",
+        )
+        .run(nextFence, owner, now + leaseMs, now, execution.nodeExecutionId, execution.fence);
+      if (changed.changes !== 1) throw new Error("DAG_NODE_NOT_PENDING");
+      const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+      this.recordDagDecisionInternal(
+        workItemId,
+        work.stateRevision,
+        work.currentDagRevision,
+        work.currentRequirementRevision,
+        work.currentSubjectRevision,
+        "node.claimed",
+        nodeId,
+        "ready",
+        this.getEffectiveDagObligations(workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        execution.idempotencyKey,
+        null,
+        now,
+      );
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(execution.nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  claimDagExecutionForStartRecovery(
+    nodeExecutionId: string,
+    ownerId: string,
+    now = Date.now(),
+    leaseMs = 30_000,
+  ): WorkDagNodeExecutionRecord | null {
+    const owner = requiredText(ownerId, 200);
+    if (!owner || !Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error("INVALID_DAG_CLAIM");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row | undefined;
+      if (!row) throw new Error("DAG_EXECUTION_NOT_FOUND");
+      const current = this.fromDagExecutionRow(row);
+      if (current.state !== "claimed") {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if (current.claimOwner !== owner && current.claimLeaseUntil !== null && current.claimLeaseUntil > now) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const nextFence = current.claimOwner === owner ? current.fence : current.fence + 1;
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET claim_owner=?,claim_lease_until=?,fence=?,updated_at=? WHERE node_execution_id=? AND state='claimed' AND fence=? AND (claim_owner=? OR claim_lease_until IS NULL OR claim_lease_until<=?)",
+        )
+        .run(owner, now + leaseMs, nextFence, now, nodeExecutionId, current.fence, owner, now);
+      if (changed.changes !== 1) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const updated = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  startDagNodeExecution(
+    nodeExecutionId: string,
+    ownerId: string,
+    fence: number,
+    now = Date.now(),
+  ): WorkDagNodeExecutionRecord {
+    const owner = requiredText(ownerId, 200);
+    if (!owner) throw new Error("INVALID_DAG_CLAIM");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row | undefined;
+      if (!row) throw new Error("DAG_EXECUTION_NOT_FOUND");
+      const execution = this.fromDagExecutionRow(row);
+      if (execution.state === "running" && execution.claimOwner === owner && execution.fence === fence) {
+        this.db.exec("COMMIT");
+        return execution;
+      }
+      if (
+        execution.state !== "claimed" ||
+        execution.claimOwner !== owner ||
+        execution.fence !== fence ||
+        execution.claimLeaseUntil === null ||
+        execution.claimLeaseUntil <= now
+      ) {
+        throw new Error("STALE_DAG_EXECUTION_CLAIM");
+      }
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET state='running',started_at=COALESCE(started_at,?),updated_at=? WHERE node_execution_id=? AND state='claimed' AND claim_owner=? AND fence=?",
+        )
+        .run(now, now, nodeExecutionId, owner, fence);
+      if (changed.changes !== 1) throw new Error("STALE_DAG_EXECUTION_CLAIM");
+      const updated = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  setDagExecutionExternalRef(
+    nodeExecutionId: string,
+    ownerId: string,
+    fence: number,
+    externalRef: string,
+    now = Date.now(),
+  ): WorkDagNodeExecutionRecord {
+    const owner = requiredText(ownerId, 200);
+    const ref = requiredText(externalRef, 2_000);
+    if (!owner || !ref) throw new Error("INVALID_DAG_EXTERNAL_REF");
+    const changed = this.db
+      .prepare(
+        "UPDATE work_dag_executions SET external_ref=?,updated_at=? WHERE node_execution_id=? AND state='running' AND claim_owner=? AND fence=? AND (external_ref IS NULL OR external_ref=?)",
+      )
+      .run(ref, now, nodeExecutionId, owner, fence, ref);
+    if (changed.changes !== 1) throw new Error("STALE_DAG_EXECUTION_CLAIM");
+    const row = this.db
+      .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+      .get(nodeExecutionId) as Row;
+    return this.fromDagExecutionRow(row);
+  }
+
+  claimDagExecutionForReconciliation(
+    nodeExecutionId: string,
+    ownerId: string,
+    now = Date.now(),
+    leaseMs = 30_000,
+  ): WorkDagNodeExecutionRecord | null {
+    const owner = requiredText(ownerId, 200);
+    if (!owner || !Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error("INVALID_DAG_CLAIM");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row | undefined;
+      if (!row) throw new Error("DAG_EXECUTION_NOT_FOUND");
+      const current = this.fromDagExecutionRow(row);
+      if (current.state !== "running" || current.externalRef === null) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if (current.claimOwner !== owner && current.claimLeaseUntil !== null && current.claimLeaseUntil > now) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const nextFence = current.claimOwner === owner ? current.fence : current.fence + 1;
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET claim_owner=?,claim_lease_until=?,fence=?,updated_at=? WHERE node_execution_id=? AND state='running' AND external_ref IS NOT NULL AND fence=? AND (claim_owner=? OR claim_lease_until IS NULL OR claim_lease_until<=?)",
+        )
+        .run(owner, now + leaseMs, nextFence, now, nodeExecutionId, current.fence, owner, now);
+      if (changed.changes !== 1) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const updated = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  markDagExecutionOutcomeUnknown(
+    nodeExecutionId: string,
+    externalRef: string,
+    reason: string,
+    now = Date.now(),
+  ): WorkDagNodeExecutionRecord {
+    const ref = requiredText(externalRef, 2_000);
+    const summary = requiredText(reason, 2_000);
+    if (!ref || !summary) throw new Error("INVALID_DAG_RESULT");
+    const result: DagNodeResult = {
+      status: "external_outcome_unknown",
+      summary,
+      externalRef: ref,
+    };
+    const digest = resultDigest(result);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row | undefined;
+      if (!row) throw new Error("DAG_EXECUTION_NOT_FOUND");
+      const execution = this.fromDagExecutionRow(row);
+      if (execution.state === "external_outcome_unknown") {
+        if (String(row.result_digest ?? "") !== digest) throw new Error("DAG_RESULT_CONFLICT");
+        this.db.exec("COMMIT");
+        return execution;
+      }
+      if (execution.state !== "running" && execution.state !== "claimed") {
+        throw new Error("DAG_EXECUTION_NOT_RUNNING");
+      }
+
+      const nextFence = execution.fence + 1;
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET state='external_outcome_unknown',fence=?,claim_owner=NULL,claim_lease_until=NULL,finished_at=?,result_json=?,result_digest=?,external_ref=?,updated_at=? WHERE node_execution_id=? AND state IN ('claimed','running') AND fence=?",
+        )
+        .run(nextFence, now, JSON.stringify(result), digest, ref, now, nodeExecutionId, execution.fence);
+      if (changed.changes !== 1) throw new Error("STALE_DAG_EXECUTION_CLAIM");
+
+      const work = this.getWorkInternal(execution.workItemId);
+      const workChanged = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, execution.workItemId, work.stateRevision);
+      if (workChanged.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      const snapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      this.recordDagDecisionInternal(
+        execution.workItemId,
+        work.stateRevision + 1,
+        work.currentDagRevision,
+        work.currentRequirementRevision,
+        work.currentSubjectRevision,
+        "node.outcome_unknown",
+        execution.nodeId,
+        "external_outcome_unknown",
+        this.getEffectiveDagObligations(execution.workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        execution.idempotencyKey,
+        digest,
+        now,
+      );
+      this.event(
+        execution.workItemId,
+        work.activeWorkAttemptId,
+        "dag.node_outcome_unknown",
+        JSON.stringify({
+          nodeId: execution.nodeId,
+          nodeExecutionId,
+          externalRef: ref,
+          digest,
+        }),
+        now,
+      );
+      const updated = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private recordDagLateResultInternal(
+    execution: WorkDagNodeExecutionRecord,
+    ownerId: string,
+    fence: number,
+    result: DagNodeResult,
+    digest: string,
+    disposition: WorkDagLateResultRecord["disposition"],
+    now: number,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO work_dag_late_results(work_item_id,node_execution_id,node_id,owner_id,fence,current_state,current_fence,disposition,result_json,result_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        execution.workItemId,
+        execution.nodeExecutionId,
+        execution.nodeId,
+        ownerId,
+        fence,
+        execution.state,
+        execution.fence,
+        disposition,
+        JSON.stringify(result),
+        digest,
+        now,
+      );
+  }
+
+  reconcileDagNodeResult(
+    nodeExecutionId: string,
+    ownerId: string,
+    fence: number,
+    result: DagNodeResult,
+    now = Date.now(),
+  ): WorkDagNodeExecutionRecord {
+    const owner = requiredText(ownerId, 200);
+    if (!owner || !["succeeded", "failed", "external_outcome_unknown"].includes(result.status)) {
+      throw new Error("INVALID_DAG_RESULT");
+    }
+    const facts = result.facts ?? [];
+    const artifacts = result.artifacts ?? [];
+    const evidence = result.evidence ?? [];
+    if (facts.length > 100 || artifacts.length > 100 || evidence.length > 100) throw new Error("INVALID_DAG_RESULT");
+    const factKeys = new Set<string>();
+    for (const fact of facts) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/.test(fact.key) || factKeys.has(fact.key)) {
+        throw new Error("INVALID_DAG_RESULT");
+      }
+      factKeys.add(fact.key);
+    }
+    const artifactIds = new Set<string>();
+    for (const artifact of artifacts) {
+      if (!artifact.artifactId || !artifact.type || !artifact.ref || artifactIds.has(artifact.artifactId)) {
+        throw new Error("INVALID_DAG_RESULT");
+      }
+      artifactIds.add(artifact.artifactId);
+    }
+    const evidenceIds = new Set<string>();
+    for (const item of evidence) {
+      const id = item.evidenceId?.trim() || "";
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/.test(item.type) ||
+        !item.verifierIdentity?.trim() ||
+        (id && evidenceIds.has(id))
+      ) {
+        throw new Error("INVALID_DAG_RESULT");
+      }
+      if (id) evidenceIds.add(id);
+    }
+    const digest = resultDigest(result);
+    this.db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row | undefined;
+      if (!row) throw new Error("DAG_EXECUTION_NOT_FOUND");
+      const execution = this.fromDagExecutionRow(row);
+      if (["succeeded", "failed", "external_outcome_unknown"].includes(execution.state)) {
+        if (String(row.result_digest ?? "") === digest) {
+          this.db.exec("COMMIT");
+          committed = true;
+          return execution;
+        }
+        this.recordDagLateResultInternal(execution, owner, fence, result, digest, "rejected_terminal_conflict", now);
+        this.db.exec("COMMIT");
+        committed = true;
+        throw new Error("DAG_RESULT_CONFLICT");
+      }
+      if (
+        (execution.state !== "claimed" && execution.state !== "running") ||
+        execution.claimOwner !== owner ||
+        execution.fence !== fence
+      ) {
+        this.recordDagLateResultInternal(execution, owner, fence, result, digest, "rejected_stale_claim", now);
+        this.db.exec("COMMIT");
+        committed = true;
+        throw new Error("STALE_DAG_EXECUTION_CLAIM");
+      }
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET state=?,finished_at=?,result_json=?,result_digest=?,updated_at=? WHERE node_execution_id=? AND state IN ('claimed','running') AND claim_owner=? AND fence=?",
+        )
+        .run(result.status, now, JSON.stringify(result), digest, now, nodeExecutionId, owner, fence);
+      if (changed.changes !== 1) {
+        const latest = this.fromDagExecutionRow(
+          this.db.prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?").get(nodeExecutionId) as Row,
+        );
+        this.recordDagLateResultInternal(latest, owner, fence, result, digest, "rejected_cas_race", now);
+        this.db.exec("COMMIT");
+        committed = true;
+        throw new Error("STALE_DAG_EXECUTION_CLAIM");
+      }
+
+      for (const fact of facts) {
+        this.db
+          .prepare(
+            "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+          )
+          .run(
+            randomUUID(),
+            execution.workItemId,
+            fact.key,
+            JSON.stringify(fact.value),
+            execution.subjectRevision,
+            nodeExecutionId,
+            now,
+          );
+      }
+      for (const artifact of artifacts) {
+        this.db
+          .prepare(
+            "INSERT INTO work_dag_artifacts(artifact_id,work_item_id,artifact_type,artifact_ref,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+          )
+          .run(
+            artifact.artifactId,
+            execution.workItemId,
+            artifact.type,
+            artifact.ref,
+            artifact.subjectRevision,
+            nodeExecutionId,
+            now,
+          );
+      }
+      const work = this.getWorkInternal(execution.workItemId);
+      const requirementSnapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      const requirementWorkflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+      for (const item of evidence) {
+        this.db
+          .prepare(
+            "INSERT INTO work_dag_evidence(evidence_id,work_item_id,evidence_type,passed,subject_revision,verifier_identity,artifact_ref,source_execution_id,requirement_semantics_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+          )
+          .run(
+            item.evidenceId?.trim() || randomUUID(),
+            execution.workItemId,
+            item.type,
+            item.passed ? 1 : 0,
+            item.subjectRevision,
+            item.verifierIdentity.trim(),
+            item.artifactRef?.trim() || null,
+            nodeExecutionId,
+            evidenceRequirementSemanticsDigest(
+              requirementWorkflow.definition,
+              requirementSnapshot.requirements,
+              item.type,
+            ),
+            now,
+          );
+      }
+
+      const workChanged = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, execution.workItemId, work.stateRevision);
+      if (workChanged.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      const snapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      this.recordDagDecisionInternal(
+        execution.workItemId,
+        work.stateRevision + 1,
+        work.currentDagRevision,
+        work.currentRequirementRevision,
+        work.currentSubjectRevision,
+        "node.result",
+        execution.nodeId,
+        result.status,
+        this.getEffectiveDagObligations(execution.workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        execution.idempotencyKey,
+        digest,
+        now,
+      );
+      this.event(
+        execution.workItemId,
+        null,
+        "dag.node_result",
+        JSON.stringify({ nodeId: execution.nodeId, nodeExecutionId, status: result.status, digest }),
+        now,
+      );
+      const updated = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      committed = true;
+      return this.fromDagExecutionRow(updated);
+    } catch (error) {
+      if (!committed) this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  resolveUnknownDagExecution(
+    nodeExecutionId: string,
+    state: "succeeded" | "failed",
+    reason: string,
+    now = Date.now(),
+    expectedWorkRevision?: number,
+  ): WorkDagNodeExecutionRecord {
+    const normalizedReason = requiredText(reason, 2_000);
+    if (!normalizedReason) throw new Error("INVALID_DAG_RESULT");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row | undefined;
+      if (!row) throw new Error("DAG_EXECUTION_NOT_FOUND");
+      const execution = this.fromDagExecutionRow(row);
+      if (execution.state !== "external_outcome_unknown") throw new Error("DAG_EXECUTION_NOT_UNKNOWN");
+      const work = this.getWorkInternal(execution.workItemId);
+      if (expectedWorkRevision !== undefined && work.stateRevision !== expectedWorkRevision) {
+        throw new Error("STALE_WORK_REVISION");
+      }
+      const previous = execution.result;
+      const resolved: DagNodeResult = {
+        status: state,
+        summary: normalizedReason,
+        ...(previous?.externalRef ? { externalRef: previous.externalRef } : {}),
+      };
+      const digest = resultDigest(resolved);
+      const changed = this.db
+        .prepare(
+          "UPDATE work_dag_executions SET state=?,result_json=?,result_digest=?,finished_at=?,updated_at=? WHERE node_execution_id=? AND state='external_outcome_unknown'",
+        )
+        .run(state, JSON.stringify(resolved), digest, now, now, nodeExecutionId);
+      if (changed.changes !== 1) throw new Error("DAG_EXECUTION_NOT_UNKNOWN");
+      const workChanged = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, execution.workItemId, work.stateRevision);
+      if (workChanged.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      const snapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      this.recordDagDecisionInternal(
+        execution.workItemId,
+        work.stateRevision + 1,
+        work.currentDagRevision,
+        work.currentRequirementRevision,
+        work.currentSubjectRevision,
+        "node.unknown_resolved",
+        execution.nodeId,
+        state,
+        this.getEffectiveDagObligations(execution.workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        execution.idempotencyKey,
+        digest,
+        now,
+      );
+      const updated = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  recordDagPlannerFailure(
+    workItemId: string,
+    plannerIdentity: string,
+    plannerVersion: string,
+    reasonCode: string,
+    inputDigest: string,
+    errorCode: string,
+    now = Date.now(),
+  ): void {
+    const identity = requiredText(plannerIdentity, 200);
+    const version = requiredText(plannerVersion, 200);
+    const reason = requiredText(reasonCode, 200);
+    const error = requiredText(errorCode, 100);
+    if (!identity || !version || !reason || !error) throw new Error("INVALID_PLANNER_FAILURE");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWorkInternal(workItemId);
+      if (work.currentRequirementRevision === 0) throw new Error("REQUIREMENT_SNAPSHOT_NOT_FOUND");
+      const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+      const factId = randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+        )
+        .run(
+          factId,
+          workItemId,
+          "planner.failure",
+          JSON.stringify({
+            plannerIdentity: identity,
+            plannerVersion: version,
+            reasonCode: reason,
+            errorCode: error,
+            inputDigest,
+          }),
+          work.currentSubjectRevision,
+          "planner:" + factId,
+          now,
+        );
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, workItemId, work.stateRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.recordDagDecisionInternal(
+        workItemId,
+        work.stateRevision + 1,
+        work.currentDagRevision,
+        work.currentRequirementRevision,
+        work.currentSubjectRevision,
+        "planner.failed",
+        null,
+        error,
+        this.getEffectiveDagObligations(workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        null,
+        inputDigest,
+        now,
+      );
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "dag.planner_failed",
+        JSON.stringify({ plannerIdentity: identity, plannerVersion: version, reasonCode: reason, errorCode: error }),
+        now,
+      );
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
+  getDagWaitByExecution(nodeExecutionId: string): WorkDagWaitRecord | null {
+    const row = this.db.prepare("SELECT * FROM work_dag_waits WHERE node_execution_id=?").get(nodeExecutionId) as
+      Row | undefined;
+    return row ? this.fromDagWaitRow(row) : null;
+  }
+
+  listDagWaits(workItemId: string): WorkDagWaitRecord[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM work_dag_waits WHERE work_item_id=? ORDER BY created_at,wait_id")
+        .all(workItemId) as Row[]
+    ).map((row) => this.fromDagWaitRow(row));
+  }
+
+  ensureDagWait(
+    nodeExecutionId: string,
+    capability: string,
+    correlationKey: string,
+    expiresAt: number | null,
+    now = Date.now(),
+  ): WorkDagWaitRecord {
+    const cap = requiredText(capability, 200);
+    const correlation = requiredText(correlationKey, 500);
+    if (!cap || !correlation || (expiresAt !== null && (!Number.isSafeInteger(expiresAt) || expiresAt <= now))) {
+      throw new Error("INVALID_DAG_WAIT");
+    }
+    const executionRow = this.db
+      .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+      .get(nodeExecutionId) as Row | undefined;
+    if (!executionRow) throw new Error("DAG_EXECUTION_NOT_FOUND");
+    const execution = this.fromDagExecutionRow(executionRow);
+    if (execution.state !== "running") throw new Error("DAG_WAIT_EXECUTION_NOT_RUNNING");
+    const existing = this.getDagWaitByExecution(nodeExecutionId);
+    if (existing) {
+      if (existing.capability !== cap || existing.correlationKey !== correlation || existing.expiresAt !== expiresAt) {
+        throw new Error("DAG_WAIT_IDEMPOTENCY_CONFLICT");
+      }
+      return existing;
+    }
+    const waitId = randomUUID();
+    this.db
+      .prepare(
+        "INSERT INTO work_dag_waits(wait_id,work_item_id,node_execution_id,correlation_key,capability,state,expires_at,signal_event_id,signal_digest,signal_payload_json,created_at,updated_at) VALUES(?,?,?,?,?,'waiting',?,NULL,NULL,NULL,?,?)",
+      )
+      .run(waitId, execution.workItemId, nodeExecutionId, correlation, cap, expiresAt, now, now);
+    const row = this.db.prepare("SELECT * FROM work_dag_waits WHERE wait_id=?").get(waitId) as Row;
+    return this.fromDagWaitRow(row);
+  }
+
+  signalDagWait(correlationKey: string, payload: unknown, eventId: string, now = Date.now()): WorkDagWaitRecord {
+    const correlation = requiredText(correlationKey, 500);
+    const event = requiredText(eventId, 300);
+    if (!correlation || !event) throw new Error("INVALID_DAG_WAIT_SIGNAL");
+    const payloadJson = JSON.stringify(payload ?? null);
+    if (Buffer.byteLength(payloadJson, "utf8") > 64 * 1024) throw new Error("INVALID_DAG_WAIT_SIGNAL");
+    const digest = stableDigest(payload ?? null);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replay = this.db
+        .prepare("SELECT correlation_key,payload_digest FROM work_dag_wait_events WHERE event_id=?")
+        .get(event) as { correlation_key?: string; payload_digest?: string } | undefined;
+      const row = this.db.prepare("SELECT * FROM work_dag_waits WHERE correlation_key=?").get(correlation) as
+        Row | undefined;
+      if (!row) throw new Error("DAG_WAIT_NOT_FOUND");
+      if (replay) {
+        if (replay.correlation_key !== correlation || replay.payload_digest !== digest)
+          throw new Error("DAG_WAIT_SIGNAL_CONFLICT");
+        this.db.exec("COMMIT");
+        return this.fromDagWaitRow(row);
+      }
+      const wait = this.fromDagWaitRow(row);
+      const executionRow = this.db
+        .prepare("SELECT state FROM work_dag_executions WHERE node_execution_id=?")
+        .get(wait.nodeExecutionId) as { state?: string } | undefined;
+      const work = this.getWorkInternal(wait.workItemId);
+      const canSignal =
+        wait.state === "waiting" && executionRow?.state === "running" && !TERMINAL_WORK_STATUSES.has(work.status);
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_wait_events(event_id,correlation_key,payload_digest,payload_json,disposition,created_at) VALUES(?,?,?,?,?,?)",
+        )
+        .run(event, correlation, digest, payloadJson, canSignal ? "accepted" : "late_ignored", now);
+      if (canSignal) {
+        this.db
+          .prepare(
+            "UPDATE work_dag_waits SET state='signaled',signal_event_id=?,signal_digest=?,signal_payload_json=?,updated_at=? WHERE wait_id=? AND state='waiting'",
+          )
+          .run(event, digest, payloadJson, now, wait.waitId);
+      }
+      const updated = this.db.prepare("SELECT * FROM work_dag_waits WHERE wait_id=?").get(wait.waitId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagWaitRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  expireDagWait(waitId: string, now = Date.now()): WorkDagWaitRecord {
+    const row = this.db.prepare("SELECT * FROM work_dag_waits WHERE wait_id=?").get(waitId) as Row | undefined;
+    if (!row) throw new Error("DAG_WAIT_NOT_FOUND");
+    const wait = this.fromDagWaitRow(row);
+    if (wait.state === "waiting" && wait.expiresAt !== null && wait.expiresAt <= now) {
+      this.db
+        .prepare("UPDATE work_dag_waits SET state='expired',updated_at=? WHERE wait_id=? AND state='waiting'")
+        .run(now, waitId);
+    }
+    const updated = this.db.prepare("SELECT * FROM work_dag_waits WHERE wait_id=?").get(waitId) as Row;
+    return this.fromDagWaitRow(updated);
+  }
+
+  cancelDagWaits(workItemId: string, now = Date.now()): number {
+    const result = this.db
+      .prepare("UPDATE work_dag_waits SET state='cancelled',updated_at=? WHERE work_item_id=? AND state='waiting'")
+      .run(now, workItemId);
+    return Number(result.changes);
+  }
+
+  evaluateDagCompletion(workItemId: string): {
+    ready: boolean;
+    deadlocked: boolean;
+    missing: string[];
+    readyNodeIds: string[];
+    runningNodeIds: string[];
+    waitingNodeIds: string[];
+  } {
+    const work = this.getWorkInternal(workItemId);
+    const obligations = this.getEffectiveDagObligations(workItemId);
+    if (work.currentDagRevision < 1) {
+      const missing = [
+        ...(work.status === "cancelled" ? ["WORK_CANCELLED"] : []),
+        ...obligations.map((item) => item.id),
+      ];
+      return {
+        ready: false,
+        deadlocked: work.status !== "cancelled" && missing.length > 0,
+        missing,
+        readyNodeIds: [],
+        runningNodeIds: [],
+        waitingNodeIds: [],
+      };
+    }
+
+    const revision = this.getDagRevision(workItemId, work.currentDagRevision);
+    const nodeIds = new Set(revision.graph.nodes.map((node) => node.id));
+    const latestByNode = new Map<string, WorkDagNodeExecutionRecord>();
+    for (const execution of this.listDagExecutions(workItemId)) {
+      if (!nodeIds.has(execution.nodeId)) continue;
+      const old = latestByNode.get(execution.nodeId);
+      if (!old || old.generation < execution.generation) latestByNode.set(execution.nodeId, execution);
+    }
+    const executions: DagExecution[] = [...latestByNode.values()].map((execution) => ({
+      nodeId: execution.nodeId,
+      generation: execution.generation,
+      state: execution.state,
+      fence: execution.fence,
+      key: execution.idempotencyKey,
+    }));
+    const context = this.getDagContext(workItemId);
+    const core = completion(obligations, executions, context);
+    const missing = [...core.missing];
+    const activeAttempt = this.getActiveAttempt(workItemId);
+    if (activeAttempt) missing.push("ACTIVE_WORK_ATTEMPT:" + activeAttempt.workAttemptId);
+
+    const ready = readyNodes(revision.graph, executions, context).map((node) => node.id);
+    const running = [...latestByNode.values()]
+      .filter((execution) => execution.state === "claimed" || execution.state === "running")
+      .map((execution) => execution.nodeId);
+    const waiting = revision.graph.nodes
+      .filter((node) => {
+        if (node.kind !== "wait") return false;
+        const state = latestByNode.get(node.id)?.state;
+        return state === "pending" || state === "claimed" || state === "running";
+      })
+      .map((node) => node.id);
+    const outstanding = missing.filter((item) => item !== "WORK_CANCELLED" && !item.startsWith("ACTIVE_WORK_ATTEMPT:"));
+    const deadlocked =
+      work.status !== "cancelled" &&
+      detectPlanDeadlock({
+        outstandingObligations: outstanding,
+        ready,
+        running,
+        waiting,
+      });
+    if (deadlocked && !missing.includes("PLAN_DEADLOCK")) missing.push("PLAN_DEADLOCK");
+    return {
+      ready: core.ready && !activeAttempt && !deadlocked,
+      deadlocked,
+      missing,
+      readyNodeIds: ready,
+      runningNodeIds: running,
+      waitingNodeIds: waiting,
+    };
+  }
+
+  completeDagWork(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedWorkRevision: number,
+    expectedDagRevision: number,
+    expectedRequirementRevision: number,
+    expectedSubjectRevision: string | null,
+    now = Date.now(),
+  ): WorkItemRecord {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWork(workItemId, principalId, scope);
+      if (
+        work.stateRevision !== expectedWorkRevision ||
+        work.currentDagRevision !== expectedDagRevision ||
+        work.currentRequirementRevision !== expectedRequirementRevision ||
+        work.currentSubjectRevision !== expectedSubjectRevision
+      ) {
+        throw new Error("STALE_DAG_COMPLETION");
+      }
+      if (work.status === "cancelled") throw new Error("DAG_COMPLETION_NOT_READY");
+      if (TERMINAL_WORK_STATUSES.has(work.status)) {
+        if (work.status === "completed") {
+          this.db.exec("COMMIT");
+          return work;
+        }
+        throw new Error("DAG_COMPLETION_NOT_READY");
+      }
+      const evaluation = this.evaluateDagCompletion(workItemId);
+      if (!evaluation.ready) throw new Error("DAG_COMPLETION_NOT_READY");
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET status='completed',completed_at=?,next_action_type=NULL,next_action_at=NULL,next_action_context=NULL,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND current_dag_revision=? AND current_requirement_revision=? AND ((current_subject_revision IS NULL AND ? IS NULL) OR current_subject_revision=?)",
+        )
+        .run(
+          now,
+          now,
+          workItemId,
+          principalId,
+          scope,
+          expectedWorkRevision,
+          expectedDagRevision,
+          expectedRequirementRevision,
+          expectedSubjectRevision,
+          expectedSubjectRevision,
+        );
+      if (changed.changes !== 1) throw new Error("STALE_DAG_COMPLETION");
+      const snapshot = this.getRequirementSnapshot(workItemId, expectedRequirementRevision);
+      this.recordDagDecisionInternal(
+        workItemId,
+        expectedWorkRevision + 1,
+        expectedDagRevision,
+        expectedRequirementRevision,
+        expectedSubjectRevision,
+        "work.completed",
+        null,
+        "requirements_satisfied",
+        this.getEffectiveDagObligations(workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        null,
+        null,
+        now,
+      );
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "dag.work_completed",
+        JSON.stringify({
+          dagRevision: expectedDagRevision,
+          requirementRevision: expectedRequirementRevision,
+          subjectRevision: expectedSubjectRevision,
+        }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  retryDagNode(workItemId: string, nodeId: string, reason: string, now = Date.now()): WorkDagNodeExecutionRecord {
+    const normalizedReason = requiredText(reason, 500);
+    if (!normalizedReason) throw new Error("INVALID_DAG_RETRY");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWorkInternal(workItemId);
+      if (TERMINAL_WORK_STATUSES.has(work.status) || work.currentDagRevision < 1) {
+        throw new Error("DAG_RETRY_NOT_ALLOWED");
+      }
+      const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+      if (!workflow.definition.lifecycle.retry.failure.enabled) throw new Error("DAG_RETRY_NOT_ALLOWED");
+      const revision = this.getDagRevision(workItemId, work.currentDagRevision);
+      const node = revision.graph.nodes.find((candidate) => candidate.id === nodeId);
+      if (!node) throw new Error("DAG_NODE_NOT_FOUND");
+      const previous = this.listDagExecutions(workItemId)
+        .filter((execution) => execution.nodeId === nodeId)
+        .sort((a, b) => b.generation - a.generation)[0];
+      if (!previous || previous.state !== "failed") throw new Error("DAG_RETRY_NOT_ALLOWED");
+      const nextGeneration = previous.generation + 1;
+      if (nextGeneration > workflow.definition.lifecycle.retry.failure.maxRunsPerWorkAttempt) {
+        throw new Error("DAG_RETRY_LIMIT_REACHED");
+      }
+      const idempotencyKey = executionKey(workItemId, node, nextGeneration);
+      const nodeExecutionId = randomUUID();
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_executions(node_execution_id,work_item_id,node_id,created_dag_revision,generation,state,fence,idempotency_key,subject_revision,resource_identity,claim_owner,claim_lease_until,started_at,finished_at,result_json,result_digest,superseded_by_node_id,superseded_dag_revision,created_at,updated_at) VALUES(?,?,?,?,?,'pending',0,?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,?)",
+        )
+        .run(
+          nodeExecutionId,
+          workItemId,
+          nodeId,
+          work.currentDagRevision,
+          nextGeneration,
+          idempotencyKey,
+          node.subject,
+          node.resource,
+          now,
+          now,
+        );
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(now, workItemId, work.stateRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+      this.recordDagDecisionInternal(
+        workItemId,
+        work.stateRevision + 1,
+        work.currentDagRevision,
+        work.currentRequirementRevision,
+        work.currentSubjectRevision,
+        "node.retry_created",
+        nodeId,
+        normalizedReason,
+        this.getEffectiveDagObligations(workItemId).map((item) => item.id),
+        snapshot.policyRef,
+        idempotencyKey,
+        "previous:" + previous.nodeExecutionId,
+        now,
+      );
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "dag.node_retry_created",
+        JSON.stringify({ nodeId, generation: nextGeneration, reason: normalizedReason }),
+        now,
+      );
+      const row = this.db
+        .prepare("SELECT * FROM work_dag_executions WHERE node_execution_id=?")
+        .get(nodeExecutionId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromDagExecutionRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  cancelDagExecutions(workItemId: string, now = Date.now()): number {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWorkInternal(workItemId);
+      if (work.status !== "cancelled") throw new Error("WORK_NOT_CANCELLED");
+      const current = this.listDagExecutions(workItemId).filter((execution) =>
+        ["pending", "claimed", "running"].includes(execution.state),
+      );
+      for (const execution of current) {
+        this.db
+          .prepare(
+            "UPDATE work_dag_executions SET state='cancelled',fence=fence+1,claim_owner=NULL,claim_lease_until=NULL,finished_at=?,updated_at=? WHERE node_execution_id=? AND state IN ('pending','claimed','running')",
+          )
+          .run(now, now, execution.nodeExecutionId);
+      }
+      if (current.length > 0 && work.currentRequirementRevision > 0) {
+        const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+        for (const execution of current) {
+          this.recordDagDecisionInternal(
+            workItemId,
+            work.stateRevision,
+            work.currentDagRevision,
+            work.currentRequirementRevision,
+            work.currentSubjectRevision,
+            "node.cancelled",
+            execution.nodeId,
+            "work_cancelled",
+            this.getEffectiveDagObligations(workItemId).map((item) => item.id),
+            snapshot.policyRef,
+            execution.idempotencyKey,
+            null,
+            now,
+          );
+        }
+      }
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "dag.executions_cancelled",
+        JSON.stringify({ count: current.length }),
+        now,
+      );
+      this.db.exec("COMMIT");
+      return current.length;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getShadowDag(workItemId: string): ShadowDagProjection | null {
+    const row = this.db.prepare("SELECT projection_json FROM work_shadow_dags WHERE work_item_id=?").get(workItemId) as
+      { projection_json?: string } | undefined;
+    if (!row?.projection_json) return null;
+    try {
+      return JSON.parse(row.projection_json) as ShadowDagProjection;
+    } catch {
+      return null;
+    }
+  }
+
+  saveShadowDag(projection: ShadowDagProjection, now = Date.now()): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.db
+        .prepare("SELECT state_revision FROM work_items WHERE work_item_id=?")
+        .get(projection.workItemId) as { state_revision?: number } | undefined;
+      if (!work || Number(work.state_revision) !== projection.stateRevision) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db
+        .prepare(
+          "INSERT INTO work_shadow_dags(work_item_id,state_revision,source_digest,semantic_digest,projection_json,updated_at) " +
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(work_item_id) DO UPDATE SET " +
+            "state_revision=excluded.state_revision,source_digest=excluded.source_digest," +
+            "semantic_digest=excluded.semantic_digest,projection_json=excluded.projection_json,updated_at=excluded.updated_at",
+        )
+        .run(
+          projection.workItemId,
+          projection.stateRevision,
+          projection.sourceDigest,
+          projection.semanticDigest,
+          JSON.stringify(projection),
+          now,
+        );
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   close(): void {
     this.db.close();
   }
@@ -2993,6 +5233,42 @@ export class WorkOrchestrationStore {
     }
   }
 
+  private recordDagDecisionInternal(
+    workItemId: string,
+    workStateRevision: number,
+    dagRevision: number,
+    requirementRevision: number,
+    subjectRevision: string | null,
+    action: string,
+    nodeId: string | null,
+    reasonCode: string,
+    requirementIds: string[],
+    policyRef: string,
+    idempotencyRef: string | null,
+    resultRef: string | null,
+    now: number,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO work_dag_decisions(work_item_id,work_state_revision,dag_revision,requirement_revision,subject_revision,action,node_id,reason_code,requirement_ids_json,policy_ref,idempotency_ref,result_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        workItemId,
+        workStateRevision,
+        dagRevision,
+        requirementRevision,
+        subjectRevision,
+        action,
+        nodeId,
+        reasonCode,
+        JSON.stringify(requirementIds),
+        policyRef,
+        idempotencyRef,
+        resultRef,
+        now,
+      );
+  }
+
   private event(
     workItemId: string,
     workAttemptId: string | null,
@@ -3003,6 +5279,100 @@ export class WorkOrchestrationStore {
     this.db
       .prepare("INSERT INTO work_events(work_item_id,work_attempt_id,event_type,details,created_at) VALUES(?,?,?,?,?)")
       .run(workItemId, workAttemptId, eventType, details, now);
+  }
+
+  private fromDagReplanRequestRow(row: Row): WorkDagReplanRequestRecord {
+    return {
+      requestId: String(row.request_id),
+      workItemId: String(row.work_item_id),
+      requestedBy: String(row.requested_by),
+      reason: String(row.reason),
+      state: String(row.state) as WorkDagReplanRequestRecord["state"],
+      proposalId: row.proposal_id == null ? null : String(row.proposal_id),
+      createdAt: Number(row.created_at),
+      consumedAt: row.consumed_at == null ? null : Number(row.consumed_at),
+    };
+  }
+
+  private fromDagWaitRow(row: Row): WorkDagWaitRecord {
+    return {
+      waitId: String(row.wait_id),
+      workItemId: String(row.work_item_id),
+      nodeExecutionId: String(row.node_execution_id),
+      correlationKey: String(row.correlation_key),
+      capability: String(row.capability),
+      state: String(row.state) as WorkDagWaitRecord["state"],
+      expiresAt: row.expires_at == null ? null : Number(row.expires_at),
+      signalEventId: row.signal_event_id == null ? null : String(row.signal_event_id),
+      signalDigest: row.signal_digest == null ? null : String(row.signal_digest),
+      signalPayload: row.signal_payload_json == null ? null : JSON.parse(String(row.signal_payload_json)),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private fromDagRevisionRow(row: Row): WorkDagRevisionRecord {
+    return {
+      workItemId: String(row.work_item_id),
+      revision: Number(row.revision),
+      parentRevision: row.parent_revision == null ? null : Number(row.parent_revision),
+      attemptId: row.attempt_id == null ? null : String(row.attempt_id),
+      plannerIdentity: String(row.planner_identity),
+      plannerVersion: String(row.planner_version),
+      validatorVersion: String(row.validator_version ?? "work-dag-policy@1"),
+      policyRevision: String(row.policy_revision),
+      requirementSnapshotRevision: Number(row.requirement_revision),
+      reasonCode: String(row.reason_code),
+      plannerInputDigest: String(row.planner_input_digest),
+      graph: JSON.parse(String(row.graph_json)) as DagGraph,
+      semanticDigest: String(row.semantic_digest),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private fromDagProposalRow(row: Row): WorkDagProposalRecord {
+    return {
+      proposalId: String(row.proposal_id),
+      workItemId: String(row.work_item_id),
+      parentRevision: Number(row.parent_revision),
+      expectedWorkRevision: Number(row.expected_work_revision),
+      expectedRequirementRevision: Number(row.expected_requirement_revision),
+      attemptId: row.attempt_id == null ? null : String(row.attempt_id),
+      plannerIdentity: String(row.planner_identity),
+      plannerVersion: String(row.planner_version),
+      validatorVersion: String(row.validator_version ?? "work-dag-policy@1"),
+      plannerInputDigest: String(row.planner_input_digest),
+      reasonCode: String(row.reason_code),
+      graph: JSON.parse(String(row.graph_json)) as DagGraph,
+      status: String(row.status) as WorkDagProposalRecord["status"],
+      decisionCodes: JSON.parse(String(row.decision_codes_json)) as string[],
+      acceptedRevision: row.accepted_revision == null ? null : Number(row.accepted_revision),
+      createdAt: Number(row.created_at),
+      decidedAt: row.decided_at == null ? null : Number(row.decided_at),
+    };
+  }
+
+  private fromDagExecutionRow(row: Row): WorkDagNodeExecutionRecord {
+    return {
+      nodeExecutionId: String(row.node_execution_id),
+      workItemId: String(row.work_item_id),
+      nodeId: String(row.node_id),
+      createdDagRevision: Number(row.created_dag_revision),
+      generation: Number(row.generation),
+      state: String(row.state) as WorkDagNodeExecutionRecord["state"],
+      fence: Number(row.fence),
+      idempotencyKey: String(row.idempotency_key),
+      subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      resourceIdentity: row.resource_identity == null ? null : String(row.resource_identity),
+      claimOwner: row.claim_owner == null ? null : String(row.claim_owner),
+      claimLeaseUntil: row.claim_lease_until == null ? null : Number(row.claim_lease_until),
+      startedAt: row.started_at == null ? null : Number(row.started_at),
+      finishedAt: row.finished_at == null ? null : Number(row.finished_at),
+      result: row.result_json == null ? null : (JSON.parse(String(row.result_json)) as DagNodeResult),
+      externalRef: row.external_ref == null ? null : String(row.external_ref),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
   }
 
   private fromWorkspaceRow(row: Row): WorkspaceRecord {
@@ -3090,6 +5460,19 @@ export class WorkOrchestrationStore {
       createdAt: Number(row.created_at),
     };
   }
+  private fromRequirementSnapshotRow(row: Row): RequirementSnapshot {
+    return {
+      workItemId: String(row.work_item_id),
+      revision: Number(row.revision),
+      resolverVersion: String(row.resolver_version),
+      requirements: normalizeWorkRequirements(JSON.parse(String(row.requirements_json)) as WorkRequirement[]),
+      policyRef: String(row.policy_ref),
+      policyDigest: String(row.policy_digest),
+      effectiveDigest: String(row.effective_digest),
+      createdAt: Number(row.created_at),
+    };
+  }
+
   private fromWorkRow(row: Row): WorkItemRecord {
     return {
       workItemId: String(row.work_item_id),
@@ -3108,6 +5491,8 @@ export class WorkOrchestrationStore {
       stateRevision: Number(row.state_revision),
       workflowId: String(row.workflow_id),
       workflowVersion: Number(row.workflow_version),
+      currentRequirementRevision: Number(row.current_requirement_revision ?? 0),
+      currentDagRevision: Number(row.current_dag_revision ?? 0),
       activeWorkAttemptId: row.active_work_attempt_id == null ? null : String(row.active_work_attempt_id),
       orchestrationEpoch: Number(row.orchestration_epoch),
       orchestrationOwnerId: row.orchestration_owner_id == null ? null : String(row.orchestration_owner_id),

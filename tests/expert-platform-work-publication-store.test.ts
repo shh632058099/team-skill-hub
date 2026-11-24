@@ -173,6 +173,91 @@ test("publication operation claim is owner-affine and carries immutable executio
   }
 });
 
+test("publication cancellation fences active operations and reports unknown push outcome", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-cancel-"));
+  try {
+    const store = new WorkPublicationStore(path.join(dir, "runtime.sqlite"));
+    const preparing = store.createOrReusePublication(
+      {
+        ...fixture(),
+        workAttemptId: "attempt-prepare",
+        executionSnapshot: {
+          workspacePath: "/tmp/ws",
+          repositoryUrl: "https://example.test/repo.git",
+          defaultBranch: "main",
+          branchPrefix: "skillhub/work/",
+          protectedBranches: ["main"],
+          allowedPushRemote: "origin",
+          expectedContentRevision: "a".repeat(64),
+          approvedChangeSummary: {
+            baseCommit: "b".repeat(40),
+            changedFiles: [],
+            addedFiles: [],
+            deletedFiles: [],
+            diffStat: { filesChanged: 0, insertions: 0, deletions: 0 },
+            contentRevision: "a".repeat(64),
+          },
+        },
+      } as any,
+      1000,
+    );
+    const prepareClaim = store.claimPublicationOperation("worker-1", 1100, 1000)!;
+    const cancelledPrepare = store.cancelForWork("work-1", 1200);
+    assert.ok(cancelledPrepare.cancelledPublicationIds.includes(preparing.publicationId));
+    assert.deepEqual(cancelledPrepare.outcomeUnknownPublicationIds, []);
+    assert.equal(store.getPublication(preparing.publicationId).state, "cancelled");
+    assert.throws(
+      () => store.completePublicationOperation(prepareClaim, { success: false, errorCode: "X" }, 1300),
+      /STALE_PUBLICATION_OPERATION/,
+    );
+
+    const pushing = store.createOrReusePublication(
+      {
+        ...fixture(),
+        workAttemptId: "attempt-push",
+        repositoryId: "repo-2",
+        executionSnapshot: {
+          workspacePath: "/tmp/ws2",
+          repositoryUrl: "https://example.test/repo.git",
+          defaultBranch: "main",
+          branchPrefix: "skillhub/work/",
+          protectedBranches: ["main"],
+          allowedPushRemote: "origin",
+          expectedContentRevision: "a".repeat(64),
+          approvedChangeSummary: {
+            baseCommit: "b".repeat(40),
+            changedFiles: [],
+            addedFiles: [],
+            deletedFiles: [],
+            diffStat: { filesChanged: 0, insertions: 0, deletions: 0 },
+            contentRevision: "a".repeat(64),
+          },
+        },
+      } as any,
+      1400,
+    );
+    store.transitionPublication(
+      pushing.publicationId,
+      "prepared",
+      { commitSha: "c".repeat(40), treeSha: "d".repeat(40), artifactRef: "pub:" + pushing.publicationId },
+      1500,
+    );
+    store.transitionPublication(pushing.publicationId, "approved", {}, 1600);
+    const pushClaim = store.claimPublicationOperation("worker-1", 1700, 1000)!;
+    const cancelledPush = store.cancelForWork("work-1", 1800);
+    assert.ok(cancelledPush.outcomeUnknownPublicationIds.includes(pushing.publicationId));
+    assert.equal(store.getPublication(pushing.publicationId).state, "failed");
+    assert.equal(store.getPublication(pushing.publicationId).lastErrorCode, "WORK_CANCELLED_OUTCOME_UNKNOWN");
+    assert.throws(
+      () => store.completePublicationOperation(pushClaim, { success: true }, 1900),
+      /STALE_PUBLICATION_OPERATION/,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("expired pushing lease is reclaimed by the same owner with new fencing", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-publication-push-recovery-"));
   try {

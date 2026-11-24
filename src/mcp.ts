@@ -1,4 +1,5 @@
 import { verifyClientSessionProof } from "./expert-platform/session-proof.js";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { observeReuse } from "./reuse-observability.js";
@@ -16,34 +17,59 @@ import { WorkChangeRequestStore } from "./expert-platform/work-change-request-st
 import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
 import { workWaitRequiresHumanAction, workWaitShouldContinuePolling } from "./expert-platform/work-wait-policy.js";
 
-// The experimental task API is opt-in until an isolated Worker runtime is provisioned.
-const expertRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
-const expertTaskStore = expertRuntimeDb ? new ExpertTaskStore(expertRuntimeDb) : null;
-const expertStore = expertRuntimeDb ? new ExpertStore(expertRuntimeDb) : null;
-const expertDispatchService =
-  expertTaskStore && expertStore ? new ExpertDispatchService(expertStore, expertTaskStore) : null;
-const workOrchestrationStore = expertRuntimeDb ? new WorkOrchestrationStore(expertRuntimeDb) : null;
-const workPublicationStore = expertRuntimeDb ? new WorkPublicationStore(expertRuntimeDb) : null;
-const workChangeRequestStore = expertRuntimeDb ? new WorkChangeRequestStore(expertRuntimeDb) : null;
-const workerAvailability = expertRuntimeDb
-  ? createWorkerAvailabilityProbe(
-      process.env.EXPERT_WORKER_REGISTRY_DB?.trim() ||
-        path.join(path.dirname(expertRuntimeDb), "expert-workers.sqlite"),
-    )
-  : undefined;
-const workOrchestrator =
-  workOrchestrationStore && expertTaskStore && expertDispatchService
-    ? new WorkOrchestrator(
-        workOrchestrationStore,
-        expertTaskStore,
-        expertDispatchService,
-        workerAvailability,
-        workPublicationStore ?? undefined,
-        workChangeRequestStore ?? undefined,
-      )
-    : null;
-const mcpWorkAdapter =
-  workOrchestrationStore && workOrchestrator ? new McpWorkAdapter(workOrchestrationStore, workOrchestrator) : null;
+export interface McpExpertRuntime {
+  expertTaskStore: ExpertTaskStore | null;
+  expertStore: ExpertStore | null;
+  expertDispatchService: ExpertDispatchService | null;
+  workOrchestrationStore: WorkOrchestrationStore | null;
+  workPublicationStore: WorkPublicationStore | null;
+  workChangeRequestStore: WorkChangeRequestStore | null;
+  workOrchestrator: WorkOrchestrator | null;
+  mcpWorkAdapter: McpWorkAdapter | null;
+}
+
+function createMcpExpertRuntime(): McpExpertRuntime {
+  const expertRuntimeDb = process.env.EXPERT_RUNTIME_DB?.trim();
+  if (!expertRuntimeDb) {
+    return {
+      expertTaskStore: null,
+      expertStore: null,
+      expertDispatchService: null,
+      workOrchestrationStore: null,
+      workPublicationStore: null,
+      workChangeRequestStore: null,
+      workOrchestrator: null,
+      mcpWorkAdapter: null,
+    };
+  }
+  const expertTaskStore = new ExpertTaskStore(expertRuntimeDb);
+  const expertStore = new ExpertStore(expertRuntimeDb);
+  const expertDispatchService = new ExpertDispatchService(expertStore, expertTaskStore);
+  const workOrchestrationStore = new WorkOrchestrationStore(expertRuntimeDb);
+  const workPublicationStore = new WorkPublicationStore(expertRuntimeDb);
+  const workChangeRequestStore = new WorkChangeRequestStore(expertRuntimeDb);
+  const workerAvailability = createWorkerAvailabilityProbe(
+    process.env.EXPERT_WORKER_REGISTRY_DB?.trim() || path.join(path.dirname(expertRuntimeDb), "expert-workers.sqlite"),
+  );
+  const workOrchestrator = new WorkOrchestrator(
+    workOrchestrationStore,
+    expertTaskStore,
+    expertDispatchService,
+    workerAvailability,
+    workPublicationStore,
+    workChangeRequestStore,
+  );
+  return {
+    expertTaskStore,
+    expertStore,
+    expertDispatchService,
+    workOrchestrationStore,
+    workPublicationStore,
+    workChangeRequestStore,
+    workOrchestrator,
+    mcpWorkAdapter: new McpWorkAdapter(workOrchestrationStore, workOrchestrator),
+  };
+}
 const filterSchema = {
   domain: z.string().optional(),
   category: z.string().optional(),
@@ -52,6 +78,114 @@ const filterSchema = {
   client: z.string().min(1).optional(),
 };
 
+const workDagScalarSchema = z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()]);
+
+const workDagPredicateSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("always") }).strict(),
+  z.object({ kind: z.literal("fact"), key: z.string().trim().min(1).max(200), equals: workDagScalarSchema }).strict(),
+  z.object({ kind: z.literal("evidence"), type: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ kind: z.literal("artifact"), type: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ kind: z.literal("subject"), revision: z.string().trim().min(1).max(500) }).strict(),
+  z.object({ kind: z.literal("no_blocker") }).strict(),
+]);
+
+const workRequirementInputSchema = z
+  .object({
+    id: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/),
+    strength: z.enum(["required", "preferred"]).default("required"),
+    condition: workDagPredicateSchema,
+    satisfaction: workDagPredicateSchema,
+  })
+  .strict();
+
+type McpWorkRequirementInput = z.infer<typeof workRequirementInputSchema>;
+
+const UNSUPPORTED_MCP_LIFECYCLE_EVIDENCE = new Set(["review", "verification"]);
+const UNSUPPORTED_MCP_POLICY_FACTS = new Set([
+  "publication_required",
+  "review_required",
+  "verification_required",
+  "change_request_required",
+]);
+
+function validateMcpWorkRequirements(requirements: readonly McpWorkRequirementInput[]): void {
+  for (const requirement of requirements) {
+    const satisfaction = requirement.satisfaction;
+    if (satisfaction.kind === "evidence" && UNSUPPORTED_MCP_LIFECYCLE_EVIDENCE.has(satisfaction.type)) {
+      throw new Error("WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS:" + satisfaction.type);
+    }
+    if (satisfaction.kind === "fact" && UNSUPPORTED_MCP_POLICY_FACTS.has(satisfaction.key)) {
+      throw new Error("WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS:" + satisfaction.key);
+    }
+  }
+}
+
+function canonicalMcpRequirements(requirements: readonly McpWorkRequirementInput[]) {
+  const ids = new Set<string>();
+  const normalized = requirements.map((item) => {
+    if (ids.has(item.id)) throw new Error("DUPLICATE_WORK_REQUIREMENT");
+    ids.add(item.id);
+    return {
+      id: item.id,
+      source: "user" as const,
+      strength: item.strength,
+      condition: structuredClone(item.condition),
+      satisfaction: structuredClone(item.satisfaction),
+    };
+  });
+  return normalized.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function mcpRequirementsDigest(requirements: readonly McpWorkRequirementInput[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalMcpRequirements(requirements)))
+    .digest("hex");
+}
+
+function applyMcpWorkRequirements(
+  store: WorkOrchestrationStore,
+  orchestrator: WorkOrchestrator,
+  workItemId: string,
+  principalId: string,
+  scope: string,
+  requirements: readonly McpWorkRequirementInput[],
+  expectedWorkRevision?: number,
+  expectedRequirementRevision?: number,
+) {
+  validateMcpWorkRequirements(requirements);
+  const work = store.getWork(workItemId, principalId, scope);
+  if (expectedWorkRevision !== undefined && work.stateRevision !== expectedWorkRevision) {
+    throw new Error("STALE_WORK_REVISION");
+  }
+  if (expectedRequirementRevision !== undefined && work.currentRequirementRevision !== expectedRequirementRevision) {
+    throw new Error("STALE_REQUIREMENT_REVISION");
+  }
+  const workflow = store.getWorkflow(work.workflowId, work.workflowVersion);
+  if (workflow.definition.graph.mode !== "dynamic-dag") {
+    throw new Error("WORK_REQUIREMENTS_REQUIRE_DYNAMIC_DAG");
+  }
+  const current = store.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+  const desired = [
+    ...current.requirements.filter((item) => item.source === "source"),
+    ...canonicalMcpRequirements(requirements),
+  ].sort((a, b) => a.id.localeCompare(b.id));
+  const currentCanonical = [...current.requirements].sort((a, b) => a.id.localeCompare(b.id));
+  if (JSON.stringify(currentCanonical) !== JSON.stringify(desired)) {
+    store.updateRequirementSnapshot(
+      workItemId,
+      principalId,
+      scope,
+      work.stateRevision,
+      current.revision,
+      desired,
+      "mcp-typed-v1",
+    );
+  }
+  return orchestrator.getWork(workItemId, principalId, scope);
+}
 function compactSkill(skill: ReturnType<SkillHubApplicationService["listSkills"]>[number]) {
   return {
     name: skill.name,
@@ -313,14 +447,31 @@ function workSourceRequestSlot(
   expertId: string | undefined,
   repositoryId: string | undefined,
   deploymentId: string | undefined,
+  requirementsDigest?: string,
 ): string {
   const workflow = workflowId?.trim() || null;
   return routingMode === "explicit"
-    ? JSON.stringify(["explicit", expertId ?? null, repositoryId ?? null, deploymentId ?? null, workflow])
-    : JSON.stringify(["auto", workflow]);
+    ? JSON.stringify([
+        "explicit",
+        expertId ?? null,
+        repositoryId ?? null,
+        deploymentId ?? null,
+        workflow,
+        requirementsDigest ?? null,
+      ])
+    : JSON.stringify(["auto", workflow, requirementsDigest ?? null]);
 }
-
-export function createSkillHubMcpHandler(appService: SkillHubApplicationService) {
+export function createSkillHubMcpHandler(appService: SkillHubApplicationService, expertRuntime?: McpExpertRuntime) {
+  const {
+    expertTaskStore,
+    expertStore,
+    expertDispatchService,
+    workOrchestrationStore,
+    workPublicationStore,
+    workChangeRequestStore,
+    workOrchestrator,
+    mcpWorkAdapter,
+  } = expertRuntime ?? createMcpExpertRuntime();
   return createMcpHandler(({ requestInfo }) => {
     const principal = appService.authenticateRequest(requestInfo?.headers);
     const server = new McpServer({
@@ -447,15 +598,27 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
       "discover",
       {
         description:
-          "Discover the most relevant caller-visible team Skills, Knowledge, Prompts, Agents, and Tools. Repository scope is determined automatically from the API Token permissions; do not pre-list, infer, or guess repositories.",
+          "Discover caller-visible Team Skill Hub Skills, Knowledge, Prompts, Agents, and Tools for reference and planning. This is NOT an execution tool. If the user explicitly asks Team Skill Hub to execute engineering work (including review, fix/rework, build/test or verify), do not invoke a discovered Skill locally as a substitute; call list_workflows and then submit_work so the durable Work/DAG runtime owns execution. Repository scope is determined automatically from API Token permissions; do not pre-list, infer, or guess repositories.",
         inputSchema: z.object({
           query: z.string().min(1),
           top_k: z.number().int().min(1).max(20).optional(),
           client: z.string().min(1).optional(),
         }),
       },
-      async ({ query, top_k, client }) =>
-        toolResult(compactDiscovery(appService.discover(query, { topK: top_k ?? 5, client }, principal))),
+      async ({ query, top_k, client }) => {
+        const discovery = compactDiscovery(appService.discover(query, { topK: top_k ?? 5, client }, principal));
+        return toolResult(
+          workOrchestrator
+            ? {
+                ...discovery,
+                executionGuidance: {
+                  durableEngineeringWork:
+                    "If the user asked Team Skill Hub to execute engineering work, including review -> conditional fix/rework -> verification, use list_workflows then submit_work. Skills/Prompts returned by discover are reference assets and MUST NOT replace durable Work execution.",
+                },
+              }
+            : discovery,
+        );
+      },
     );
 
     registerTool(
@@ -1529,7 +1692,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "list_workflows",
           {
             description:
-              "List the current selectable Expert Platform Workflow catalog. Choose by the user's primary requested outcome, not incidental verification failures or secondary activities. Use this when intent is ambiguous or when a custom Workflow may fit better.",
+              "List the current selectable Team Skill Hub Expert Platform Workflow catalog. When the user explicitly asks Team Skill Hub to execute engineering work, choose the Workflow by the user's primary requested outcome and then call submit_work; do not execute a discovered Skill locally as a substitute. Use this when intent is ambiguous or when a custom Workflow may fit better.",
             inputSchema: z.object({}),
           },
           async () =>
@@ -1544,11 +1707,18 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
           "submit_work",
           {
             description:
-              "PRIMARY submission tool for all new Expert Platform work. Submit a durable engineering WorkItem that Team Skill Hub will keep advancing through Expert execution, evidence, review, rework, publication and completion. Use this instead of deprecated submit_expert_task / submit_expert_task_auto for both automatic and explicit routing. After a successful submission, you MUST execute the returned followUp and must not return to the user yet: if followUp.tool=wait_work, call wait_work with followUp.arguments and continue following each response; if followUp.tool=get_work, call get_work with followUp.arguments once before replying.",
+              "PRIMARY submission tool for Team Skill Hub execution. If the user explicitly says to use Team Skill Hub to execute/do/review+fix+verify engineering work, you MUST create a durable WorkItem with submit_work instead of running a discovered Skill locally. Team Skill Hub will keep advancing the Work through DAG planning, Expert execution, evidence, review, conditional rework, verification, publication when required, and completion. Use this instead of deprecated submit_expert_task / submit_expert_task_auto for both automatic and explicit routing. After a successful submission, you MUST execute the returned followUp and must not return to the user yet: if followUp.tool=wait_work, call wait_work with followUp.arguments and continue following each response; if followUp.tool=get_work, call get_work with followUp.arguments once before replying.",
             inputSchema: z.object({
               title: z.string().trim().min(1).max(500),
               description: z.string().trim().min(1).max(10000),
               idempotencyKey: z.string().trim().min(1).max(200),
+              requirements: z
+                .array(workRequirementInputSchema)
+                .max(200)
+                .optional()
+                .describe(
+                  "Typed EXTRA user requirements for dynamic-dag workflows. Usually OMIT this field when the selected Workflow already captures the user's review/fix/rework/verify/no-publication lifecycle. Do NOT restate lifecycle intent as generic evidence such as review/verification or policy meta-facts such as publication_required. Use requirements only for explicit additional hard/preferred obligations the user actually stated, for example 'even if no code changes, ctest must run'. Do not encode commands or arbitrary expressions.",
+                ),
               workflowId: z
                 .string()
                 .trim()
@@ -1589,6 +1759,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             title,
             description,
             idempotencyKey,
+            requirements,
             routingMode,
             workflowId,
             expertId,
@@ -1604,12 +1775,23 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
             const normalizedDeploymentId = normalizeOptionalMcpIdentifier(deploymentId);
             const explicitRouting = routingMode === "explicit";
             const effectiveWorkflowId = workflowId ?? "investigation";
+            const requestedRequirements = requirements ?? [];
+            if (requirements !== undefined) validateMcpWorkRequirements(requestedRequirements);
+            const requirementsDigest =
+              requirements === undefined ? undefined : mcpRequirementsDigest(requestedRequirements);
+            if (
+              requirements !== undefined &&
+              workOrchestrationStore!.getWorkflow(effectiveWorkflowId).definition.graph.mode !== "dynamic-dag"
+            ) {
+              throw new Error("WORK_REQUIREMENTS_REQUIRE_DYNAMIC_DAG");
+            }
             const sourceRequestSlot = workSourceRequestSlot(
               routingMode,
               effectiveWorkflowId,
               normalizedExpertId,
               explicitRouting ? normalizedRepositoryId : undefined,
               explicitRouting ? normalizedDeploymentId : undefined,
+              requirementsDigest,
             );
             const trustedClientSession = verifyClientSessionProof(
               credential,
@@ -1633,12 +1815,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
               (trustedClientSession || trustedSourceRequest ? clientSessionId : undefined);
             assertManagedWorkRequestBinding(client, effectiveSessionId, trustedSourceRequest);
             const adapter = mcpWorkAdapter!;
-            const submitted = adapter.submit(
+            let submitted = adapter.submit(
               {
                 idempotencyKey,
                 title,
                 description,
                 workflowId: effectiveWorkflowId,
+                ...(requirementsDigest === undefined ? {} : { requirementsDigest }),
                 ...(normalizedExpertId === undefined ? {} : { expertId: normalizedExpertId }),
                 ...(explicitRouting && normalizedRepositoryId !== undefined
                   ? { repositoryId: normalizedRepositoryId }
@@ -1658,6 +1841,17 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 ...(trustedSourceRequest && sourceRequestId ? { sourceRequestId, sourceRequestSlot } : {}),
               },
             );
+            if (requirements !== undefined) {
+              const updated = applyMcpWorkRequirements(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                submitted.work.workItemId,
+                principal.id,
+                principal.tenantId,
+                requestedRequirements,
+              );
+              submitted = { ...updated, sourceControlToken: submitted.sourceControlToken };
+            }
             const submittedHumanActionRequired = workWaitRequiresHumanAction({
               status: submitted.work.status,
               currentSubjectRevision: submitted.work.currentSubjectRevision,
@@ -2076,6 +2270,121 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
         );
 
         registerTool(
+          "update_work_requirements",
+          {
+            description:
+              "Replace the authenticated user's typed requirements for a dynamic-dag WorkItem while preserving source-derived and Workflow policy obligations. Requires both current Work and Requirement revisions; semantic changes create an immutable RequirementSnapshot and cause the DAG runtime to re-plan.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+              expectedRequirementRevision: z.number().int().min(1),
+              requirements: z.array(workRequirementInputSchema).max(200),
+            }),
+          },
+          async ({ workItemId, expectedRevision, expectedRequirementRevision, requirements }) =>
+            toolResult(
+              applyMcpWorkRequirements(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workItemId,
+                principal.id,
+                principal.tenantId,
+                requirements,
+                expectedRevision,
+                expectedRequirementRevision,
+              ),
+            ),
+        );
+
+        registerTool(
+          "request_work_replan",
+          {
+            description:
+              "Request a bounded Planner re-plan for a dynamic-dag WorkItem without supplying or installing a DAG directly. The request is durable and deduplicated while pending; Runtime consumes it through the normal Planner -> Policy Validator -> CAS path.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+              reason: z.string().trim().min(1).max(2000),
+            }),
+          },
+          async ({ workItemId, expectedRevision, reason }) => {
+            const request = workOrchestrationStore!.requestDagReplan(
+              workItemId,
+              principal.id,
+              principal.tenantId,
+              expectedRevision,
+              reason,
+            );
+            return toolResult({
+              request,
+              work: workOrchestrator!.getWork(workItemId, principal.id, principal.tenantId),
+            });
+          },
+        );
+
+        registerTool(
+          "signal_work_wait",
+          {
+            description:
+              "Signal a durable Dynamic DAG Wait node owned by the authenticated principal. eventId is the external event's stable deduplication identity; replaying the same event is idempotent, while late events after cancel/supersession are audited and ignored.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              correlationKey: z.string().trim().min(1).max(500),
+              eventId: z.string().trim().min(1).max(300),
+              payload: z.unknown().optional(),
+            }),
+          },
+          async ({ workItemId, correlationKey, eventId, payload }) => {
+            workOrchestrationStore!.getWork(workItemId, principal.id, principal.tenantId);
+            const wait = workOrchestrationStore!
+              .listDagWaits(workItemId)
+              .find((item) => item.correlationKey === correlationKey);
+            if (!wait) throw new Error("DAG_WAIT_NOT_FOUND");
+            const signaled = workOrchestrationStore!.signalDagWait(correlationKey, payload ?? null, eventId);
+            return toolResult({
+              wait: signaled,
+              work: workOrchestrator!.getWork(workItemId, principal.id, principal.tenantId),
+            });
+          },
+        );
+
+        registerTool(
+          "resolve_work_dag_unknown",
+          {
+            description:
+              "Manually reconcile a Dynamic DAG execution whose external side-effect outcome is unknown. Requires the current Work revision. Use succeeded only after independently verifying the external action occurred; otherwise use failed so policy can re-plan safely.",
+            inputSchema: z.object({
+              workItemId: z.string().uuid(),
+              nodeExecutionId: z.string().uuid(),
+              expectedRevision: z.number().int().min(1),
+              outcome: z.enum(["succeeded", "failed"]),
+              reason: z.string().trim().min(1).max(2000),
+            }),
+          },
+          async ({ workItemId, nodeExecutionId, expectedRevision, outcome, reason }) => {
+            const work = workOrchestrationStore!.getWork(workItemId, principal.id, principal.tenantId);
+            if (work.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
+            const execution = workOrchestrationStore!
+              .listDagExecutions(workItemId)
+              .find((item) => item.nodeExecutionId === nodeExecutionId);
+            if (!execution) throw new Error("DAG_EXECUTION_NOT_FOUND");
+            const resolvedExecution = workOrchestrationStore!.resolveUnknownDagExecution(
+              nodeExecutionId,
+              outcome,
+              reason,
+              Date.now(),
+              expectedRevision,
+            );
+            const current = workOrchestrationStore!.getWork(workItemId, principal.id, principal.tenantId);
+            const detail =
+              current.status === "blocked" && current.blockedReason === "DAG_EXTERNAL_OUTCOME_UNKNOWN"
+                ? workOrchestrator!.resumeWork(workItemId, principal.id, principal.tenantId, current.stateRevision)
+                : workOrchestrator!.getWork(workItemId, principal.id, principal.tenantId);
+            return toolResult({ ...detail, resolvedExecution });
+          },
+        );
+
+        registerTool(
           "resume_work",
           {
             description:
@@ -2163,6 +2472,7 @@ export interface SkillHubMcpToolCatalogEntry {
 
 export async function listSkillHubMcpTools(
   appService: SkillHubApplicationService,
+  expertRuntime?: McpExpertRuntime,
 ): Promise<SkillHubMcpToolCatalogEntry[]> {
   const catalogService = new Proxy(appService, {
     get(target, property, receiver) {
@@ -2173,7 +2483,7 @@ export async function listSkillHubMcpTools(
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as SkillHubApplicationService;
-  const handler = createSkillHubMcpHandler(catalogService);
+  const handler = createSkillHubMcpHandler(catalogService, expertRuntime);
   try {
     const response = await handler.fetch(
       new Request("http://team-skill-hub.local/mcp", {

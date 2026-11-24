@@ -55,6 +55,9 @@ export function routeExpert(deployments: readonly ExpertDeployment[], input: Rou
       eligibleByExpert.set(deployment.id, deployment);
     }
   }
+  if (eligibleByExpert.size === 1) {
+    return { expertId: [...eligibleByExpert.keys()][0]!, selectionMode: "auto" };
+  }
   const normalizedProblem = input.problem.toLowerCase();
   const scores = [...eligibleByExpert.values()].map((expert) => ({
     expert,

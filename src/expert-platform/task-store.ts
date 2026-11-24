@@ -48,6 +48,8 @@ export type DeploymentTaskSnapshot = {
   };
 };
 
+export type TaskExecutionKind = "agent" | "verification";
+
 export type Submission = {
   principalId: string;
   scope: string;
@@ -69,6 +71,7 @@ export type Submission = {
   workflowVersion?: number;
   workspaceKey?: string;
   validationSnapshot?: VerificationPolicyStep[];
+  executionKind?: TaskExecutionKind;
 };
 export type TaskRecord = {
   taskId: string;
@@ -78,6 +81,7 @@ export type TaskRecord = {
   repositoryId: string | null;
   selectionMode: "explicit" | "auto";
   schemaVersion: number;
+  executionKind: TaskExecutionKind;
   deploymentId?: string | null;
   deploymentConfigVersion?: number | null;
   deploymentSnapshot?: DeploymentTaskSnapshot | null;
@@ -127,6 +131,7 @@ export type Claim = {
   workerId: string;
   fencing: number;
   problem: string;
+  executionKind?: TaskExecutionKind;
   repositoryId?: string | null;
   repositoryUrl?: string;
   repositoryBranch?: string;
@@ -154,6 +159,7 @@ export class ExpertTaskStore {
         idempotency_key TEXT NOT NULL,
         request_digest TEXT NOT NULL,
         problem TEXT NOT NULL,
+        execution_kind TEXT NOT NULL DEFAULT 'agent' CHECK (execution_kind IN ('agent','verification')),
         source_session_id TEXT,
         source_client TEXT,
         expert_id TEXT NOT NULL DEFAULT 'legacy',
@@ -210,6 +216,10 @@ export class ExpertTaskStore {
     this.ensureEventColumn("tool_code", "TEXT");
     this.ensureEventColumn("count", "INTEGER");
     this.ensureTaskColumn("expert_id", "TEXT NOT NULL DEFAULT 'legacy'");
+    this.ensureTaskColumn(
+      "execution_kind",
+      "TEXT NOT NULL DEFAULT 'agent' CHECK (execution_kind IN ('agent','verification'))",
+    );
     this.ensureTaskColumn("repository_id", "TEXT");
     this.ensureTaskColumn(
       "selection_mode",
@@ -322,6 +332,7 @@ export class ExpertTaskStore {
     const repositoryId = input.repositoryId?.trim() || null;
     const selectionMode = input.selectionMode ?? "explicit";
     const schemaVersion = input.schemaVersion ?? (input.deploymentSnapshot ? 2 : 1);
+    const executionKind = input.executionKind ?? "agent";
     const snapshot = input.deploymentSnapshot;
     const sourceRequestSlot =
       input.sourceRequestSlot ??
@@ -342,6 +353,7 @@ export class ExpertTaskStore {
     if (!snapshot && schemaVersion === 2) throw new Error("INVALID_DEPLOYMENT_SNAPSHOT");
     if (
       (selectionMode !== "explicit" && selectionMode !== "auto") ||
+      (executionKind !== "agent" && executionKind !== "verification") ||
       !Number.isSafeInteger(schemaVersion) ||
       schemaVersion <= 0
     ) {
@@ -370,6 +382,7 @@ export class ExpertTaskStore {
           repositoryId,
           selectionMode,
           schemaVersion,
+          executionKind,
           workItemId: input.workItemId?.trim() || null,
           workAttemptId: input.workAttemptId?.trim() || null,
           workflowId: input.workflowId?.trim() || null,
@@ -470,7 +483,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,execution_kind,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -479,6 +492,7 @@ export class ExpertTaskStore {
           input.idempotencyKey,
           digest,
           input.problem.trim(),
+          executionKind,
           expertId,
           repositoryId,
           selectionMode,
@@ -509,6 +523,7 @@ export class ExpertTaskStore {
         repositoryId,
         selectionMode,
         schemaVersion,
+        executionKind,
         ...(snapshot
           ? {
               deploymentId: snapshot.deploymentId,
@@ -624,7 +639,11 @@ export class ExpertTaskStore {
         runId,
         workerId,
         fencing,
-        problem: String(row.problem),
+        problem:
+          row.continuation_reason == null
+            ? String(row.problem)
+            : String(row.problem) + "\n\nContinuation context:\n" + String(row.continuation_reason),
+        executionKind: (row.execution_kind ?? "agent") as TaskExecutionKind,
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
         workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
         validationSnapshot: normalizeVerificationPolicy(
@@ -834,6 +853,15 @@ export class ExpertTaskStore {
   runCount(taskId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM expert_runs WHERE task_id=?").get(taskId) as { n: number };
     return Number(row.n);
+  }
+
+  getByIdempotency(principalId: string, scope: string, idempotencyKey: string): TaskRecord | null {
+    const key = idempotencyKey.trim();
+    if (!principalId.trim() || !scope.trim() || !key) throw new Error("INVALID_REQUEST");
+    const row = this.db
+      .prepare("SELECT * FROM expert_tasks WHERE principal_id=? AND scope=? AND idempotency_key=?")
+      .get(principalId, scope, key) as Row | undefined;
+    return row ? this.fromRow(row) : null;
   }
 
   get(taskId: string, principalId: string, scope: string): TaskRecord {
@@ -1371,6 +1399,7 @@ export class ExpertTaskStore {
       repositoryId: row.repository_id == null ? null : String(row.repository_id),
       selectionMode: (row.selection_mode ?? "explicit") as "explicit" | "auto",
       schemaVersion: Number(row.schema_version ?? 1),
+      executionKind: (row.execution_kind ?? "agent") as TaskExecutionKind,
       ...(row.deployment_id
         ? {
             deploymentId: String(row.deployment_id),

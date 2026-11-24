@@ -69,6 +69,435 @@ const submission = {
   repositoryId: "ota-repo",
 } as const;
 
+test("orchestrator maintains a read-only shadow DAG projection without changing legacy execution", () => {
+  const f = fixture();
+  try {
+    const staged = f.orchestrator.stageWork(
+      {
+        ...submission,
+        idempotencyKey: "shadow-stage",
+        workflowId: "investigation",
+      },
+      100,
+    );
+    assert.equal(staged.work.currentRequirementRevision, 1);
+    const initial = f.work.getShadowDag(staged.work.workItemId);
+    assert.ok(initial);
+    assert.equal(initial!.graph.nodes.length, 0);
+
+    const running = f.orchestrator.reconcileWork(staged.work.workItemId, "alice", "team-a", 110);
+    assert.equal(running.work.status, "running");
+    const projected = f.work.getShadowDag(staged.work.workItemId);
+    assert.ok(projected);
+    assert.ok(projected!.graph.nodes.some((node) => node.kind === "agent"));
+    assert.equal(
+      f.work.getWorkInternal(staged.work.workItemId).stateRevision,
+      running.work.stateRevision,
+      "shadow projection must not advance authoritative Work state",
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("dynamic-dag workflow is staged for DAG runtime and legacy reconciler does not dispatch an attempt", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    f.work.putWorkflow("dynamic-investigation", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const detail = f.orchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "dynamic-owned",
+        workflowId: "dynamic-investigation",
+      },
+      100,
+    );
+    assert.equal(detail.work.status, "queued");
+    assert.equal(detail.attempts.length, 0);
+    assert.deepEqual(detail.dag?.lateResults, []);
+    assert.deepEqual(detail.dag?.replanRequests, []);
+    const reconciled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 110);
+    assert.equal(reconciled.work.status, "queued");
+    assert.equal(reconciled.attempts.length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+test("dynamic get_work exposes one authoritative completion gate from DAG evidence", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    f.work.putWorkflow("dynamic-gate", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: ["unit_test"], required: [] },
+      review: { required: false },
+      completion: { require: ["required_evidence_passed", "no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const detail = f.orchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "dynamic-gate",
+        workflowId: "dynamic-gate",
+      },
+      100,
+    );
+    const input = f.work.getDagPlannerInput(detail.work.workItemId);
+    f.work.submitDagProposal(
+      {
+        workItemId: detail.work.workItemId,
+        principalId: "alice",
+        scope: "team-a",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: {
+          nodes: [
+            {
+              id: "verify",
+              kind: "verification",
+              capability: "unit_test",
+              subject: null,
+              resource: "workspace",
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [],
+        },
+      },
+      101,
+    );
+    let work = f.work.getWorkInternal(detail.work.workItemId);
+    let claim = f.work.claimDagNode(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "verify",
+      "worker",
+      work.stateRevision,
+      1,
+      102,
+      1000,
+    );
+    claim = f.work.startDagNodeExecution(claim.nodeExecutionId, "worker", claim.fence, 103);
+    f.work.reconcileDagNodeResult(
+      claim.nodeExecutionId,
+      "worker",
+      claim.fence,
+      {
+        status: "succeeded",
+        evidence: [{ type: "unit_test", passed: true, subjectRevision: null, verifierIdentity: "worker" }],
+      },
+      104,
+    );
+    const current = f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a");
+    assert.equal(current.dag?.completion.ready, true);
+    assert.equal(current.gate.ready, true);
+    assert.deepEqual(current.gate.missing, current.dag?.completion.missing);
+  } finally {
+    f.close();
+  }
+});
+
+test("dynamic-dag cancel fences DAG execution and cancels correlated verification task", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    f.work.putWorkflow("dynamic-cancel", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const detail = f.orchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "dynamic-cancel",
+        workflowId: "dynamic-cancel",
+      },
+      100,
+    );
+    const input = f.work.getDagPlannerInput(detail.work.workItemId);
+    f.work.submitDagProposal(
+      {
+        workItemId: detail.work.workItemId,
+        principalId: "alice",
+        scope: "team-a",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: {
+          nodes: [
+            {
+              id: "verify",
+              kind: "verification",
+              capability: "unit_test",
+              subject: null,
+              resource: "workspace",
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [],
+        },
+      },
+      110,
+    );
+    let work = f.work.getWorkInternal(detail.work.workItemId);
+    let execution = f.work.claimDagNode(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "verify",
+      "hub",
+      work.stateRevision,
+      1,
+      111,
+      1000,
+    );
+    execution = f.work.startDagNodeExecution(execution.nodeExecutionId, "hub", execution.fence, 112);
+    f.work.setDagExecutionExternalRef(
+      execution.nodeExecutionId,
+      "hub",
+      execution.fence,
+      "expert-task-key:dag:" + execution.idempotencyKey,
+      113,
+    );
+    const task = f.tasks.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "dag:" + execution.idempotencyKey,
+      problem: "verify",
+      executionKind: "verification",
+    });
+    assert.equal(task.status, "queued");
+
+    const cancelled = f.orchestrator.cancelWork(detail.work.workItemId, "alice", "team-a", 120);
+    assert.equal(cancelled.work.status, "cancelled");
+    assert.equal(f.tasks.get(task.taskId, "alice", "team-a").status, "cancelled");
+    assert.equal(f.work.listDagExecutions(detail.work.workItemId)[0]?.state, "cancelled");
+  } finally {
+    f.close();
+  }
+});
+
+test("dynamic-dag cancel preserves an in-flight publication push as external outcome unknown", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    f.work.putWorkflow("dynamic-push-cancel", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const detail = f.orchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "dynamic-push-cancel",
+        workflowId: "dynamic-push-cancel",
+      },
+      100,
+    );
+    let work = f.work.getWorkInternal(detail.work.workItemId);
+    const subject = "workspace:" + "a".repeat(64);
+    f.work.setCurrentSubjectRevision(detail.work.workItemId, "alice", "team-a", work.stateRevision, subject, 101);
+    const input = f.work.getDagPlannerInput(detail.work.workItemId);
+    f.work.submitDagProposal(
+      {
+        workItemId: detail.work.workItemId,
+        principalId: "alice",
+        scope: "team-a",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "delivery",
+        graph: {
+          nodes: [
+            {
+              id: "prepare",
+              kind: "publication",
+              capability: "prepare",
+              subject,
+              resource: "workspace",
+              mutates: false,
+              requirements: [],
+            },
+            {
+              id: "push",
+              kind: "publication",
+              capability: "push",
+              subject,
+              resource: "workspace",
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [{ from: "prepare", to: "push" }],
+        },
+      },
+      102,
+    );
+    work = f.work.getWorkInternal(detail.work.workItemId);
+    let prepare = f.work.claimDagNode(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "prepare",
+      "hub",
+      work.stateRevision,
+      1,
+      103,
+      1000,
+    );
+    prepare = f.work.startDagNodeExecution(prepare.nodeExecutionId, "hub", prepare.fence, 104);
+    f.work.reconcileDagNodeResult(prepare.nodeExecutionId, "hub", prepare.fence, { status: "succeeded" }, 105);
+    work = f.work.getWorkInternal(detail.work.workItemId);
+    let push = f.work.claimDagNode(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      "push",
+      "hub",
+      work.stateRevision,
+      1,
+      106,
+      1000,
+    );
+    push = f.work.startDagNodeExecution(push.nodeExecutionId, "hub", push.fence, 107);
+    f.work.setDagExecutionExternalRef(
+      push.nodeExecutionId,
+      "hub",
+      push.fence,
+      "publication-key:" + detail.work.workItemId + ":push:" + subject,
+      108,
+    );
+
+    const publication = f.publications.createOrReusePublication(
+      {
+        workItemId: detail.work.workItemId,
+        workAttemptId: "attempt-delivery",
+        workspaceId: "workspace-delivery",
+        sourceSubjectRevision: subject,
+        baseCommit: "b".repeat(40),
+        repositoryId: "ota-repo",
+        repositoryIdentityRevision: 1,
+        publicationPolicyRevision: 1,
+        branchName: "skillhub/work/cancel-push",
+        pushRemoteName: "origin",
+        ownerWorkerId: "worker-1",
+        commitTimestamp: 1_800_000_000_000,
+        commitAuthorName: "Team Skill Hub",
+        commitAuthorEmail: "team-skill-hub@local.invalid",
+        commitMessage: "cancel push test",
+        executionSnapshot: {
+          workspacePath: "/tmp/workspace-delivery",
+          repositoryUrl: "https://example.test/ota.git",
+          defaultBranch: "main",
+          branchPrefix: "skillhub/work/",
+          protectedBranches: ["main"],
+          allowedPushRemote: "origin",
+          expectedContentRevision: "a".repeat(64),
+          approvedChangeSummary: {
+            baseCommit: "b".repeat(40),
+            changedFiles: [],
+            addedFiles: [],
+            deletedFiles: [],
+            diffStat: { filesChanged: 0, insertions: 0, deletions: 0 },
+            contentRevision: "a".repeat(64),
+          },
+        },
+      },
+      109,
+    );
+    f.publications.transitionPublication(
+      publication.publicationId,
+      "prepared",
+      {
+        commitSha: "c".repeat(40),
+        treeSha: "d".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "c".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      110,
+    );
+    f.publications.transitionPublication(publication.publicationId, "approved", {}, 111);
+    const publicationClaim = f.publications.claimPublicationOperation("worker-1", 112, 1000)!;
+    assert.equal(publicationClaim.operation, "push");
+
+    const cancelled = f.orchestrator.cancelWork(detail.work.workItemId, "alice", "team-a", 113);
+    assert.equal(cancelled.work.status, "cancelled");
+    const publicationAfter = f.publications.getPublication(publication.publicationId);
+    assert.equal(publicationAfter.state, "failed");
+    assert.equal(publicationAfter.lastErrorCode, "WORK_CANCELLED_OUTCOME_UNKNOWN");
+    const pushAfter = f.work.listDagExecutions(detail.work.workItemId).find((item) => item.nodeId === "push")!;
+    assert.equal(pushAfter.state, "external_outcome_unknown");
+    assert.equal(pushAfter.result?.externalRef, "publication:" + publication.publicationId);
+    assert.throws(
+      () => f.publications.completePublicationOperation(publicationClaim, { success: true }, 114),
+      /STALE_PUBLICATION_OPERATION/,
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test("dynamic-dag resume only clears blocked state and leaves execution to DAG runtime", () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    f.work.putWorkflow("dynamic-resume", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const detail = f.orchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "dynamic-resume",
+        workflowId: "dynamic-resume",
+      },
+      100,
+    );
+    let work = f.work.getWorkInternal(detail.work.workItemId);
+    work = f.work.blockWork(
+      detail.work.workItemId,
+      "alice",
+      "team-a",
+      work.stateRevision,
+      "DAG_EXECUTOR_UNAVAILABLE",
+      null,
+      110,
+      { resumeCondition: "manual", blockedByType: "dag_executor" },
+    );
+    const resumed = f.orchestrator.resumeWork(detail.work.workItemId, "alice", "team-a", work.stateRevision, 120);
+    assert.equal(resumed.work.status, "queued");
+    assert.equal(resumed.attempts.length, 0);
+  } finally {
+    f.close();
+  }
+});
+
 test("WorkAttempt pins workflow validation policy into ExpertTask and Worker claim", () => {
   const f = fixture();
   try {

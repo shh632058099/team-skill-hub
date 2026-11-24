@@ -235,6 +235,54 @@ export class WorkChangeRequestStore {
     ).map((row) => this.fromRow(row));
   }
 
+  cancelForWork(
+    workItemId: string,
+    now = Date.now(),
+  ): {
+    cancelledChangeRequestIds: string[];
+    outcomeUnknownChangeRequestIds: string[];
+  } {
+    const id = requiredText(workItemId, 200);
+    if (!Number.isFinite(now)) throw new Error("INVALID_CHANGE_REQUEST");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db
+        .prepare(
+          "SELECT * FROM work_change_requests WHERE work_item_id=? AND state IN ('pending','creating') ORDER BY created_at,change_request_id",
+        )
+        .all(id) as Row[];
+      const cancelledChangeRequestIds: string[] = [];
+      const outcomeUnknownChangeRequestIds: string[] = [];
+
+      for (const row of rows) {
+        const current = this.fromRow(row);
+        const fencing = Number(row.operation_fencing ?? 0) + 1;
+        const unknown = current.state === "creating";
+        const changed = this.db
+          .prepare(
+            "UPDATE work_change_requests SET state='blocked',last_error_code=?,operation_fencing=?,operation_lease_until=NULL,operation_claimed_worker_id=NULL,next_attempt_at=NULL,updated_at=? WHERE change_request_id=? AND operation_fencing=? AND state=?",
+          )
+          .run(
+            unknown ? "WORK_CANCELLED_OUTCOME_UNKNOWN" : "WORK_CANCELLED",
+            fencing,
+            now,
+            current.changeRequestId,
+            Number(row.operation_fencing ?? 0),
+            current.state,
+          );
+        if (changed.changes !== 1) throw new Error("STALE_CHANGE_REQUEST_OPERATION");
+        if (unknown) outcomeUnknownChangeRequestIds.push(current.changeRequestId);
+        else cancelledChangeRequestIds.push(current.changeRequestId);
+      }
+
+      this.db.exec("COMMIT");
+      return { cancelledChangeRequestIds, outcomeUnknownChangeRequestIds };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   claim(workerId: string, now = Date.now(), leaseMs = 30_000): ChangeRequestOperationLease | null {
     const owner = requiredText(workerId, 200);
     if (!Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error("INVALID_CHANGE_REQUEST_LEASE");

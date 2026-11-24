@@ -22,6 +22,7 @@ import { WorkChangeRequestStore, type WorkChangeRequestRecord } from "./work-cha
 import { buildPublicationCommitMetadata, buildWorkBranchName } from "./publication-policy.js";
 import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
+import { WorkDagShadowProjector } from "./work-dag-shadow-projector.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -53,6 +54,22 @@ export interface WorkDetail {
   workspaceChangeSummary: TaskRecord["workspaceChangeSummary"];
   reviews: ReviewDecisionRecord[];
   approvals: WorkApprovalRecord[];
+  dag: {
+    currentRevision: number;
+    requirementRevision: number;
+    revision: ReturnType<WorkOrchestrationStore["getDagRevision"]> | null;
+    requirementSnapshot: ReturnType<WorkOrchestrationStore["getRequirementSnapshot"]> | null;
+    replanRequests: ReturnType<WorkOrchestrationStore["listDagReplanRequests"]>;
+    executions: ReturnType<WorkOrchestrationStore["listDagExecutions"]>;
+    facts: ReturnType<WorkOrchestrationStore["listDagFacts"]>;
+    evidence: ReturnType<WorkOrchestrationStore["listDagEvidence"]>;
+    artifacts: ReturnType<WorkOrchestrationStore["listDagArtifacts"]>;
+    waits: ReturnType<WorkOrchestrationStore["listDagWaits"]>;
+    lateResults: ReturnType<WorkOrchestrationStore["listDagLateResults"]>;
+    decisions: ReturnType<WorkOrchestrationStore["listDagDecisions"]>;
+    completion: ReturnType<WorkOrchestrationStore["evaluateDagCompletion"]>;
+    shadow: ReturnType<WorkOrchestrationStore["getShadowDag"]>;
+  } | null;
   publication: {
     publicationId: string;
     state: WorkPublicationRecord["state"];
@@ -203,7 +220,11 @@ function isRetryable(reason: string): boolean {
 function requiredWorkspaceAccessForWorkflow(
   workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
 ): "read-only" | "read-write" | undefined {
-  if (workflow.definition.change?.mode === "code_change") return "read-write";
+  if (
+    workflow.definition.change?.mode === "code_change" ||
+    workflow.definition.change?.mode === "conditional_code_change"
+  )
+    return "read-write";
   if (workflow.definition.change?.mode === "readonly") return "read-only";
   return undefined;
 }
@@ -220,7 +241,7 @@ function effectiveVerificationSteps(
   resolved: ResolvedDispatch,
 ): VerificationPolicyStep[] {
   const repositorySteps =
-    workflow.definition.change?.mode === "code_change"
+    workflow.definition.change?.mode === "code_change" || workflow.definition.change?.mode === "conditional_code_change"
       ? (resolved.deploymentSnapshot?.repository?.verificationPolicy?.required ?? [])
       : [];
   let steps: VerificationPolicyStep[];
@@ -229,7 +250,10 @@ function effectiveVerificationSteps(
   } catch {
     throw new Error("VERIFICATION_POLICY_INVALID");
   }
-  if (workflow.definition.change?.mode === "code_change") {
+  if (
+    workflow.definition.change?.mode === "code_change" ||
+    workflow.definition.change?.mode === "conditional_code_change"
+  ) {
     const evidenceTypes = new Set(steps.map((step) => step.evidenceType));
     const missing = ["build", "unit_test"].filter((type) => !evidenceTypes.has(type));
     if (missing.length > 0) throw new Error("VERIFICATION_POLICY_MISSING:" + missing.join(","));
@@ -334,6 +358,7 @@ function parseReworkRequest(context: string | null): WorkReworkRequest {
 export class WorkOrchestrator {
   private readonly orchestrationOwnerId = randomUUID();
   private readonly orchestrationLeaseMs = 30_000;
+  private readonly shadowProjector: WorkDagShadowProjector;
   constructor(
     private readonly workStore: WorkOrchestrationStore,
     private readonly tasks: ExpertTaskStore,
@@ -341,10 +366,19 @@ export class WorkOrchestrator {
     private readonly workerAvailable: (workerId: string, now: number) => boolean = () => true,
     private readonly publications?: WorkPublicationStore,
     private readonly changeRequests?: WorkChangeRequestStore,
-  ) {}
+  ) {
+    this.shadowProjector = new WorkDagShadowProjector(
+      this.workStore,
+      this.tasks,
+      this.publications,
+      this.changeRequests,
+    );
+  }
 
   stageWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
     const work = this.workStore.createOrReuseWork(input, now);
+    this.workStore.ensureRequirementSnapshot(work.workItemId, now);
+    this.refreshShadowProjection(work.workItemId, now);
     const detail = this.detail(work.workItemId, input.principalId, input.scope);
     if (work.reusedExistingWork !== undefined) detail.work.reusedExistingWork = work.reusedExistingWork;
     if (work.deduplicationReason !== undefined) detail.work.deduplicationReason = work.deduplicationReason;
@@ -353,6 +387,8 @@ export class WorkOrchestrator {
 
   submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
     const staged = this.stageWork(input, now);
+    const workflow = this.workStore.getWorkflow(staged.work.workflowId, staged.work.workflowVersion);
+    if (workflow.definition.graph.mode === "dynamic-dag") return staged;
     return this.reconcileWork(staged.work.workItemId, input.principalId, input.scope, now);
   }
 
@@ -642,6 +678,10 @@ export class WorkOrchestrator {
     this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     work = this.reconcilePendingSourceForClaimedWork(workItemId, principalId, scope, now, fence);
     if (TERMINAL_WORK.has(work.status)) return this.detail(workItemId, principalId, scope);
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+    if (workflow.definition.graph.mode === "dynamic-dag") {
+      return this.detail(workItemId, principalId, scope);
+    }
     this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     work = this.reconcilePublicationLifecycle(work, now, fence);
     if (TERMINAL_WORK.has(work.status) || work.status === "blocked") {
@@ -1148,6 +1188,65 @@ export class WorkOrchestrator {
     );
   }
 
+  ensureChangeRequest(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    now = Date.now(),
+  ): WorkChangeRequestRecord {
+    if (!this.publications || !this.changeRequests) throw new Error("CHANGE_REQUEST_STORE_UNAVAILABLE");
+    const work = this.workStore.getWork(workItemId, principalId, scope);
+    const publication = this.publications
+      .listPublications(workItemId)
+      .filter((item) => item.sourceSubjectRevision === work.currentSubjectRevision)
+      .at(-1);
+    if (!publication || publication.state !== "pushed" || !publication.commitSha) {
+      throw new Error("CHANGE_REQUEST_PUBLICATION_NOT_READY");
+    }
+    const existing = this.changeRequests.getByPublication(publication.publicationId);
+    if (existing) return existing;
+    const attempt = this.workStore
+      .listAttempts(workItemId)
+      .find((item) => item.workAttemptId === publication.workAttemptId);
+    const resolved = attempt?.dispatchBinding ? asResolvedDispatch(attempt.dispatchBinding) : null;
+    const repository = resolved?.deploymentSnapshot?.repository;
+    const policy = repository?.publicationPolicy;
+    if (!repository || !policy?.permissions.includes("create-change-request")) {
+      throw new Error("CHANGE_REQUEST_NOT_ALLOWED");
+    }
+    const snapshot = publication.executionSnapshot;
+    const credentialGrantRef = snapshot?.credentialRef;
+    if (!snapshot || !credentialGrantRef) throw new Error("CHANGE_REQUEST_CREDENTIAL_UNAVAILABLE");
+    return this.changeRequests.createOrReuse(
+      {
+        workItemId,
+        workAttemptId: publication.workAttemptId,
+        publicationId: publication.publicationId,
+        ownerWorkerId: publication.ownerWorkerId,
+        repositoryIdentity:
+          publication.repositoryId +
+          "@" +
+          (publication.repositoryIdentityRevision ?? publication.publicationPolicyRevision),
+        repositoryUrl: snapshot.repositoryUrl,
+        headBranch: publication.branchName,
+        headCommit: publication.commitSha,
+        baseBranch: snapshot.defaultBranch,
+        title: work.title,
+        body:
+          "Created by Team Skill Hub Work Orchestration.\n\n" +
+          "Work Item: " +
+          workItemId +
+          "\nPublication: " +
+          publication.publicationId +
+          "\nCommit: " +
+          publication.commitSha,
+        idempotencyKey: "publication:" + publication.publicationId,
+        credentialGrantRef,
+      },
+      now,
+    );
+  }
+
   recordPreparedPublicationArtifact(
     workItemId: string,
     principalId: string,
@@ -1204,6 +1303,95 @@ export class WorkOrchestrator {
     if (detail.reviewTask && (detail.reviewTask.status === "queued" || detail.reviewTask.status === "running")) {
       this.tasks.cancel(detail.reviewTask.taskId, principalId, scope);
     }
+    const workflow = this.workStore.getWorkflow(detail.work.workflowId, detail.work.workflowVersion);
+    if (workflow.definition.graph.mode === "dynamic-dag") {
+      const publicationCancellation = this.publications?.cancelForWork(workItemId, now) ?? {
+        cancelledPublicationIds: [],
+        outcomeUnknownPublicationIds: [],
+      };
+      const changeRequestCancellation = this.changeRequests?.cancelForWork(workItemId, now) ?? {
+        cancelledChangeRequestIds: [],
+        outcomeUnknownChangeRequestIds: [],
+      };
+      if (
+        publicationCancellation.outcomeUnknownPublicationIds.length > 0 ||
+        changeRequestCancellation.outcomeUnknownChangeRequestIds.length > 0
+      ) {
+        const dagRevision =
+          detail.work.currentDagRevision > 0
+            ? this.workStore.getDagRevision(workItemId, detail.work.currentDagRevision)
+            : null;
+        const nodes = new Map(dagRevision?.graph.nodes.map((node) => [node.id, node]) ?? []);
+        const executions = this.workStore.listDagExecutions(workItemId);
+        const latest = new Map<string, (typeof executions)[number]>();
+        for (const execution of executions) {
+          const previous = latest.get(execution.nodeId);
+          if (!previous || previous.generation < execution.generation) {
+            latest.set(execution.nodeId, execution);
+          }
+        }
+        const markUnknown = (
+          kind: "publication" | "change_request",
+          capability: string,
+          subject: string | null,
+          externalRef: string,
+          reason: string,
+        ) => {
+          const candidate = [...latest.values()].find((execution) => {
+            if (execution.state !== "running" && execution.state !== "claimed") return false;
+            const node = nodes.get(execution.nodeId);
+            return (
+              node?.kind === kind && node.capability === capability && (subject === null || node.subject === subject)
+            );
+          });
+          if (candidate) {
+            this.workStore.markDagExecutionOutcomeUnknown(candidate.nodeExecutionId, externalRef, reason, now);
+          }
+        };
+
+        for (const publicationId of publicationCancellation.outcomeUnknownPublicationIds) {
+          const publication = this.publications!.getPublication(publicationId);
+          markUnknown(
+            "publication",
+            "push",
+            publication.sourceSubjectRevision,
+            "publication:" + publicationId,
+            "Work was cancelled while publication push was in flight; reconcile the remote branch outcome.",
+          );
+        }
+        for (const changeRequestId of changeRequestCancellation.outcomeUnknownChangeRequestIds) {
+          const request = this.changeRequests!.get(changeRequestId);
+          const publication = this.publications?.getPublication(request.publicationId);
+          markUnknown(
+            "change_request",
+            "create",
+            publication?.sourceSubjectRevision ?? null,
+            "change-request:" + changeRequestId,
+            "Work was cancelled while change-request creation was in flight; reconcile the remote provider outcome.",
+          );
+        }
+      }
+    }
+    if (workflow.definition.graph.mode === "dynamic-dag") {
+      for (const execution of this.workStore.listDagExecutions(workItemId)) {
+        if (!["pending", "claimed", "running"].includes(execution.state)) continue;
+        const ref = execution.externalRef;
+        if (!ref) continue;
+        let task: TaskRecord | null = null;
+        if (ref.startsWith("expert-task:")) {
+          try {
+            task = this.tasks.get(ref.slice("expert-task:".length), principalId, scope);
+          } catch {
+            task = null;
+          }
+        } else if (ref.startsWith("expert-task-key:")) {
+          task = this.tasks.getByIdempotency(principalId, scope, ref.slice("expert-task-key:".length));
+        }
+        if (task && (task.status === "queued" || task.status === "running")) {
+          this.tasks.cancel(task.taskId, principalId, scope);
+        }
+      }
+    }
     const current = this.workStore.getWork(workItemId, principalId, scope);
     if (current.activeWorkAttemptId) {
       this.workStore.finishWorkAttempt(
@@ -1220,6 +1408,10 @@ export class WorkOrchestrator {
       this.workStore.transitionWork(workItemId, principalId, scope, current.stateRevision, "cancelled", now);
     }
     this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
+    if (workflow.definition.graph.mode === "dynamic-dag") {
+      this.workStore.cancelDagExecutions(workItemId, now);
+      this.workStore.cancelDagWaits(workItemId, now);
+    }
     return this.detail(workItemId, principalId, scope);
   }
 
@@ -2030,11 +2222,26 @@ export class WorkOrchestrator {
     return this.detail(current.workItemId, current.principalId, current.scope);
   }
 
+  private refreshShadowProjection(workItemId: string, now = Date.now()): void {
+    try {
+      this.shadowProjector.reconcile(workItemId, now);
+    } catch (error) {
+      // Phase A projection is deliberately non-authoritative: projection failure must never alter
+      // existing Work/Attempt/Task behavior. Keep only a bounded diagnostic code.
+      const code =
+        error instanceof Error && /^[A-Z0-9_]{1,80}$/.test(error.message)
+          ? error.message
+          : "SHADOW_DAG_RECONCILE_FAILED";
+      console.error(JSON.stringify({ event: "work_dag.shadow_reconcile_failed", workItemId, code }));
+    }
+  }
+
   private orchestrationFence(epoch: number, now: number): WorkOrchestrationFence {
     return { ownerId: this.orchestrationOwnerId, epoch, now };
   }
 
   private detail(workItemId: string, principalId: string, scope: string): WorkDetail {
+    this.refreshShadowProjection(workItemId);
     const work = this.workStore.getWork(workItemId, principalId, scope);
     const attempts = this.workStore.listAttempts(workItemId);
     const latest = attempts.at(-1);
@@ -2100,6 +2307,39 @@ export class WorkOrchestrator {
           lastErrorCode: changeRequestRecord.lastErrorCode,
         }
       : null;
+    const dag =
+      workflow.definition.graph.mode === "dynamic-dag"
+        ? {
+            currentRevision: work.currentDagRevision,
+            requirementRevision: work.currentRequirementRevision,
+            revision:
+              work.currentDagRevision > 0 ? this.workStore.getDagRevision(workItemId, work.currentDagRevision) : null,
+            requirementSnapshot:
+              work.currentRequirementRevision > 0
+                ? this.workStore.getRequirementSnapshot(workItemId, work.currentRequirementRevision)
+                : null,
+            replanRequests: this.workStore.listDagReplanRequests(workItemId),
+            executions: this.workStore.listDagExecutions(workItemId),
+            facts: this.workStore.listDagFacts(workItemId),
+            evidence: this.workStore.listDagEvidence(workItemId),
+            artifacts: this.workStore.listDagArtifacts(workItemId),
+            waits: this.workStore.listDagWaits(workItemId),
+            lateResults: this.workStore.listDagLateResults(workItemId),
+            decisions: this.workStore.listDagDecisions(workItemId),
+            completion: this.workStore.evaluateDagCompletion(workItemId),
+            shadow: this.workStore.getShadowDag(workItemId),
+          }
+        : null;
+    const gate: CompletionGateResult = dag
+      ? {
+          ready: dag.completion.ready,
+          missing: [...dag.completion.missing],
+          workflowId: work.workflowId,
+          workflowVersion: work.workflowVersion,
+          subjectRevision: work.currentSubjectRevision,
+        }
+      : this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
+
     return {
       work,
       attempts,
@@ -2116,7 +2356,7 @@ export class WorkOrchestrator {
         passed: verificationResults.filter((item) => item.status === "passed").length,
         failed: verificationResults.filter((item) => item.status === "failed").length,
       },
-      gate: this.workStore.evaluateCompletionGate(workItemId, principalId, scope),
+      gate,
       runtime: {
         requiredProfile: workflow.definition.execution.requiredRuntimeProfile ?? null,
         effectiveProfile:
@@ -2127,6 +2367,7 @@ export class WorkOrchestrator {
       workspaceChangeSummary: currentTask?.workspaceChangeSummary ?? null,
       reviews: this.workStore.listReviewDecisions(workItemId),
       approvals,
+      dag,
       publication,
       changeRequest,
     };
