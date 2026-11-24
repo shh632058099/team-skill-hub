@@ -92,6 +92,9 @@ test("Codex plugin builder emits portable plugin, MCP auth, hooks and marketplac
     assert.match(skill, /omit workflowId only for read-only/i);
     assert.match(skill, /defaults omission to investigation/i);
     assert.match(skill, /repository modification.*explicitly set a code-change workflow/i);
+    assert.match(skill, /primary requested outcome/i);
+    assert.match(skill, /list_workflows/i);
+    assert.match(skill, /incidental build\/test failures.*do not change/i);
 
     const serialized = [
       await readFile(path.join(out, "plugin.json"), "utf8"),

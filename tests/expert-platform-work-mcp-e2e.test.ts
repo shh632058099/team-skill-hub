@@ -218,6 +218,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const tools = await listMcpTools(mcpUrl, apiKey);
     for (const name of [
       "submit_work",
+      "list_workflows",
       "update_work_source",
       "get_work",
       "wait_work",
@@ -240,6 +241,33 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.match(submitWorkTool?.description ?? "", /followUp\.tool.*get_work/i);
     assert.match(waitWorkTool?.description ?? "", /MUST continue calling wait_work/i);
     assert.match(waitWorkTool?.description ?? "", /followUp/i);
+
+    const workflowCatalog = await callMcp(mcpUrl, apiKey, 899, "list_workflows", {});
+    assert.match(String(workflowCatalog.selectionRule), /primary requested outcome/i);
+    assert.match(String(workflowCatalog.selectionRule), /secondary activities/i);
+    const catalogWorkflows = workflowCatalog.workflows as Array<{
+      workflowId: string;
+      version: number;
+      changeMode: "readonly" | "code_change" | null;
+      summary: string;
+      selectionConfigured: boolean;
+    }>;
+    assert.equal(
+      catalogWorkflows.some((item) => item.workflowId === "code-fix-default"),
+      false,
+    );
+    const investigationWorkflow = catalogWorkflows.find((item) => item.workflowId === "investigation");
+    assert.equal(investigationWorkflow?.version, 4);
+    assert.equal(investigationWorkflow?.changeMode, "readonly");
+    assert.equal(investigationWorkflow?.selectionConfigured, true);
+    assert.match(investigationWorkflow?.summary ?? "", /readonly analysis/i);
+    const bugFixWorkflow = catalogWorkflows.find((item) => item.workflowId === "bug-fix");
+    assert.equal(bugFixWorkflow?.version, 3);
+    assert.equal(bugFixWorkflow?.changeMode, "code_change");
+    assert.match(bugFixWorkflow?.summary ?? "", /incorrect existing/i);
+    const customWorkflow = catalogWorkflows.find((item) => item.workflowId === "mcp-verified");
+    assert.equal(customWorkflow?.version, 1);
+    assert.equal(customWorkflow?.selectionConfigured, false);
 
     await assert.rejects(
       () =>
@@ -347,7 +375,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(signedSubmission.work.sourceScope, `codex-proof-test/${signedSessionId}`);
     assert.equal(signedSubmission.work.workflowId, "investigation");
-    assert.equal(signedSubmission.work.workflowVersion, 3);
+    assert.equal(signedSubmission.work.workflowVersion, 4);
     assert.deepEqual(signedSubmission.currentTask.validationSnapshot, []);
     const signedWorkId = String(signedSubmission.work.workItemId);
     const updateAt = Date.now();

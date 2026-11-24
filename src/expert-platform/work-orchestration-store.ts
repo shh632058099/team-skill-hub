@@ -42,6 +42,7 @@ export interface WorkflowDefinition {
   validation: { requiredEvidence: string[]; required: VerificationPolicyStep[] };
   review: { required: boolean; reviewerExpertId?: string };
   change?: { mode: "readonly" | "code_change"; delivery?: "merge_request" };
+  selection?: { summary: string; useWhen: string[]; notWhen: string[] };
   source?: { terminal: { active: "cancel"; waitingReview: "retain_review" } };
   publication?: { required: boolean; mode: "work_branch"; approvalRequired?: boolean };
   completion: {
@@ -67,6 +68,17 @@ export interface WorkflowDefinitionRecord {
   version: number;
   definition: WorkflowDefinition;
   createdAt: number;
+}
+
+export interface SelectableWorkflowRecord {
+  workflowId: string;
+  version: number;
+  changeMode: "readonly" | "code_change" | null;
+  delivery: "merge_request" | null;
+  summary: string;
+  useWhen: string[];
+  notWhen: string[];
+  selectionConfigured: boolean;
 }
 
 export interface WorkSubmission {
@@ -337,8 +349,9 @@ function presetWorkflow(overrides: Partial<WorkflowDefinition> = {}): WorkflowDe
   };
 }
 
-function codeChangePreset(): WorkflowDefinition {
+function codeChangePreset(selection?: NonNullable<WorkflowDefinition["selection"]>): WorkflowDefinition {
   return presetWorkflow({
+    ...(selection ? { selection } : {}),
     change: { mode: "code_change", delivery: "merge_request" },
     validation: { requiredEvidence: ["expert_result", "build", "unit_test"], required: [] },
     review: { required: true },
@@ -356,8 +369,9 @@ function codeChangePreset(): WorkflowDefinition {
   });
 }
 
-function readonlyPreset(): WorkflowDefinition {
+function readonlyPreset(selection?: NonNullable<WorkflowDefinition["selection"]>): WorkflowDefinition {
   return presetWorkflow({
+    ...(selection ? { selection } : {}),
     change: { mode: "readonly" },
     lifecycle: { ...DEFAULT_WORKFLOW.lifecycle, attempt: { maxWorkAttempts: 3, maxReworks: 2 } },
     review: { required: false },
@@ -425,6 +439,88 @@ const PLATFORM_PRESET_WORKFLOWS: ReadonlyArray<readonly [string, number, Workflo
   ["test-improvement", 2, codeChangePreset()],
   ["build-fix", 2, codeChangePreset()],
   ["release-change", 2, codeChangePreset()],
+  [
+    "investigation",
+    4,
+    readonlyPreset({
+      summary: "Readonly analysis, search, statistics, diagnosis, or code inspection.",
+      useWhen: [
+        "the primary requested outcome is to understand, inspect, search, diagnose, or measure without modifying repository files",
+      ],
+      notWhen: ["the user asks to modify repository files or deliver a code change"],
+    }),
+  ],
+  [
+    "code-review",
+    4,
+    readonlyPreset({
+      summary: "Readonly code review that produces findings without modifying repository files.",
+      useWhen: ["the primary requested outcome is review findings, risks, or maintainability feedback without edits"],
+      notWhen: ["the user asks to fix findings or otherwise modify repository files"],
+    }),
+  ],
+  [
+    "bug-fix",
+    3,
+    codeChangePreset({
+      summary: "Fix incorrect existing runtime or business behavior.",
+      useWhen: [
+        "broken existing functionality, regressions, crashes, or incorrect behavior are the primary requested outcome",
+      ],
+      notWhen: [
+        "the primary requested outcome is a new feature, test-only improvement, build-system repair, or release change",
+      ],
+    }),
+  ],
+  [
+    "feature-change",
+    3,
+    codeChangePreset({
+      summary: "Implement new or changed externally observable behavior.",
+      useWhen: [
+        "a new feature, requirement, API behavior, or externally observable behavior is the primary requested outcome",
+      ],
+      notWhen: ["the primary requested outcome is only refactoring, tests, buildability, or release preparation"],
+    }),
+  ],
+  [
+    "refactor",
+    3,
+    codeChangePreset({
+      summary: "Restructure existing code without an intended behavior change.",
+      useWhen: [
+        "code structure, maintainability, or organization is the primary requested outcome and behavior should stay stable",
+      ],
+      notWhen: ["the user primarily requests a bug fix, new behavior, test change, build repair, or release change"],
+    }),
+  ],
+  [
+    "test-improvement",
+    3,
+    codeChangePreset({
+      summary: "Add, fix, or improve tests when the tests themselves are the primary deliverable.",
+      useWhen: ["test coverage, test cases, or test infrastructure are the primary requested outcome"],
+      notWhen: ["tests are secondary work supporting a bug fix or feature change"],
+    }),
+  ],
+  [
+    "build-fix",
+    3,
+    codeChangePreset({
+      summary: "Restore compilation, linking, or CI buildability when buildability itself is the primary deliverable.",
+      useWhen: ["build, link, toolchain, or CI buildability repair is the primary requested outcome"],
+      notWhen: ["a feature or bug task merely happens to encounter a build failure during verification"],
+    }),
+  ],
+  [
+    "release-change",
+    3,
+    codeChangePreset({
+      summary: "Change versioning, packaging, release, or publishing behavior.",
+      useWhen: ["versioning, packaging, release preparation, or publishing is the primary requested outcome"],
+      notWhen: ["release activity is only a downstream consequence of another primary code-change task"],
+    }),
+  ],
 ];
 const WORK_STATUSES = new Set<WorkStatus>([
   "queued",
@@ -799,6 +895,33 @@ export class WorkOrchestrationStore {
       definition.change = { mode, ...(delivery ? { delivery } : {}) };
     }
 
+    const rawSelection = (definition as { selection?: unknown }).selection;
+    if (rawSelection !== undefined) {
+      if (!rawSelection || typeof rawSelection !== "object" || Array.isArray(rawSelection)) {
+        throw new Error("INVALID_WORKFLOW");
+      }
+      const summary = (rawSelection as { summary?: unknown }).summary;
+      const useWhen = (rawSelection as { useWhen?: unknown }).useWhen;
+      const notWhen = (rawSelection as { notWhen?: unknown }).notWhen;
+      const normalizeSelectionList = (value: unknown): string[] => {
+        if (!Array.isArray(value) || value.length > 20) throw new Error("INVALID_WORKFLOW");
+        return value.map((item) => {
+          if (typeof item !== "string") throw new Error("INVALID_WORKFLOW");
+          const normalized = item.trim();
+          if (!normalized || normalized.length > 500) throw new Error("INVALID_WORKFLOW");
+          return normalized;
+        });
+      };
+      if (typeof summary !== "string") throw new Error("INVALID_WORKFLOW");
+      const normalizedSummary = summary.trim();
+      if (!normalizedSummary || normalizedSummary.length > 500) throw new Error("INVALID_WORKFLOW");
+      definition.selection = {
+        summary: normalizedSummary,
+        useWhen: normalizeSelectionList(useWhen),
+        notWhen: normalizeSelectionList(notWhen),
+      };
+    }
+
     if (definition.validation.required.some((step) => step.evidenceType === "integration_test")) {
       definition.validation.requiredEvidence = [
         ...new Set([...definition.validation.requiredEvidence, "integration_test"]),
@@ -1002,6 +1125,34 @@ export class WorkOrchestrationStore {
         createdAt: Number(row.created_at),
       }),
     );
+  }
+
+  listSelectableWorkflows(): SelectableWorkflowRecord[] {
+    const rows = this.db
+      .prepare(
+        [
+          "SELECT w.* FROM work_workflows w",
+          "JOIN (SELECT workflow_id, MAX(version) AS version FROM work_workflows WHERE workflow_id<>? GROUP BY workflow_id) latest",
+          "ON latest.workflow_id=w.workflow_id AND latest.version=w.version",
+          "ORDER BY w.workflow_id",
+        ].join(" "),
+      )
+      .all(DEFAULT_WORKFLOW_ID) as Row[];
+    return rows.map((row) => {
+      const workflowId = String(row.workflow_id);
+      const definition = this.normalizeWorkflowDefinition(JSON.parse(String(row.definition_json)));
+      const selection = definition.selection;
+      return {
+        workflowId,
+        version: Number(row.version),
+        changeMode: definition.change?.mode ?? null,
+        delivery: definition.change?.delivery ?? null,
+        summary: selection?.summary ?? `Workflow ${workflowId} has no selection metadata configured.`,
+        useWhen: selection ? [...selection.useWhen] : [],
+        notWhen: selection ? [...selection.notWhen] : [],
+        selectionConfigured: Boolean(selection),
+      };
+    });
   }
 
   putRepositoryWorkflowDefault(repositoryId: string, workflowId: string, now = Date.now()): void {

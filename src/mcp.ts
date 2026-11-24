@@ -1526,6 +1526,21 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
 
       if (workOrchestrator) {
         registerTool(
+          "list_workflows",
+          {
+            description:
+              "List the current selectable Expert Platform Workflow catalog. Choose by the user's primary requested outcome, not incidental verification failures or secondary activities. Use this when intent is ambiguous or when a custom Workflow may fit better.",
+            inputSchema: z.object({}),
+          },
+          async () =>
+            toolResult({
+              selectionRule:
+                "Choose the Workflow by the user's primary requested outcome; incidental verification failures and secondary activities do not change the Workflow.",
+              workflows: workOrchestrationStore!.listSelectableWorkflows(),
+            }),
+        );
+
+        registerTool(
           "submit_work",
           {
             description:
@@ -1541,7 +1556,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService)
                 .max(200)
                 .optional()
                 .describe(
-                  "Omit for read-only investigation work. Omitted workflowId defaults to investigation. For any request that modifies repository files, explicitly choose a code-change workflow such as bug-fix, feature-change, refactor, test-improvement, build-fix, or release-change.",
+                  "Omit only for clearly read-only investigation/search/statistics/code-inspection work; omission defaults to investigation. For repository modifications, explicitly choose a code-change Workflow by the user's primary requested outcome. If intent is ambiguous or a custom Workflow may fit better, call list_workflows first. Incidental build/test failures and secondary activities do not change the primary Workflow.",
                 ),
               routingMode: z
                 .enum(["auto", "explicit"])

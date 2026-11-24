@@ -139,6 +139,9 @@ test("bash setup bootstraps shared runtime state with absolute custom homes and 
     assert.match(guidance, /omit `workflowId` only for read-only/i);
     assert.match(guidance, /defaults omission to `investigation`/i);
     assert.match(guidance, /repository modification.*explicitly set a code-change workflow/i);
+    assert.match(guidance, /primary requested outcome/i);
+    assert.match(guidance, /list_workflows/i);
+    assert.match(guidance, /incidental build\/test failures.*do not change/i);
     assert.match(guidance, /all repositories visible to the current API Token \/ Principal/i);
     assert.match(guidance, /do not pre-list, infer, guess, or pass repository IDs/i);
     assert.match(guidance, /discover_scoped/);
@@ -170,6 +173,9 @@ test("all Codex and Claude setup variants carry caller-visible repository guidan
     assert.match(source, /omit .*workflowId.* only for read-only/i, relative);
     assert.match(source, /defaults omission to .*investigation/i, relative);
     assert.match(source, /repository modification.*explicitly set a code-change workflow/i, relative);
+    assert.match(source, /primary requested outcome/i, relative);
+    assert.match(source, /list_workflows/i, relative);
+    assert.match(source, /incidental build\/test failures.*do not change/i, relative);
   }
 });
 

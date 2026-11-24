@@ -48,7 +48,8 @@ test("platform presets preserve history and publish stricter development and rea
     }
 
     for (const id of ["bug-fix", "feature-change", "refactor", "test-improvement", "build-fix", "release-change"]) {
-      assert.equal(store.getWorkflow(id).version, 2);
+      assert.equal(store.getWorkflow(id, 2).version, 2);
+      assert.equal(store.getWorkflow(id).version, 3);
       const workflow = store.getWorkflow(id).definition;
       assert.deepEqual(workflow.change, { mode: "code_change", delivery: "merge_request" });
       assert.ok(workflow.validation.requiredEvidence.includes("build"));
@@ -63,12 +64,167 @@ test("platform presets preserve history and publish stricter development and rea
 
     for (const id of ["investigation", "code-review"]) {
       assert.equal(store.getWorkflow(id, 2).version, 2);
-      assert.equal(store.getWorkflow(id).version, 3);
+      assert.equal(store.getWorkflow(id, 3).version, 3);
+      assert.equal(store.getWorkflow(id).version, 4);
       const workflow = store.getWorkflow(id).definition;
       assert.deepEqual(workflow.change, { mode: "readonly" });
       assert.equal(workflow.review.required, false);
       assert.equal(workflow.completion.require.includes("review_accepted"), false);
     }
+  });
+});
+
+test("selectable workflow catalog exposes latest semantic metadata and preserves legacy custom workflows", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    store.putWorkflow("custom-legacy", 1, structuredClone(base));
+    store.putWorkflow("custom-semantic", 1, {
+      ...structuredClone(base),
+      selection: {
+        summary: "First custom meaning",
+        useWhen: ["first version"],
+        notWhen: ["second version"],
+      },
+    } as typeof base);
+    store.putWorkflow("custom-semantic", 2, {
+      ...structuredClone(base),
+      selection: {
+        summary: "Optimize latency without changing external behavior",
+        useWhen: ["performance optimization is the primary requested outcome"],
+        notWhen: ["the user is asking to add a new feature"],
+      },
+    } as typeof base);
+
+    const catalog = store.listSelectableWorkflows();
+
+    assert.equal(
+      catalog.some((item) => item.workflowId === "code-fix-default"),
+      false,
+    );
+    assert.equal(catalog.filter((item) => item.workflowId === "custom-semantic").length, 1);
+
+    const investigation = catalog.find((item) => item.workflowId === "investigation");
+    assert.equal(investigation?.version, 4);
+    assert.equal(investigation?.changeMode, "readonly");
+    assert.equal(investigation?.selectionConfigured, true);
+    assert.match(investigation?.summary ?? "", /readonly analysis/i);
+
+    const bugFix = catalog.find((item) => item.workflowId === "bug-fix");
+    assert.equal(bugFix?.version, 3);
+    assert.equal(bugFix?.changeMode, "code_change");
+    assert.equal(bugFix?.selectionConfigured, true);
+    assert.match(bugFix?.summary ?? "", /incorrect existing/i);
+
+    const custom = catalog.find((item) => item.workflowId === "custom-semantic");
+    assert.equal(custom?.version, 2);
+    assert.equal(custom?.summary, "Optimize latency without changing external behavior");
+    assert.deepEqual(custom?.useWhen, ["performance optimization is the primary requested outcome"]);
+
+    const legacy = catalog.find((item) => item.workflowId === "custom-legacy");
+    assert.equal(legacy?.selectionConfigured, false);
+    assert.equal(legacy?.changeMode, base.change?.mode ?? null);
+    assert.deepEqual(legacy?.useWhen, []);
+    assert.deepEqual(legacy?.notWhen, []);
+  });
+});
+
+test("existing runtime database backfills new built-in workflow versions on reopen", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-upgrade-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    assert.equal(initial.getWorkflow("investigation").version, 4);
+    assert.equal(initial.getWorkflow("bug-fix").version, 3);
+    initial.close();
+
+    const legacyDb = new DatabaseSync(file);
+    legacyDb.exec(
+      [
+        "DELETE FROM work_workflows WHERE workflow_id IN ('investigation','code-review') AND version=4;",
+        "DELETE FROM work_workflows WHERE workflow_id IN ('bug-fix','feature-change','refactor','test-improvement','build-fix','release-change') AND version=3;",
+      ].join("\n"),
+    );
+    legacyDb.close();
+
+    const reopened = new WorkOrchestrationStore(file);
+    assert.equal(reopened.getWorkflow("investigation", 3).version, 3);
+    assert.equal(reopened.getWorkflow("investigation").version, 4);
+    assert.equal(reopened.getWorkflow("bug-fix", 2).version, 2);
+    assert.equal(reopened.getWorkflow("bug-fix").version, 3);
+    const catalog = reopened.listSelectableWorkflows();
+    assert.equal(catalog.find((item) => item.workflowId === "investigation")?.version, 4);
+    assert.equal(catalog.find((item) => item.workflowId === "bug-fix")?.version, 3);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("workflow selection metadata rejects malformed semantic guidance", () => {
+  withStore((store) => {
+    const base = store.getWorkflow("code-fix-default").definition;
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-selection", 1, {
+          ...structuredClone(base),
+          selection: {
+            summary: " ",
+            useWhen: ["valid"],
+            notWhen: [],
+          },
+        } as typeof base),
+      /INVALID_WORKFLOW/,
+    );
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-selection-array", 1, {
+          ...structuredClone(base),
+          selection: {
+            summary: "Valid summary",
+            useWhen: [""],
+            notWhen: [],
+          },
+        } as typeof base),
+      /INVALID_WORKFLOW/,
+    );
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-selection-summary-length", 1, {
+          ...structuredClone(base),
+          selection: {
+            summary: "x".repeat(501),
+            useWhen: [],
+            notWhen: [],
+          },
+        } as typeof base),
+      /INVALID_WORKFLOW/,
+    );
+    assert.throws(
+      () =>
+        store.putWorkflow("bad-selection-count", 1, {
+          ...structuredClone(base),
+          selection: {
+            summary: "Valid summary",
+            useWhen: Array.from({ length: 21 }, (_, index) => `condition-${index}`),
+            notWhen: [],
+          },
+        } as typeof base),
+      /INVALID_WORKFLOW/,
+    );
+
+    const withUnknownField = {
+      ...structuredClone(base),
+      selection: {
+        summary: "Normalized summary",
+        useWhen: ["primary outcome matches"],
+        notWhen: ["primary outcome does not match"],
+        internalNote: "must not leak through the catalog",
+      },
+    } as unknown as typeof base;
+    store.putWorkflow("normalized-selection", 1, withUnknownField);
+    const normalizedSelection = store.getWorkflow("normalized-selection").definition.selection;
+    assert.ok(normalizedSelection);
+    assert.equal("internalNote" in (normalizedSelection as object), false);
   });
 });
 test("workflow selection prefers explicit then repository default then platform default", () => {
