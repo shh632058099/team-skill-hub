@@ -2089,24 +2089,17 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
             );
 
             const readActivity = (after: number, remaining: number) => {
-              const refs = [
-                ...(detail.currentTask ? [{ task: detail.currentTask, role: "execution" as const }] : []),
-                ...(detail.reviewTask ? [{ task: detail.reviewTask, role: "review" as const }] : []),
-              ];
-              const seen = new Set<string>();
-              return refs
-                .filter(({ task }) => {
-                  if (seen.has(task.taskId)) return false;
-                  seen.add(task.taskId);
-                  return true;
-                })
-                .flatMap(({ task, role }) =>
-                  expertTaskStore
-                    .ownerEvents(task.taskId, principal.id, principal.tenantId, after, Math.max(1, remaining))
-                    .events.map((event) => ({ ...event, taskId: task.taskId, role })),
-                )
-                .sort((a, b) => a.eventId - b.eventId)
-                .slice(0, remaining);
+              const reviewTaskIds = new Set(
+                detail.attempts
+                  .map((attempt) => attempt.reviewTaskId)
+                  .filter((taskId): taskId is string => Boolean(taskId)),
+              );
+              return expertTaskStore
+                .ownerWorkEvents(workItemId, principal.id, principal.tenantId, after, Math.max(1, remaining))
+                .events.map((event) => ({
+                  ...event,
+                  role: reviewTaskIds.has(event.taskId) ? ("review" as const) : ("execution" as const),
+                }));
             };
 
             while (true) {

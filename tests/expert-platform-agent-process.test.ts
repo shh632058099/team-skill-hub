@@ -125,7 +125,7 @@ test("Codex JSONL model errors receive a fixed code without exposing response te
           timeoutMs: 5000,
           streamingBackend: "codex",
         }),
-      /EXECUTOR_PROCESS_FAILED/,
+      /MODEL_RATE_LIMITED/,
     );
   } finally {
     console.error = original;
@@ -150,7 +150,7 @@ test("Claude JSONL result errors receive a fixed code without exposing response 
           timeoutMs: 5000,
           streamingBackend: "claude",
         }),
-      /EXECUTOR_PROCESS_FAILED/,
+      /MODEL_RATE_LIMITED/,
     );
   } finally {
     console.error = original;

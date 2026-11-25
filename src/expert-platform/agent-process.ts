@@ -230,19 +230,21 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
     child.once("error", () => finish(new Error("EXECUTOR_PROCESS_FAILED")));
     child.once("close", (code) => {
       if (terminating) return;
+      const modelFailure = code === 0 ? null : (structuredErrorCode ?? classifyJsonlFailure(output) ?? null);
+      const classifiedFailure = code === 0 ? null : (modelFailure ?? classifyProcessFailure(stderrOutput));
       if (code !== 0) {
         console.error(
           JSON.stringify({
             event: "expert_worker.executor_process_failed",
             backend: options.streamingBackend ?? "generic",
             exitCode: code,
-            errorCode: structuredErrorCode ?? classifyJsonlFailure(output) ?? classifyProcessFailure(stderrOutput),
+            errorCode: classifiedFailure,
             stderrHint: sanitizedStderrHint(stderrOutput),
             ...(accessTarget(stderrOutput) ? { accessTarget: accessTarget(stderrOutput) } : {}),
           }),
         );
       }
-      finish(code === 0 ? undefined : new Error("EXECUTOR_PROCESS_FAILED"));
+      finish(code === 0 ? undefined : new Error(modelFailure ?? "EXECUTOR_PROCESS_FAILED"));
     });
   });
 }

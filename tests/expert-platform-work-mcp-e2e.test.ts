@@ -1139,6 +1139,46 @@ test("MCP Work API drives durable work through review, rework, authorization and
       },
     });
 
+    const primaryTask = tasks.get(taskId, "alice", "team-a");
+    const retryTask = tasks.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "mcp-work-1-retry-generation",
+      problem: "Retry the same DAG Agent node",
+      expertId: primaryTask.expertId,
+      repositoryId: primaryTask.repositoryId ?? undefined,
+      selectionMode: primaryTask.selectionMode,
+      deploymentId: primaryTask.deploymentId ?? undefined,
+      schemaVersion: primaryTask.schemaVersion,
+      deploymentSnapshot: primaryTask.deploymentSnapshot ?? undefined,
+      workItemId: primaryTask.workItemId ?? undefined,
+      workAttemptId: primaryTask.workAttemptId ?? undefined,
+      workflowId: primaryTask.workflowId ?? undefined,
+      workflowVersion: primaryTask.workflowVersion ?? undefined,
+      workspaceKey: primaryTask.workspaceKey ?? undefined,
+      executionKind: "agent",
+    });
+    tasks.requireWorker(retryTask.taskId, "worker-retry");
+    const retryClaim = tasks.claim("worker-retry", 1_050, 30_000, "ota")!;
+    assert.equal(retryClaim.taskId, retryTask.taskId);
+    tasks.recordActivity(retryClaim, "model.started", 1, "", 0, 1_100);
+    tasks.complete(retryClaim, "Retry generation complete", 1_150, { commitSha: "a".repeat(40) });
+
+    const retryActivity = await callMcp(mcpUrl, apiKey, 47, "wait_work", {
+      workItemId: workId,
+      afterEventId: baseline.nextEventId,
+      afterActivityEventId: baseline.nextActivityEventId,
+      timeoutMs: 0,
+    });
+    assert.ok(
+      retryActivity.activityEvents.some(
+        (event: { type?: string; role?: string; taskId?: string }) =>
+          event.type === "model.started" && event.role === "execution" && event.taskId === retryTask.taskId,
+      ),
+      "wait_work must follow activity from a retry-generation ExpertTask that is not attempt.taskId",
+    );
+    assert.ok(Number(retryActivity.nextActivityEventId) > Number(baseline.nextActivityEventId));
+
     const legacyWait = await callMcp(mcpUrl, apiKey, 43, "wait_work", {
       workItemId: workId,
       afterEventId: baseline.nextEventId,
@@ -1152,7 +1192,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const incrementalWait = callMcp(mcpUrl, apiKey, 41, "wait_work", {
       workItemId: workId,
       afterEventId: baseline.nextEventId,
-      afterActivityEventId: baseline.nextActivityEventId,
+      afterActivityEventId: retryActivity.nextActivityEventId,
       timeoutMs: 3_000,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1166,7 +1206,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
           event.type === "model.started" && event.role === "execution" && event.taskId === taskId,
       ),
     );
-    assert.ok(Number(incremental.nextActivityEventId) > Number(baseline.nextActivityEventId));
+    assert.ok(Number(incremental.nextActivityEventId) > Number(retryActivity.nextActivityEventId));
     assert.equal(incremental.followUp.required, true);
     assert.equal(incremental.followUp.tool, "wait_work");
     assert.deepEqual(incremental.followUp.arguments, {

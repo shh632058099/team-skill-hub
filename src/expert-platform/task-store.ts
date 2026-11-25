@@ -1293,6 +1293,44 @@ export class ExpertTaskStore {
     };
   }
 
+  /** Authenticated owner-scoped activity stream across every ExpertTask linked to one WorkItem. */
+  ownerWorkEvents(workItemId: string, principalId: string, scope: string, afterEventId = 0, limit = 50) {
+    const work = workItemId.trim();
+    if (
+      !work ||
+      !Number.isSafeInteger(afterEventId) ||
+      afterEventId < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    )
+      throw new Error("INVALID_EVENT_CURSOR");
+    const rows = this.db
+      .prepare(
+        `SELECT e.event_id,e.task_id,e.run_id,e.event_type,e.details,e.tool_code,e.count,e.created_at
+         FROM expert_events AS e
+         INNER JOIN expert_tasks AS t ON t.task_id=e.task_id
+         WHERE t.work_item_id=? AND t.principal_id=? AND t.scope=? AND e.event_id>?
+         ORDER BY e.event_id LIMIT ?`,
+      )
+      .all(work, principalId, scope, afterEventId, limit + 1) as Row[];
+    const selected = rows.slice(0, limit);
+    return {
+      events: selected.map((row) => ({
+        eventId: Number(row.event_id),
+        taskId: String(row.task_id),
+        runId: row.run_id == null ? null : String(row.run_id),
+        type: String(row.event_type),
+        details: row.details == null ? "" : String(row.details),
+        tool: row.tool_code == null ? null : String(row.tool_code),
+        count: row.count == null ? null : Number(row.count),
+        timestampMs: Number(row.created_at),
+      })),
+      nextEventId: selected.length ? Number(selected[selected.length - 1]!.event_id) : afterEventId,
+      hasMore: rows.length > limit,
+    };
+  }
+
   listByWorkAttempt(workAttemptId: string, principalId: string, scope: string): TaskRecord[] {
     const attempt = workAttemptId.trim();
     if (!attempt) throw new Error("INVALID_WORK_ATTEMPT");

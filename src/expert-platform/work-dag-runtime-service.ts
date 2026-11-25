@@ -4,6 +4,7 @@ import { subjectForResource, type DagGraph, type DagNode } from "./work-dag.js";
 import { WorkDagPlannerCoordinator, WorkDagScheduler } from "./work-dag-engine.js";
 import type { WorkDagNodeExecutionRecord, WorkDagProposalRecord } from "./work-dag-runtime.js";
 import { DEFAULT_WORK_DAG_PLANNING_POLICY } from "./work-dag-policy.js";
+import { executorFailureDisposition, executorRetryDelayMs, safeExecutorFailureCode } from "./executor-failure.js";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
@@ -455,11 +456,59 @@ export class WorkDagRuntime {
         }
       }
 
+      const executorFailureCode = safeExecutorFailureCode(failure.execution.result?.summary ?? "");
+      const executorDisposition = executorFailureDisposition(failure.execution.result?.summary ?? "");
+      if (executorDisposition === "timeout") {
+        return this.block(
+          workItemId,
+          principalId,
+          scope,
+          "DAG_EXECUTOR_TIMEOUT",
+          JSON.stringify({
+            code: executorFailureCode,
+            nodeId: failure.node.id,
+            nodeKind: failure.node.kind,
+            summary: failure.execution.result?.summary ?? null,
+          }),
+          now,
+          "dag_execution",
+          failure.execution.nodeExecutionId,
+        );
+      }
+      if (executorDisposition === "non_retryable") {
+        return this.block(
+          workItemId,
+          principalId,
+          scope,
+          "DAG_EXECUTOR_FAILED",
+          JSON.stringify({
+            code: executorFailureCode,
+            nodeId: failure.node.id,
+            nodeKind: failure.node.kind,
+            summary: failure.execution.result?.summary ?? null,
+          }),
+          now,
+          "dag_execution",
+          failure.execution.nodeExecutionId,
+        );
+      }
+
       const executorRetry =
         failure.node.kind === "agent" || (failure.node.kind === "review" && work.status !== "rework");
       if (executorRetry) {
+        if (executorDisposition === "transient") {
+          const retryAfter =
+            (failure.execution.finishedAt ?? failure.execution.updatedAt) +
+            executorRetryDelayMs(failure.execution.generation);
+          if (now < retryAfter) return false;
+        }
         try {
-          this.store.retryDagNode(workItemId, failure.node.id, "executor_failure", now);
+          this.store.retryDagNode(
+            workItemId,
+            failure.node.id,
+            executorFailureCode ? "executor_failure:" + executorFailureCode : "executor_failure",
+            now,
+          );
           return true;
         } catch (error) {
           if (

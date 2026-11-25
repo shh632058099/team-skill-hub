@@ -2,6 +2,7 @@ import type { Claim } from "./task-store.js";
 import type { VerificationEvidenceResult } from "./verification-policy.js";
 import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
 import { agentFailureReason, type AgentExecutionOutcome } from "./agent-execution-outcome.js";
+import { safeExecutorFailureCode } from "./executor-failure.js";
 import type { PublicationOperationLease, PublicationOperationResult } from "./work-publication-store.js";
 import type { ChangeRequestOperationLease, ChangeRequestOperationResult } from "./work-change-request-store.js";
 
@@ -121,18 +122,23 @@ export async function runRemoteWorkerOnce(
       execution = await executor(claim, controller.signal);
       await stage("execution.completed");
     } catch (error) {
-      await stage("execution.failed", "EXECUTION_FAILED");
       if (leaseLost) throw leaseLost;
       if (
         cancellationRequested &&
         error instanceof Error &&
         (error.message === "EXECUTOR_CANCELLED" || error.message === "CODEX_CANCELLED")
       ) {
+        await stage("execution.failed", "TASK_CANCELLED");
         await client.failTask(claim, "TASK_CANCELLED");
         return true;
       }
       const message = error instanceof Error ? error.message : "UNKNOWN_ERROR";
-      const errorCode = message.split(/[:\\s]/, 1)[0] ?? "UNKNOWN_ERROR";
+      const errorCode = message.split(/[:\s]/, 1)[0] ?? "UNKNOWN_ERROR";
+      const safeExecutorCode = safeExecutorFailureCode(message);
+      const forwardedCode = DETERMINISTIC_WORKSPACE_ERRORS.has(errorCode)
+        ? errorCode
+        : (safeExecutorCode ?? "EXECUTION_FAILED");
+      await stage("execution.failed", forwardedCode);
       console.error(
         JSON.stringify({
           event: "expert_worker.execution_failed",
@@ -141,7 +147,7 @@ export async function runRemoteWorkerOnce(
           errorCode: /^[A-Z0-9_]{1,80}$/.test(errorCode) ? errorCode : "UNCLASSIFIED",
         }),
       );
-      await client.failTask(claim, DETERMINISTIC_WORKSPACE_ERRORS.has(errorCode) ? errorCode : "EXECUTION_FAILED");
+      await client.failTask(claim, forwardedCode);
       return true;
     }
     if (leaseLost) throw leaseLost;

@@ -507,6 +507,86 @@ test("agent executor failure retries the same logical node generation before rep
   }
 });
 
+test("transient model failure uses durable backoff before retrying the same agent node", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    let calls = 0;
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      async execute() {
+        calls++;
+        return calls === 1
+          ? { status: "failed", summary: "MODEL_REQUEST_FAILED" }
+          : {
+              status: "succeeded",
+              evidence: [{ type: "expert_result", passed: true, subjectRevision: null, verifierIdentity: "fake" }],
+            };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(f.store, [adapter]),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 100), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    const failed = f.store.listDagExecutions(f.workId).at(-1)!;
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", failed.finishedAt! + 4_999), false);
+    assert.equal(f.store.listDagExecutions(f.workId).length, 1);
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", failed.finishedAt! + 5_000), true);
+    let executions = f.store.listDagExecutions(f.workId);
+    assert.deepEqual(
+      executions.map((item) => [item.generation, item.state]),
+      [
+        [1, "failed"],
+        [2, "pending"],
+      ],
+    );
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", failed.finishedAt! + 5_001), true);
+    executions = f.store.listDagExecutions(f.workId);
+    assert.equal(executions.at(-1)?.state, "succeeded");
+    assert.equal(calls, 2);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("executor hard timeout blocks immediately instead of blindly retrying the agent node", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    let calls = 0;
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      async execute() {
+        calls++;
+        return { status: "failed", summary: "EXECUTOR_TIMEOUT" };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(f.store, [adapter]),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 100), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 102), true);
+
+    const work = f.store.getWorkInternal(f.workId);
+    assert.equal(work.status, "blocked");
+    assert.equal(work.blockedReason, "DAG_EXECUTOR_TIMEOUT");
+    assert.match(work.blockedContext ?? "", /EXECUTOR_TIMEOUT/);
+    assert.equal(calls, 1);
+    assert.equal(f.store.listDagExecutions(f.workId).length, 1);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("review executor failure blocks after retry exhaustion instead of being replanned as review findings", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dag-review-executor-failure-"));
   const store = new WorkOrchestrationStore(join(dir, "runtime.db"));

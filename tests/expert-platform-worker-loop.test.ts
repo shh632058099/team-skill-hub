@@ -96,6 +96,26 @@ test("executor failure is reported to Hub with generic reason", async () => {
   assert.equal(client.completed, undefined);
 });
 
+test("worker forwards safe executor failure classifications to Hub", async () => {
+  for (const code of [
+    "MODEL_REQUEST_FAILED",
+    "MODEL_RATE_LIMITED",
+    "MODEL_NETWORK_FAILED",
+    "EXECUTOR_TIMEOUT",
+    "AUTHENTICATION_FAILED",
+  ]) {
+    const client = new FakeClient(claim);
+    assert.equal(
+      await runRemoteWorkerOnce(client, "worker-1", "ota", async () => {
+        throw new Error(code + ":private detail must not be forwarded");
+      }),
+      true,
+    );
+    assert.equal(client.failed, code);
+    assert.equal(client.completed, undefined);
+  }
+});
+
 test("semantic blocked agent outcome fails the ExpertTask instead of completing it", async () => {
   const client = new FakeClient(claim);
   assert.equal(
