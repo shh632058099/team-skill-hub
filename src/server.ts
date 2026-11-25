@@ -37,12 +37,20 @@ import { McpWorkAdapter } from "./expert-platform/mcp-work-adapter.js";
 import { WorkPublicationStore } from "./expert-platform/work-publication-store.js";
 import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
 import { WorkDagPlannerCoordinator, WorkDagScheduler } from "./expert-platform/work-dag-engine.js";
+import {
+  WorkDagPolicyContextResolver,
+  createWorkDagOrganizationPolicyProviderFromEnv,
+} from "./expert-platform/work-dag-policy-context.js";
 import { WorkDagSeedPlanner } from "./expert-platform/work-dag-planners.js";
 import { createConfiguredWorkDagPlanner } from "./expert-platform/work-dag-model-client.js";
 import { WorkDagRuntime } from "./expert-platform/work-dag-runtime-service.js";
 import { createExpertTaskDagAdapters } from "./expert-platform/work-dag-expert-adapters.js";
 import { createControlDagAdapters } from "./expert-platform/work-dag-control-adapters.js";
 import { createDeliveryDagAdapters } from "./expert-platform/work-dag-delivery-adapters.js";
+import {
+  ExternalActionRegistry,
+  createExternalActionDagAdapters,
+} from "./expert-platform/work-dag-external-adapters.js";
 import { normalizeSourceRepository } from "./expert-platform/source-repository.js";
 import { RUNTIME_PROFILE_IDS } from "./expert-platform/runtime-profile-policy.js";
 import {
@@ -151,6 +159,7 @@ export async function startServer(
   adminConfigStore?: AdminConfigStore,
   apiKeyStore?: ManagedApiKeyStore,
   apiKeyAuth?: ApiKeyAuthenticationProvider,
+  externalActions: ExternalActionRegistry = new ExternalActionRegistry(),
 ) {
   const restApiVersion = "1";
   const adminPrincipal = {
@@ -272,21 +281,36 @@ export async function startServer(
       workPublicationStore: publications,
       workChangeRequestStore: changeRequests,
       workOrchestrator: orchestrator,
+      workDagRuntime: null,
       mcpWorkAdapter: new McpWorkAdapter(work, orchestrator),
     };
     const dagScheduler = new WorkDagScheduler(work, [
       ...createExpertTaskDagAdapters(work, tasks, dispatch),
       ...createControlDagAdapters(work, publications),
       ...createDeliveryDagAdapters(work, publications, changeRequests, orchestrator),
+      ...createExternalActionDagAdapters(externalActions),
     ]);
     const configuredDagPlanner = createConfiguredWorkDagPlanner(process.env);
     const dagPlanner = configuredDagPlanner?.planner ?? new WorkDagSeedPlanner();
     const dagPlannerTimeoutMs = configuredDagPlanner?.timeoutMs ?? 30_000;
     const dagRuntime = new WorkDagRuntime(
       work,
-      new WorkDagPlannerCoordinator(work, dagPlanner, dagPlannerTimeoutMs),
+      new WorkDagPlannerCoordinator(
+        work,
+        dagPlanner,
+        dagPlannerTimeoutMs,
+        new WorkDagPolicyContextResolver(
+          work,
+          dispatch,
+          experts,
+          tasks,
+          externalActions.listPolicies(),
+          createWorkDagOrganizationPolicyProviderFromEnv(process.env),
+        ),
+      ),
       dagScheduler,
     );
+    mcpExpertRuntime.workDagRuntime = dagRuntime;
     workRuntimeResources = { work, publications, changeRequests, tasks, experts, orchestrator, dagRuntime };
     app.addHook("onClose", async () => {
       if (workReconcileTimer) clearInterval(workReconcileTimer);
@@ -1137,6 +1161,9 @@ export async function startServer(
         ...(body.reason?.trim() ? { reason: body.reason.trim() } : {}),
         actorPrincipalId: adminPrincipal.id,
       });
+      if (owner.orchestrationEngine === "dynamic-dag") {
+        await runtime.dagRuntime.reconcileUntilBoundary(request.params.id, owner.principalId, owner.scope);
+      }
       return adminWorkDetail(request.params.id);
     } catch (error) {
       return adminWorkError(error, reply);
@@ -1149,7 +1176,11 @@ export async function startServer(
     try {
       const runtime = requireWorkRuntime();
       const owner = runtime.work.getWorkInternal(request.params.id);
-      runtime.orchestrator.reconcileWork(request.params.id, owner.principalId, owner.scope);
+      if (owner.orchestrationEngine === "dynamic-dag") {
+        await runtime.dagRuntime.reconcileUntilBoundary(request.params.id, owner.principalId, owner.scope);
+      } else {
+        runtime.orchestrator.reconcileWork(request.params.id, owner.principalId, owner.scope);
+      }
       return adminWorkDetail(request.params.id);
     } catch (error) {
       return adminWorkError(error, reply);
@@ -1163,6 +1194,9 @@ export async function startServer(
       const runtime = requireWorkRuntime();
       const owner = runtime.work.getWorkInternal(request.params.id);
       runtime.orchestrator.resumeWork(request.params.id, owner.principalId, owner.scope, owner.stateRevision);
+      if (owner.orchestrationEngine === "dynamic-dag") {
+        await runtime.dagRuntime.reconcileUntilBoundary(request.params.id, owner.principalId, owner.scope);
+      }
       return adminWorkDetail(request.params.id);
     } catch (error) {
       return adminWorkError(error, reply);

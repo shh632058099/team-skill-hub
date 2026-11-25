@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-service.js";
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
@@ -10,6 +11,39 @@ import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestratio
 import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
 import { WorkChangeRequestStore } from "../src/expert-platform/work-change-request-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
+
+function markPreCutoverLegacy(dbPath: string, workItemId: string) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.prepare("UPDATE work_items SET orchestration_engine='legacy-single-node' WHERE work_item_id=?").run(workItemId);
+  } finally {
+    db.close();
+  }
+}
+
+function submitPreCutoverLegacy(
+  orchestrator: WorkOrchestrator,
+  dbPath: string,
+  input: Parameters<WorkOrchestrator["stageWork"]>[0],
+  now = Date.now(),
+) {
+  const staged = orchestrator.stageWork(input, now);
+  markPreCutoverLegacy(dbPath, staged.work.workItemId);
+  return orchestrator.reconcileWork(staged.work.workItemId, input.principalId, input.scope, now);
+}
+
+function legacyFacade(orchestrator: WorkOrchestrator, dbPath: string): WorkOrchestrator {
+  return new Proxy(orchestrator, {
+    get(target, property) {
+      if (property === "submitWork") {
+        return (input: Parameters<WorkOrchestrator["stageWork"]>[0], now?: number) =>
+          submitPreCutoverLegacy(target, dbPath, input, now);
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as WorkOrchestrator;
+}
 
 function fixture(workerAvailable?: (workerId: string, now: number) => boolean, enableChangeRequests = false) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestrator-"));
@@ -37,15 +71,25 @@ function fixture(workerAvailable?: (workerId: string, now: number) => boolean, e
     active: true,
   });
   const dispatch = new ExpertDispatchService(experts, tasks);
-  const orchestrator = new WorkOrchestrator(work, tasks, dispatch, workerAvailable, publications, changeRequests);
+  const dynamicOrchestrator = new WorkOrchestrator(
+    work,
+    tasks,
+    dispatch,
+    workerAvailable,
+    publications,
+    changeRequests,
+  );
+  const orchestrator = legacyFacade(dynamicOrchestrator, db);
   return {
     dir,
+    db,
     experts,
     tasks,
     work,
     publications,
     changeRequests,
     orchestrator,
+    dynamicOrchestrator,
     close() {
       publications.close();
       changeRequests?.close();
@@ -81,6 +125,7 @@ test("orchestrator maintains a read-only shadow DAG projection without changing 
       100,
     );
     assert.equal(staged.work.currentRequirementRevision, 1);
+    markPreCutoverLegacy(f.db, staged.work.workItemId);
     const initial = f.work.getShadowDag(staged.work.workItemId);
     assert.ok(initial);
     assert.equal(initial!.graph.nodes.length, 0);
@@ -110,7 +155,7 @@ test("dynamic-dag workflow is staged for DAG runtime and legacy reconciler does 
       completion: { require: ["no_unresolved_blocker"] },
       graph: { mode: "dynamic-dag" },
     });
-    const detail = f.orchestrator.submitWork(
+    const detail = f.dynamicOrchestrator.submitWork(
       {
         ...submission,
         idempotencyKey: "dynamic-owned",
@@ -130,6 +175,30 @@ test("dynamic-dag workflow is staged for DAG runtime and legacy reconciler does 
   }
 });
 
+test("every post-cutover Work is owned by DAG runtime even when Workflow graph mode is legacy single-node", () => {
+  const f = fixture();
+  try {
+    assert.equal(f.work.getWorkflow("investigation").definition.graph.mode, "single-node");
+    const detail = f.dynamicOrchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "cutover-investigation",
+        workflowId: "investigation",
+      },
+      100,
+    );
+    assert.equal(detail.work.orchestrationEngine, "dynamic-dag");
+    assert.equal(detail.work.status, "queued");
+    assert.equal(detail.attempts.length, 0);
+
+    const reconciled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 110);
+    assert.equal(reconciled.work.status, "queued");
+    assert.equal(reconciled.attempts.length, 0);
+  } finally {
+    f.close();
+  }
+});
+
 test("dynamic get_work exposes one authoritative completion gate from DAG evidence", () => {
   const f = fixture();
   try {
@@ -141,7 +210,7 @@ test("dynamic get_work exposes one authoritative completion gate from DAG eviden
       completion: { require: ["required_evidence_passed", "no_unresolved_blocker"] },
       graph: { mode: "dynamic-dag" },
     });
-    const detail = f.orchestrator.submitWork(
+    const detail = f.dynamicOrchestrator.submitWork(
       {
         ...submission,
         idempotencyKey: "dynamic-gate",
@@ -221,7 +290,7 @@ test("dynamic-dag cancel fences DAG execution and cancels correlated verificatio
       completion: { require: ["no_unresolved_blocker"] },
       graph: { mode: "dynamic-dag" },
     });
-    const detail = f.orchestrator.submitWork(
+    const detail = f.dynamicOrchestrator.submitWork(
       {
         ...submission,
         idempotencyKey: "dynamic-cancel",
@@ -307,7 +376,7 @@ test("dynamic-dag cancel preserves an in-flight publication push as external out
       completion: { require: ["no_unresolved_blocker"] },
       graph: { mode: "dynamic-dag" },
     });
-    const detail = f.orchestrator.submitWork(
+    const detail = f.dynamicOrchestrator.submitWork(
       {
         ...submission,
         idempotencyKey: "dynamic-push-cancel",
@@ -471,7 +540,7 @@ test("dynamic-dag resume only clears blocked state and leaves execution to DAG r
       completion: { require: ["no_unresolved_blocker"] },
       graph: { mode: "dynamic-dag" },
     });
-    const detail = f.orchestrator.submitWork(
+    const detail = f.dynamicOrchestrator.submitWork(
       {
         ...submission,
         idempotencyKey: "dynamic-resume",
@@ -669,7 +738,7 @@ test("code-change work auto-routes Claude submission to the Claude write deploym
       publications,
     );
 
-    const detail = orchestrator.submitWork({
+    const detail = submitPreCutoverLegacy(orchestrator, db, {
       principalId: "alice",
       scope: "team-a",
       idempotencyKey: "claude-auto-code-change",
@@ -748,7 +817,7 @@ test("code-change blocks before ExpertTask dispatch when concrete build and unit
       undefined,
       publications,
     );
-    const detail = orchestrator.submitWork({
+    const detail = submitPreCutoverLegacy(orchestrator, db, {
       principalId: "alice",
       scope: "team-a",
       idempotencyKey: "verification-policy-missing",
@@ -866,7 +935,7 @@ test("repository verification policy is pinned into code-change task and makes i
       undefined,
       publications,
     );
-    const detail = orchestrator.submitWork({
+    const detail = submitPreCutoverLegacy(orchestrator, db, {
       principalId: "alice",
       scope: "team-a",
       idempotencyKey: "repository-verification-policy",
@@ -914,7 +983,7 @@ test("repository verification policy is pinned into code-change task and makes i
       },
       500,
     );
-    const readonly = orchestrator.submitWork({
+    const readonly = submitPreCutoverLegacy(orchestrator, db, {
       principalId: "alice",
       scope: "team-a",
       idempotencyKey: "readonly-repository-verification-policy",
@@ -1068,6 +1137,7 @@ test("orchestrator respects durable foreign claim and only dispatches after the 
   const f = fixture();
   try {
     const work = f.work.createOrReuseWork({ ...submission, idempotencyKey: "work-foreign-claim" }, 100);
+    markPreCutoverLegacy(f.db, work.workItemId);
     f.work.claimWorkForOrchestration(work.workItemId, "other-orchestrator", 200, 1_000);
 
     assert.throws(
@@ -1089,6 +1159,7 @@ test("reconciliation recovers an attempt created before its deterministic task l
   const f = fixture();
   try {
     const work = f.work.createOrReuseWork(submission);
+    markPreCutoverLegacy(f.db, work.workItemId);
     const attempt = f.work.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
       reason: "initial",
       expertId: "ota",
@@ -1164,7 +1235,10 @@ test("startup reconciliation recovers durable work after stores reopen", () => {
       active: true,
     });
     let orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
-    const detail = orchestrator.submitWork({ ...submission, idempotencyKey: "work-restart-reconcile" });
+    const detail = submitPreCutoverLegacy(orchestrator, db, {
+      ...submission,
+      idempotencyKey: "work-restart-reconcile",
+    });
     const claim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
     tasks.complete(claim, "completed while hub is restarting", 2_000, { commitSha: "d".repeat(40) });
 
@@ -1213,7 +1287,7 @@ test("startup reconciliation recovers a durable rework request created before it
       active: true,
     });
     let orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
-    const detail = orchestrator.submitWork({ ...submission, idempotencyKey: "work-rework-restart" });
+    const detail = submitPreCutoverLegacy(orchestrator, db, { ...submission, idempotencyKey: "work-rework-restart" });
     const taskClaim = tasks.claim("worker-a", 1_000, 30_000, "ota")!;
     tasks.complete(taskClaim, "initial result", 2_000, { commitSha: "e".repeat(40) });
     const waiting = orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 3_000);

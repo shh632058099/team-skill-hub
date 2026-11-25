@@ -1,5 +1,6 @@
 import type { WorkItemRecord, WorkOrchestrationStore } from "./work-orchestration-store.js";
-import type { DagGraph, DagKind, DagNode } from "./work-dag.js";
+import { sourceEventResourceIdentity, type DagGraph, type DagKind, type DagNode } from "./work-dag.js";
+import { workflowOnlyDagPolicyContext, type WorkDagPolicyContext } from "./work-dag-policy-context.js";
 import type { DagNodeResult, WorkDagNodeExecutionRecord, WorkDagProposalRecord } from "./work-dag-runtime.js";
 
 export interface WorkDagPlannerContext {
@@ -7,15 +8,18 @@ export interface WorkDagPlannerContext {
     WorkItemRecord,
     | "workItemId"
     | "title"
-    | "description"
     | "status"
     | "workflowId"
     | "workflowVersion"
     | "currentSubjectRevision"
     | "repositoryId"
     | "activeWorkAttemptId"
-  >;
+  > & {
+    sourceEventResource: string | null;
+  };
   workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>;
+  requirementSnapshot: ReturnType<WorkOrchestrationStore["getRequirementSnapshot"]>;
+  policyContext: WorkDagPolicyContext;
   runtime: ReturnType<WorkOrchestrationStore["getDagContext"]>;
   frozen: ReturnType<WorkOrchestrationStore["getDagPlannerInput"]>["frozen"];
   frozenDigest: string;
@@ -40,11 +44,16 @@ function boundedErrorCode(error: unknown): string {
   return /^[A-Z0-9_]{1,80}$/.test(code) ? code : "PLANNER_FAILED";
 }
 
+export interface WorkDagPolicyContextProvider {
+  resolve(work: WorkItemRecord, workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>): WorkDagPolicyContext;
+}
+
 export class WorkDagPlannerCoordinator {
   constructor(
     private readonly store: WorkOrchestrationStore,
     private readonly planner: WorkDagPlanner,
     private readonly plannerTimeoutMs = 30_000,
+    private readonly policyContextProvider?: WorkDagPolicyContextProvider,
   ) {
     if (!Number.isSafeInteger(plannerTimeoutMs) || plannerTimeoutMs < 1 || plannerTimeoutMs > 10 * 60_000) {
       throw new Error("INVALID_PLANNER_TIMEOUT");
@@ -57,22 +66,54 @@ export class WorkDagPlannerCoordinator {
     reasonCode: string,
     now = Date.now(),
   ): Promise<WorkDagProposalRecord | null> {
-    const work = this.store.getWork(workItemId, principalId, scope);
+    let work = this.store.getWork(workItemId, principalId, scope);
+    let workflow = this.store.getWorkflow(work.workflowId, work.workflowVersion);
+    let requirementSnapshot = this.store.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+    let policyContext =
+      this.policyContextProvider?.resolve(work, workflow) ??
+      workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition);
+
+    if (
+      policyContext.digest !== requirementSnapshot.policyContextDigest &&
+      (!work.activeWorkAttemptId || !requirementSnapshot.policyContextDigest)
+    ) {
+      const bound = this.store.bindRequirementPolicyContext(
+        workItemId,
+        principalId,
+        scope,
+        work.stateRevision,
+        work.currentRequirementRevision,
+        policyContext,
+        now,
+      );
+      work = bound.work;
+      requirementSnapshot = bound.snapshot;
+      workflow = this.store.getWorkflow(work.workflowId, work.workflowVersion);
+      policyContext =
+        this.policyContextProvider?.resolve(work, workflow) ??
+        workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition);
+    }
+
     const input = this.store.getDagPlannerInput(workItemId);
     const context: WorkDagPlannerContext = {
       work: {
         workItemId: work.workItemId,
         title: work.title,
-        description: work.description,
         status: work.status,
         workflowId: work.workflowId,
         workflowVersion: work.workflowVersion,
         currentSubjectRevision: work.currentSubjectRevision,
         repositoryId: work.repositoryId,
         activeWorkAttemptId: work.activeWorkAttemptId,
+        sourceEventResource:
+          work.sourceScope && work.sourceRef
+            ? sourceEventResourceIdentity(work.workItemId, work.sourceType, work.sourceScope, work.sourceRef)
+            : null,
       },
       frozen: input.frozen,
-      workflow: this.store.getWorkflow(work.workflowId, work.workflowVersion),
+      workflow,
+      requirementSnapshot,
+      policyContext,
       runtime: this.store.getDagContext(workItemId),
       frozenDigest: input.digest,
       digest: input.digest,
@@ -123,6 +164,7 @@ export class WorkDagPlannerCoordinator {
         plannerInputDigest: input.digest,
         reasonCode,
         graph,
+        policyContext,
       },
       now,
     );
@@ -146,6 +188,7 @@ export interface WorkDagExecutorAdapter {
   kind: DagKind;
   capability?: string;
   correlationRef?(context: WorkDagExecutionContext): string | null;
+  canReconcile?(node: DagNode): boolean;
   execute(context: WorkDagExecutionContext): Promise<DagNodeResult | DagDeferredExecution>;
   reconcile?(context: WorkDagExecutionContext): Promise<DagNodeResult | null>;
 }
@@ -181,6 +224,10 @@ export class WorkDagScheduler {
     );
   }
 
+  private adapterCanReconcile(adapter: WorkDagExecutorAdapter | undefined, node: DagNode): boolean {
+    return Boolean(adapter?.reconcile) && (adapter?.canReconcile?.(node) ?? true);
+  }
+
   async runOne(
     workItemId: string,
     principalId: string,
@@ -188,14 +235,15 @@ export class WorkDagScheduler {
     ownerId: string,
     now = Date.now(),
     signal = new AbortController().signal,
+    preferredNodeId?: string,
   ): Promise<boolean> {
     const work = this.store.getWork(workItemId, principalId, scope);
     if (work.currentDagRevision < 1 || ["completed", "failed", "cancelled", "blocked"].includes(work.status)) {
       return false;
     }
     const evaluation = this.store.evaluateDagCompletion(workItemId);
-    const nodeId = evaluation.readyNodeIds[0];
-    if (!nodeId) return false;
+    const nodeId = preferredNodeId ?? evaluation.readyNodeIds[0];
+    if (!nodeId || !evaluation.readyNodeIds.includes(nodeId)) return false;
     const revision = this.store.getDagRevision(workItemId, work.currentDagRevision);
     const node = revision.graph.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) throw new Error("DAG_NODE_NOT_FOUND");
@@ -213,24 +261,34 @@ export class WorkDagScheduler {
       now,
       this.claimLeaseMs,
     );
-    let running = this.store.startDagNodeExecution(claimed.nodeExecutionId, ownerId, claimed.fence, now);
-    const baseContext: WorkDagExecutionContext = {
+    let claimedWithCorrelation = claimed;
+    const claimedContext: WorkDagExecutionContext = {
       work: this.store.getWork(workItemId, principalId, scope),
       node,
-      execution: running,
+      execution: claimedWithCorrelation,
       dagRevision: work.currentDagRevision,
       signal,
     };
-    const correlationRef = adapter.correlationRef?.(baseContext) ?? null;
+    const correlationRef = adapter.correlationRef?.(claimedContext) ?? null;
     if (correlationRef) {
-      running = this.store.setDagExecutionExternalRef(
-        running.nodeExecutionId,
+      claimedWithCorrelation = this.store.setDagExecutionExternalRef(
+        claimedWithCorrelation.nodeExecutionId,
         ownerId,
-        running.fence,
+        claimedWithCorrelation.fence,
         correlationRef,
         now,
       );
     }
+    const running = this.store.startDagNodeExecution(
+      claimedWithCorrelation.nodeExecutionId,
+      ownerId,
+      claimedWithCorrelation.fence,
+      now,
+    );
+    const baseContext: WorkDagExecutionContext = {
+      ...claimedContext,
+      execution: running,
+    };
     let result: DagNodeResult | DagDeferredExecution;
     try {
       result = await adapter.execute({
@@ -274,45 +332,72 @@ export class WorkDagScheduler {
       return false;
     }
     const revision = this.store.getDagRevision(workItemId, work.currentDagRevision);
-    const candidate = this.store
-      .listDagExecutions(workItemId)
+    const executions = this.store.listDagExecutions(workItemId);
+    const candidate = executions
       .filter(
         (execution) =>
           execution.state === "claimed" && revision.graph.nodes.some((node) => node.id === execution.nodeId),
       )
       .sort((a, b) => a.createdAt - b.createdAt)[0];
-    if (!candidate) return false;
-    const claimed = this.store.claimDagExecutionForStartRecovery(
+    if (!candidate) {
+      const expiredRunning = executions
+        .filter(
+          (execution) =>
+            execution.state === "running" &&
+            (execution.claimLeaseUntil === null || execution.claimLeaseUntil <= now) &&
+            revision.graph.nodes.some((node) => node.id === execution.nodeId),
+        )
+        .sort((a, b) => a.createdAt - b.createdAt);
+      for (const indeterminate of expiredRunning) {
+        const node = revision.graph.nodes.find((item) => item.id === indeterminate.nodeId);
+        const adapter = node ? this.adapterFor(node) : undefined;
+        if (indeterminate.externalRef !== null && node && this.adapterCanReconcile(adapter, node)) continue;
+        this.store.markDagExecutionOutcomeUnknown(
+          indeterminate.nodeExecutionId,
+          indeterminate.externalRef ?? "unknown:" + indeterminate.idempotencyKey,
+          "DAG_EXTERNAL_OUTCOME_UNKNOWN_AFTER_RESTART",
+          now,
+        );
+        return true;
+      }
+      return false;
+    }
+    let claimed = this.store.claimDagExecutionForStartRecovery(
       candidate.nodeExecutionId,
       ownerId,
       now,
       this.claimLeaseMs,
     );
     if (!claimed) return false;
-    const node = revision.graph.nodes.find((item) => item.id === claimed.nodeId);
+    const node = revision.graph.nodes.find((item) => item.id === claimed!.nodeId);
     if (!node) return false;
     const adapter = this.adapterFor(node);
     if (!adapter) throw new Error("DAG_EXECUTOR_NOT_FOUND");
 
-    let running = this.store.startDagNodeExecution(claimed.nodeExecutionId, ownerId, claimed.fence, now);
-    const baseContext: WorkDagExecutionContext = {
+    const claimedContext: WorkDagExecutionContext = {
       work: this.store.getWork(workItemId, principalId, scope),
       node,
-      execution: running,
+      execution: claimed,
       dagRevision: work.currentDagRevision,
       signal,
     };
-    const correlationRef = adapter.correlationRef?.(baseContext) ?? null;
-    if (correlationRef) {
-      running = this.store.setDagExecutionExternalRef(
-        running.nodeExecutionId,
-        ownerId,
-        running.fence,
-        correlationRef,
-        now,
-      );
+    if (claimed.externalRef === null) {
+      const correlationRef = adapter.correlationRef?.(claimedContext) ?? null;
+      if (correlationRef) {
+        claimed = this.store.setDagExecutionExternalRef(
+          claimed.nodeExecutionId,
+          ownerId,
+          claimed.fence,
+          correlationRef,
+          now,
+        );
+      }
     }
-
+    const running = this.store.startDagNodeExecution(claimed.nodeExecutionId, ownerId, claimed.fence, now);
+    const baseContext: WorkDagExecutionContext = {
+      ...claimedContext,
+      execution: running,
+    };
     let result: DagNodeResult | DagDeferredExecution;
     try {
       result = await adapter.execute({ ...baseContext, execution: running });
@@ -361,6 +446,10 @@ export class WorkDagScheduler {
       )
       .sort((a, b) => a.createdAt - b.createdAt || a.nodeExecutionId.localeCompare(b.nodeExecutionId));
     for (const candidate of candidates) {
+      const node = revision.graph.nodes.find((item) => item.id === candidate.nodeId);
+      if (!node) continue;
+      const adapter = this.adapterFor(node);
+      if (!adapter || !this.adapterCanReconcile(adapter, node) || !adapter.reconcile) continue;
       const running = this.store.claimDagExecutionForReconciliation(
         candidate.nodeExecutionId,
         ownerId,
@@ -368,10 +457,6 @@ export class WorkDagScheduler {
         this.claimLeaseMs,
       );
       if (!running) continue;
-      const node = revision.graph.nodes.find((item) => item.id === running.nodeId);
-      if (!node) continue;
-      const adapter = this.adapterFor(node);
-      if (!adapter?.reconcile) continue;
       const result = await adapter.reconcile({
         work,
         node,

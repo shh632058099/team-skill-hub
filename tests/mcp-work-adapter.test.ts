@@ -83,12 +83,13 @@ test("MCP adapter uses session scope plus idempotency key as stable source ident
   }
 });
 
-test("MCP terminal source signal safely cancels active work through orchestrator", () => {
+test("MCP terminal source signal cancels a post-cutover Dynamic DAG Work before execution starts", () => {
   const f = fixture();
   try {
     const detail = f.adapter.submit(input("work-terminal"), context, 1000);
-    const claim = f.tasks.claim("worker-a", 1500, 30000, "ota")!;
-    assert.equal(claim.taskId, detail.currentTask!.taskId);
+    assert.equal(detail.work.orchestrationEngine, "dynamic-dag");
+    assert.equal(detail.work.status, "queued");
+    assert.equal(detail.currentTask, null);
     const cancelled = f.adapter.updateSource(
       detail.work.workItemId,
       { state: "terminal", detail: "user closed source", sourceControlToken: detail.sourceControlToken },
@@ -96,8 +97,7 @@ test("MCP terminal source signal safely cancels active work through orchestrator
       2000,
     );
     assert.equal(cancelled.work.status, "cancelled");
-    assert.equal(cancelled.currentTask!.status, "running");
-    assert.equal(cancelled.currentTask!.cancellationRequested, true);
+    assert.equal(cancelled.currentTask, null);
     const obs = f.work.listSourceObservations(detail.work.workItemId).at(-1)!;
     assert.equal(obs.state, "terminal");
     assert.equal(obs.reconciliationAction, "cancel");
@@ -146,7 +146,7 @@ test("idempotent MCP submit retries keep a bounded set of source control capabil
       unbound,
       1200,
     );
-    assert.equal(active.work.status, "running");
+    assert.equal(active.work.status, "queued");
     const cancelled = f.adapter.updateSource(
       retry.work.workItemId,
       { state: "terminal", sourceControlToken: retry.sourceControlToken },
@@ -201,7 +201,7 @@ test("MCP source signal is session-bound even for the same principal", () => {
         ),
       /MCP_SOURCE_SCOPE_MISMATCH/,
     );
-    assert.equal(f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a").work.status, "running");
+    assert.equal(f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a").work.status, "queued");
   } finally {
     f.close();
   }

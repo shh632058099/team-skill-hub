@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCodexDockerArgs } from "../src/expert-platform/codex-container-executor.js";
+import { buildAgentDockerArgs } from "../src/expert-platform/agent-container-executor.js";
 
 test("Docker Codex executor builds a constrained read-only invocation", () => {
-  const args = buildCodexDockerArgs({
+  const args = buildAgentDockerArgs({
     image: "team-skill-hub-expert-worker-prototype",
     sourcePath: "/work/repo",
     network: "expert-egress",
     supplementalGroupId: 988,
     primaryGroupId: 988,
     envNames: ["OPENAI_API_KEY", "HTTPS_PROXY"],
-    codexArgs: ["exec", "--sandbox", "read-only", "--json", "inspect"],
+    commandArgs: ["exec", "--sandbox", "read-only", "--json", "inspect"],
   });
   assert.deepEqual(args.slice(0, 10), [
     "run",
@@ -42,48 +42,48 @@ test("Docker Codex executor builds a constrained read-only invocation", () => {
 test("Docker Codex executor rejects host networking and protected env names", () => {
   assert.throws(
     () =>
-      buildCodexDockerArgs({
+      buildAgentDockerArgs({
         image: "worker",
         sourcePath: "/work/repo",
         network: "host",
         envNames: ["OPENAI_API_KEY"],
-        codexArgs: ["--version"],
+        commandArgs: ["--version"],
       }),
     /INVALID_NETWORK/,
   );
   assert.throws(
     () =>
-      buildCodexDockerArgs({
+      buildAgentDockerArgs({
         image: "worker",
         sourcePath: "/work/repo",
         network: "expert-egress",
         envNames: ["PATH"],
-        codexArgs: ["--version"],
+        commandArgs: ["--version"],
       }),
     /INVALID_ENV_NAME/,
   );
   assert.throws(
     () =>
-      buildCodexDockerArgs({
+      buildAgentDockerArgs({
         image: "worker",
         sourcePath: "/work/repo",
         network: "expert-egress",
         envNames: ["CODEX_HOME"],
-        codexArgs: ["--version"],
+        commandArgs: ["--version"],
       }),
     /INVALID_ENV_NAME/,
   );
 });
 
 test("Docker Codex executor mounts a per-worker provider config and API key env", () => {
-  const args = buildCodexDockerArgs({
+  const args = buildAgentDockerArgs({
     image: "worker",
     sourcePath: "/work/repo",
     network: "expert-egress",
     seccompProfile: "unconfined",
     envNames: ["DEEPSEEK_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "HTTPS_PROXY"],
     configFilePath: "/etc/expert/deepseek-codex.toml",
-    codexArgs: ["exec", "--sandbox", "read-only", "--json", "inspect"],
+    commandArgs: ["exec", "--sandbox", "read-only", "--json", "inspect"],
   });
 
   assert.ok(args.includes("type=bind,src=/etc/expert/deepseek-codex.toml,dst=/run/codex-config.toml,readonly"));
@@ -96,20 +96,20 @@ test("Docker Codex executor mounts a per-worker provider config and API key env"
 test("Docker executor rejects unsafe per-task container names", () => {
   assert.throws(
     () =>
-      buildCodexDockerArgs({
+      buildAgentDockerArgs({
         image: "expert-worker",
         containerName: "bad name; rm -rf /",
         sourcePath: "/work/repo",
         network: "expert-egress",
         envNames: [],
-        codexArgs: ["exec", "task"],
+        commandArgs: ["exec", "task"],
       }),
     /INVALID_CONTAINER_NAME/,
   );
 });
 
 test("Docker Codex executor makes only workspace writable while root and config mounts remain read-only", () => {
-  const args = buildCodexDockerArgs({
+  const args = buildAgentDockerArgs({
     image: "worker",
     sourcePath: "/work/repo",
     workspaceAccess: "read-write",
@@ -118,7 +118,7 @@ test("Docker Codex executor makes only workspace writable while root and config 
     authFilePath: "/etc/expert/auth.json",
     configFilePath: "/etc/expert/config.toml",
     mcpConfigFilePath: "/etc/expert/mcp.json",
-    codexArgs: ["exec", "--sandbox", "workspace-write", "--json", "edit"],
+    commandArgs: ["exec", "--sandbox", "workspace-write", "--json", "edit"],
   });
   assert.ok(args.includes("--read-only"), "container rootfs must remain read-only");
   assert.ok(args.includes("type=bind,src=/work/repo,dst=/workspace"));
@@ -129,39 +129,39 @@ test("Docker Codex executor makes only workspace writable while root and config 
 });
 
 test("Docker executor bind-mounts only an explicit runtime session directory", () => {
-  const args = buildCodexDockerArgs({
+  const args = buildAgentDockerArgs({
     image: "worker",
     sourcePath: "/work/repo",
     network: "expert-egress",
     envNames: [],
     runtimeStatePath: "/work/work-1/.runtime-session/codex",
     runtimeStateTarget: "/home/expert/.codex",
-    codexArgs: ["exec", "--json", "inspect"],
+    commandArgs: ["exec", "--json", "inspect"],
   });
   assert.ok(args.includes("type=bind,src=/work/work-1/.runtime-session/codex,dst=/home/expert/.codex"));
   assert.throws(
     () =>
-      buildCodexDockerArgs({
+      buildAgentDockerArgs({
         image: "worker",
         sourcePath: "/work/repo",
         network: "expert-egress",
         envNames: [],
         runtimeStatePath: "../escape",
         runtimeStateTarget: "/home/expert/.codex",
-        codexArgs: ["exec", "inspect"],
+        commandArgs: ["exec", "inspect"],
       }),
     /INVALID_RUNTIME_STATE_PATH/,
   );
   assert.throws(
     () =>
-      buildCodexDockerArgs({
+      buildAgentDockerArgs({
         image: "worker",
         sourcePath: "/work/repo",
         network: "expert-egress",
         envNames: [],
         runtimeStatePath: "/work/runtime",
         runtimeStateTarget: "/etc",
-        codexArgs: ["exec", "inspect"],
+        commandArgs: ["exec", "inspect"],
       }),
     /INVALID_RUNTIME_STATE_TARGET/,
   );

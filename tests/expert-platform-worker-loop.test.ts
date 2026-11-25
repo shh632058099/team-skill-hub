@@ -95,6 +95,19 @@ test("executor failure is reported to Hub with generic reason", async () => {
   assert.equal(client.failed, "EXECUTION_FAILED");
   assert.equal(client.completed, undefined);
 });
+
+test("semantic blocked agent outcome fails the ExpertTask instead of completing it", async () => {
+  const client = new FakeClient(claim);
+  assert.equal(
+    await runRemoteWorkerOnce(client, "worker-1", "ota", async () => ({
+      result: "Remote repository access is unavailable.",
+      executionOutcome: { status: "blocked" as const, reasonCode: "REMOTE_ACCESS" },
+    })),
+    true,
+  );
+  assert.equal(client.completed, undefined);
+  assert.equal(client.failed, "AGENT_BLOCKED:REMOTE_ACCESS\nRemote repository access is unavailable.");
+});
 test("worker forwards only known deterministic workspace error codes, never exception details", async () => {
   for (const code of [
     "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
@@ -182,7 +195,7 @@ test("worker aborts execution on cancellation request and acknowledges cancelled
           { once: true },
         ),
       );
-      throw new Error("CODEX_CANCELLED");
+      throw new Error("EXECUTOR_CANCELLED");
     },
     { heartbeatMs: 10 },
   );

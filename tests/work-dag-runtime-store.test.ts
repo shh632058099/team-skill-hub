@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
-import type { DagGraph } from "../src/expert-platform/work-dag.js";
+import { evaluatePredicate, type DagGraph } from "../src/expert-platform/work-dag.js";
 import { WORK_DAG_POLICY_VALIDATOR_VERSION } from "../src/expert-platform/work-dag-policy.js";
 
 function setup() {
@@ -245,6 +245,83 @@ test("proposal subject-bound nodes must match the current Work subject", () => {
   }
 });
 
+test("claim rejects a RequirementSnapshot revision that the accepted DAG has not revalidated", () => {
+  const { dir, store, workId } = setup();
+  try {
+    const initial = store.getDagPlannerInput(workId);
+    store.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: initial.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: initial.frozen.requirementRevision,
+        plannerIdentity: "planner",
+        plannerVersion: "1",
+        plannerInputDigest: initial.digest,
+        reasonCode: "initial",
+        graph: graph(["a"]),
+      },
+      100,
+    );
+
+    let work = store.getWorkInternal(workId);
+    const snapshot = store.getRequirementSnapshot(workId, work.currentRequirementRevision);
+    store.updateRequirementSnapshot(
+      workId,
+      "a",
+      "s",
+      work.stateRevision,
+      snapshot.revision,
+      [
+        ...snapshot.requirements,
+        {
+          id: "user:new-preference",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "preference.noted", equals: true },
+        },
+      ],
+      "test",
+      101,
+    );
+
+    work = store.getWorkInternal(workId);
+    assert.throws(
+      () => store.claimDagNode(workId, "a", "s", "a", "worker", work.stateRevision, 1, 102, 1000),
+      /STALE_DAG_CLAIM/,
+    );
+
+    const revalidated = store.getDagPlannerInput(workId);
+    const noop = store.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: revalidated.frozen.workRevision,
+        expectedDagRevision: 1,
+        expectedRequirementRevision: revalidated.frozen.requirementRevision,
+        plannerIdentity: "planner",
+        plannerVersion: "1",
+        plannerInputDigest: revalidated.digest,
+        reasonCode: "user_update",
+        graph: graph(["a"]),
+      },
+      103,
+    );
+    assert.equal(noop.status, "noop");
+
+    work = store.getWorkInternal(workId);
+    const claimed = store.claimDagNode(workId, "a", "s", "a", "worker", work.stateRevision, 1, 104, 1000);
+    assert.equal(claimed.boundRequirementRevision, work.currentRequirementRevision);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("claim is fenced and result reconciliation is exactly-once with durable outputs", () => {
   const { dir, store, workId } = setup();
   try {
@@ -295,6 +372,71 @@ test("claim is fenced and result reconciliation is exactly-once with durable out
     work = store.getWorkInternal(workId);
     const b = store.claimDagNode(workId, "a", "s", "b", "worker", work.stateRevision, 1, 140, 1000);
     assert.equal(b.state, "claimed");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("subject-bound DAG facts become stale after subject changes while control facts remain global", () => {
+  const { dir, store, workId } = setup();
+  try {
+    let work = store.getWorkInternal(workId);
+    store.setCurrentSubjectRevision(workId, "a", "s", work.stateRevision, "subject-v1", 90);
+    const input = store.getDagPlannerInput(workId);
+    store.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "p",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: {
+          nodes: [
+            {
+              id: "verify",
+              kind: "verification",
+              capability: "build",
+              subject: "subject-v1",
+              resource: "workspace",
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [],
+        },
+      },
+      100,
+    );
+    work = store.getWorkInternal(workId);
+    const claimed = store.claimDagNode(workId, "a", "s", "verify", "worker", work.stateRevision, 1, 110, 1000);
+    const running = store.startDagNodeExecution(claimed.nodeExecutionId, "worker", claimed.fence, 111);
+    store.reconcileDagNodeResult(
+      running.nodeExecutionId,
+      "worker",
+      running.fence,
+      { status: "succeeded", facts: [{ key: "custom.ready", value: true }] },
+      112,
+    );
+    let context = store.getDagContext(workId);
+    assert.equal(evaluatePredicate({ kind: "fact", key: "custom.ready", equals: true }, context), true);
+
+    work = store.getWorkInternal(workId);
+    store.setCurrentSubjectRevision(workId, "a", "s", work.stateRevision, "subject-v2", 120);
+    context = store.getDagContext(workId);
+    assert.equal(evaluatePredicate({ kind: "fact", key: "custom.ready", equals: true }, context), "unknown");
+    assert.equal(Object.hasOwn(context.facts, "custom.ready"), false);
+
+    store.recordDagPlannerFailure(workId, "planner", "1", "manual", "digest", "PLANNER_FAILED", 121);
+    work = store.getWorkInternal(workId);
+    store.setCurrentSubjectRevision(workId, "a", "s", work.stateRevision, "subject-v3", 122);
+    context = store.getDagContext(workId);
+    assert.equal(Object.hasOwn(context.facts, "planner.failure"), true);
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

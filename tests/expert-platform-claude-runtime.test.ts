@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { buildClaudeArgs, buildClaudeReadOnlyArgs, parseClaudeResult } from "../src/expert-platform/claude-runtime.js";
-import { createDockerCodexExecutor } from "../src/expert-platform/docker-codex-executor.js";
+import { createDockerAgentExecutor } from "../src/expert-platform/docker-agent-executor.js";
 import type { Claim } from "../src/expert-platform/task-store.js";
 
 const claim: Claim = { workerId: "w", taskId: "t", runId: "r", fencing: 1, problem: "Read-only OTA analysis" };
@@ -67,7 +67,7 @@ test("Claude output accepts successful structured response and rejects failure o
 test("Claude executor uses existing Docker isolation and selected model without Codex-only config mount", async () => {
   let args: readonly string[] = [];
   const stages: string[] = [];
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     image: "team-skill-hub-expert-claude:0.1.0",
     backend: "claude",
     claudeModel: "sonnet",
@@ -102,7 +102,7 @@ test("Claude Worker consumes Hub Anthropic model config and mapped AI Router cre
   let args: readonly string[] = [];
   let env: NodeJS.ProcessEnv | undefined;
   try {
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "claude",
       claudeMaxTurns: 25,
       image: "expert-claude",
@@ -147,7 +147,7 @@ test("Claude Worker consumes Hub Anthropic model config and mapped AI Router cre
 });
 
 test("Claude rejects incompatible Responses config instead of silently ignoring it", async () => {
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     backend: "claude",
     image: "expert-claude",
     sourcePath: "/repo",
@@ -180,7 +180,7 @@ test("Claude Router credential reference can target ANTHROPIC_AUTH_TOKEN", async
   process.env.ANTHROPIC_AUTH_TOKEN = "synthetic-test-value";
   try {
     let seen: { args: readonly string[]; env?: NodeJS.ProcessEnv } | undefined;
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "claude",
       image: "expert-claude",
       sourcePath: "/repo",
@@ -268,7 +268,7 @@ test("Claude workspace-write profile gets rw workspace while keeping container r
       wireApi: "anthropic-messages" as const,
       allowedEnvNames: ["ANTHROPIC_API_KEY"],
     };
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "claude",
       image: "expert-claude",
       sourcePath: origin,

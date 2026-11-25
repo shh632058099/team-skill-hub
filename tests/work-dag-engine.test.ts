@@ -86,7 +86,7 @@ test("planner coordinator freezes input, installs proposal and audits planner fa
       version: "1",
       async propose(input) {
         assert.equal(input.digest, input.frozenDigest);
-        assert.equal(input.work.description, "inspect");
+        assert.equal(input.requirementSnapshot.originalRequest, "inspect");
         return single();
       },
     };
@@ -240,6 +240,7 @@ test("scheduler persists deterministic correlation before side effect and expire
       kind: "agent",
       capability: "analysis",
       correlationRef(ctx) {
+        assert.equal(ctx.execution.state, "claimed");
         return "expert-task-key:" + ctx.execution.idempotencyKey;
       },
       async execute(ctx) {
@@ -386,6 +387,178 @@ test("claimed intent is recovered after lease expiry without creating a new exec
     assert.equal(calls, 1);
     store.close();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("claimed recovery preserves an already-persisted correlation instead of recomputing it", async () => {
+  const { dir, store, workId } = setup();
+  try {
+    const input = store.getDagPlannerInput(workId);
+    store.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "p",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: single(),
+      },
+      100,
+    );
+    const work = store.getWorkInternal(workId);
+    let claimed = store.claimDagNode(workId, "a", "s", "agent", "owner-1", work.stateRevision, 1, 110, 10);
+    claimed = store.setDagExecutionExternalRef(claimed.nodeExecutionId, "owner-1", claimed.fence, "corr:original", 111);
+
+    let executedRef: string | null = null;
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      capability: "analysis",
+      correlationRef() {
+        return "corr:recomputed";
+      },
+      async execute(context) {
+        executedRef = context.execution.externalRef;
+        return { status: "succeeded" };
+      },
+    };
+    const scheduler = new WorkDagScheduler(store, [adapter], 10);
+
+    assert.equal(await scheduler.recoverOne(workId, "a", "s", "owner-2", 121), true);
+    const execution = store.listDagExecutions(workId)[0]!;
+    assert.equal(execution.state, "succeeded");
+    assert.equal(execution.externalRef, "corr:original");
+    assert.equal(executedRef, "corr:original");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("expired running execution without durable correlation becomes outcome-unknown instead of replaying", async () => {
+  const { dir, store, workId } = setup();
+  try {
+    const input = store.getDagPlannerInput(workId);
+    store.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "p",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: single(),
+      },
+      100,
+    );
+    const work = store.getWorkInternal(workId);
+    const claimed = store.claimDagNode(workId, "a", "s", "agent", "owner-1", work.stateRevision, 1, 110, 10);
+    store.startDagNodeExecution(claimed.nodeExecutionId, "owner-1", claimed.fence, 111);
+    const boundRequirementRevision = claimed.boundRequirementRevision;
+    assert.ok(boundRequirementRevision);
+    const boundSnapshot = store.getRequirementSnapshot(workId, boundRequirementRevision);
+    const current = store.getWorkInternal(workId);
+    const currentSnapshot = store.getRequirementSnapshot(workId, current.currentRequirementRevision);
+    store.updateRequirementSnapshot(
+      workId,
+      "a",
+      "s",
+      current.stateRevision,
+      currentSnapshot.revision,
+      [
+        ...currentSnapshot.requirements,
+        {
+          id: "user:later-context",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "later.context", equals: true },
+        },
+      ],
+      "test",
+      112,
+    );
+    assert.notEqual(store.getWorkInternal(workId).currentRequirementRevision, boundRequirementRevision);
+    let calls = 0;
+    const scheduler = new WorkDagScheduler(
+      store,
+      [
+        {
+          kind: "agent",
+          capability: "analysis",
+          async execute() {
+            calls++;
+            return { status: "succeeded" };
+          },
+        },
+      ],
+      10,
+    );
+    assert.equal(await scheduler.recoverOne(workId, "a", "s", "owner-2", 119), false);
+    assert.equal(await scheduler.recoverOne(workId, "a", "s", "owner-2", 121), true);
+    const execution = store.listDagExecutions(workId)[0]!;
+    assert.equal(execution.state, "external_outcome_unknown");
+    assert.match(execution.externalRef ?? "", /^unknown:/);
+    assert.equal(calls, 0);
+    const decision = store.listDagDecisions(workId).find((item) => item.action === "node.outcome_unknown")!;
+    assert.equal(decision.dagRevision, execution.createdDagRevision);
+    assert.equal(decision.requirementRevision, boundRequirementRevision);
+    assert.equal(decision.policyRef, boundSnapshot.policyRef);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("expired correlated execution without a reconcile handler becomes outcome-unknown instead of staying running forever", async () => {
+  const { dir, store, workId } = setup();
+  try {
+    const input = store.getDagPlannerInput(workId);
+    store.submitDagProposal(
+      {
+        workItemId: workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "p",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: single(),
+      },
+      100,
+    );
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      capability: "analysis",
+      async execute() {
+        return { kind: "deferred", externalRef: "external:opaque-operation" };
+      },
+    };
+    const scheduler = new WorkDagScheduler(store, [adapter], 10);
+    assert.equal(await scheduler.runOne(workId, "a", "s", "owner-1", 110), true);
+    let execution = store.listDagExecutions(workId)[0]!;
+    assert.equal(execution.state, "running");
+    assert.equal(execution.externalRef, "external:opaque-operation");
+
+    assert.equal(await scheduler.recoverOne(workId, "a", "s", "owner-2", 119), false);
+    assert.equal(await scheduler.recoverOne(workId, "a", "s", "owner-2", 121), true);
+    execution = store.listDagExecutions(workId)[0]!;
+    assert.equal(execution.state, "external_outcome_unknown");
+    assert.equal(execution.externalRef, "external:opaque-operation");
+  } finally {
+    store.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

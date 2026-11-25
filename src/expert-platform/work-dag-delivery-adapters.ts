@@ -4,18 +4,48 @@ import type { WorkChangeRequestRecord, WorkChangeRequestStore } from "./work-cha
 import type { DagDeferredExecution, WorkDagExecutionContext, WorkDagExecutorAdapter } from "./work-dag-engine.js";
 import type { DagNodeResult } from "./work-dag-runtime.js";
 
+export interface WorkDagDeliveryTarget {
+  resourceKey: string;
+  repositoryId: string | null;
+  subjectRevision: string | null;
+}
+
+function deliveryTarget(context: WorkDagExecutionContext): WorkDagDeliveryTarget {
+  const resourceKey = context.node.resource ?? "workspace";
+  const repositoryId = resourceKey.startsWith("repo:")
+    ? resourceKey.slice("repo:".length).trim() || null
+    : context.work.repositoryId;
+  return {
+    resourceKey,
+    repositoryId,
+    subjectRevision: context.node.subject,
+  };
+}
+
 export interface WorkDagDeliveryGateway {
-  ensurePublication(workItemId: string, principalId: string, scope: string, now?: number): WorkPublicationRecord;
+  ensurePublication(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    now?: number,
+    target?: WorkDagDeliveryTarget,
+  ): WorkPublicationRecord;
   recordPreparedPublicationArtifact(
     workItemId: string,
     principalId: string,
     scope: string,
     publicationId: string,
     now?: number,
+    target?: WorkDagDeliveryTarget,
   ): unknown;
-  ensureChangeRequest(workItemId: string, principalId: string, scope: string, now?: number): WorkChangeRequestRecord;
+  ensureChangeRequest(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    now?: number,
+    target?: WorkDagDeliveryTarget,
+  ): WorkChangeRequestRecord;
 }
-
 type PublicationReader = Pick<
   WorkPublicationStore,
   "listPublications" | "getPublication" | "getPublicationArtifact" | "transitionPublication"
@@ -23,19 +53,21 @@ type PublicationReader = Pick<
 type ChangeRequestReader = Pick<WorkChangeRequestStore, "getByPublication">;
 
 function currentPublication(
-  store: WorkOrchestrationStore,
   publications: PublicationReader,
   workItemId: string,
+  target: WorkDagDeliveryTarget,
 ): WorkPublicationRecord | null {
-  const work = store.getWorkInternal(workItemId);
   return (
     publications
       .listPublications(workItemId)
-      .filter((item) => item.sourceSubjectRevision === work.currentSubjectRevision)
+      .filter(
+        (item) =>
+          item.sourceSubjectRevision === target.subjectRevision &&
+          (target.repositoryId === null || item.repositoryId === target.repositoryId),
+      )
       .at(-1) ?? null
   );
 }
-
 class PublicationDagAdapter implements WorkDagExecutorAdapter {
   readonly kind = "publication" as const;
 
@@ -46,14 +78,15 @@ class PublicationDagAdapter implements WorkDagExecutorAdapter {
   ) {}
 
   correlationRef(context: WorkDagExecutionContext): string {
+    const target = deliveryTarget(context);
     return [
       "publication-key",
       context.work.workItemId,
       context.node.capability,
-      context.work.currentSubjectRevision ?? "missing",
+      target.resourceKey,
+      target.subjectRevision ?? "missing",
     ].join(":");
   }
-
   private maybeApprovePush(
     context: WorkDagExecutionContext,
     publication: WorkPublicationRecord,
@@ -87,9 +120,16 @@ class PublicationDagAdapter implements WorkDagExecutorAdapter {
     if (context.node.capability !== "prepare" && context.node.capability !== "push") {
       return { status: "failed", summary: "PUBLICATION_CAPABILITY_UNSUPPORTED" };
     }
+    const target = deliveryTarget(context);
     let publication =
-      currentPublication(this.store, this.publications, context.work.workItemId) ??
-      this.gateway.ensurePublication(context.work.workItemId, context.work.principalId, context.work.scope, Date.now());
+      currentPublication(this.publications, context.work.workItemId, target) ??
+      this.gateway.ensurePublication(
+        context.work.workItemId,
+        context.work.principalId,
+        context.work.scope,
+        Date.now(),
+        target,
+      );
     if (context.node.capability === "push") {
       const advanced = this.maybeApprovePush(context, publication, Date.now());
       if ("status" in advanced) return advanced;
@@ -102,7 +142,8 @@ class PublicationDagAdapter implements WorkDagExecutorAdapter {
   }
 
   async reconcile(context: WorkDagExecutionContext): Promise<DagNodeResult | null> {
-    let publication = currentPublication(this.store, this.publications, context.work.workItemId);
+    const target = deliveryTarget(context);
+    let publication = currentPublication(this.publications, context.work.workItemId, target);
     if (!publication) return null;
     if (publication.state === "blocked" || publication.state === "failed" || publication.state === "cancelled") {
       return {
@@ -121,6 +162,7 @@ class PublicationDagAdapter implements WorkDagExecutorAdapter {
         context.work.scope,
         publication.publicationId,
         Date.now(),
+        target,
       );
       return {
         status: "succeeded",
@@ -132,6 +174,7 @@ class PublicationDagAdapter implements WorkDagExecutorAdapter {
             type: "git_commit",
             ref: artifact.artifactId,
             subjectRevision: publication.sourceSubjectRevision,
+            resourceIdentity: target.resourceKey,
           },
         ],
       };
@@ -156,6 +199,7 @@ class PublicationDagAdapter implements WorkDagExecutorAdapter {
           subjectRevision: subject,
           verifierIdentity: "team-skill-hub-publication",
           artifactRef: publication.artifactRef,
+          resourceIdentity: target.resourceKey,
         },
       ],
     };
@@ -173,22 +217,32 @@ class ChangeRequestDagAdapter implements WorkDagExecutorAdapter {
   ) {}
 
   correlationRef(context: WorkDagExecutionContext): string {
-    return ["change-request-key", context.work.workItemId, context.work.currentSubjectRevision ?? "missing"].join(":");
+    const target = deliveryTarget(context);
+    return [
+      "change-request-key",
+      context.work.workItemId,
+      target.resourceKey,
+      target.subjectRevision ?? "missing",
+    ].join(":");
   }
-
   async execute(context: WorkDagExecutionContext): Promise<DagDeferredExecution | DagNodeResult> {
     if (context.node.capability !== "create") {
       return { status: "failed", summary: "CHANGE_REQUEST_CAPABILITY_UNSUPPORTED" };
     }
-    this.gateway.ensureChangeRequest(context.work.workItemId, context.work.principalId, context.work.scope, Date.now());
-    return {
-      kind: "deferred",
-      externalRef: context.execution.externalRef ?? this.correlationRef(context),
-    };
+    const target = deliveryTarget(context);
+    this.gateway.ensureChangeRequest(
+      context.work.workItemId,
+      context.work.principalId,
+      context.work.scope,
+      Date.now(),
+      target,
+    );
+    return { kind: "deferred", externalRef: context.execution.externalRef ?? this.correlationRef(context) };
   }
 
   async reconcile(context: WorkDagExecutionContext): Promise<DagNodeResult | null> {
-    const publication = currentPublication(this.store, this.publications, context.work.workItemId);
+    const target = deliveryTarget(context);
+    const publication = currentPublication(this.publications, context.work.workItemId, target);
     if (!publication) return null;
     const request = this.requests.getByPublication(publication.publicationId);
     if (!request) return null;
@@ -209,6 +263,7 @@ class ChangeRequestDagAdapter implements WorkDagExecutorAdapter {
             publication.commitSha === null
               ? publication.sourceSubjectRevision
               : "publication:" + publication.publicationId + ":" + publication.commitSha,
+          resourceIdentity: target.resourceKey,
         },
       ],
     };

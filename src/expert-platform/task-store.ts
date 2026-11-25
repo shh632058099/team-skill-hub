@@ -75,6 +75,7 @@ export type Submission = {
 };
 export type TaskRecord = {
   taskId: string;
+  idempotencyKey: string;
   status: TaskStatus;
   result: string | null;
   expertId: string;
@@ -103,6 +104,8 @@ export type TaskRecord = {
   requiredWorkerId: string | null;
   continuationCount: number;
   continuationReason: string | null;
+  executionRef: string | null;
+  executionReservationRef: string | null;
   runtimeSessionId: string | null;
   runId: string | null;
   /** True when this submission reused a task created by an earlier submission. */
@@ -190,7 +193,8 @@ export class ExpertTaskStore {
         task_id TEXT NOT NULL REFERENCES expert_tasks(task_id),
         worker_id TEXT NOT NULL,
         fencing INTEGER NOT NULL,
-        status TEXT NOT NULL
+        status TEXT NOT NULL,
+        problem TEXT
       );
       CREATE TABLE IF NOT EXISTS expert_run_turns (
         run_id TEXT NOT NULL REFERENCES expert_runs(run_id),
@@ -250,6 +254,30 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("continuation_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureTaskColumn("continuation_reason", "TEXT");
     this.ensureTaskColumn("runtime_session_id", "TEXT");
+    this.ensureTaskColumn("execution_problem", "TEXT");
+    this.ensureTaskColumn("execution_ref", "TEXT");
+    this.ensureTaskColumn("execution_reservation_ref", "TEXT");
+    this.db.exec(
+      "UPDATE expert_tasks SET execution_reservation_ref=execution_ref WHERE execution_reservation_ref IS NULL AND execution_ref IS NOT NULL",
+    );
+    this.ensureRunColumn("problem", "TEXT");
+    this.db.exec(
+      `UPDATE expert_runs
+       SET problem=(
+         SELECT CASE
+           WHEN task.continuation_reason IS NULL
+             THEN COALESCE(task.execution_problem,task.problem)
+           ELSE COALESCE(task.execution_problem,task.problem) || char(10) || char(10) || 'Continuation context:' || char(10) || task.continuation_reason
+         END
+         FROM expert_tasks AS task
+         WHERE task.run_id=expert_runs.run_id AND task.status<>'queued'
+       )
+       WHERE problem IS NULL
+         AND EXISTS (
+           SELECT 1 FROM expert_tasks AS task
+           WHERE task.run_id=expert_runs.run_id AND task.status<>'queued'
+         )`,
+    );
     // Older tasks already have a queued lifecycle event created at submission time.
     // Backfill from that event so the new history column remains useful after upgrade.
     this.db.exec(
@@ -517,6 +545,7 @@ export class ExpertTaskStore {
       this.db.exec("COMMIT");
       return {
         taskId,
+        idempotencyKey: input.idempotencyKey,
         status: "queued",
         result: null,
         expertId,
@@ -548,6 +577,8 @@ export class ExpertTaskStore {
         reusedExistingTask: false,
         continuationCount: 0,
         continuationReason: null,
+        executionRef: null,
+        executionReservationRef: null,
         runtimeSessionId: null,
         runId: null,
         ...sessionTask,
@@ -624,14 +655,21 @@ export class ExpertTaskStore {
       }
       const runId = randomUUID();
       const fencing = Number(row.fencing) + 1;
+      const executionProblem = row.execution_problem == null ? String(row.problem) : String(row.execution_problem);
+      const claimProblem =
+        row.continuation_reason == null
+          ? executionProblem
+          : executionProblem + "\n\nContinuation context:\n" + String(row.continuation_reason);
       this.db
         .prepare(
           "UPDATE expert_tasks SET status='running',run_id=?,worker_id=?,lease_until=?,fencing=? WHERE task_id=?",
         )
         .run(runId, workerId, now + leaseMs, fencing, taskId);
       this.db
-        .prepare("INSERT INTO expert_runs(run_id,task_id,worker_id,fencing,status) VALUES (?,?,?,?,'running')")
-        .run(runId, taskId, workerId, fencing);
+        .prepare(
+          "INSERT INTO expert_runs(run_id,task_id,worker_id,fencing,status,problem) VALUES (?,?,?,?,'running',?)",
+        )
+        .run(runId, taskId, workerId, fencing, claimProblem);
       this.event(taskId, runId, "running");
       this.db.exec("COMMIT");
       return {
@@ -639,10 +677,7 @@ export class ExpertTaskStore {
         runId,
         workerId,
         fencing,
-        problem:
-          row.continuation_reason == null
-            ? String(row.problem)
-            : String(row.problem) + "\n\nContinuation context:\n" + String(row.continuation_reason),
+        problem: claimProblem,
         executionKind: (row.execution_kind ?? "agent") as TaskExecutionKind,
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
         workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
@@ -778,9 +813,60 @@ export class ExpertTaskStore {
     }
   }
 
-  requeueForRetry(taskId: string, expectedWorkAttemptId: string, reason: string, now = Date.now()): TaskRecord {
+  reserveExecutionRef(taskId: string, executionRef: string, expectedReservationRef: string | null): TaskRecord | null {
+    const normalizedExecutionRef = executionRef.trim();
+    if (!normalizedExecutionRef) throw new Error("INVALID_EXECUTION_REF");
+    const expected = expectedReservationRef?.trim() || null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+      if (!row) throw new Error("TASK_NOT_FOUND");
+      const current = row.execution_reservation_ref == null ? null : String(row.execution_reservation_ref);
+      if (current === normalizedExecutionRef) {
+        this.db.exec("COMMIT");
+        return this.fromRow(row);
+      }
+      if (current !== expected || (row.status !== "succeeded" && row.status !== "failed")) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const changed =
+        expected === null
+          ? this.db
+              .prepare(
+                "UPDATE expert_tasks SET execution_reservation_ref=? WHERE task_id=? AND execution_reservation_ref IS NULL AND status IN ('succeeded','failed')",
+              )
+              .run(normalizedExecutionRef, taskId)
+          : this.db
+              .prepare(
+                "UPDATE expert_tasks SET execution_reservation_ref=? WHERE task_id=? AND execution_reservation_ref=? AND status IN ('succeeded','failed')",
+              )
+              .run(normalizedExecutionRef, taskId, expected);
+      if (changed.changes !== 1) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromRow(updated);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  requeueForRetry(
+    taskId: string,
+    expectedWorkAttemptId: string,
+    reason: string,
+    now = Date.now(),
+    problem?: string,
+    executionRef?: string,
+  ): TaskRecord {
     const workAttemptId = expectedWorkAttemptId.trim();
     if (!workAttemptId || !reason.trim()) throw new Error("INVALID_REQUEST");
+    const normalizedProblem = problem?.trim() || null;
+    const normalizedExecutionRef = executionRef?.trim() || null;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
@@ -791,9 +877,9 @@ export class ExpertTaskStore {
       if (row.status !== "failed") throw new Error("TASK_RETRY_NOT_ALLOWED");
       this.db
         .prepare(
-          "UPDATE expert_tasks SET status='queued',result=NULL,run_id=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0 WHERE task_id=? AND status='failed' AND work_attempt_id=?",
+          "UPDATE expert_tasks SET status='queued',result=NULL,run_id=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,execution_problem=COALESCE(?,execution_problem),execution_ref=COALESCE(?,execution_ref),execution_reservation_ref=COALESCE(?,execution_reservation_ref) WHERE task_id=? AND status='failed' AND work_attempt_id=?",
         )
-        .run(taskId, workAttemptId);
+        .run(normalizedProblem, normalizedExecutionRef, normalizedExecutionRef, taskId, workAttemptId);
       this.event(taskId, null, "retry_queued");
       const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
       this.db.exec("COMMIT");
@@ -810,10 +896,14 @@ export class ExpertTaskStore {
     reason: string,
     now = Date.now(),
     requiredWorkerId?: string,
+    problem?: string,
+    executionRef?: string,
   ): TaskRecord {
     const runId = expectedRunId.trim();
     if (!runId || !reason.trim()) throw new Error("INVALID_REQUEST");
     const normalizedWorker = requiredWorkerId?.trim() || null;
+    const normalizedProblem = problem?.trim() || null;
+    const normalizedExecutionRef = executionRef?.trim() || null;
     if (normalizedWorker && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(normalizedWorker)) {
       throw new Error("INVALID_WORKER");
     }
@@ -825,9 +915,17 @@ export class ExpertTaskStore {
       if (row.run_id == null || String(row.run_id) !== runId) throw new Error("STALE_RUN");
       const changed = this.db
         .prepare(
-          "UPDATE expert_tasks SET status='queued',result=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,continuation_count=continuation_count+1,continuation_reason=?,required_worker_id=? WHERE task_id=? AND status='succeeded' AND run_id=?",
+          "UPDATE expert_tasks SET status='queued',result=NULL,worker_id=NULL,lease_until=NULL,cancellation_requested=0,continuation_count=continuation_count+1,continuation_reason=?,required_worker_id=?,execution_problem=COALESCE(?,execution_problem),execution_ref=COALESCE(?,execution_ref),execution_reservation_ref=COALESCE(?,execution_reservation_ref) WHERE task_id=? AND status='succeeded' AND run_id=?",
         )
-        .run(reason.trim().slice(0, 200), normalizedWorker, taskId, runId);
+        .run(
+          reason.trim().slice(0, 200),
+          normalizedWorker,
+          normalizedProblem,
+          normalizedExecutionRef,
+          normalizedExecutionRef,
+          taskId,
+          runId,
+        );
       if (changed.changes !== 1) throw new Error("TASK_CONTINUATION_NOT_ALLOWED");
       this.event(taskId, runId, "continuation_queued");
       const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
@@ -1062,7 +1160,7 @@ export class ExpertTaskStore {
       .prepare("SELECT task_id,disposition,reason,needs_rework,updated_at FROM expert_task_feedback WHERE task_id=?")
       .get(taskId) as Row | undefined;
     const runs = this.db
-      .prepare("SELECT run_id,task_id,worker_id,fencing,status FROM expert_runs WHERE task_id=? ORDER BY rowid")
+      .prepare("SELECT run_id,task_id,worker_id,fencing,status,problem FROM expert_runs WHERE task_id=? ORDER BY rowid")
       .all(taskId);
     const total = Number(
       (this.db.prepare("SELECT count(*) AS n FROM expert_events WHERE task_id=?").get(taskId) as { n: number }).n,
@@ -1193,6 +1291,27 @@ export class ExpertTaskStore {
       nextEventId: selected.length ? Number(selected[selected.length - 1]!.event_id) : afterEventId,
       hasMore: rows.length > limit,
     };
+  }
+
+  listByWorkAttempt(workAttemptId: string, principalId: string, scope: string): TaskRecord[] {
+    const attempt = workAttemptId.trim();
+    if (!attempt) throw new Error("INVALID_WORK_ATTEMPT");
+    return (
+      this.db
+        .prepare("SELECT * FROM expert_tasks WHERE work_attempt_id=? AND principal_id=? AND scope=? ORDER BY rowid")
+        .all(attempt, principalId, scope) as Row[]
+    ).map((row) => this.fromRow(row));
+  }
+
+  reservedAgentTurnsForWorkAttempt(workAttemptId: string, principalId: string, scope: string): number {
+    return this.listByWorkAttempt(workAttemptId, principalId, scope)
+      .filter((task) => task.executionKind === "agent")
+      .reduce((total, task) => {
+        const observedTurns = this.listRunTurns(task.taskId, principalId, scope).length;
+        const scheduledTurns = task.continuationCount + 1;
+        const queuedRetryReservation = task.status === "queued" && observedTurns >= scheduledTurns ? 1 : 0;
+        return total + Math.max(scheduledTurns, observedTurns + queuedRetryReservation);
+      }, 0);
   }
 
   listRunTurns(taskId: string, principalId: string, scope: string): TaskRunTurnRecord[] {
@@ -1363,6 +1482,12 @@ export class ExpertTaskStore {
     this.db.exec(`ALTER TABLE expert_tasks ADD COLUMN ${name} ${definition}`);
   }
 
+  private ensureRunColumn(name: string, definition: string): void {
+    const columns = this.db.prepare("PRAGMA table_info(expert_runs)").all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === name)) return;
+    this.db.exec(`ALTER TABLE expert_runs ADD COLUMN ${name} ${definition}`);
+  }
+
   private trimTaskEvents(taskId: string): void {
     this.db
       .prepare(
@@ -1393,6 +1518,7 @@ export class ExpertTaskStore {
   private fromRow(row: Row): TaskRecord {
     return {
       taskId: String(row.task_id),
+      idempotencyKey: String(row.idempotency_key),
       status: row.status as TaskStatus,
       result: row.result == null ? null : String(row.result),
       expertId: String(row.expert_id ?? "legacy"),
@@ -1435,6 +1561,8 @@ export class ExpertTaskStore {
       requiredWorkerId: row.required_worker_id == null ? null : String(row.required_worker_id),
       continuationCount: Number(row.continuation_count ?? 0),
       continuationReason: row.continuation_reason == null ? null : String(row.continuation_reason),
+      executionRef: row.execution_ref == null ? null : String(row.execution_ref),
+      executionReservationRef: row.execution_reservation_ref == null ? null : String(row.execution_reservation_ref),
       runtimeSessionId: row.runtime_session_id == null ? null : String(row.runtime_session_id),
       runId: row.run_id == null ? null : String(row.run_id),
     };

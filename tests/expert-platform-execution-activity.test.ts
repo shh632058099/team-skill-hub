@@ -100,7 +100,7 @@ test("stream collectors capture bounded runtime session identity", () => {
 });
 
 test("opt-in subprocess streaming produces activities and report before legacy buffer limit", async () => {
-  const { runCodexProcess } = await import("../src/expert-platform/codex-process.js");
+  const { runAgentProcess } = await import("../src/expert-platform/agent-process.js");
   const events = [
     { type: "system", subtype: "init", session_id: "77777777-7777-4777-8777-777777777777" },
     { type: "assistant", message: { content: [{ type: "tool_use", name: "Grep", input: { pattern: "secret" } }] } },
@@ -108,7 +108,7 @@ test("opt-in subprocess streaming produces activities and report before legacy b
   ];
   const activities: string[] = [];
   let runtimeSessionId = "";
-  const report = await runCodexProcess({
+  const report = await runAgentProcess({
     executable: process.execPath,
     args: [
       "-e",
@@ -127,9 +127,9 @@ test("opt-in subprocess streaming produces activities and report before legacy b
 });
 
 test("streaming subprocess fails when missing terminal result", async () => {
-  const { runCodexProcess } = await import("../src/expert-platform/codex-process.js");
+  const { runAgentProcess } = await import("../src/expert-platform/agent-process.js");
   await assert.rejects(
-    runCodexProcess({
+    runAgentProcess({
       executable: process.execPath,
       args: ["-e", `process.stdout.write(${JSON.stringify('{"type":"system","subtype":"init"}\n')})`],
       timeoutMs: 5000,

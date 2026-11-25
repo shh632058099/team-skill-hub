@@ -49,8 +49,11 @@ test("platform presets preserve history and publish stricter development and rea
 
     for (const id of ["bug-fix", "feature-change", "refactor", "test-improvement", "build-fix", "release-change"]) {
       assert.equal(store.getWorkflow(id, 2).version, 2);
-      assert.equal(store.getWorkflow(id).version, 3);
+      assert.equal(store.getWorkflow(id, 3).version, 3);
+      assert.equal(store.getWorkflow(id).version, 4);
       const workflow = store.getWorkflow(id).definition;
+      assert.equal(workflow.graph.mode, "dynamic-dag");
+      assert.ok(workflow.planning?.replanPolicy.includes("always_after_agent_turn"));
       assert.deepEqual(workflow.change, { mode: "code_change", delivery: "merge_request" });
       assert.ok(workflow.validation.requiredEvidence.includes("build"));
       assert.ok(workflow.validation.requiredEvidence.includes("unit_test"));
@@ -120,7 +123,7 @@ test("selectable workflow catalog exposes latest semantic metadata and preserves
     assert.match(investigation?.summary ?? "", /readonly analysis/i);
 
     const bugFix = catalog.find((item) => item.workflowId === "bug-fix");
-    assert.equal(bugFix?.version, 3);
+    assert.equal(bugFix?.version, 4);
     assert.equal(bugFix?.changeMode, "code_change");
     assert.equal(bugFix?.selectionConfigured, true);
     assert.match(bugFix?.summary ?? "", /incorrect existing/i);
@@ -138,20 +141,105 @@ test("selectable workflow catalog exposes latest semantic metadata and preserves
   });
 });
 
+test("every newly created Work binds to dynamic DAG even when the selected Workflow is legacy single-node", () => {
+  withStore((store) => {
+    const workflow = store.getWorkflow("investigation");
+    assert.equal(workflow.definition.graph.mode, "single-node");
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "full-cutover-new-work",
+      sourceType: "mcp",
+      title: "Investigate",
+      description: "inspect the current state",
+      workflowId: "investigation",
+    });
+    assert.equal(work.orchestrationEngine, "dynamic-dag");
+  });
+});
+
+test("manual DAG replan is available to every post-cutover Work regardless of Workflow graph mode", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "full-cutover-manual-replan",
+      sourceType: "mcp",
+      title: "Investigate",
+      description: "inspect then reconsider the plan",
+      workflowId: "investigation",
+    });
+    store.ensureRequirementSnapshot(work.workItemId);
+    const current = store.getWorkInternal(work.workItemId);
+    const request = store.requestDagReplan(
+      work.workItemId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "user requested a new plan",
+      100,
+    );
+    assert.equal(request.state, "pending");
+  });
+});
+
+test("reopen backfills pre-cutover Work as legacy while all post-cutover Work is dynamic", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-engine-cutover-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    const oldWork = initial.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "pre-cutover-work",
+      sourceType: "mcp",
+      title: "Old work",
+      description: "persisted before engine cutover",
+      workflowId: "investigation",
+    });
+    initial.close();
+
+    const legacyDb = new DatabaseSync(file);
+    const columns = new Set(
+      (legacyDb.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    if (columns.has("orchestration_engine")) {
+      legacyDb.exec("ALTER TABLE work_items DROP COLUMN orchestration_engine");
+    }
+    legacyDb.close();
+
+    const reopened = new WorkOrchestrationStore(file);
+    assert.equal(reopened.getWorkInternal(oldWork.workItemId).orchestrationEngine, "legacy-single-node");
+    const newWork = reopened.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "post-cutover-work",
+      sourceType: "mcp",
+      title: "New work",
+      description: "created after engine cutover",
+      workflowId: "investigation",
+    });
+    assert.equal(newWork.orchestrationEngine, "dynamic-dag");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("existing runtime database backfills new built-in workflow versions on reopen", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "work-orchestration-upgrade-"));
   const file = path.join(dir, "runtime.db");
   try {
     const initial = new WorkOrchestrationStore(file);
     assert.equal(initial.getWorkflow("investigation").version, 4);
-    assert.equal(initial.getWorkflow("bug-fix").version, 3);
+    assert.equal(initial.getWorkflow("bug-fix").version, 4);
     initial.close();
 
     const legacyDb = new DatabaseSync(file);
     legacyDb.exec(
       [
         "DELETE FROM work_workflows WHERE workflow_id IN ('investigation','code-review') AND version=4;",
-        "DELETE FROM work_workflows WHERE workflow_id IN ('bug-fix','feature-change','refactor','test-improvement','build-fix','release-change') AND version=3;",
+        "DELETE FROM work_workflows WHERE workflow_id IN ('bug-fix','feature-change','refactor','test-improvement','build-fix','release-change') AND version=4;",
       ].join("\n"),
     );
     legacyDb.close();
@@ -160,10 +248,11 @@ test("existing runtime database backfills new built-in workflow versions on reop
     assert.equal(reopened.getWorkflow("investigation", 3).version, 3);
     assert.equal(reopened.getWorkflow("investigation").version, 4);
     assert.equal(reopened.getWorkflow("bug-fix", 2).version, 2);
-    assert.equal(reopened.getWorkflow("bug-fix").version, 3);
+    assert.equal(reopened.getWorkflow("bug-fix", 3).version, 3);
+    assert.equal(reopened.getWorkflow("bug-fix").version, 4);
     const catalog = reopened.listSelectableWorkflows();
     assert.equal(catalog.find((item) => item.workflowId === "investigation")?.version, 4);
-    assert.equal(catalog.find((item) => item.workflowId === "bug-fix")?.version, 3);
+    assert.equal(catalog.find((item) => item.workflowId === "bug-fix")?.version, 4);
     reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -635,6 +724,71 @@ test("workspace schema migrates old cleanup constraints without resetting the da
     });
     migrated.requestTerminalWorkspaceCleanup(work.workItemId, 100);
     assert.equal(migrated.getWorkspace(workspace.workspaceId).state, "retained");
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("migrated default workspace inherits Work repository identity when re-ensured without repository input", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "work-workspace-repository-migration-"));
+  const file = path.join(dir, "runtime.db");
+  try {
+    const initial = new WorkOrchestrationStore(file);
+    const work = initial.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-repository-migration",
+      sourceType: "mcp",
+      title: "migration",
+      description: "migration",
+      repositoryId: "repo-primary",
+    });
+    const attempt = initial.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    initial.close();
+
+    const db = new DatabaseSync(file);
+    db.exec("PRAGMA foreign_keys=OFF");
+    db.exec("DROP TABLE IF EXISTS work_workspace_cleanup_requests");
+    db.exec("DROP TABLE work_workspaces");
+    db.exec(
+      [
+        "CREATE TABLE work_workspaces (",
+        " workspace_id TEXT PRIMARY KEY,",
+        " workspace_key TEXT NOT NULL UNIQUE,",
+        " work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
+        " work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+        " owner_worker_id TEXT, path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
+        " state TEXT NOT NULL CHECK(state IN ('ready','in_use','retained','removed','failed')),",
+        " cleanup_policy TEXT NOT NULL CHECK(cleanup_policy='on_terminal'),",
+        " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL",
+        ");",
+      ].join("\n"),
+    );
+    db.prepare(
+      "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,?)",
+    ).run(
+      "legacy-workspace",
+      "work-" + work.workItemId.toLowerCase() + "-a1",
+      work.workItemId,
+      attempt.workAttemptId,
+      "ready",
+      "on_terminal",
+      10,
+      10,
+    );
+    db.close();
+
+    const migrated = new WorkOrchestrationStore(file);
+    const restored = migrated.ensureWorkspace(work.workItemId, attempt.workAttemptId, {});
+    assert.equal(restored.workspaceId, "legacy-workspace");
+    assert.equal(restored.resourceKey, "workspace");
+    assert.equal(restored.repositoryId, "repo-primary");
     migrated.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

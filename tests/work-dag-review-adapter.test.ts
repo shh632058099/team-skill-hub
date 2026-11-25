@@ -8,6 +8,7 @@ import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-service.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkDagScheduler } from "../src/expert-platform/work-dag-engine.js";
+import { workflowOnlyDagPolicyContext } from "../src/expert-platform/work-dag-policy-context.js";
 import { createExpertTaskDagAdapters } from "../src/expert-platform/work-dag-expert-adapters.js";
 import type { DagGraph } from "../src/expert-platform/work-dag.js";
 
@@ -30,8 +31,11 @@ function fixture(reviewerExpertId?: string) {
   experts.putDeployment({
     id: "ota-ro",
     expertId: "ota",
-    repositoryIds: ["repo"],
-    repositories: [{ id: "repo", url: "https://example.test/repo.git", branch: "main" }],
+    repositoryIds: ["repo", "repo-b"],
+    repositories: [
+      { id: "repo", url: "https://example.test/repo.git", branch: "main" },
+      { id: "repo-b", url: "https://example.test/repo-b.git", branch: "main" },
+    ],
     principals: ["alice"],
     runtimeProfile: "codex-readonly",
     active: true,
@@ -50,8 +54,11 @@ function fixture(reviewerExpertId?: string) {
     experts.putDeployment({
       id: "reviewer-ro",
       expertId: reviewerExpertId,
-      repositoryIds: ["repo"],
-      repositories: [{ id: "repo", url: "https://example.test/repo.git", branch: "main" }],
+      repositoryIds: ["repo", "repo-b"],
+      repositories: [
+        { id: "repo", url: "https://example.test/repo.git", branch: "main" },
+        { id: "repo-b", url: "https://example.test/repo-b.git", branch: "main" },
+      ],
       principals: ["alice"],
       runtimeProfile: "codex-readonly",
       active: true,
@@ -129,15 +136,21 @@ function fixture(reviewerExpertId?: string) {
   return { dir, experts, tasks, works, dispatch, workId: work.workItemId, attemptId: attempt.workAttemptId };
 }
 
-function installReview(works: WorkOrchestrationStore, workId: string) {
+function installReview(
+  works: WorkOrchestrationStore,
+  workId: string,
+  subject = "subject-v1",
+  resource = "workspace",
+  nodeId = "review",
+) {
   const graph: DagGraph = {
     nodes: [
       {
-        id: "review",
+        id: nodeId,
         kind: "review",
         capability: "review",
-        subject: "subject-v1",
-        resource: "workspace",
+        subject,
+        resource,
         mutates: false,
         requirements: [],
       },
@@ -145,6 +158,41 @@ function installReview(works: WorkOrchestrationStore, workId: string) {
     edges: [],
   };
   const input = works.getDagPlannerInput(workId);
+  const work = works.getWorkInternal(workId);
+  const workflow = works.getWorkflow(work.workflowId, work.workflowVersion);
+  const basePolicyContext = workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition);
+  const policyContext = resource.startsWith("repo:")
+    ? {
+        ...basePolicyContext,
+        resourcePolicies: {
+          [resource]: {
+            repository: {
+              repositoryId: resource.slice("repo:".length),
+              policyDigest: "test-review-repository",
+              verificationCapabilities: ["*"],
+              publicationPermissions: [],
+            },
+            deployment: {
+              deploymentId: "test-review-deployment",
+              configVersion: 1,
+              expertId: "reviewer",
+              runtimeProfile: "codex-readonly",
+              digest: "test-review-deployment",
+            },
+            executorCapabilities: {
+              agent: ["*"],
+              verification: ["*"],
+              review: ["review"],
+              approval: ["*"],
+              publication: ["*"],
+              change_request: ["*"],
+              wait: ["*"],
+              external_action: ["*"],
+            },
+          },
+        },
+      }
+    : basePolicyContext;
   const proposal = works.submitDagProposal(
     {
       workItemId: workId,
@@ -157,12 +205,56 @@ function installReview(works: WorkOrchestrationStore, workId: string) {
       plannerVersion: "1",
       plannerInputDigest: input.digest,
       reasonCode: "review",
+      policyContext,
       graph,
     },
     20,
   );
-  assert.equal(proposal.status, "accepted");
+  assert.equal(proposal.status, "accepted", JSON.stringify(proposal.decisionCodes));
 }
+
+test("agent review prompt uses the current RequirementSnapshot authority", async () => {
+  const f = fixture("reviewer");
+  try {
+    const before = f.works.getWorkInternal(f.workId);
+    const snapshot = f.works.getRequirementSnapshot(f.workId, before.currentRequirementRevision);
+    const updated = f.works.updateRequirementSnapshot(
+      f.workId,
+      "alice",
+      "team",
+      before.stateRevision,
+      snapshot.revision,
+      [
+        {
+          id: "user:snapshot-specialist",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "snapshot-specialist", equals: true },
+        },
+      ],
+      "test",
+      15,
+    );
+    assert.equal(updated.snapshot.revision, 2);
+
+    installReview(f.works, f.workId);
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const claim = f.tasks.claim("worker-1", 31, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    assert.match(claim.problem, /RequirementSnapshot revision: 2/);
+    assert.match(claim.problem, /snapshot-specialist/);
+    assert.match(claim.problem, /Original request:\s*review me/);
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
 
 test("conditional code-change can start with an agent review and complete the no-change branch", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dag-initial-review-"));
@@ -493,6 +585,183 @@ test("configured reviewerExpertId dispatches a read-only reviewer task and recor
   }
 });
 
+test("agent review result is rejected when the reviewed subject changes before reconciliation", async () => {
+  const f = fixture("reviewer");
+  try {
+    installReview(f.works, f.workId);
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const execution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    assert.ok(f.tasks.getByIdempotency("alice", "team", "dag:" + execution.idempotencyKey));
+    const claim = f.tasks.claim("worker-1", 31, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    f.tasks.complete(claim, JSON.stringify({ decision: "accepted", reason: "looks good" }), 32);
+    const current = f.works.getWorkInternal(f.workId);
+    f.works.setCurrentSubjectRevision(f.workId, "alice", "team", current.stateRevision, "subject-v2", 33);
+
+    assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 34), true);
+    const reviewed = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    assert.equal(reviewed.state, "failed");
+    assert.equal(reviewed.result?.summary, "STALE_REVIEW_SUBJECT");
+    assert.equal(f.works.listReviewDecisions(f.workId).length, 0);
+    assert.equal(f.works.getWorkInternal(f.workId).currentSubjectRevision, "subject-v2");
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("stale succeeded agent review is rerun before it can authorize a newer subject", async () => {
+  const f = fixture("reviewer");
+  try {
+    installReview(f.works, f.workId);
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const firstExecution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    const reviewTask = f.tasks.getByIdempotency("alice", "team", "dag:" + firstExecution.idempotencyKey)!;
+    const firstClaim = f.tasks.claim("worker-1", 31, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    f.tasks.complete(firstClaim, JSON.stringify({ decision: "accepted", reason: "old subject is fine" }), 32);
+
+    let current = f.works.getWorkInternal(f.workId);
+    f.works.setCurrentSubjectRevision(f.workId, "alice", "team", current.stateRevision, "subject-v2", 33);
+    assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 34), true);
+    assert.equal(
+      f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")?.result?.summary,
+      "STALE_REVIEW_SUBJECT",
+    );
+    assert.equal(f.tasks.get(reviewTask.taskId, "alice", "team").status, "succeeded");
+
+    installReview(f.works, f.workId, "subject-v2", "workspace", "review-v2");
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 40), true);
+
+    const rerun = f.tasks.get(reviewTask.taskId, "alice", "team");
+    assert.equal(rerun.status, "queued");
+    assert.equal(rerun.continuationCount, 1);
+    const secondClaim = f.tasks.claim("worker-1", 41, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    assert.match(secondClaim.problem, /dag:review-v2/);
+    f.tasks.complete(secondClaim, JSON.stringify({ decision: "accepted", reason: "new subject is fine" }), 42);
+    assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 43), true);
+    assert.equal(f.works.getDagContext(f.workId).facts["review.accepted"], true);
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("agent review task is not reused across repository resources in one WorkAttempt", async () => {
+  const f = fixture("reviewer");
+  try {
+    installReview(f.works, f.workId);
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const firstExecution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    const firstTask = f.tasks.getByIdempotency("alice", "team", "dag:" + firstExecution.idempotencyKey)!;
+    const firstClaim = f.tasks.claim("worker-1", 31, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    f.tasks.fail(firstClaim, "review crashed", 32);
+    assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 33), true);
+    assert.equal(f.works.getActiveAttempt(f.workId)?.reviewTaskId, firstTask.taskId);
+
+    f.works.setDagResourceSubject(f.workId, "repo:repo-b", "subject-b", 34);
+    const workspaceB = f.works.ensureWorkspace(
+      f.workId,
+      f.attemptId,
+      {
+        resourceKey: "repo:repo-b",
+        repositoryId: "repo-b",
+        repositoryUrl: "https://example.test/repo-b.git",
+        branch: "main",
+      },
+      35,
+    );
+    f.works.assignWorkspaceOwner(workspaceB.workspaceId, "worker-2", "/tmp/dag-review-repo-b", 36, "b".repeat(40));
+    installReview(f.works, f.workId, "subject-b", "repo:repo-b", "review-b");
+
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 40), true);
+    const secondExecution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review-b")!;
+    const secondTask = f.tasks.getByIdempotency("alice", "team", "dag:" + secondExecution.idempotencyKey);
+    assert.ok(secondTask);
+    assert.notEqual(secondTask.taskId, firstTask.taskId);
+    assert.equal(secondTask.repositoryId, "repo-b");
+    assert.equal(secondTask.workspaceKey, workspaceB.workspaceKey);
+    assert.equal(secondTask.requiredWorkerId, "worker-2");
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("repo-scoped agent review stays valid when another repository subject changes", async () => {
+  const f = fixture("reviewer");
+  try {
+    f.works.setDagResourceSubject(f.workId, "repo:repo-b", "subject-b1", 24);
+    f.works.setDagResourceSubject(f.workId, "repo:repo", "subject-v1", 25);
+    const compositeBeforeReview = f.works.getWorkInternal(f.workId).currentSubjectRevision;
+    const resourceWorkspace = f.works.ensureWorkspace(
+      f.workId,
+      f.attemptId,
+      {
+        resourceKey: "repo:repo",
+        repositoryId: "repo",
+        repositoryUrl: "https://example.test/repo.git",
+        branch: "main",
+      },
+      26,
+    );
+    f.works.assignWorkspaceOwner(
+      resourceWorkspace.workspaceId,
+      "worker-2",
+      "/tmp/dag-review-repo-workspace",
+      27,
+      "b".repeat(40),
+    );
+    installReview(f.works, f.workId, "subject-v1", "repo:repo");
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const execution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    const reviewTask = f.tasks.getByIdempotency("alice", "team", "dag:" + execution.idempotencyKey)!;
+    assert.equal(reviewTask.requiredWorkerId, "worker-2");
+    assert.equal(reviewTask.repositoryId, "repo");
+    const claim = f.tasks.claim("worker-2", 31, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    const result = JSON.stringify({ decision: "accepted", reason: "repo looks good" });
+    f.tasks.complete(claim, result, 32);
+    f.works.setDagResourceSubject(f.workId, "repo:repo-b", "subject-b2", 33);
+    const compositeAfterOtherRepoChange = f.works.getWorkInternal(f.workId).currentSubjectRevision;
+    assert.notEqual(compositeAfterOtherRepoChange, compositeBeforeReview);
+    assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 34), true);
+    const current = f.works.getWorkInternal(f.workId);
+    const reviewExecution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    assert.equal(reviewExecution.state, "succeeded");
+    assert.notEqual(reviewExecution.result?.summary, "STALE_REVIEW_SUBJECT");
+    assert.equal(f.works.listDagResourceSubjects(f.workId)["repo:repo"], "subject-v1");
+    assert.equal(current.currentSubjectRevision, compositeAfterOtherRepoChange);
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("invalid reviewer output retries as continuation of the same review task", async () => {
   const f = fixture("reviewer");
   try {
@@ -509,13 +778,59 @@ test("invalid reviewer output retries as continuation of the same review task", 
     assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 33), true);
     assert.equal(f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")?.state, "failed");
 
-    const retry = f.works.retryDagNode(f.workId, "review", "executor_failure", 34);
+    const current = f.works.getWorkInternal(f.workId);
+    const snapshot = f.works.getRequirementSnapshot(f.workId, current.currentRequirementRevision);
+    f.works.updateRequirementSnapshot(
+      f.workId,
+      "alice",
+      "team",
+      current.stateRevision,
+      snapshot.revision,
+      [
+        {
+          id: "user:review-snapshot-v2",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "review-snapshot-v2", equals: true },
+        },
+      ],
+      "test",
+      34,
+    );
+
+    const revalidationInput = f.works.getDagPlannerInput(f.workId);
+    const currentGraph = f.works.getDagRevision(f.workId, revalidationInput.frozen.dagRevision).graph;
+    const revalidation = f.works.submitDagProposal(
+      {
+        workItemId: f.workId,
+        principalId: "alice",
+        scope: "team",
+        expectedWorkRevision: revalidationInput.frozen.workRevision,
+        expectedDagRevision: revalidationInput.frozen.dagRevision,
+        expectedRequirementRevision: revalidationInput.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: revalidationInput.digest,
+        reasonCode: "user_update",
+        graph: currentGraph,
+      },
+      35,
+    );
+    assert.equal(revalidation.status, "noop");
+    const retry = f.works.retryDagNode(f.workId, "review", "executor_failure", 36);
     assert.equal(retry.generation, 2);
-    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 35), true);
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 37), true);
     const continued = f.tasks.get(reviewTask.taskId, "alice", "team");
     assert.equal(continued.status, "queued");
     assert.equal(continued.taskId, reviewTask.taskId);
     assert.equal(f.works.getActiveAttempt(f.workId)?.reviewTaskId, reviewTask.taskId);
+    const retryClaim = f.tasks.claim("worker-1", 38, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    assert.match(retryClaim.problem, /RequirementSnapshot revision: 2/);
+    assert.match(retryClaim.problem, /review-snapshot-v2/);
   } finally {
     f.works.close();
     f.tasks.close();

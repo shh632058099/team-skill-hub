@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { WorkDagSeedPlanner, WorkDagJsonPlanner } from "../src/expert-platform/work-dag-planners.js";
-import type { WorkDagPlannerContext } from "../src/expert-platform/work-dag-engine.js";
+import { WorkDagPlannerCoordinator, type WorkDagPlannerContext } from "../src/expert-platform/work-dag-engine.js";
+import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 
 function context(overrides: Partial<WorkDagPlannerContext> = {}): WorkDagPlannerContext {
   const workflow: any = {
@@ -39,15 +43,67 @@ function context(overrides: Partial<WorkDagPlannerContext> = {}): WorkDagPlanner
     work: {
       workItemId: "w",
       title: "t",
-      description: "fix it",
       status: "running",
       workflowId: "dynamic",
       workflowVersion: 1,
       currentSubjectRevision: null,
       repositoryId: "repo",
       activeWorkAttemptId: null,
+      sourceEventResource: null,
     },
     workflow,
+    requirementSnapshot: {
+      workItemId: "w",
+      revision: 1,
+      resolverIdentity: "builtin-intent-resolver",
+      resolverVersion: "typed-v2",
+      originalRequest: "fix it",
+      originalRequestDigest: "intent",
+      requirements: [],
+      unresolved: [],
+      policyObligations: [],
+      policyContextRef: "dynamic@1|organization:default@1|no-repository|no-deployment",
+      policyContextDigest: "policy-context",
+      policyRef: "dynamic@1",
+      policyDigest: "policy",
+      effectiveDigest: "effective",
+      createdAt: 1,
+    },
+    policyContext: {
+      workflowRef: "dynamic@1",
+      workflowDigest: "workflow",
+      organization: {
+        ref: "organization:default@1",
+        digest: "org",
+        allowedNodeKinds: [
+          "agent",
+          "verification",
+          "review",
+          "approval",
+          "publication",
+          "change_request",
+          "wait",
+          "external_action",
+        ],
+      },
+      repository: null,
+      deployment: null,
+      executorCapabilities: {
+        agent: ["*"],
+        verification: ["*"],
+        review: ["review"],
+        approval: ["*"],
+        publication: ["*"],
+        change_request: ["*"],
+        wait: ["*"],
+        external_action: [],
+      },
+      resourcePolicies: {},
+      limits: { maxReplans: 12, maxReworks: 2, maxTurnsPerRun: 20 },
+      usage: { replansUsed: 0, reworksUsed: 0, continuationTurns: 0 },
+      digest: "policy-context",
+    },
+
     frozen: {
       workRevision: 1,
       dagRevision: 0,
@@ -94,6 +150,48 @@ function context(overrides: Partial<WorkDagPlannerContext> = {}): WorkDagPlanner
     ...overrides,
   };
 }
+
+test("all built-in semantic Workflow policies use the same generic seed planner and validator", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dag-semantic-workflows-"));
+  const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+  try {
+    const planner = new WorkDagSeedPlanner();
+
+    const coordinator = new WorkDagPlannerCoordinator(store, planner);
+    const workflowIds = [
+      "code-fix-default",
+      "investigation",
+      "code-review",
+      "bug-fix",
+      "build-fix",
+      "feature-change",
+      "refactor",
+      "release-change",
+      "test-improvement",
+      "review-fix-verify",
+    ];
+    for (const workflowId of workflowIds) {
+      const work = store.createOrReuseWork({
+        principalId: "alice",
+        scope: "team",
+        idempotencyKey: "semantic:" + workflowId,
+        sourceType: "test",
+        title: workflowId,
+        description: "Execute " + workflowId + " according to its policy",
+        workflowId,
+      });
+      store.ensureRequirementSnapshot(work.workItemId);
+      const proposal = await coordinator.replan(work.workItemId, "alice", "team", "initial");
+      assert.ok(proposal, workflowId + " must produce a planner proposal");
+      assert.equal(proposal!.status, "accepted", workflowId + " must be accepted by the common policy validator");
+      const revision = store.getDagRevision(work.workItemId, proposal!.acceptedRevision!);
+      assert.ok(revision.graph.nodes.length > 0, workflowId + " must produce a non-empty initial DAG");
+    }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("conditional code-change seed plan reviews first, repairs only after rework, then verifies changed work", async () => {
   const planner = new WorkDagSeedPlanner();
@@ -340,6 +438,114 @@ test("seed planner does not repeat already satisfied review and delivery gates o
   });
   const graph = await planner.propose(satisfied, "user_update");
   assert.deepEqual(graph, { nodes: [], edges: [] });
+});
+
+test("json planner receives the durable RequirementSnapshot interpretation", async () => {
+  let payload: Record<string, unknown> | undefined;
+  const planner = new WorkDagJsonPlanner(
+    {
+      async complete(input: { system: string; payload: Record<string, unknown> }) {
+        payload = input.payload;
+        return JSON.stringify({ nodes: [], edges: [] });
+      },
+    },
+    "model",
+    "1",
+  );
+  const requirementSnapshot = {
+    workItemId: "w",
+    revision: 3,
+    resolverIdentity: "builtin-intent-resolver",
+    resolverVersion: "typed-v2",
+    originalRequest: "Even if no code changes, run ctest.",
+    originalRequestDigest: "intent-digest",
+    requirements: [
+      {
+        id: "user:intent:ctest",
+        source: "user",
+        strength: "required",
+        condition: { kind: "always" },
+        satisfaction: { kind: "evidence", type: "ctest" },
+      },
+    ],
+    unresolved: [],
+    policyContextRef: "dynamic@1|organization:default@1|no-repository|no-deployment",
+    policyContextDigest: "policy-context",
+    policyRef: "dynamic@1",
+    policyDigest: "policy",
+    effectiveDigest: "effective",
+    createdAt: 1,
+  };
+  await planner.propose({ ...context(), requirementSnapshot } as any, "manual");
+  assert.deepEqual(payload?.requirementSnapshot, requirementSnapshot);
+});
+
+test("planner treats RequirementSnapshot as the sole durable user-intent source", async () => {
+  let payload: Record<string, unknown> | undefined;
+  const planner = new WorkDagJsonPlanner(
+    {
+      async complete(input: { system: string; payload: Record<string, unknown> }) {
+        payload = input.payload;
+        return JSON.stringify({ nodes: [], edges: [] });
+      },
+    },
+    "model",
+    "1",
+  );
+  const base = context();
+  await planner.propose(
+    {
+      ...base,
+      work: { ...base.work, description: "MUTABLE RAW DESCRIPTION MUST NOT BE EXPOSED" } as any,
+      requirementSnapshot: {
+        ...base.requirementSnapshot,
+        originalRequest: "Durable resolved request",
+        originalRequestDigest: "durable-intent",
+      },
+    },
+    "manual",
+  );
+  assert.equal(Object.hasOwn(payload?.work as object, "description"), false);
+  assert.equal((payload?.requirementSnapshot as any).originalRequest, "Durable resolved request");
+});
+
+test("seed planner uses durable snapshot intent even if raw Work description is unavailable", async () => {
+  const planner = new WorkDagSeedPlanner();
+  const base = context();
+  const graph = await planner.propose(
+    {
+      ...base,
+      work: { ...base.work, description: "" } as any,
+      workflow: {
+        ...base.workflow,
+        definition: {
+          ...structuredClone(base.workflow.definition),
+          validation: { requiredEvidence: [], required: [] },
+          review: { required: false },
+          change: { mode: "readonly" },
+          publication: { required: false, mode: "work_branch", approvalRequired: false },
+          completion: { require: ["no_unresolved_blocker"] },
+        },
+      } as any,
+      requirementSnapshot: {
+        ...base.requirementSnapshot,
+        originalRequest: "Investigate why startup is slow",
+        originalRequestDigest: "snapshot-intent",
+      },
+      obligations: [
+        {
+          id: "policy:no_unresolved_blocker",
+          condition: { kind: "always" },
+          satisfaction: { kind: "no_blocker" },
+        },
+      ] as any,
+    },
+    "initial",
+  );
+  assert.deepEqual(
+    graph.nodes.map((node) => node.kind),
+    ["agent"],
+  );
 });
 
 test("json planner forwards cancellation signal to its model", async () => {

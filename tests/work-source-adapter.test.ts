@@ -8,6 +8,9 @@ import { ExpertStore } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
+import { WorkDagScheduler } from "../src/expert-platform/work-dag-engine.js";
+import { createControlDagAdapters } from "../src/expert-platform/work-dag-control-adapters.js";
+import { sourceEventResourceIdentity } from "../src/expert-platform/work-dag.js";
 import {
   WorkSourceIngestion,
   type NormalizedWorkSourceSignal,
@@ -96,8 +99,9 @@ test("provider-neutral source ingestion owns Work creation and observation recon
     assert.equal(detail.work.sourceRef, "demo-1");
     assert.equal(detail.sourceObservations.length, 1);
     assert.equal(detail.sourceObservations[0]!.reconciliationAction, "noop");
-    const claim = f.tasks.claim("worker-a", 1500, 30000, "ota")!;
-    assert.equal(claim.taskId, detail.currentTask!.taskId);
+    assert.equal(detail.work.orchestrationEngine, "dynamic-dag");
+    assert.equal(detail.work.status, "queued");
+    assert.equal(detail.currentTask, null);
     const terminal = f.ingestion.update(
       adapter,
       detail.work.workItemId,
@@ -107,8 +111,103 @@ test("provider-neutral source ingestion owns Work creation and observation recon
       2000,
     );
     assert.equal(terminal.work.status, "cancelled");
-    assert.equal(terminal.currentTask!.cancellationRequested, true);
+    assert.equal(terminal.currentTask, null);
     assert.equal(terminal.sourceObservations.at(-1)!.reconciliationAction, "cancel");
+  } finally {
+    f.close();
+  }
+});
+
+test("durable source observation automatically signals a matching source-event DAG wait", async () => {
+  const f = fixture();
+  try {
+    const base = f.work.getWorkflow("investigation").definition;
+    f.work.putWorkflow("source-event-wait", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      review: { required: false },
+      change: { mode: "readonly" },
+      publication: { required: false, mode: "work_branch", approvalRequired: false },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const sourceWaitAdapter: WorkSourceAdapter<DemoSubmit, DemoSignal, DemoContext> = {
+      ...adapter,
+      normalizeSubmission(input, context, now) {
+        return {
+          ...adapter.normalizeSubmission(input, context, now),
+          workflowId: "source-event-wait",
+        };
+      },
+    };
+    const detail = f.ingestion.submit(
+      sourceWaitAdapter,
+      { key: "demo-wait" },
+      { sourceScope: "scope-a" },
+      { principalId: "alice", scope: "team-a" },
+      1000,
+    );
+    f.work.ensureRequirementSnapshot(detail.work.workItemId, 1001);
+    const input = f.work.getDagPlannerInput(detail.work.workItemId);
+    const sourceResource = sourceEventResourceIdentity(detail.work.workItemId, "demo", "scope-a", "demo-wait");
+    const proposal = f.work.submitDagProposal(
+      {
+        workItemId: detail.work.workItemId,
+        principalId: "alice",
+        scope: "team-a",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: input.frozen.dagRevision,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph: {
+          nodes: [
+            {
+              id: "wait-source",
+              kind: "wait",
+              capability: "source_event",
+              subject: null,
+              resource: sourceResource,
+              mutates: false,
+              requirements: [],
+            },
+          ],
+          edges: [],
+        },
+      },
+      1010,
+    );
+    assert.equal(proposal.status, "accepted", JSON.stringify(proposal.decisionCodes));
+
+    const scheduler = new WorkDagScheduler(f.work, createControlDagAdapters(f.work));
+    assert.equal(await scheduler.runOne(detail.work.workItemId, "alice", "team-a", "hub", 1020), true);
+    const waiting = f.work.listDagWaits(detail.work.workItemId)[0]!;
+    assert.equal(waiting.state, "waiting");
+    assert.equal(waiting.correlationKey, sourceResource);
+
+    const updated = f.ingestion.update(
+      sourceWaitAdapter,
+      detail.work.workItemId,
+      { state: "active", fingerprint: "active:demo-wait:2" },
+      { sourceScope: "scope-a" },
+      { principalId: "alice", scope: "team-a" },
+      1100,
+    );
+    const observation = updated.sourceObservations.at(-1)!;
+    const signaled = f.work.listDagWaits(detail.work.workItemId)[0]!;
+    assert.equal(signaled.state, "signaled");
+    assert.equal(signaled.signalEventId, "source-observation:" + observation.observationId);
+    assert.deepEqual(signaled.signalPayload, {
+      sourceType: "demo",
+      sourceScope: "scope-a",
+      sourceRef: "demo-wait",
+      state: "active",
+      detail: null,
+      fingerprint: "active:demo-wait:2",
+      observedAt: 1100,
+    });
   } finally {
     f.close();
   }
@@ -137,7 +236,7 @@ test("source ingestion rejects adapter identity drift before recording a signal"
       /SOURCE_ADAPTER_IDENTITY_MISMATCH/,
     );
     assert.equal(f.work.listSourceObservations(detail.work.workItemId).length, 1);
-    assert.equal(f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a").work.status, "running");
+    assert.equal(f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a").work.status, "queued");
   } finally {
     f.close();
   }
@@ -282,7 +381,7 @@ test("source reconciliation respects the durable orchestration claim before chan
       /WORK_ORCHESTRATION_CLAIMED/,
     );
     assert.equal(f.work.getSourceObservation(terminal.observationId).reconciledAt, null);
-    assert.equal(f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a").work.status, "running");
+    assert.equal(f.orchestrator.getWork(detail.work.workItemId, "alice", "team-a").work.status, "queued");
     const recovered = f.orchestrator.reconcileSourceObservation(terminal.observationId, "alice", "team-a", 2601);
     assert.equal(recovered.work.status, "cancelled");
     assert.equal(f.work.getSourceObservation(terminal.observationId).reconciliationAction, "cancel");
@@ -355,7 +454,7 @@ test("direct Work reconciliation fences pending terminal source before execution
 
     const reconciled = f.orchestrator.reconcileWork(detail.work.workItemId, "alice", "team-a", 2000);
     assert.equal(reconciled.work.status, "cancelled");
-    assert.equal(reconciled.currentTask!.status, "cancelled");
+    assert.equal(reconciled.currentTask, null);
     assert.equal(f.work.getSourceObservation(terminal.observationId).reconciliationAction, "cancel");
   } finally {
     f.close();

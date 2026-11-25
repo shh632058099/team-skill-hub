@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { Script } from "node:vm";
 import { SkillHubApplicationService } from "../src/application.js";
 import { LoggingEventSink } from "../src/events.js";
@@ -70,6 +71,9 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /Source Observations/);
     assert.match(html, /Workflows/);
     assert.match(html, /id="workflows"/);
+    assert.match(html, /所有新 Work 统一使用 Dynamic DAG/);
+    assert.match(html, /Workflow 只定义策略/);
+    assert.match(html, /执行引擎/);
     assert.match(html, /\/admin\/api\/workflows/);
     const workflowsResponse = await fetch(base + "/admin/api/workflows");
     assert.equal(workflowsResponse.status, 200);
@@ -103,6 +107,15 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /id="workReviewReject"/);
     assert.match(html, /源码或关键环境变化后/);
     assert.match(html, /高级执行与审计信息/);
+    assert.match(html, /Dynamic DAG/);
+    assert.match(html, /id="workDagSummary"/);
+    assert.match(html, /id="workDagNodeRows"/);
+    assert.match(html, /id="workDagRevisionRows"/);
+    assert.match(html, /id="workDagProposalRows"/);
+    assert.match(html, /id="workDagExecutionRows"/);
+    assert.match(html, /id="workDagWaitRows"/);
+    assert.match(html, /id="workDagLateResultRows"/);
+    assert.match(html, /id="workDagAuditDecisionRows"/);
     assert.match(html, /预置模板/);
     assert.match(html, /最大 WorkAttempt/);
     assert.match(html, /验证步骤/);
@@ -805,6 +818,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(workDetailBefore.status, 200);
     const workDetailBeforeBody = await workDetailBefore.json();
     assert.ok(["queued", "running"].includes(workDetailBeforeBody.work.status));
+    assert.equal(workDetailBeforeBody.work.orchestrationEngine, "dynamic-dag");
     assert.ok(workDetailBeforeBody.attempts.length <= 1);
     const workReconcile = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/reconcile", {
       method: "POST",
@@ -828,6 +842,19 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.equal(Array.isArray(reconciledWork.approvals), true);
     assert.equal(reconciledWork.publication, null);
     assert.equal(reconciledWork.changeRequest, null);
+    assert.ok(reconciledWork.dag);
+    assert.ok(reconciledWork.dag.currentRevision >= 1);
+    assert.equal(Array.isArray(reconciledWork.dag.revision.graph.nodes), true);
+    assert.equal(Array.isArray(reconciledWork.dag.revision.graph.edges), true);
+    assert.equal(Array.isArray(reconciledWork.dag.executions), true);
+    assert.equal(Array.isArray(reconciledWork.dag.revisions), true);
+    assert.equal(Array.isArray(reconciledWork.dag.replanRequests), true);
+    assert.equal(Array.isArray(reconciledWork.dag.proposals), true);
+    assert.equal(Array.isArray(reconciledWork.dag.decisions), true);
+    assert.equal(Array.isArray(reconciledWork.dag.waits), true);
+    assert.equal(Array.isArray(reconciledWork.dag.lateResults), true);
+    assert.ok(reconciledWork.dag.requirementSnapshot);
+    assert.equal(reconciledWork.dag.requirementSnapshot.revision, reconciledWork.work.currentRequirementRevision);
     const linkedTaskResponse = await fetch(base + "/admin/api/expert-tasks/" + reconciledWork.currentTask.taskId);
     assert.equal(linkedTaskResponse.status, 200);
     const linkedTask = await linkedTaskResponse.json();
@@ -847,6 +874,11 @@ test("Admin expert configuration UI manages definitions and execution configurat
       deploymentId: "ota-from-url",
       repositoryId: urlDeploymentBody.deployment.repositoryIds[0],
     });
+    const legacyReviewDb = new DatabaseSync(runtimeDb);
+    legacyReviewDb
+      .prepare("UPDATE work_items SET orchestration_engine='legacy-single-node' WHERE work_item_id=?")
+      .run(reviewWork.workItemId);
+    legacyReviewDb.close();
     const reviewAttempt = reviewStore.createWorkAttempt(
       reviewWork.workItemId,
       "team-a",

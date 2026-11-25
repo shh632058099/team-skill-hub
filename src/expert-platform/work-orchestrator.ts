@@ -23,6 +23,7 @@ import { buildPublicationCommitMetadata, buildWorkBranchName } from "./publicati
 import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 import { WorkDagShadowProjector } from "./work-dag-shadow-projector.js";
+import type { WorkDagDeliveryTarget } from "./work-dag-delivery-adapters.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -58,11 +59,18 @@ export interface WorkDetail {
     currentRevision: number;
     requirementRevision: number;
     revision: ReturnType<WorkOrchestrationStore["getDagRevision"]> | null;
+    revisions: ReturnType<WorkOrchestrationStore["listDagRevisions"]>;
     requirementSnapshot: ReturnType<WorkOrchestrationStore["getRequirementSnapshot"]> | null;
     replanRequests: ReturnType<WorkOrchestrationStore["listDagReplanRequests"]>;
+    proposals: ReturnType<WorkOrchestrationStore["listDagProposals"]>;
     executions: ReturnType<WorkOrchestrationStore["listDagExecutions"]>;
     facts: ReturnType<WorkOrchestrationStore["listDagFacts"]>;
     evidence: ReturnType<WorkOrchestrationStore["listDagEvidence"]>;
+    evidenceView: Array<
+      ReturnType<WorkOrchestrationStore["listDagEvidence"]>[number] & {
+        stale: boolean;
+      }
+    >;
     artifacts: ReturnType<WorkOrchestrationStore["listDagArtifacts"]>;
     waits: ReturnType<WorkOrchestrationStore["listDagWaits"]>;
     lateResults: ReturnType<WorkOrchestrationStore["listDagLateResults"]>;
@@ -387,8 +395,7 @@ export class WorkOrchestrator {
 
   submitWork(input: SubmitWorkInput, now = Date.now()): WorkDetail {
     const staged = this.stageWork(input, now);
-    const workflow = this.workStore.getWorkflow(staged.work.workflowId, staged.work.workflowVersion);
-    if (workflow.definition.graph.mode === "dynamic-dag") return staged;
+    if (staged.work.orchestrationEngine === "dynamic-dag") return staged;
     return this.reconcileWork(staged.work.workItemId, input.principalId, input.scope, now);
   }
 
@@ -678,10 +685,10 @@ export class WorkOrchestrator {
     this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     work = this.reconcilePendingSourceForClaimedWork(workItemId, principalId, scope, now, fence);
     if (TERMINAL_WORK.has(work.status)) return this.detail(workItemId, principalId, scope);
-    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
-    if (workflow.definition.graph.mode === "dynamic-dag") {
+    if (work.orchestrationEngine === "dynamic-dag") {
       return this.detail(workItemId, principalId, scope);
     }
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     this.workStore.assertWorkOrchestrationClaim(workItemId, this.orchestrationOwnerId, orchestrationEpoch, now);
     work = this.reconcilePublicationLifecycle(work, now, fence);
     if (TERMINAL_WORK.has(work.status) || work.status === "blocked") {
@@ -910,6 +917,24 @@ export class WorkOrchestrator {
       return this.detail(work.workItemId, principalId, scope);
     }
 
+    if (work.orchestrationEngine === "dynamic-dag") {
+      if (!work.currentSubjectRevision) throw new Error("WORK_SUBJECT_REQUIRED");
+      this.workStore.submitReviewDecision(
+        work.workItemId,
+        principalId,
+        scope,
+        {
+          expectedRevision: work.stateRevision,
+          subjectRevision: work.currentSubjectRevision,
+          decision: "rework",
+          reason: feedback.reason?.trim() || "Expert task feedback requested rework",
+          actorPrincipalId: principalId,
+        },
+        now,
+      );
+      return this.detail(work.workItemId, principalId, scope);
+    }
+
     work = this.workStore.requestRework(
       work.workItemId,
       principalId,
@@ -939,6 +964,9 @@ export class WorkOrchestrator {
   ): WorkDetail {
     this.workStore.submitReviewDecision(workItemId, principalId, scope, input, now);
     let work = this.workStore.getWork(workItemId, principalId, scope);
+    if (work.orchestrationEngine === "dynamic-dag") {
+      return this.detail(workItemId, principalId, scope);
+    }
 
     if (input.decision === "accepted") {
       const gate = this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
@@ -1013,6 +1041,9 @@ export class WorkOrchestrator {
         now,
       );
       let work = this.workStore.getWork(workItemId, principalId, scope);
+      if (work.orchestrationEngine === "dynamic-dag") {
+        return this.detail(workItemId, principalId, scope);
+      }
       if (input.decision === "approved") {
         const gate = this.workStore.evaluateCompletionGate(workItemId, principalId, scope);
         if (gate.ready && !TERMINAL_WORK.has(work.status)) {
@@ -1080,9 +1111,121 @@ export class WorkOrchestrator {
     return this.detail(workItemId, principalId, scope);
   }
 
-  ensurePublication(workItemId: string, principalId: string, scope: string, now = Date.now()): WorkPublicationRecord {
+  ensurePublication(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    now = Date.now(),
+    target?: WorkDagDeliveryTarget,
+  ): WorkPublicationRecord {
     if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
     const work = this.workStore.getWork(workItemId, principalId, scope);
+    if (target) {
+      const subjectRevision = target.subjectRevision?.trim() || "";
+      if (!subjectRevision || !/^workspace:[a-f0-9]{64}$/i.test(subjectRevision)) {
+        throw new Error("PUBLICATION_SOURCE_STALE");
+      }
+      const attempts = this.workStore.listAttempts(workItemId);
+      const attempt = [...attempts]
+        .reverse()
+        .find((candidate) =>
+          Boolean(this.workStore.getWorkspaceForResource(candidate.workAttemptId, target.resourceKey)),
+        );
+      if (!attempt) throw new Error("PUBLICATION_WORK_ATTEMPT_NOT_READY");
+      const workspace = this.workStore.getWorkspaceForResource(attempt.workAttemptId, target.resourceKey);
+      if (
+        !workspace ||
+        !workspace.ownerWorkerId ||
+        !workspace.path ||
+        !workspace.baseCommit ||
+        workspace.state === "removed" ||
+        workspace.state === "failed"
+      ) {
+        throw new Error("PUBLICATION_WORKSPACE_UNAVAILABLE");
+      }
+      if (!this.workerAvailable(workspace.ownerWorkerId, now)) {
+        throw new Error("PUBLICATION_WORKSPACE_UNAVAILABLE");
+      }
+      const task = this.tasks
+        .listByWorkAttempt(attempt.workAttemptId, principalId, scope)
+        .filter(
+          (candidate) =>
+            candidate.executionKind === "agent" &&
+            candidate.status === "succeeded" &&
+            candidate.workspaceKey === workspace.workspaceKey &&
+            candidate.repositoryId === (target.repositoryId ?? workspace.repositoryId) &&
+            candidate.workspaceChangeSummary !== null &&
+            "workspace:" + candidate.workspaceChangeSummary.contentRevision === subjectRevision,
+        )
+        .at(-1);
+      if (!task?.workspaceChangeSummary) throw new Error("PUBLICATION_SOURCE_STALE");
+      const summary = task.workspaceChangeSummary;
+      if (summary.baseCommit !== workspace.baseCommit) throw new Error("PUBLICATION_SOURCE_STALE");
+      const repository = task.deploymentSnapshot?.repository;
+      const policy = repository?.publicationPolicy;
+      if (!repository || !policy) throw new Error("PUBLICATION_POLICY_MISSING");
+      if (!policy.permissions.includes("prepare-commit") || !policy.permissions.includes("push-work-branch")) {
+        throw new Error("PUBLICATION_NOT_ALLOWED");
+      }
+      if (target.repositoryId && repository.id !== target.repositoryId) {
+        throw new Error("PUBLICATION_REPOSITORY_MISMATCH");
+      }
+
+      const existingPublication = this.publications
+        .listPublications(workItemId)
+        .find(
+          (publication) =>
+            publication.workAttemptId === attempt.workAttemptId && publication.repositoryId === repository.id,
+        );
+      if (existingPublication) {
+        if (existingPublication.sourceSubjectRevision !== subjectRevision) {
+          throw new Error("PUBLICATION_SOURCE_REVISION_CONFLICT");
+        }
+        return existingPublication;
+      }
+
+      const branchName = buildWorkBranchName(policy.branchPrefix, workItemId, attempt.sequence);
+      const commitMetadata = buildPublicationCommitMetadata({
+        title: work.title,
+        workItemId,
+        workAttemptId: attempt.workAttemptId,
+        sourceSubjectRevision: subjectRevision,
+        timestamp: now,
+      });
+      return this.publications.createOrReusePublication(
+        {
+          workItemId,
+          workAttemptId: attempt.workAttemptId,
+          workspaceId: workspace.workspaceId,
+          sourceSubjectRevision: subjectRevision,
+          baseCommit: workspace.baseCommit,
+          repositoryId: repository.id,
+          repositoryIdentityRevision: task.deploymentConfigVersion ?? attempt.deploymentConfigVersion,
+          publicationPolicyRevision: policy.version,
+          branchName,
+          pushRemoteName: "origin",
+          ownerWorkerId: workspace.ownerWorkerId,
+          commitTimestamp: commitMetadata.timestamp,
+          commitAuthorName: commitMetadata.authorName,
+          commitAuthorEmail: commitMetadata.authorEmail,
+          commitMessage: commitMetadata.message,
+          executionSnapshot: {
+            workspacePath: workspace.path,
+            repositoryUrl: repository.url,
+            defaultBranch: repository.branch,
+            branchPrefix: policy.branchPrefix,
+            protectedBranches: [...policy.protectedBranches],
+            allowedPushRemote: policy.allowedPushRemote,
+            ...((policy.credentialRef ?? repository.credentialRef)
+              ? { credentialRef: policy.credentialRef ?? repository.credentialRef }
+              : {}),
+            expectedContentRevision: summary.contentRevision,
+            approvedChangeSummary: summary,
+          },
+        },
+        now,
+      );
+    }
     if (!work.currentSubjectRevision || !/^workspace:[a-f0-9]{64}$/i.test(work.currentSubjectRevision)) {
       throw new Error("PUBLICATION_SOURCE_STALE");
     }
@@ -1193,12 +1336,18 @@ export class WorkOrchestrator {
     principalId: string,
     scope: string,
     now = Date.now(),
+    target?: WorkDagDeliveryTarget,
   ): WorkChangeRequestRecord {
     if (!this.publications || !this.changeRequests) throw new Error("CHANGE_REQUEST_STORE_UNAVAILABLE");
     const work = this.workStore.getWork(workItemId, principalId, scope);
     const publication = this.publications
       .listPublications(workItemId)
-      .filter((item) => item.sourceSubjectRevision === work.currentSubjectRevision)
+      .filter((item) =>
+        target
+          ? item.sourceSubjectRevision === target.subjectRevision &&
+            (target.repositoryId === null || item.repositoryId === target.repositoryId)
+          : item.sourceSubjectRevision === work.currentSubjectRevision,
+      )
       .at(-1);
     if (!publication || publication.state !== "pushed" || !publication.commitSha) {
       throw new Error("CHANGE_REQUEST_PUBLICATION_NOT_READY");
@@ -1208,8 +1357,23 @@ export class WorkOrchestrator {
     const attempt = this.workStore
       .listAttempts(workItemId)
       .find((item) => item.workAttemptId === publication.workAttemptId);
-    const resolved = attempt?.dispatchBinding ? asResolvedDispatch(attempt.dispatchBinding) : null;
-    const repository = resolved?.deploymentSnapshot?.repository;
+    let repository = attempt?.dispatchBinding
+      ? asResolvedDispatch(attempt.dispatchBinding).deploymentSnapshot?.repository
+      : null;
+    if (target && attempt) {
+      const workspace = this.workStore.getWorkspace(publication.workspaceId);
+      const task = this.tasks
+        .listByWorkAttempt(attempt.workAttemptId, principalId, scope)
+        .filter(
+          (candidate) =>
+            candidate.executionKind === "agent" &&
+            candidate.status === "succeeded" &&
+            candidate.workspaceKey === workspace.workspaceKey &&
+            candidate.repositoryId === publication.repositoryId,
+        )
+        .at(-1);
+      repository = task?.deploymentSnapshot?.repository ?? null;
+    }
     const policy = repository?.publicationPolicy;
     if (!repository || !policy?.permissions.includes("create-change-request")) {
       throw new Error("CHANGE_REQUEST_NOT_ALLOWED");
@@ -1253,19 +1417,26 @@ export class WorkOrchestrator {
     scope: string,
     publicationId: string,
     now = Date.now(),
+    target?: WorkDagDeliveryTarget,
   ): WorkDetail {
     if (!this.publications) throw new Error("PUBLICATION_STORE_UNAVAILABLE");
     const work = this.workStore.getWork(workItemId, principalId, scope);
     const publication = this.publications.getPublication(publicationId);
     if (publication.workItemId !== workItemId) throw new Error("PUBLICATION_WORK_MISMATCH");
-    if (work.currentSubjectRevision !== publication.sourceSubjectRevision) {
+    const expectedSubject = target
+      ? (this.workStore.listDagResourceSubjects(workItemId)[target.resourceKey] ?? null)
+      : work.currentSubjectRevision;
+    if (
+      (target?.repositoryId && publication.repositoryId !== target.repositoryId) ||
+      expectedSubject !== publication.sourceSubjectRevision
+    ) {
       if (["preparing", "prepared", "approved", "pushing"].includes(publication.state)) {
         this.publications.transitionPublication(
           publicationId,
           "blocked",
           {
             lastErrorCode: "PUBLICATION_SOURCE_STALE",
-            lastErrorContext: work.currentSubjectRevision ?? "missing_current_subject",
+            lastErrorContext: expectedSubject ?? "missing_current_subject",
           },
           now,
         );
@@ -1274,6 +1445,9 @@ export class WorkOrchestrator {
     }
     const artifact = this.publications.getPublicationArtifact(publicationId);
     if (!artifact) throw new Error("PUBLICATION_ARTIFACT_NOT_PREPARED");
+    if (target) {
+      return this.detail(workItemId, principalId, scope);
+    }
     this.workStore.recordEvidence(
       workItemId,
       principalId,
@@ -1303,8 +1477,7 @@ export class WorkOrchestrator {
     if (detail.reviewTask && (detail.reviewTask.status === "queued" || detail.reviewTask.status === "running")) {
       this.tasks.cancel(detail.reviewTask.taskId, principalId, scope);
     }
-    const workflow = this.workStore.getWorkflow(detail.work.workflowId, detail.work.workflowVersion);
-    if (workflow.definition.graph.mode === "dynamic-dag") {
+    if (detail.work.orchestrationEngine === "dynamic-dag") {
       const publicationCancellation = this.publications?.cancelForWork(workItemId, now) ?? {
         cancelledPublicationIds: [],
         outcomeUnknownPublicationIds: [],
@@ -1372,7 +1545,7 @@ export class WorkOrchestrator {
         }
       }
     }
-    if (workflow.definition.graph.mode === "dynamic-dag") {
+    if (detail.work.orchestrationEngine === "dynamic-dag") {
       for (const execution of this.workStore.listDagExecutions(workItemId)) {
         if (!["pending", "claimed", "running"].includes(execution.state)) continue;
         const ref = execution.externalRef;
@@ -1408,7 +1581,7 @@ export class WorkOrchestrator {
       this.workStore.transitionWork(workItemId, principalId, scope, current.stateRevision, "cancelled", now);
     }
     this.workStore.requestTerminalWorkspaceCleanup(workItemId, now);
-    if (workflow.definition.graph.mode === "dynamic-dag") {
+    if (detail.work.orchestrationEngine === "dynamic-dag") {
       this.workStore.cancelDagExecutions(workItemId, now);
       this.workStore.cancelDagWaits(workItemId, now);
     }
@@ -2307,21 +2480,37 @@ export class WorkOrchestrator {
           lastErrorCode: changeRequestRecord.lastErrorCode,
         }
       : null;
+    const dagEvidence = work.orchestrationEngine === "dynamic-dag" ? this.workStore.listDagEvidence(workItemId) : [];
+    const dagContext = work.orchestrationEngine === "dynamic-dag" ? this.workStore.getDagContext(workItemId) : null;
     const dag =
-      workflow.definition.graph.mode === "dynamic-dag"
+      work.orchestrationEngine === "dynamic-dag"
         ? {
             currentRevision: work.currentDagRevision,
             requirementRevision: work.currentRequirementRevision,
             revision:
               work.currentDagRevision > 0 ? this.workStore.getDagRevision(workItemId, work.currentDagRevision) : null,
+            revisions: this.workStore.listDagRevisions(workItemId),
             requirementSnapshot:
               work.currentRequirementRevision > 0
                 ? this.workStore.getRequirementSnapshot(workItemId, work.currentRequirementRevision)
                 : null,
             replanRequests: this.workStore.listDagReplanRequests(workItemId),
+            proposals: this.workStore.listDagProposals(workItemId),
             executions: this.workStore.listDagExecutions(workItemId),
             facts: this.workStore.listDagFacts(workItemId),
-            evidence: this.workStore.listDagEvidence(workItemId),
+            evidence: dagEvidence,
+            evidenceView: dagEvidence.map((evidence) => ({
+              ...evidence,
+              stale:
+                dagContext?.evidence.find(
+                  (item) =>
+                    item.type === evidence.type &&
+                    item.subject === evidence.subjectRevision &&
+                    (item.resource ?? null) === evidence.resourceIdentity &&
+                    item.passed === evidence.passed &&
+                    item.createdAt === evidence.createdAt,
+                )?.stale ?? true,
+            })),
             artifacts: this.workStore.listDagArtifacts(workItemId),
             waits: this.workStore.listDagWaits(workItemId),
             lateResults: this.workStore.listDagLateResults(workItemId),

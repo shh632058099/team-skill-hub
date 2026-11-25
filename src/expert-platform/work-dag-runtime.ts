@@ -44,6 +44,7 @@ export interface WorkDagNodeExecutionRecord {
   workItemId: string;
   nodeId: string;
   createdDagRevision: number;
+  boundRequirementRevision: number | null;
   generation: number;
   state: DagState;
   fence: number;
@@ -69,12 +70,14 @@ export interface DagNodeArtifactOutput {
   type: string;
   ref: string;
   subjectRevision: string | null;
+  resourceIdentity?: string | null;
 }
 export interface DagNodeEvidenceOutput {
   evidenceId?: string;
   type: string;
   passed: boolean;
   subjectRevision: string | null;
+  resourceIdentity?: string | null;
   verifierIdentity: string;
   artifactRef?: string;
 }
@@ -92,6 +95,7 @@ export interface WorkDagFactRecord {
   key: string;
   value: DagScalar;
   subjectRevision: string | null;
+  resourceIdentity: string | null;
   sourceExecutionId: string;
   createdAt: number;
 }
@@ -101,6 +105,7 @@ export interface WorkDagEvidenceRecord {
   type: string;
   passed: boolean;
   subjectRevision: string | null;
+  resourceIdentity: string | null;
   verifierIdentity: string;
   artifactRef: string | null;
   sourceExecutionId: string;
@@ -114,6 +119,7 @@ export interface WorkDagArtifactRecord {
   type: string;
   ref: string;
   subjectRevision: string | null;
+  resourceIdentity: string | null;
   sourceExecutionId: string;
   createdAt: number;
 }

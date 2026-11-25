@@ -5,8 +5,15 @@ import type { WorkAttemptRecord, WorkItemRecord, WorkOrchestrationStore } from "
 import type { VerificationPolicyStep } from "./verification-policy.js";
 import { normalizeVerificationPolicy } from "./verification-policy.js";
 import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
+import {
+  requirementPromptContext,
+  requirementRoutingProblems,
+  resolveRequirementRouting,
+} from "./work-dag-requirements.js";
 import type { DagDeferredExecution, WorkDagExecutionContext, WorkDagExecutorAdapter } from "./work-dag-engine.js";
 import type { DagNodeResult } from "./work-dag-runtime.js";
+import { subjectForResource } from "./work-dag.js";
+import { agentOutcomeProtocolInstructions } from "./agent-execution-outcome.js";
 
 function workspaceAccess(
   workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
@@ -48,6 +55,23 @@ function taskSubject(task: TaskRecord): string {
   );
 }
 
+function updateDagSubject(store: WorkOrchestrationStore, context: WorkDagExecutionContext, subject: string): void {
+  if (context.node.resource?.startsWith("repo:")) {
+    store.setDagResourceSubject(context.work.workItemId, context.node.resource, subject);
+    return;
+  }
+  const current = store.getWorkInternal(context.work.workItemId);
+  if (current.currentSubjectRevision !== subject) {
+    store.setCurrentSubjectRevision(
+      current.workItemId,
+      current.principalId,
+      current.scope,
+      current.stateRevision,
+      subject,
+    );
+  }
+}
+
 function verificationSteps(
   workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
   resolved: ResolvedDispatch,
@@ -77,9 +101,28 @@ function taskKey(context: WorkDagExecutionContext): string {
   return "dag:" + context.execution.idempotencyKey;
 }
 
-function taskForCorrelation(tasks: ExpertTaskStore, context: WorkDagExecutionContext): TaskRecord | null {
-  const ref = context.execution.externalRef;
+function correlationBaseRef(ref: string): string {
+  const marker = ref.indexOf("#authority=");
+  return marker < 0 ? ref : ref.slice(0, marker);
+}
+
+function authoritySubjectFromCorrelation(ref: string | null): string | null {
   if (!ref) return null;
+  const marker = ref.indexOf("#authority=");
+  if (marker < 0) return null;
+  const encoded = ref.slice(marker + "#authority=".length);
+  if (!encoded) return null;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+function taskForCorrelation(tasks: ExpertTaskStore, context: WorkDagExecutionContext): TaskRecord | null {
+  const externalRef = context.execution.externalRef;
+  if (!externalRef) return null;
+  const ref = correlationBaseRef(externalRef);
   if (ref.startsWith("expert-task:")) {
     const taskId = ref.slice("expert-task:".length);
     try {
@@ -92,6 +135,14 @@ function taskForCorrelation(tasks: ExpertTaskStore, context: WorkDagExecutionCon
     return tasks.getByIdempotency(context.work.principalId, context.work.scope, ref.slice("expert-task-key:".length));
   }
   return null;
+}
+
+function taskBelongsToExecution(tasks: ExpertTaskStore, context: WorkDagExecutionContext, task: TaskRecord): boolean {
+  if (task.executionRef !== null) {
+    return task.executionRef === context.execution.idempotencyKey;
+  }
+  const keyed = tasks.getByIdempotency(context.work.principalId, context.work.scope, taskKey(context));
+  return keyed?.taskId === task.taskId;
 }
 
 function taskTerminalResult(
@@ -130,6 +181,45 @@ function pendingAttemptContext(work: WorkItemRecord): {
   }
 }
 
+function repositoryResource(context: WorkDagExecutionContext): {
+  resourceKey: string;
+  repositoryId: string | undefined;
+} {
+  const resourceKey = context.node.resource ?? "workspace";
+  if (resourceKey.startsWith("repo:")) {
+    const repositoryId = resourceKey.slice("repo:".length).trim();
+    if (!repositoryId) throw new Error("INVALID_DAG_REPOSITORY_RESOURCE");
+    return { resourceKey, repositoryId };
+  }
+  return { resourceKey: "workspace", repositoryId: context.work.repositoryId ?? undefined };
+}
+
+function executionRequirementRevision(store: WorkOrchestrationStore, context: WorkDagExecutionContext): number {
+  if (context.execution.boundRequirementRevision !== null) {
+    return context.execution.boundRequirementRevision;
+  }
+  return store.getDagRevision(context.work.workItemId, context.execution.createdDagRevision)
+    .requirementSnapshotRevision;
+}
+
+function requirementExecutionContext(
+  store: WorkOrchestrationStore,
+  work: WorkItemRecord,
+  requirementRevision = work.currentRequirementRevision,
+): { routingProblems: string[]; promptContext: string } {
+  if (requirementRevision < 1) {
+    return {
+      routingProblems: [work.description],
+      promptContext: "Original request: " + work.description,
+    };
+  }
+  const snapshot = store.getRequirementSnapshot(work.workItemId, requirementRevision);
+  return {
+    routingProblems: requirementRoutingProblems(snapshot),
+    promptContext: requirementPromptContext(snapshot),
+  };
+}
+
 class ExpertTaskDagAdapterBase {
   constructor(
     protected readonly workStore: WorkOrchestrationStore,
@@ -137,21 +227,77 @@ class ExpertTaskDagAdapterBase {
     protected readonly dispatch: ExpertDispatchService,
   ) {}
 
-  protected resolve(work: WorkItemRecord, attempt?: WorkAttemptRecord): ResolvedDispatch {
-    if (attempt?.dispatchBinding) return asResolved(attempt.dispatchBinding);
-    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
-    const resolved = this.dispatch.resolve({
-      principalId: work.principalId,
-      scope: work.scope,
-      problem: work.description,
-      expertId: attempt?.expertId ?? work.requestedExpertId ?? undefined,
-      selectionMode: attempt?.expertId || work.requestedExpertId ? "explicit" : "auto",
-      repositoryId: work.repositoryId ?? undefined,
-      deploymentId: attempt?.deploymentId ?? work.requestedDeploymentId ?? undefined,
-      requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile,
-      requiredWorkspaceAccess: workspaceAccess(workflow),
-      preferredBackend: preferredBackend(work),
+  protected taskMatchesResource(
+    context: WorkDagExecutionContext,
+    attempt: WorkAttemptRecord,
+    task: TaskRecord,
+  ): boolean {
+    const resource = repositoryResource(context);
+    if (task.repositoryId !== (resource.repositoryId ?? null)) return false;
+    const workspace =
+      this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey) ??
+      (resource.resourceKey === "workspace" && attempt.workspaceId
+        ? this.workStore.getWorkspace(attempt.workspaceId)
+        : null);
+    if (!workspace) return false;
+    return task.workspaceKey === workspace.workspaceKey;
+  }
+
+  protected taskHasOtherActiveDagExecution(context: WorkDagExecutionContext, task: TaskRecord): boolean {
+    const taskIdRef = "expert-task:" + task.taskId;
+    const taskKeyRef = "expert-task-key:" + task.idempotencyKey;
+    return this.workStore.listDagExecutions(context.work.workItemId).some((execution) => {
+      if (execution.nodeExecutionId === context.execution.nodeExecutionId) return false;
+      if (execution.state !== "claimed" && execution.state !== "running") return false;
+      if (task.executionRef === execution.idempotencyKey || task.executionReservationRef === execution.idempotencyKey) {
+        return true;
+      }
+      if (!execution.externalRef) return false;
+      const ref = correlationBaseRef(execution.externalRef);
+      return ref === taskIdRef || ref === taskKeyRef;
     });
+  }
+
+  protected correlationPinsTask(context: WorkDagExecutionContext, task: TaskRecord): boolean {
+    if (!context.execution.externalRef) return false;
+    const ref = correlationBaseRef(context.execution.externalRef);
+    return ref === "expert-task:" + task.taskId || ref === "expert-task-key:" + task.idempotencyKey;
+  }
+
+  protected reserveTaskForExecution(context: WorkDagExecutionContext, task: TaskRecord): TaskRecord | null {
+    if (task.executionReservationRef === context.execution.idempotencyKey) return task;
+    return this.tasks.reserveExecutionRef(task.taskId, context.execution.idempotencyKey, task.executionReservationRef);
+  }
+
+  protected resolve(
+    work: WorkItemRecord,
+    attempt?: WorkAttemptRecord,
+    repositoryIdOverride?: string,
+    requirementRevision = work.currentRequirementRevision,
+  ): ResolvedDispatch {
+    const binding = attempt?.dispatchBinding ? asResolved(attempt.dispatchBinding) : null;
+    if (binding && (!repositoryIdOverride || binding.repositoryId === repositoryIdOverride)) return binding;
+    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
+    const resolveForProblem = (problem: string) =>
+      this.dispatch.resolve({
+        principalId: work.principalId,
+        scope: work.scope,
+        problem,
+        expertId: attempt?.expertId ?? work.requestedExpertId ?? undefined,
+        selectionMode: attempt?.expertId || work.requestedExpertId ? "explicit" : "auto",
+        repositoryId: repositoryIdOverride ?? work.repositoryId ?? undefined,
+        deploymentId: attempt?.deploymentId ?? work.requestedDeploymentId ?? undefined,
+        requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile,
+        requiredWorkspaceAccess: workspaceAccess(workflow),
+        preferredBackend: preferredBackend(work),
+      });
+    const resolved =
+      requirementRevision > 0
+        ? resolveRequirementRouting(
+            this.workStore.getRequirementSnapshot(work.workItemId, requirementRevision),
+            resolveForProblem,
+          )
+        : resolveForProblem(work.description);
     if (attempt && resolved.deploymentConfigVersion !== attempt.deploymentConfigVersion) {
       throw new Error("STALE_DEPLOYMENT_CONFIG");
     }
@@ -162,10 +308,28 @@ class ExpertTaskDagAdapterBase {
     attempt: WorkAttemptRecord;
     resolved: ResolvedDispatch;
   } {
+    const resource = repositoryResource(context);
+    const requirementRevision = executionRequirementRevision(this.workStore, context);
     let attempt = this.workStore.getActiveAttempt(context.work.workItemId);
-    if (attempt) return { attempt, resolved: this.resolve(context.work, attempt) };
+    if (attempt) {
+      const resolved = this.resolve(context.work, attempt, resource.repositoryId, requirementRevision);
+      const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
+      this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
+        resourceKey: resource.resourceKey,
+        repositoryId: resolved.repositoryId,
+        ...(resolved.deploymentSnapshot?.repository?.url
+          ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
+          : {}),
+        ...(resolved.deploymentSnapshot?.repository?.branch
+          ? { branch: resolved.deploymentSnapshot.repository.branch }
+          : {}),
+        cleanupPolicy: workflow.definition.execution.workspace.cleanup,
+      });
+      return { attempt, resolved };
+    }
+
     const currentWork = this.workStore.getWorkInternal(context.work.workItemId);
-    const resolved = this.resolve(currentWork);
+    const resolved = this.resolve(currentWork, undefined, resource.repositoryId, requirementRevision);
     const attempts = this.workStore.listAttempts(context.work.workItemId);
     const pending = pendingAttemptContext(currentWork);
     const reason = attempts.length === 0 ? "initial" : (pending?.reason ?? "policy_replan");
@@ -189,6 +353,8 @@ class ExpertTaskDagAdapterBase {
     );
     const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
     this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
+      resourceKey: resource.resourceKey,
+      repositoryId: resolved.repositoryId,
       ...(resolved.deploymentSnapshot?.repository?.url
         ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
         : {}),
@@ -208,9 +374,19 @@ class ExpertTaskDagAdapterBase {
     validationSnapshot: VerificationPolicyStep[],
     problem: string,
   ): TaskRecord {
-    const workspace = attempt.workspaceId
-      ? this.workStore.getWorkspace(attempt.workspaceId)
-      : this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {});
+    const resource = repositoryResource(context);
+    const workspace =
+      this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey) ??
+      this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
+        resourceKey: resource.resourceKey,
+        repositoryId: resolved.repositoryId,
+        ...(resolved.deploymentSnapshot?.repository?.url
+          ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
+          : {}),
+        ...(resolved.deploymentSnapshot?.repository?.branch
+          ? { branch: resolved.deploymentSnapshot.repository.branch }
+          : {}),
+      });
     let task = this.dispatch.submitResolved(
       {
         principalId: context.work.principalId,
@@ -242,6 +418,15 @@ class ExpertTaskDagAdapterBase {
 class AgentDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecutorAdapter {
   readonly kind = "agent" as const;
 
+  private assertAgentTurnAvailable(attempt: WorkAttemptRecord): void {
+    const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
+    const work = this.workStore.getWorkInternal(attempt.workItemId);
+    const used = this.tasks.reservedAgentTurnsForWorkAttempt(attempt.workAttemptId, work.principalId, work.scope);
+    if (used >= workflow.definition.lifecycle.continuation.maxTurnsPerRun) {
+      throw new Error("WORK_CONTINUATION_LIMIT_REACHED");
+    }
+  }
+
   private continuationReason(context: WorkDagExecutionContext): string {
     const failed = this.workStore
       .listDagExecutions(context.work.workItemId)
@@ -264,8 +449,20 @@ class AgentDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecuto
     const attempt = this.workStore.getActiveAttempt(context.work.workItemId);
     if (attempt?.taskId) {
       const primary = this.tasks.get(attempt.taskId, context.work.principalId, context.work.scope);
-      if (primary.status === "succeeded" || primary.status === "failed") {
-        return "expert-task:" + primary.taskId;
+      if (
+        this.taskMatchesResource(context, attempt, primary) &&
+        !this.taskHasOtherActiveDagExecution(context, primary)
+      ) {
+        if (
+          primary.executionRef === context.execution.idempotencyKey ||
+          primary.executionReservationRef === context.execution.idempotencyKey
+        ) {
+          return "expert-task:" + primary.taskId;
+        }
+        if (primary.status === "succeeded" || primary.status === "failed") {
+          const reserved = this.reserveTaskForExecution(context, primary);
+          if (reserved) return "expert-task:" + reserved.taskId;
+        }
       }
     }
     return "expert-task-key:" + taskKey(context);
@@ -277,64 +474,84 @@ class AgentDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecuto
       attempt.reviewContext ? "Review context: " + attempt.reviewContext : null,
       attempt.whatShouldChange ? "Required rework: " + attempt.whatShouldChange : null,
     ].filter((item): item is string => Boolean(item));
-    const submitNew = () =>
-      this.submitTask(
-        context,
-        attempt,
-        resolved,
-        "agent",
-        [],
-        [
-          "You are executing one node in a durable Team Skill Hub Dynamic Runtime DAG.",
-          "Do not submit or delegate another Work.",
-          "Do not query, wait on, submit, cancel, update, or otherwise control this WorkItem or DAG through MCP.",
-          "Team Skill Hub owns lifecycle progression. If MCP is available, use it only for authorized Skill/Knowledge lookup; do not use Work control tools.",
-          "Perform the requested work in the provided workspace.",
-          "WorkItem: " + context.work.workItemId,
-          "DAG node: " + context.node.id,
-          ...attemptContext,
-          "",
-          context.work.description,
-        ].join("\n"),
-      );
+    const agentProblem = [
+      "You are executing one node in a durable Team Skill Hub Dynamic Runtime DAG.",
+      "Do not submit or delegate another Work.",
+      "Do not query, wait on, submit, cancel, update, or otherwise control this WorkItem or DAG through MCP.",
+      "Team Skill Hub owns lifecycle progression. If MCP is available, use it only for authorized Skill/Knowledge lookup; do not use Work control tools.",
+      "Perform the requested work in the provided workspace.",
+      ...agentOutcomeProtocolInstructions(),
+      "WorkItem: " + context.work.workItemId,
+      "DAG node: " + context.node.id,
+      ...attemptContext,
+      "",
+      requirementExecutionContext(this.workStore, context.work, executionRequirementRevision(this.workStore, context))
+        .promptContext,
+    ].join("\n");
+    const submitNew = () => {
+      this.assertAgentTurnAvailable(attempt);
+      return this.submitTask(context, attempt, resolved, "agent", [], agentProblem);
+    };
     let task = this.tasks.getByIdempotency(context.work.principalId, context.work.scope, taskKey(context));
-    if (!task && attempt.taskId) {
+    const expectsKeyedTask =
+      context.execution.externalRef !== null &&
+      correlationBaseRef(context.execution.externalRef) === "expert-task-key:" + taskKey(context);
+    if (!task && !expectsKeyedTask && attempt.taskId) {
       const primary = this.tasks.get(attempt.taskId, context.work.principalId, context.work.scope);
-      if (primary.status === "succeeded" && primary.runId) {
+      const resource = repositoryResource(context);
+      const targetWorkspace =
+        this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey) ??
+        (resource.resourceKey === "workspace" && attempt.workspaceId
+          ? this.workStore.getWorkspace(attempt.workspaceId)
+          : null);
+      const canReusePrimary =
+        this.taskMatchesResource(context, attempt, primary) && !this.taskHasOtherActiveDagExecution(context, primary);
+      if (!canReusePrimary && this.correlationPinsTask(context, primary)) {
+        task = primary;
+      } else if (canReusePrimary && primary.executionRef === context.execution.idempotencyKey) {
+        task = primary;
+      } else if (canReusePrimary && primary.status === "succeeded" && primary.runId) {
+        this.assertAgentTurnAvailable(attempt);
         task = this.tasks.scheduleContinuation(
           primary.taskId,
           primary.runId,
           this.continuationReason(context),
           Date.now(),
-          attempt.workspaceId
-            ? (this.workStore.getWorkspace(attempt.workspaceId).ownerWorkerId ?? undefined)
-            : undefined,
+          targetWorkspace?.ownerWorkerId ?? undefined,
+          agentProblem,
+          context.execution.idempotencyKey,
         );
-      } else if (primary.status === "failed") {
-        task = this.tasks.requeueForRetry(primary.taskId, attempt.workAttemptId, this.continuationReason(context));
+      } else if (canReusePrimary && primary.status === "failed") {
+        this.assertAgentTurnAvailable(attempt);
+        task = this.tasks.requeueForRetry(
+          primary.taskId,
+          attempt.workAttemptId,
+          this.continuationReason(context),
+          Date.now(),
+          agentProblem,
+          context.execution.idempotencyKey,
+        );
       } else {
         task = submitNew();
       }
     } else if (!task) {
       task = submitNew();
-      this.workStore.linkAttemptTask(attempt.workAttemptId, task.taskId);
+      if (!attempt.taskId) {
+        this.workStore.linkAttemptTask(attempt.workAttemptId, task.taskId);
+      }
     }
     return { kind: "deferred", externalRef: context.execution.externalRef ?? "expert-task:" + task.taskId };
   }
 
   async reconcile(context: WorkDagExecutionContext): Promise<DagNodeResult | null> {
+    const correlated = taskForCorrelation(this.tasks, context);
+    if (!correlated || !taskBelongsToExecution(this.tasks, context, correlated)) {
+      await this.execute(context);
+      return null;
+    }
     return taskTerminalResult(this.tasks, context, (task) => {
       const subject = taskSubject(task);
-      const current = this.workStore.getWorkInternal(context.work.workItemId);
-      if (current.currentSubjectRevision !== subject) {
-        this.workStore.setCurrentSubjectRevision(
-          current.workItemId,
-          current.principalId,
-          current.scope,
-          current.stateRevision,
-          subject,
-        );
-      }
+      updateDagSubject(this.workStore, context, subject);
       const workspaceChanged =
         task.workspaceChangeSummary === null
           ? undefined
@@ -385,30 +602,33 @@ class VerificationDagAdapter extends ExpertTaskDagAdapterBase implements WorkDag
   }
 
   async reconcile(context: WorkDagExecutionContext): Promise<DagNodeResult | null> {
+    const correlated = taskForCorrelation(this.tasks, context);
+    if (!correlated) {
+      await this.execute(context);
+      return null;
+    }
     return taskTerminalResult(this.tasks, context, (task) => {
+      const reportedSubject = task.verificationResults.find((result) =>
+        Boolean(result.subjectRevision),
+      )?.subjectRevision;
+      const cleanWorkspace =
+        task.workspaceChangeSummary?.diffStat.filesChanged === 0 ? task.workspaceChangeSummary : null;
+      const cleanWorkspaceSubject = cleanWorkspace ? "workspace:" + cleanWorkspace.contentRevision : null;
+      const subject =
+        cleanWorkspace && context.execution.subjectRevision !== cleanWorkspaceSubject
+          ? cleanWorkspace.baseCommit
+          : reportedSubject;
       const evidence = task.verificationResults.map((result) => ({
         type: result.evidenceType,
         passed: result.status === "passed",
-        subjectRevision: result.subjectRevision,
+        subjectRevision: subject ?? result.subjectRevision,
         verifierIdentity: result.verifierIdentity,
       }));
       const failed = task.validationSnapshot.some((step) => {
         const result = task.verificationResults.find((candidate) => candidate.stepId === step.id);
         return !result || result.status !== "passed";
       });
-      const subject = task.verificationResults.find((result) => Boolean(result.subjectRevision))?.subjectRevision;
-      if (subject) {
-        const current = this.workStore.getWorkInternal(context.work.workItemId);
-        if (current.currentSubjectRevision !== subject) {
-          this.workStore.setCurrentSubjectRevision(
-            current.workItemId,
-            current.principalId,
-            current.scope,
-            current.stateRevision,
-            subject,
-          );
-        }
-      }
+      if (subject) updateDagSubject(this.workStore, context, subject);
       return {
         status: failed ? "failed" : "succeeded",
         summary: failed ? "VERIFICATION_FAILED" : "Verification passed",
@@ -460,38 +680,124 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
     const workflow = this.workflowDefinition(context);
     return Boolean(workflow.review.reviewerExpertId) || workflow.change?.mode === "conditional_code_change";
   }
+
   correlationRef(context: WorkDagExecutionContext): string {
     if (this.usesAgentReview(context)) {
+      const current = this.workStore.getWorkInternal(context.work.workItemId);
+      const authoritySubject =
+        context.execution.subjectRevision ??
+        subjectForResource(this.workStore.getDagContext(context.work.workItemId), context.node.resource);
+      const authoritySuffix = authoritySubject ? "#authority=" + encodeURIComponent(authoritySubject) : "";
+      const keyed = this.tasks.getByIdempotency(context.work.principalId, context.work.scope, taskKey(context));
+      if (keyed) return "expert-task:" + keyed.taskId + authoritySuffix;
       const attempt = this.workStore.getActiveAttempt(context.work.workItemId);
-      if (attempt?.reviewTaskId) return "expert-task:" + attempt.reviewTaskId;
-      return "expert-task-key:" + taskKey(context);
+      if (attempt?.reviewTaskId) {
+        const existing = this.tasks.get(attempt.reviewTaskId, current.principalId, current.scope);
+        if (
+          this.taskMatchesResource(context, attempt, existing) &&
+          !this.taskHasOtherActiveDagExecution(context, existing)
+        ) {
+          if (
+            existing.executionRef === context.execution.idempotencyKey ||
+            existing.executionReservationRef === context.execution.idempotencyKey
+          ) {
+            return "expert-task:" + existing.taskId + authoritySuffix;
+          }
+          if (existing.status === "succeeded" || existing.status === "failed") {
+            const reserved = this.reserveTaskForExecution(context, existing);
+            if (reserved) return "expert-task:" + reserved.taskId + authoritySuffix;
+          }
+        }
+      }
+      return "expert-task-key:" + taskKey(context) + authoritySuffix;
     }
     return "human-review:" + context.work.workItemId + ":" + (context.work.currentSubjectRevision ?? "missing");
   }
   private dispatchAgentReview(context: WorkDagExecutionContext, reviewerExpertId?: string): TaskRecord {
     const current = this.workStore.getWorkInternal(context.work.workItemId);
-    const ensured = this.workStore.getActiveAttempt(current.workItemId) ?? this.ensureAttempt(context).attempt;
-    const attempt = this.workStore.getWorkAttempt(ensured.workAttemptId);
+    const requirementRevision = executionRequirementRevision(this.workStore, context);
+    const resource = repositoryResource(context);
+    const attempt = this.workStore.getActiveAttempt(current.workItemId) ?? this.ensureAttempt(context).attempt;
     const effectiveReviewerExpertId = reviewerExpertId ?? attempt.expertId;
-    if (!attempt.workspaceId) throw new Error("WORKSPACE_NOT_FOUND");
-    const workspace = this.workStore.getWorkspace(attempt.workspaceId);
-    if (attempt.reviewTaskId) {
-      let existing = this.tasks.get(attempt.reviewTaskId, current.principalId, current.scope);
-      if (existing.expertId !== effectiveReviewerExpertId) {
+    const workspace =
+      resource.resourceKey === "workspace"
+        ? attempt.workspaceId
+          ? this.workStore.getWorkspace(attempt.workspaceId)
+          : null
+        : (this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey) ??
+          (() => {
+            const resourceDispatch = this.resolve(current, attempt, resource.repositoryId, requirementRevision);
+            return this.workStore.ensureWorkspace(current.workItemId, attempt.workAttemptId, {
+              resourceKey: resource.resourceKey,
+              repositoryId: resourceDispatch.repositoryId,
+              ...(resourceDispatch.deploymentSnapshot?.repository?.url
+                ? { repositoryUrl: resourceDispatch.deploymentSnapshot.repository.url }
+                : {}),
+              ...(resourceDispatch.deploymentSnapshot?.repository?.branch
+                ? { branch: resourceDispatch.deploymentSnapshot.repository.branch }
+                : {}),
+            });
+          })());
+    if (!workspace) throw new Error("WORKSPACE_NOT_FOUND");
+    const initialReview = attempt.taskId === null;
+    const reviewProblem =
+      (initialReview
+        ? "Perform an independent review of the repository/workspace baseline for this work item. "
+        : "Perform an independent code review of the current workspace changes for this work item. ") +
+      "Do not modify files. Review correctness, regressions, tests, maintainability, and requirement coverage. " +
+      "Do not query, wait on, submit, cancel, update, or otherwise control this WorkItem or DAG through MCP. " +
+      "Team Skill Hub owns lifecycle progression. If MCP is available, use it only for authorized Skill/Knowledge lookup. " +
+      'Return ONLY JSON: {"decision":"accepted"|"rework","reason":"..."}. ' +
+      "Use rework when any blocking issue remains.\n\nOriginal work:\n" +
+      requirementExecutionContext(this.workStore, current, requirementRevision).promptContext;
+    const keyed = this.tasks.getByIdempotency(current.principalId, current.scope, taskKey(context));
+    if (keyed) {
+      if (!this.taskMatchesResource(context, attempt, keyed) || keyed.expertId !== effectiveReviewerExpertId) {
         throw new Error("WORK_ATTEMPT_REVIEW_TASK_CONFLICT");
       }
-      if (existing.status === "failed") {
-        existing = this.tasks.requeueForRetry(existing.taskId, attempt.workAttemptId, "dag:" + context.node.id);
-      } else if (existing.status === "succeeded" && existing.runId && context.execution.generation > 1) {
-        existing = this.tasks.scheduleContinuation(
-          existing.taskId,
-          existing.runId,
-          "dag:" + context.node.id,
-          Date.now(),
-          workspace.ownerWorkerId ?? undefined,
-        );
+      return keyed;
+    }
+    const expectsKeyedTask =
+      context.execution.externalRef !== null &&
+      correlationBaseRef(context.execution.externalRef) === "expert-task-key:" + taskKey(context);
+    if (!expectsKeyedTask && attempt.reviewTaskId) {
+      let existing = this.tasks.get(attempt.reviewTaskId, current.principalId, current.scope);
+      const canReuseExisting =
+        this.taskMatchesResource(context, attempt, existing) && !this.taskHasOtherActiveDagExecution(context, existing);
+      if (!canReuseExisting && this.correlationPinsTask(context, existing)) {
+        return existing;
       }
-      return existing;
+      if (canReuseExisting) {
+        if (existing.expertId !== effectiveReviewerExpertId) {
+          throw new Error("WORK_ATTEMPT_REVIEW_TASK_CONFLICT");
+        }
+        if (existing.executionRef === context.execution.idempotencyKey) {
+          return existing;
+        }
+        if (existing.status === "failed") {
+          existing = this.tasks.requeueForRetry(
+            existing.taskId,
+            attempt.workAttemptId,
+            "dag:" + context.node.id,
+            Date.now(),
+            reviewProblem,
+            context.execution.idempotencyKey,
+          );
+          return existing;
+        }
+        if (existing.status === "succeeded" && existing.runId) {
+          existing = this.tasks.scheduleContinuation(
+            existing.taskId,
+            existing.runId,
+            "dag:" + context.node.id,
+            Date.now(),
+            workspace.ownerWorkerId ?? undefined,
+            reviewProblem,
+            context.execution.idempotencyKey,
+          );
+          return existing;
+        }
+      }
     }
     if (["removed", "failed", "cleaning"].includes(workspace.state)) {
       throw new Error("WORKSPACE_OWNER_UNAVAILABLE");
@@ -499,10 +805,12 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
     const resolved = this.dispatch.resolve({
       principalId: current.principalId,
       scope: current.scope,
-      problem: current.description,
+      problem:
+        requirementExecutionContext(this.workStore, current, requirementRevision).routingProblems[0] ??
+        current.description,
       expertId: effectiveReviewerExpertId,
       selectionMode: "explicit",
-      repositoryId: current.repositoryId ?? undefined,
+      repositoryId: resource.repositoryId,
       requiredWorkspaceAccess: "read-only",
       preferredBackend: preferredBackend(current),
     });
@@ -513,23 +821,13 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
       throw new Error("RUNTIME_PROFILE_MISMATCH");
     }
 
-    const initialReview = attempt.taskId === null;
     let task = this.dispatch.submitResolved(
       {
         principalId: current.principalId,
         scope: current.scope,
         idempotencyKey: taskKey(context),
         sourceClient: "work_dag_review",
-        problem:
-          (initialReview
-            ? "Perform an independent review of the repository/workspace baseline for this work item. "
-            : "Perform an independent code review of the current workspace changes for this work item. ") +
-          "Do not modify files. Review correctness, regressions, tests, maintainability, and requirement coverage. " +
-          "Do not query, wait on, submit, cancel, update, or otherwise control this WorkItem or DAG through MCP. " +
-          "Team Skill Hub owns lifecycle progression. If MCP is available, use it only for authorized Skill/Knowledge lookup. " +
-          'Return ONLY JSON: {"decision":"accepted"|"rework","reason":"..."}. ' +
-          "Use rework when any blocking issue remains.\n\nOriginal work:\n" +
-          current.description,
+        problem: reviewProblem,
         expertId: resolved.expertId,
         selectionMode: "explicit",
         repositoryId: resolved.repositoryId,
@@ -663,13 +961,33 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
 
   async reconcile(context: WorkDagExecutionContext): Promise<DagNodeResult | null> {
     if (this.usesAgentReview(context)) {
-      const task = taskForCorrelation(this.tasks, context);
-      if (!task || task.status === "queued" || task.status === "running") return null;
+      let task = taskForCorrelation(this.tasks, context);
+      if (!task || !taskBelongsToExecution(this.tasks, context, task)) {
+        this.dispatchAgentReview(context, this.configuredReviewerExpertId(context) ?? undefined);
+        task = taskForCorrelation(this.tasks, context);
+        if (!task || !taskBelongsToExecution(this.tasks, context, task)) return null;
+      }
+      if (task.status === "queued" || task.status === "running") return null;
       if (task.status === "failed" || task.status === "cancelled") {
         return {
           status: "failed",
           summary: task.result ?? "AGENT_REVIEW_FAILED",
           facts: [{ key: "review.agent_failed", value: true }],
+        };
+      }
+
+      const currentBeforeReview = this.workStore.getWorkInternal(context.work.workItemId);
+      const currentDagContext = this.workStore.getDagContext(context.work.workItemId);
+      const boundResourceSubject = subjectForResource(currentDagContext, context.node.resource);
+      const authoritySubject = authoritySubjectFromCorrelation(context.execution.externalRef);
+      if (
+        (context.node.subject !== null && boundResourceSubject !== context.node.subject) ||
+        (authoritySubject !== null && boundResourceSubject !== authoritySubject)
+      ) {
+        return {
+          status: "failed",
+          summary: "STALE_REVIEW_SUBJECT",
+          facts: [{ key: "review.stale", value: true }],
         };
       }
 
@@ -687,22 +1005,20 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
       let current = this.workStore.getWorkInternal(context.work.workItemId);
       const activeBeforeDecision = this.workStore.getActiveAttempt(current.workItemId);
       const initialReview = activeBeforeDecision?.taskId === null;
-      const subject = taskSubject(task);
-      if (current.currentSubjectRevision !== subject) {
-        current = this.workStore.setCurrentSubjectRevision(
-          current.workItemId,
-          current.principalId,
-          current.scope,
-          current.stateRevision,
-          subject,
-        );
+      const runtimeContext = this.workStore.getDagContext(current.workItemId);
+      let reviewedSubject = context.node.subject ?? subjectForResource(runtimeContext, context.node.resource);
+      if (!reviewedSubject) {
+        reviewedSubject = taskSubject(task);
+        updateDagSubject(this.workStore, context, reviewedSubject);
+        current = this.workStore.getWorkInternal(current.workItemId);
       }
+      const decisionSubject = current.currentSubjectRevision ?? reviewedSubject;
       const actor = "agent:" + task.expertId;
       let stored = this.workStore
         .listReviewDecisions(current.workItemId)
         .filter(
           (item) =>
-            item.subjectRevision === subject &&
+            item.subjectRevision === decisionSubject &&
             item.actorPrincipalId === actor &&
             item.decision === parsed.decision &&
             (item.reason ?? null) === (parsed.reason ?? null),
@@ -734,7 +1050,7 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
 
         stored = this.workStore.submitReviewDecision(current.workItemId, current.principalId, current.scope, {
           expectedRevision: current.stateRevision,
-          subjectRevision: subject,
+          subjectRevision: decisionSubject,
           decision: parsed.decision,
           ...(parsed.reason ? { reason: parsed.reason } : {}),
           actorPrincipalId: actor,

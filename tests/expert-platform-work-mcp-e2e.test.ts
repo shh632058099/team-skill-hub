@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { SkillHubApplicationService } from "../src/application.js";
 import { LoggingEventSink } from "../src/events.js";
 import { ExpertStore } from "../src/expert-platform/expert-store.js";
@@ -29,6 +30,26 @@ interface McpResponse {
     tools?: Array<{ name: string; description?: string }>;
   };
   error?: { message?: string };
+}
+
+function markPreCutoverLegacy(dbPath: string, workItemId: string) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.prepare("UPDATE work_items SET orchestration_engine='legacy-single-node' WHERE work_item_id=?").run(workItemId);
+  } finally {
+    db.close();
+  }
+}
+
+function submitPreCutoverLegacy(
+  orchestrator: WorkOrchestrator,
+  dbPath: string,
+  input: Parameters<WorkOrchestrator["stageWork"]>[0],
+  now = Date.now(),
+) {
+  const staged = orchestrator.stageWork(input, now);
+  markPreCutoverLegacy(dbPath, staged.work.workItemId);
+  return orchestrator.reconcileWork(staged.work.workItemId, input.principalId, input.scope, now);
 }
 
 async function callMcp(
@@ -86,6 +107,60 @@ async function callMcpWithoutSessionHeader(
   const text = rpc.result?.content?.find((item) => item.type === "text")?.text;
   if (!text || rpc.result?.isError) throw new Error(text ?? "MCP_TOOL_FAILED");
   return JSON.parse(text) as Record<string, any>;
+}
+
+function mergeSubmittedWithAdvanced(
+  submitted: Record<string, any>,
+  advanced: Record<string, any>,
+): Record<string, any> {
+  return {
+    ...advanced,
+    sourceControlToken: submitted.sourceControlToken,
+    workItemId: submitted.workItemId ?? submitted.work?.workItemId,
+    status: advanced.work?.status ?? submitted.status,
+    followUp: submitted.followUp,
+    work: {
+      ...advanced.work,
+      ...(submitted.work?.reusedExistingWork === undefined
+        ? {}
+        : { reusedExistingWork: submitted.work.reusedExistingWork }),
+      ...(submitted.work?.deduplicationReason === undefined
+        ? {}
+        : { deduplicationReason: submitted.work.deduplicationReason }),
+    },
+  };
+}
+
+async function submitWorkAndAdvance(
+  url: string,
+  apiKey: string,
+  id: number,
+  args: Record<string, unknown>,
+): Promise<Record<string, any>> {
+  const submitted = await callMcp(url, apiKey, id, "submit_work", args);
+  const advanced = await callMcp(url, apiKey, id + 100_000, "get_work", {
+    workItemId: submitted.work.workItemId,
+  });
+  return mergeSubmittedWithAdvanced(submitted, advanced);
+}
+
+async function submitWorkAndAdvanceWithoutSessionHeader(
+  url: string,
+  apiKey: string,
+  id: number,
+  args: Record<string, unknown>,
+  client = "codex-proof-test",
+): Promise<Record<string, any>> {
+  const submitted = await callMcpWithoutSessionHeader(url, apiKey, id, "submit_work", args, client);
+  const advanced = await callMcpWithoutSessionHeader(
+    url,
+    apiKey,
+    id + 100_000,
+    "get_work",
+    { workItemId: submitted.work.workItemId },
+    client,
+  );
+  return mergeSubmittedWithAdvanced(submitted, advanced);
 }
 
 async function listMcpTools(url: string, apiKey: string): Promise<Array<{ name: string; description?: string }>> {
@@ -291,6 +366,31 @@ test("MCP dynamic DAG control plane versions requirements, signals waits, and re
       );
     }
 
+    const cutoverSubmission = await callMcp(mcpUrl, apiKey, 1999, "submit_work", {
+      title: "Cutover requirement control",
+      description: "Historical Workflow metadata must not disable Dynamic DAG requirements.",
+      idempotencyKey: "dag-cutover-investigation-requirements",
+      workflowId: "investigation",
+      routingMode: "explicit",
+      expertId: "noop",
+      repositoryId: "repo",
+      deploymentId: "dep",
+      requirements: [
+        {
+          id: "user:cutover-check",
+          strength: "required",
+          condition: { kind: "always" },
+          satisfaction: { kind: "evidence", type: "cutover_check" },
+        },
+      ],
+    });
+    assert.equal(cutoverSubmission.work.orchestrationEngine, "dynamic-dag");
+    assert.equal(cutoverSubmission.dag.requirementRevision, 2);
+    assert.deepEqual(
+      cutoverSubmission.dag.requirementSnapshot.requirements.map((item: any) => item.id),
+      ["user:cutover-check"],
+    );
+
     await assert.rejects(
       () =>
         callMcp(mcpUrl, apiKey, 2000, "submit_work", {
@@ -400,6 +500,92 @@ test("MCP dynamic DAG control plane versions requirements, signals waits, and re
           requirements: [],
         }),
       /STALE_WORK_REVISION|STALE_REQUIREMENT_REVISION/,
+    );
+
+    const unresolvedSubmission = await callMcp(mcpUrl, apiKey, 2010, "submit_work", {
+      title: "Resolve hard requirement",
+      description: "You must satisfy the custom release gate.",
+      idempotencyKey: "dag-control-resolve-unresolved",
+      workflowId: "mcp-dynamic",
+      routingMode: "explicit",
+      expertId: "noop",
+      repositoryId: "repo",
+      deploymentId: "dep",
+    });
+    assert.equal(unresolvedSubmission.dag.requirementSnapshot.unresolved.length, 1);
+    const unresolvedId = String(unresolvedSubmission.dag.requirementSnapshot.unresolved[0].id);
+    const unresolvedCurrent = observer.getWorkInternal(String(unresolvedSubmission.work.workItemId));
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 2011, "update_work_requirements", {
+          workItemId: unresolvedSubmission.work.workItemId,
+          expectedRevision: unresolvedCurrent.stateRevision,
+          expectedRequirementRevision: unresolvedCurrent.currentRequirementRevision,
+          requirements: [
+            {
+              id: "user:unrelated",
+              strength: "required",
+              condition: { kind: "always" },
+              satisfaction: { kind: "evidence", type: "unrelated" },
+            },
+          ],
+          unresolvedResolutions: [
+            {
+              unresolvedId,
+              replacementRequirementIds: ["user:missing-replacement"],
+            },
+          ],
+        }),
+      /WORK_REQUIREMENT_RESOLUTION_REPLACEMENT_REQUIRED/,
+    );
+
+    await assert.rejects(
+      () =>
+        callMcp(mcpUrl, apiKey, 2012, "update_work_requirements", {
+          workItemId: unresolvedSubmission.work.workItemId,
+          expectedRevision: unresolvedCurrent.stateRevision,
+          expectedRequirementRevision: unresolvedCurrent.currentRequirementRevision,
+          requirements: [
+            {
+              id: "user:preferred-replacement",
+              strength: "preferred",
+              condition: { kind: "always" },
+              satisfaction: { kind: "evidence", type: "custom_release_gate" },
+            },
+          ],
+          unresolvedResolutions: [
+            {
+              unresolvedId,
+              replacementRequirementIds: ["user:preferred-replacement"],
+            },
+          ],
+        }),
+      /WORK_REQUIREMENT_RESOLUTION_REPLACEMENT_REQUIRED/,
+    );
+
+    const resolvedRequirements = await callMcp(mcpUrl, apiKey, 2011, "update_work_requirements", {
+      workItemId: unresolvedSubmission.work.workItemId,
+      expectedRevision: unresolvedCurrent.stateRevision,
+      expectedRequirementRevision: unresolvedCurrent.currentRequirementRevision,
+      requirements: [
+        {
+          id: "user:custom-release-gate",
+          strength: "required",
+          condition: { kind: "always" },
+          satisfaction: { kind: "evidence", type: "custom_release_gate" },
+        },
+      ],
+      unresolvedResolutions: [
+        {
+          unresolvedId,
+          replacementRequirementIds: ["user:custom-release-gate"],
+        },
+      ],
+    });
+    assert.deepEqual(resolvedRequirements.dag.requirementSnapshot.unresolved, []);
+    assert.deepEqual(
+      resolvedRequirements.dag.requirementSnapshot.requirements.map((item: any) => item.id),
+      ["user:custom-release-gate"],
     );
 
     let work = observer.getWorkInternal(workId);
@@ -682,6 +868,11 @@ test("MCP Work API drives durable work through review, rework, authorization and
         require: [...baseWorkflow.completion.require, "required_approvals_approved"],
         requiredApprovals: [{ scope: "work_completion", subjectType: "workspace_revision" }],
       },
+      planning: {
+        maxReplans: 10,
+        replanPolicy: ["always_after_agent_turn", "on_new_information", "on_failure", "manual"],
+      },
+      graph: { mode: "dynamic-dag" },
     });
     workflowSetup.close();
 
@@ -732,7 +923,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(investigationWorkflow?.selectionConfigured, true);
     assert.match(investigationWorkflow?.summary ?? "", /readonly analysis/i);
     const bugFixWorkflow = catalogWorkflows.find((item) => item.workflowId === "bug-fix");
-    assert.equal(bugFixWorkflow?.version, 3);
+    assert.equal(bugFixWorkflow?.version, 4);
     assert.equal(bugFixWorkflow?.changeMode, "code_change");
     assert.match(bugFixWorkflow?.summary ?? "", /incorrect existing/i);
     const customWorkflow = catalogWorkflows.find((item) => item.workflowId === "mcp-verified");
@@ -832,7 +1023,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     const signedProof = `${signedAt}.${createHmac("sha256", apiKey)
       .update(`team-skill-hub/client-session/v1\n${signedSessionId}\n${signedIdempotencyKey}\n${signedAt}`)
       .digest("hex")}`;
-    const signedSubmission = await callMcpWithoutSessionHeader(mcpUrl, apiKey, 901, "submit_work", {
+    const signedSubmission = await submitWorkAndAdvanceWithoutSessionHeader(mcpUrl, apiKey, 901, {
       title: "Signed native MCP session",
       description: "Verify stateless MCP can bind native client session",
       idempotencyKey: signedIdempotencyKey,
@@ -862,7 +1053,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(signedTerminal.work.status, "cancelled");
     assert.equal(signedTerminal.sourceObservations.at(-1).reconciliationAction, "cancel");
 
-    const submitted = await callMcp(mcpUrl, apiKey, 1, "submit_work", {
+    const submitted = await submitWorkAndAdvance(mcpUrl, apiKey, 1, {
       title: "Inspect OTA rollback",
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
@@ -897,7 +1088,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       },
     });
 
-    const replay = await callMcp(mcpUrl, apiKey, 2, "submit_work", {
+    const replay = await submitWorkAndAdvance(mcpUrl, apiKey, 2, {
       title: "Inspect OTA rollback",
       description: "Inspect OTA rollback handling after power loss",
       idempotencyKey: "mcp-work-1",
@@ -1047,7 +1238,10 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
 
     const fullWaiting = await callMcp(mcpUrl, apiKey, 44, "get_work", { workItemId: workId });
-    assert.equal(fullWaiting.evidence[0].subjectRevision, "a".repeat(40));
+    const dagExpertEvidence = fullWaiting.dag.evidence.find((item: any) => item.type === "expert_result");
+    assert.ok(dagExpertEvidence);
+    assert.equal(dagExpertEvidence.subjectRevision, "a".repeat(40));
+    assert.equal(dagExpertEvidence.passed, true);
     assert.equal(fullWaiting.turns.length, 1);
     assert.equal(fullWaiting.turns[0].runId, claim.runId);
     assert.equal(fullWaiting.turns[0].status, "succeeded");
@@ -1110,7 +1304,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(workflowBound.work.workflowId, "mcp-verified");
     assert.equal(workflowBound.work.workflowVersion, 1);
-    assert.deepEqual(workflowBound.currentTask.validationSnapshot, [
+    assert.deepEqual(workflowBound.verification.requiredSteps, [
       {
         id: "readme-check",
         type: "command",
@@ -1123,7 +1317,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: workflowBound.work.workItemId,
     });
 
-    const approvalSubmission = await callMcp(mcpUrl, apiKey, 66, "submit_work", {
+    const approvalSubmission = await submitWorkAndAdvance(mcpUrl, apiKey, 66, {
       title: "Approval-gated workspace change",
       description: "Modify a fixture and require explicit completion approval",
       idempotencyKey: "mcp-work-approval",
@@ -1158,8 +1352,8 @@ test("MCP Work API drives durable work through review, rework, authorization and
     });
     assert.equal(approvalWaiting.work.status, "waiting_review");
     assert.equal(approvalWaiting.work.currentSubjectRevision, approvalSubject);
-    assert.ok(approvalWaiting.gate.missing.includes("review_accepted"));
-    assert.ok(approvalWaiting.gate.missing.includes("required_approval:work_completion"));
+    assert.ok(approvalWaiting.gate.missing.includes("policy:review_accepted"));
+    assert.ok(approvalWaiting.gate.missing.includes("policy:required_approvals_approved"));
     assert.deepEqual(approvalWaiting.runtime, {
       requiredProfile: "codex-workspace-write",
       effectiveProfile: "codex-workspace-write",
@@ -1174,8 +1368,9 @@ test("MCP Work API drives durable work through review, rework, authorization and
       subjectRevision: approvalSubject,
       decision: "accepted",
     });
-    assert.equal(approvalReviewed.work.status, "waiting_review");
-    assert.deepEqual(approvalReviewed.gate.missing, ["required_approval:work_completion"]);
+    assert.equal(approvalReviewed.work.status, "running");
+    assert.ok(approvalReviewed.gate.missing.includes("policy:required_approvals_approved"));
+    assert.ok(approvalReviewed.gate.missing.some((item: string) => item.startsWith("NODE_RUNNING:approval:")));
     assert.equal(approvalReviewed.reviews.at(-1).decision, "accepted");
     assert.equal(approvalReviewed.reviews.at(-1).subjectRevision, approvalSubject);
 
@@ -1235,7 +1430,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(developerApproval.subjectRevision, approvalSubject);
     approvalStore.close();
 
-    const adminSubmission = await callMcp(mcpUrl, apiKey, 73, "submit_work", {
+    const adminSubmission = await submitWorkAndAdvance(mcpUrl, apiKey, 73, {
       title: "Admin approval precedence",
       description: "Verify admin role is recorded when principal has admin and developer",
       idempotencyKey: "mcp-work-admin-approval",
@@ -1279,7 +1474,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(adminStore.listApprovals(adminSubmission.work.workItemId).at(-1)!.role, "admin");
     adminStore.close();
 
-    const publicationSubmission = await callMcp(mcpUrl, apiKey, 77, "submit_work", {
+    const publicationSubmission = await submitWorkAndAdvance(mcpUrl, apiKey, 77, {
       title: "Publication approval via MCP",
       description: "Prepare a publication artifact and approve only its exact commit",
       idempotencyKey: "mcp-work-publication-approval",
@@ -1405,7 +1600,12 @@ test("MCP Work API drives durable work through review, rework, authorization and
       actor: "mallory",
       role: "admin",
     });
-    assert.equal(publicationApproved.work.status, "waiting_review");
+    assert.equal(publicationApproved.work.status, "running");
+    assert.ok(
+      publicationApproved.gate.missing.some(
+        (item: string) => item.startsWith("NODE_RUNNING:") || item.includes("publication"),
+      ),
+    );
     const publicationCheck = new WorkPublicationStore(runtimeDb);
     assert.equal(publicationCheck.getPublication(preparedPublication.publicationId).state, "approved");
     publicationCheck.close();
@@ -1420,7 +1620,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(storedPublicationApproval.subjectRevision, publicationSubject);
     publicationApprovalStore.close();
 
-    const omittedRouteIds = await callMcp(mcpUrl, apiKey, 60, "submit_work", {
+    const omittedRouteIds = await submitWorkAndAdvance(mcpUrl, apiKey, 60, {
       title: "Auto route omitted identifiers",
       description: "Verify Claude optional routing placeholders are treated as omitted",
       idempotencyKey: "mcp-work-omit-route-ids",
@@ -1436,7 +1636,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: omittedRouteIds.work.workItemId,
     });
 
-    const unspecifiedRouteIds = await callMcp(mcpUrl, apiKey, 62, "submit_work", {
+    const unspecifiedRouteIds = await submitWorkAndAdvance(mcpUrl, apiKey, 62, {
       title: "Auto route unspecified identifiers",
       description: "Verify Claude unspecified routing placeholders are treated as omitted",
       idempotencyKey: "mcp-work-unspecified-route-ids",
@@ -1452,9 +1652,9 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: unspecifiedRouteIds.work.workItemId,
     });
 
-    const autoRoutingIgnoresPlaceholders = await callMcp(mcpUrl, apiKey, 64, "submit_work", {
+    const autoRoutingIgnoresPlaceholders = await submitWorkAndAdvance(mcpUrl, apiKey, 64, {
       title: "Auto routing ignores placeholder route values",
-      description: "Auto routing must ignore model-generated placeholder route identifiers",
+      description: "Auto routing ignores model-generated placeholder route identifiers",
       idempotencyKey: "mcp-work-auto-routing-placeholder",
       expertId: "ota",
       routingMode: "auto",
@@ -1469,7 +1669,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: autoRoutingIgnoresPlaceholders.work.workItemId,
     });
 
-    const sourceTerminalSubmission = await callMcp(mcpUrl, apiKey, 801, "submit_work", {
+    const sourceTerminalSubmission = await submitWorkAndAdvance(mcpUrl, apiKey, 801, {
       title: "MCP source terminal",
       description: "validate source terminal cancellation",
       idempotencyKey: "mcp-source-terminal",
@@ -1492,7 +1692,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(sourceTerminal.sourceObservations.at(-1).state, "terminal");
     assert.equal(sourceTerminal.sourceObservations.at(-1).reconciliationAction, "cancel");
 
-    const blockedSubmission = await callMcp(mcpUrl, apiKey, 82, "submit_work", {
+    const blockedSubmission = await submitWorkAndAdvance(mcpUrl, apiKey, 82, {
       title: "Resume blocked OTA work",
       description: "Block on a missing deployment and resume after it is configured",
       idempotencyKey: "mcp-work-resume",
@@ -1525,7 +1725,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.ok(resumedWork.currentTask?.taskId);
     await callMcp(mcpUrl, apiKey, 84, "cancel_work", { workItemId: blockedSubmission.work.workItemId });
 
-    const reworkSubmission = await callMcp(mcpUrl, apiKey, 7, "submit_work", {
+    const reworkSubmission = await submitWorkAndAdvance(mcpUrl, apiKey, 7, {
       title: "Inspect OTA retry",
       description: "Inspect OTA retry path",
       idempotencyKey: "mcp-work-rework",
@@ -1570,7 +1770,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       workItemId: cancellable.work.workItemId,
     });
     assert.equal(cancelled.work.status, "cancelled");
-    assert.equal(cancelled.attempts[0].status, "cancelled");
+    assert.equal(cancelled.attempts.length, 0);
   } finally {
     tasks?.close();
     if (app) await app.close();
@@ -1612,7 +1812,7 @@ test("server startup reconciliation advances durable completed work without a cl
       active: true,
     });
     const orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
-    const detail = orchestrator.submitWork({
+    const detail = submitPreCutoverLegacy(orchestrator, runtimeDb, {
       principalId: "alice",
       scope: "team-a",
       idempotencyKey: "server-reconcile-1",
@@ -1725,7 +1925,7 @@ test("server restart resumes one durable verification continuation and preserves
       },
     });
     const orchestrator = new WorkOrchestrator(work, tasks, new ExpertDispatchService(experts, tasks));
-    const detail = orchestrator.submitWork({
+    const detail = submitPreCutoverLegacy(orchestrator, runtimeDb, {
       principalId: "alice",
       scope: "team-a",
       idempotencyKey: "restart-verification-continuation",

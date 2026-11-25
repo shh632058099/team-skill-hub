@@ -16,6 +16,17 @@ import { WorkPublicationStore } from "./expert-platform/work-publication-store.j
 import { WorkChangeRequestStore } from "./expert-platform/work-change-request-store.js";
 import { createWorkerAvailabilityProbe } from "./expert-platform/persistent-worker-registry.js";
 import { workWaitRequiresHumanAction, workWaitShouldContinuePolling } from "./expert-platform/work-wait-policy.js";
+import { WorkDagPlannerCoordinator, WorkDagScheduler } from "./expert-platform/work-dag-engine.js";
+import {
+  WorkDagPolicyContextResolver,
+  createWorkDagOrganizationPolicyProviderFromEnv,
+} from "./expert-platform/work-dag-policy-context.js";
+import { WorkDagSeedPlanner } from "./expert-platform/work-dag-planners.js";
+import { createConfiguredWorkDagPlanner } from "./expert-platform/work-dag-model-client.js";
+import { WorkDagRuntime } from "./expert-platform/work-dag-runtime-service.js";
+import { createExpertTaskDagAdapters } from "./expert-platform/work-dag-expert-adapters.js";
+import { createControlDagAdapters } from "./expert-platform/work-dag-control-adapters.js";
+import { createDeliveryDagAdapters } from "./expert-platform/work-dag-delivery-adapters.js";
 
 export interface McpExpertRuntime {
   expertTaskStore: ExpertTaskStore | null;
@@ -25,6 +36,7 @@ export interface McpExpertRuntime {
   workPublicationStore: WorkPublicationStore | null;
   workChangeRequestStore: WorkChangeRequestStore | null;
   workOrchestrator: WorkOrchestrator | null;
+  workDagRuntime?: WorkDagRuntime | null;
   mcpWorkAdapter: McpWorkAdapter | null;
 }
 
@@ -39,6 +51,7 @@ function createMcpExpertRuntime(): McpExpertRuntime {
       workPublicationStore: null,
       workChangeRequestStore: null,
       workOrchestrator: null,
+      workDagRuntime: null,
       mcpWorkAdapter: null,
     };
   }
@@ -59,6 +72,35 @@ function createMcpExpertRuntime(): McpExpertRuntime {
     workPublicationStore,
     workChangeRequestStore,
   );
+  const dagScheduler = new WorkDagScheduler(workOrchestrationStore, [
+    ...createExpertTaskDagAdapters(workOrchestrationStore, expertTaskStore, expertDispatchService),
+    ...createControlDagAdapters(workOrchestrationStore, workPublicationStore),
+    ...createDeliveryDagAdapters(
+      workOrchestrationStore,
+      workPublicationStore,
+      workChangeRequestStore,
+      workOrchestrator,
+    ),
+  ]);
+  const configuredDagPlanner = createConfiguredWorkDagPlanner(process.env);
+  const dagPlanner = configuredDagPlanner?.planner ?? new WorkDagSeedPlanner();
+  const workDagRuntime = new WorkDagRuntime(
+    workOrchestrationStore,
+    new WorkDagPlannerCoordinator(
+      workOrchestrationStore,
+      dagPlanner,
+      configuredDagPlanner?.timeoutMs ?? 30_000,
+      new WorkDagPolicyContextResolver(
+        workOrchestrationStore,
+        expertDispatchService,
+        expertStore,
+        expertTaskStore,
+        [],
+        createWorkDagOrganizationPolicyProviderFromEnv(process.env),
+      ),
+    ),
+    dagScheduler,
+  );
   return {
     expertTaskStore,
     expertStore,
@@ -67,8 +109,27 @@ function createMcpExpertRuntime(): McpExpertRuntime {
     workPublicationStore,
     workChangeRequestStore,
     workOrchestrator,
+    workDagRuntime,
     mcpWorkAdapter: new McpWorkAdapter(workOrchestrationStore, workOrchestrator),
   };
+}
+
+async function reconcileMcpWork(
+  store: WorkOrchestrationStore,
+  orchestrator: WorkOrchestrator,
+  dagRuntime: WorkDagRuntime | null | undefined,
+  workItemId: string,
+  principalId: string,
+  scope: string,
+) {
+  const work = store.getWork(workItemId, principalId, scope);
+  if (work.orchestrationEngine === "dynamic-dag") {
+    if (dagRuntime) {
+      await dagRuntime.reconcileUntilBoundary(workItemId, principalId, scope);
+    }
+    return orchestrator.getWork(workItemId, principalId, scope);
+  }
+  return orchestrator.reconcileWork(workItemId, principalId, scope);
 }
 const filterSchema = {
   domain: z.string().optional(),
@@ -154,6 +215,10 @@ function applyMcpWorkRequirements(
   requirements: readonly McpWorkRequirementInput[],
   expectedWorkRevision?: number,
   expectedRequirementRevision?: number,
+  unresolvedResolutions: readonly {
+    unresolvedId: string;
+    replacementRequirementIds: readonly string[];
+  }[] = [],
 ) {
   validateMcpWorkRequirements(requirements);
   const work = store.getWork(workItemId, principalId, scope);
@@ -163,17 +228,42 @@ function applyMcpWorkRequirements(
   if (expectedRequirementRevision !== undefined && work.currentRequirementRevision !== expectedRequirementRevision) {
     throw new Error("STALE_REQUIREMENT_REVISION");
   }
-  const workflow = store.getWorkflow(work.workflowId, work.workflowVersion);
-  if (workflow.definition.graph.mode !== "dynamic-dag") {
+  if (work.orchestrationEngine !== "dynamic-dag") {
     throw new Error("WORK_REQUIREMENTS_REQUIRE_DYNAMIC_DAG");
   }
   const current = store.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
+  const canonicalRequirements = canonicalMcpRequirements(requirements);
+  const canonicalRequirementsById = new Map(canonicalRequirements.map((item) => [item.id, item] as const));
+  const resolvedIds = new Set<string>();
+  for (const resolution of unresolvedResolutions) {
+    if (resolvedIds.has(resolution.unresolvedId)) throw new Error("DUPLICATE_UNRESOLVED_REQUIREMENT_ID");
+    const unresolved = current.unresolved.find((item) => item.id === resolution.unresolvedId);
+    if (!unresolved || unresolved.source !== "user") {
+      throw new Error("WORK_REQUIREMENT_UNRESOLVED_NOT_RESOLVABLE:" + resolution.unresolvedId);
+    }
+    if (
+      resolution.replacementRequirementIds.length === 0 ||
+      resolution.replacementRequirementIds.some((id) => {
+        const replacement = canonicalRequirementsById.get(id);
+        return !replacement || replacement.strength !== "required";
+      })
+    ) {
+      throw new Error("WORK_REQUIREMENT_RESOLUTION_REPLACEMENT_REQUIRED:" + resolution.unresolvedId);
+    }
+    resolvedIds.add(resolution.unresolvedId);
+  }
+  const desiredUnresolved = current.unresolved.filter((item) => !resolvedIds.has(item.id));
   const desired = [
-    ...current.requirements.filter((item) => item.source === "source"),
-    ...canonicalMcpRequirements(requirements),
+    ...current.requirements.filter(
+      (item) => item.source === "source" || (item.source === "user" && item.id.startsWith("user:intent:")),
+    ),
+    ...canonicalRequirements,
   ].sort((a, b) => a.id.localeCompare(b.id));
   const currentCanonical = [...current.requirements].sort((a, b) => a.id.localeCompare(b.id));
-  if (JSON.stringify(currentCanonical) !== JSON.stringify(desired)) {
+  if (
+    JSON.stringify(currentCanonical) !== JSON.stringify(desired) ||
+    JSON.stringify(current.unresolved) !== JSON.stringify(desiredUnresolved)
+  ) {
     store.updateRequirementSnapshot(
       workItemId,
       principalId,
@@ -181,7 +271,9 @@ function applyMcpWorkRequirements(
       work.stateRevision,
       current.revision,
       desired,
-      "mcp-typed-v1",
+      "mcp-typed-v2",
+      Date.now(),
+      desiredUnresolved,
     );
   }
   return orchestrator.getWork(workItemId, principalId, scope);
@@ -471,6 +563,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
     workChangeRequestStore,
     workOrchestrator,
     mcpWorkAdapter,
+    workDagRuntime,
   } = expertRuntime ?? createMcpExpertRuntime();
   return createMcpHandler(({ requestInfo }) => {
     const principal = appService.authenticateRequest(requestInfo?.headers);
@@ -1779,12 +1872,6 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
             if (requirements !== undefined) validateMcpWorkRequirements(requestedRequirements);
             const requirementsDigest =
               requirements === undefined ? undefined : mcpRequirementsDigest(requestedRequirements);
-            if (
-              requirements !== undefined &&
-              workOrchestrationStore!.getWorkflow(effectiveWorkflowId).definition.graph.mode !== "dynamic-dag"
-            ) {
-              throw new Error("WORK_REQUIREMENTS_REQUIRE_DYNAMIC_DAG");
-            }
             const sourceRequestSlot = workSourceRequestSlot(
               routingMode,
               effectiveWorkflowId,
@@ -1852,6 +1939,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               );
               submitted = { ...updated, sourceControlToken: submitted.sourceControlToken };
             }
+
             const submittedHumanActionRequired = workWaitRequiresHumanAction({
               status: submitted.work.status,
               currentSubjectRevision: submitted.work.currentSubjectRevision,
@@ -1944,7 +2032,16 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
             inputSchema: z.object({ workItemId: z.string().uuid() }),
           },
           async ({ workItemId }) =>
-            toolResult(workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId)),
+            toolResult(
+              await reconcileMcpWork(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workDagRuntime,
+                workItemId,
+                principal.id,
+                principal.tenantId,
+              ),
+            ),
         );
 
         registerTool(
@@ -1982,7 +2079,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               count: number | null;
               timestampMs: number;
             }> = [];
-            let detail = workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId);
+            let detail = await reconcileMcpWork(
+              workOrchestrationStore!,
+              workOrchestrator!,
+              workDagRuntime,
+              workItemId,
+              principal.id,
+              principal.tenantId,
+            );
 
             const readActivity = (after: number, remaining: number) => {
               const refs = [
@@ -2018,7 +2122,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               collected.push(...page.events);
               cursor = page.nextEventId;
 
-              detail = workOrchestrator.reconcileWork(workItemId, principal.id, principal.tenantId);
+              detail = await reconcileMcpWork(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workDagRuntime,
+                workItemId,
+                principal.id,
+                principal.tenantId,
+              );
               const activityRemaining = Math.max(1, limit - activityEvents.length);
               const newActivity = trackActivity ? readActivity(activityCursor, activityRemaining) : [];
               activityEvents.push(...newActivity);
@@ -2176,15 +2287,24 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               reason: z.string().trim().max(4000).optional(),
             }),
           },
-          async ({ workItemId, expectedRevision, subjectRevision, decision, reason }) =>
-            toolResult(
-              workOrchestrator.submitReview(workItemId, principal.id, principal.tenantId, {
-                expectedRevision,
-                subjectRevision,
-                decision,
-                ...(reason === undefined ? {} : { reason }),
-              }),
-            ),
+          async ({ workItemId, expectedRevision, subjectRevision, decision, reason }) => {
+            workOrchestrator.submitReview(workItemId, principal.id, principal.tenantId, {
+              expectedRevision,
+              subjectRevision,
+              decision,
+              ...(reason === undefined ? {} : { reason }),
+            });
+            return toolResult(
+              await reconcileMcpWork(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workDagRuntime,
+                workItemId,
+                principal.id,
+                principal.tenantId,
+              ),
+            );
+          },
         );
 
         registerTool(
@@ -2207,18 +2327,26 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
                 ? "developer"
                 : null;
             if (!approvalRole) throw new Error("WORK_APPROVAL_FORBIDDEN");
+            workOrchestrator.submitApproval(
+              workItemId,
+              principal.id,
+              principal.tenantId,
+              {
+                expectedRevision,
+                subjectRevision,
+                approvalScope,
+                decision,
+              },
+              { actor: principal.id, role: approvalRole },
+            );
             return toolResult(
-              workOrchestrator.submitApproval(
+              await reconcileMcpWork(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workDagRuntime,
                 workItemId,
                 principal.id,
                 principal.tenantId,
-                {
-                  expectedRevision,
-                  subjectRevision,
-                  approvalScope,
-                  decision,
-                },
-                { actor: principal.id, role: approvalRole },
               ),
             );
           },
@@ -2273,15 +2401,24 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
           "update_work_requirements",
           {
             description:
-              "Replace the authenticated user's typed requirements for a dynamic-dag WorkItem while preserving source-derived and Workflow policy obligations. Requires both current Work and Requirement revisions; semantic changes create an immutable RequirementSnapshot and cause the DAG runtime to re-plan.",
+              "Replace the authenticated user's typed requirements for a Dynamic DAG WorkItem while preserving source-derived and mandatory policy obligations. unresolvedResolutions must explicitly map each user-origin unresolved hard requirement to one or more typed replacement requirement IDs supplied in the same update. Requires current Work and Requirement revisions; semantic changes create an immutable RequirementSnapshot and cause re-plan.",
             inputSchema: z.object({
               workItemId: z.string().uuid(),
               expectedRevision: z.number().int().min(1),
               expectedRequirementRevision: z.number().int().min(1),
               requirements: z.array(workRequirementInputSchema).max(200),
+              unresolvedResolutions: z
+                .array(
+                  z.object({
+                    unresolvedId: z.string().trim().min(1).max(200),
+                    replacementRequirementIds: z.array(z.string().trim().min(1).max(200)).min(1).max(200),
+                  }),
+                )
+                .max(200)
+                .optional(),
             }),
           },
-          async ({ workItemId, expectedRevision, expectedRequirementRevision, requirements }) =>
+          async ({ workItemId, expectedRevision, expectedRequirementRevision, requirements, unresolvedResolutions }) =>
             toolResult(
               applyMcpWorkRequirements(
                 workOrchestrationStore!,
@@ -2292,6 +2429,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
                 requirements,
                 expectedRevision,
                 expectedRequirementRevision,
+                unresolvedResolutions ?? [],
               ),
             ),
         );
@@ -2343,7 +2481,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
             const signaled = workOrchestrationStore!.signalDagWait(correlationKey, payload ?? null, eventId);
             return toolResult({
               wait: signaled,
-              work: workOrchestrator!.getWork(workItemId, principal.id, principal.tenantId),
+              work: await reconcileMcpWork(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workDagRuntime,
+                workItemId,
+                principal.id,
+                principal.tenantId,
+              ),
             });
           },
         );
@@ -2376,14 +2521,20 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               expectedRevision,
             );
             const current = workOrchestrationStore!.getWork(workItemId, principal.id, principal.tenantId);
-            const detail =
-              current.status === "blocked" && current.blockedReason === "DAG_EXTERNAL_OUTCOME_UNKNOWN"
-                ? workOrchestrator!.resumeWork(workItemId, principal.id, principal.tenantId, current.stateRevision)
-                : workOrchestrator!.getWork(workItemId, principal.id, principal.tenantId);
+            if (current.status === "blocked" && current.blockedReason === "DAG_EXTERNAL_OUTCOME_UNKNOWN") {
+              workOrchestrator!.resumeWork(workItemId, principal.id, principal.tenantId, current.stateRevision);
+            }
+            const detail = await reconcileMcpWork(
+              workOrchestrationStore!,
+              workOrchestrator!,
+              workDagRuntime,
+              workItemId,
+              principal.id,
+              principal.tenantId,
+            );
             return toolResult({ ...detail, resolvedExecution });
           },
         );
-
         registerTool(
           "resume_work",
           {
@@ -2394,8 +2545,19 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               expectedRevision: z.number().int().min(1),
             }),
           },
-          async ({ workItemId, expectedRevision }) =>
-            toolResult(workOrchestrator.resumeWork(workItemId, principal.id, principal.tenantId, expectedRevision)),
+          async ({ workItemId, expectedRevision }) => {
+            workOrchestrator.resumeWork(workItemId, principal.id, principal.tenantId, expectedRevision);
+            return toolResult(
+              await reconcileMcpWork(
+                workOrchestrationStore!,
+                workOrchestrator!,
+                workDagRuntime,
+                workItemId,
+                principal.id,
+                principal.tenantId,
+              ),
+            );
+          },
         );
 
         registerTool(
@@ -2440,9 +2602,20 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
             principal.tenantId,
             feedbackInput,
           );
+          const reconciledWork =
+            linkedWork?.work.orchestrationEngine === "dynamic-dag"
+              ? await reconcileMcpWork(
+                  workOrchestrationStore!,
+                  workOrchestrator!,
+                  workDagRuntime,
+                  linkedWork.work.workItemId,
+                  principal.id,
+                  principal.tenantId,
+                )
+              : linkedWork;
           return toolResult({
             feedback,
-            ...(linkedWork ? { work: linkedWork } : {}),
+            ...(reconciledWork ? { work: reconciledWork } : {}),
           });
         },
       );

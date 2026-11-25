@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { test } from "node:test";
-import { createDockerCodexExecutor } from "../src/expert-platform/docker-codex-executor.js";
+import { createDockerAgentExecutor } from "../src/expert-platform/docker-agent-executor.js";
 import type { Claim } from "../src/expert-platform/task-store.js";
 
 const claim: Claim = {
@@ -61,7 +61,7 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
   try {
     for (const backend of ["codex", "claude"] as const) {
       let mounted = "";
-      const executor = createDockerCodexExecutor({
+      const executor = createDockerAgentExecutor({
         backend,
         image: "expert-image",
         sourcePath: "/work/repo",
@@ -125,7 +125,7 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
 
 test("Docker Codex executor runs codex JSONL through docker with read-only source", async () => {
   let seen: { executable: string; args: readonly string[]; signal?: AbortSignal } | undefined;
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     backend: "codex",
     image: "team-skill-hub-expert-worker-prototype",
     sourcePath: "/work/repo",
@@ -146,6 +146,31 @@ test("Docker Codex executor runs codex JSONL through docker with read-only sourc
   assert.ok(seen?.args.includes("--json"));
   assert.equal(seen?.args.at(-1), claim.problem);
   assert.equal(seen?.signal, signal);
+});
+
+test("Dynamic DAG agent outcome protocol is parsed and stripped before Worker completion", async () => {
+  const executor = createDockerAgentExecutor({
+    backend: "codex",
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async () =>
+      'Remote repository access is unavailable.\n<TEAM_SKILL_HUB_OUTCOME>{"status":"blocked","reasonCode":"REMOTE_ACCESS"}</TEAM_SKILL_HUB_OUTCOME>',
+  });
+  const result = await executor(
+    {
+      ...claim,
+      executionKind: "agent",
+      problem: claim.problem + "\nTEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1",
+    },
+    new AbortController().signal,
+  );
+  assert.deepEqual(result, {
+    result: "Remote repository access is unavailable.",
+    executionOutcome: { status: "blocked", reasonCode: "REMOTE_ACCESS" },
+  });
 });
 
 test("verification-only execution skips the model and runs pinned verification", async () => {
@@ -174,7 +199,7 @@ test("verification-only execution skips the model and runs pinned verification",
     const commitSha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     let modelCalls = 0;
     let verificationCalls = 0;
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "codex",
       image: "expert-worker",
       sourcePath: origin,
@@ -253,7 +278,7 @@ test("Docker executor runs pinned verification in the prepared workspace and ret
     ]);
     const commitSha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "codex",
       image: "expert-worker",
       sourcePath: origin,
@@ -353,7 +378,7 @@ test("Docker Codex executor mounts an isolated per-expert provider config", asyn
       allowedEnvNames: ["OPENAI_API_KEY"],
     },
   };
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/repo",
@@ -393,7 +418,7 @@ test("Docker Codex executor mounts an isolated per-expert provider config", asyn
 });
 
 test("Docker Codex executor requires a configured secret reference and rejects env expansion", async () => {
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/repo",
@@ -442,7 +467,7 @@ test("Docker Codex executor requires a configured secret reference and rejects e
 
 test("Docker Codex executor fails closed when a new-style repository ID has no resolved source", async () => {
   let ran = false;
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/default-repo",
@@ -465,7 +490,7 @@ test("Docker Codex executor labels UUID-backed execution with task, run and fenc
   const taskId = "71950fc2-e7e3-45fd-af39-0697e00ac219";
   const runId = "7cf042dc-33e2-48f3-a1ce-eea40ec4ba08";
   let args: readonly string[] = [];
-  const executor = createDockerCodexExecutor({
+  const executor = createDockerAgentExecutor({
     backend: "codex",
     image: "expert-worker",
     sourcePath: "/work/repo",
@@ -486,7 +511,7 @@ test("Docker Codex executor labels UUID-backed execution with task, run and fenc
 
 test("Docker executor emits only bounded stage codes for successful execution", async () => {
   const stages: string[] = [];
-  const execute = createDockerCodexExecutor({
+  const execute = createDockerAgentExecutor({
     backend: "codex",
     image: "expert-image",
     sourcePath: "/work/repo",
@@ -511,7 +536,7 @@ test("Docker executor emits only bounded stage codes for successful execution", 
 
 test("Docker executor emits generic failure codes, not raw process stderr", async () => {
   const stages: string[] = [];
-  const execute = createDockerCodexExecutor({
+  const execute = createDockerAgentExecutor({
     backend: "codex",
     image: "expert-image",
     sourcePath: "/work/repo",
@@ -542,7 +567,7 @@ test("Docker executor keeps legacy profiles read-only and rejects write profile 
   const makeExecutor = () => {
     let launched = false;
     let args: readonly string[] = [];
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "codex",
       image: "worker",
       sourcePath: "/work/repo",
@@ -613,7 +638,7 @@ test("workspace-write executor captures deterministic change summary before veri
       wireApi: "responses" as const,
       allowedEnvNames: ["OPENAI_API_KEY"],
     };
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "codex",
       image: "expert-worker",
       sourcePath: origin,
@@ -692,7 +717,7 @@ test("workspace-write verification observes mutated content and binds evidence t
       allowedEnvNames: ["OPENAI_API_KEY"],
     };
     let verifiedWorkspace = "";
-    const executor = createDockerCodexExecutor({
+    const executor = createDockerAgentExecutor({
       backend: "codex",
       image: "expert-worker",
       sourcePath: origin,

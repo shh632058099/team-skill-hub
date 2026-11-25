@@ -10,7 +10,9 @@ import {
   type WorkDagExecutorAdapter,
 } from "../src/expert-platform/work-dag-engine.js";
 import { WorkDagSeedPlanner } from "../src/expert-platform/work-dag-planners.js";
+import type { DagGraph } from "../src/expert-platform/work-dag.js";
 import { WorkDagRuntime } from "../src/expert-platform/work-dag-runtime-service.js";
+import { workflowOnlyDagPolicyContext } from "../src/expert-platform/work-dag-policy-context.js";
 
 function fixture(
   requiredEvidence: string[],
@@ -58,6 +60,36 @@ async function drive(runtime: WorkDagRuntime, workId: string, max = 20) {
     if (!changed) break;
   }
 }
+
+test("DAG runtime processes every post-cutover Work even when its Workflow snapshot says single-node", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dag-runtime-cutover-"));
+  const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+  try {
+    assert.equal(store.getWorkflow("investigation").definition.graph.mode, "single-node");
+    const work = store.createOrReuseWork({
+      principalId: "a",
+      scope: "s",
+      idempotencyKey: "dag-cutover-single-node-workflow",
+      sourceType: "mcp",
+      title: "inspect",
+      description: "inspect the repository",
+      workflowId: "investigation",
+    });
+    store.ensureRequirementSnapshot(work.workItemId);
+    const runtime = new WorkDagRuntime(
+      store,
+      new WorkDagPlannerCoordinator(store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(store, []),
+    );
+
+    assert.equal(await runtime.reconcileWork(work.workItemId, "a", "s", 100), true);
+    assert.equal(store.getWorkInternal(work.workItemId).currentDagRevision, 1);
+    assert.equal(store.listDagRevisions(work.workItemId).length, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("runtime plans, executes and completes from durable requirements", async () => {
   const f = fixture(["expert_result"]);
@@ -126,6 +158,304 @@ test("verification failure causes agent repair re-plan, then a fresh verificatio
       f.store
         .listDagDecisions(f.workId)
         .some((item) => item.reasonCode === "verification_failure" && item.action === "plan.accepted"),
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("accepted failure-conditioned branch runs before generic failure replanning", async () => {
+  const f = fixture(["unit_test"], 5, ["manual"]);
+  try {
+    const input = f.store.getDagPlannerInput(f.workId);
+    const graph: DagGraph = {
+      nodes: [
+        {
+          id: "verify",
+          kind: "verification",
+          capability: "unit_test",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "repair",
+          kind: "agent",
+          capability: "repair",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [
+        {
+          from: "verify",
+          to: "repair",
+          predicate: { kind: "node_result", nodeId: "verify", state: "failed" },
+        },
+      ],
+    };
+    const proposal = f.store.submitDagProposal(
+      {
+        workItemId: f.workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph,
+      },
+      100,
+    );
+    assert.equal(proposal.status, "accepted");
+
+    let repairCalls = 0;
+    const verification: WorkDagExecutorAdapter = {
+      kind: "verification",
+      capability: "unit_test",
+      async execute() {
+        return {
+          status: "failed",
+          summary: "test failed",
+          evidence: [{ type: "unit_test", passed: false, subjectRevision: null, verifierIdentity: "fake" }],
+        };
+      },
+    };
+    const repair: WorkDagExecutorAdapter = {
+      kind: "agent",
+      capability: "repair",
+      async execute() {
+        repairCalls++;
+        return { status: "succeeded", summary: "repair ran" };
+      },
+    };
+    const planner = {
+      identity: "unexpected",
+      version: "1",
+      async propose() {
+        throw new Error("SHOULD_NOT_REPLAN");
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, planner),
+      new WorkDagScheduler(f.store, [verification, repair]),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    assert.deepEqual(f.store.evaluateDagCompletion(f.workId).readyNodeIds, ["repair"]);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 102), true);
+    assert.equal(repairCalls, 1);
+    assert.notEqual(f.store.getWorkInternal(f.workId).blockedReason, "DAG_REPLAN_NOT_ALLOWED");
+    assert.equal(
+      f.store.listDagExecutions(f.workId).find((execution) => execution.nodeId === "repair")?.state,
+      "succeeded",
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("failure-conditioned successor is preferred over an unrelated ready node", async () => {
+  const f = fixture(["unit_test"], 5, ["manual"]);
+  try {
+    const input = f.store.getDagPlannerInput(f.workId);
+    const graph: DagGraph = {
+      nodes: [
+        {
+          id: "verify",
+          kind: "verification",
+          capability: "unit_test",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "unrelated",
+          kind: "agent",
+          capability: "unrelated",
+          subject: null,
+          resource: "other",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "repair",
+          kind: "agent",
+          capability: "repair",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [
+        {
+          from: "verify",
+          to: "repair",
+          predicate: { kind: "node_result", nodeId: "verify", state: "failed" },
+        },
+      ],
+    };
+    assert.equal(
+      f.store.submitDagProposal({
+        workItemId: f.workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph,
+      }).status,
+      "accepted",
+    );
+
+    let repairCalls = 0;
+    let unrelatedCalls = 0;
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, {
+        identity: "unexpected",
+        version: "1",
+        async propose() {
+          throw new Error("SHOULD_NOT_REPLAN");
+        },
+      }),
+      new WorkDagScheduler(f.store, [
+        {
+          kind: "verification",
+          capability: "unit_test",
+          async execute() {
+            return {
+              status: "failed",
+              summary: "test failed",
+              evidence: [{ type: "unit_test", passed: false, subjectRevision: null, verifierIdentity: "fake" }],
+            };
+          },
+        },
+        {
+          kind: "agent",
+          capability: "unrelated",
+          async execute() {
+            unrelatedCalls++;
+            return { status: "succeeded" };
+          },
+        },
+        {
+          kind: "agent",
+          capability: "repair",
+          async execute() {
+            repairCalls++;
+            return { status: "succeeded" };
+          },
+        },
+      ]),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    assert.deepEqual(f.store.evaluateDagCompletion(f.workId).readyNodeIds, ["unrelated", "repair"]);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 102), true);
+    assert.equal(repairCalls, 1);
+    assert.equal(unrelatedCalls, 0);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("executor failure is handled before an unrelated ready node", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    const input = f.store.getDagPlannerInput(f.workId);
+    const graph: DagGraph = {
+      nodes: [
+        {
+          id: "crash",
+          kind: "agent",
+          capability: "crash",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "unrelated",
+          kind: "agent",
+          capability: "unrelated",
+          subject: null,
+          resource: "other",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [],
+    };
+    assert.equal(
+      f.store.submitDagProposal({
+        workItemId: f.workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph,
+      }).status,
+      "accepted",
+    );
+
+    let unrelatedCalls = 0;
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(f.store, [
+        {
+          kind: "agent",
+          capability: "crash",
+          async execute() {
+            return { status: "failed", summary: "EXECUTOR_CRASH" };
+          },
+        },
+        {
+          kind: "agent",
+          capability: "unrelated",
+          async execute() {
+            unrelatedCalls++;
+            return { status: "succeeded" };
+          },
+        },
+      ]),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    assert.equal(
+      f.store.listDagExecutions(f.workId).find((execution) => execution.nodeId === "crash")?.state,
+      "failed",
+    );
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 102), true);
+    assert.equal(unrelatedCalls, 0);
+    assert.ok(
+      f.store
+        .listDagExecutions(f.workId)
+        .some(
+          (execution) => execution.nodeId === "crash" && execution.generation === 2 && execution.state === "pending",
+        ),
     );
   } finally {
     f.store.close();
@@ -265,6 +595,41 @@ test("deterministic expert routing failure blocks once instead of burning retry 
   }
 });
 
+test("semantic agent blocker blocks immediately instead of retrying a completed refusal", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    let calls = 0;
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      async execute() {
+        calls++;
+        return {
+          status: "failed",
+          summary: "AGENT_BLOCKED:REMOTE_ACCESS\nRemote repository access is unavailable.",
+        };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(f.store, [adapter]),
+    );
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 100), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 102), true);
+
+    const work = f.store.getWorkInternal(f.workId);
+    assert.equal(work.status, "blocked");
+    assert.equal(work.blockedReason, "DAG_AGENT_BLOCKED");
+    assert.match(work.blockedContext ?? "", /REMOTE_ACCESS/);
+    assert.equal(calls, 1);
+    assert.equal(f.store.listDagExecutions(f.workId).length, 1);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("requirement update waits for an in-flight node instead of attempting to supersede it", async () => {
   const f = fixture(["expert_result"]);
   try {
@@ -312,6 +677,245 @@ test("requirement update waits for an in-flight node instead of attempting to su
     work = f.store.getWorkInternal(f.workId);
     assert.notEqual(work.status, "blocked");
     assert.equal(work.currentDagRevision, 1);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("requirement-update noop replan is consumed instead of repeating on every reconcile", async () => {
+  const f = fixture(["expert_result"], 10, ["on_user_update"]);
+  try {
+    const input = f.store.getDagPlannerInput(f.workId);
+    const graph: DagGraph = {
+      nodes: [
+        {
+          id: "agent",
+          kind: "agent",
+          capability: "analysis",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [],
+    };
+    f.store.submitDagProposal(
+      {
+        workItemId: f.workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "bootstrap",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph,
+      },
+      100,
+    );
+
+    const agent: WorkDagExecutorAdapter = {
+      kind: "agent",
+      async execute() {
+        return {
+          status: "succeeded",
+          evidence: [{ type: "expert_result", passed: true, subjectRevision: null, verifierIdentity: "fake" }],
+        };
+      },
+    };
+    const reasons: string[] = [];
+    const planner = {
+      identity: "test",
+      version: "1",
+      async propose(_input: unknown, reason: string) {
+        reasons.push(reason);
+        return graph;
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, planner),
+      new WorkDagScheduler(f.store, [agent]),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    let work = f.store.getWorkInternal(f.workId);
+    const snapshot = f.store.getRequirementSnapshot(f.workId, work.currentRequirementRevision);
+    f.store.updateRequirementSnapshot(
+      f.workId,
+      "a",
+      "s",
+      work.stateRevision,
+      snapshot.revision,
+      [
+        {
+          id: "user:preference",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "preference.noted", equals: true },
+        },
+      ],
+      "test",
+      110,
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 120), true);
+    assert.deepEqual(reasons, ["user_update"]);
+    assert.equal(f.store.listDagProposals(f.workId).at(-1)?.status, "noop");
+
+    work = f.store.getWorkInternal(f.workId);
+    const secondSnapshot = f.store.getRequirementSnapshot(f.workId, work.currentRequirementRevision);
+    f.store.updateRequirementSnapshot(
+      f.workId,
+      "a",
+      "s",
+      work.stateRevision,
+      secondSnapshot.revision,
+      [
+        ...secondSnapshot.requirements,
+        {
+          id: "user:second-preference",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "second.preference.noted", equals: true },
+        },
+      ],
+      "test",
+      122,
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 123), true);
+    assert.deepEqual(reasons, ["user_update", "user_update"]);
+    assert.equal(f.store.listDagProposals(f.workId).at(-1)?.status, "noop");
+    assert.equal(f.store.getWorkInternal(f.workId).currentDagRevision, 1);
+
+    await runtime.reconcileWork(f.workId, "a", "s", 124);
+    assert.deepEqual(reasons, ["user_update", "user_update"]);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("execution-contract drift retires the active Attempt and accepts the same graph under a new policy revision", async () => {
+  const f = fixture(["expert_result"], 10, ["on_user_update"]);
+  try {
+    const graph: DagGraph = {
+      nodes: [
+        {
+          id: "agent",
+          kind: "agent",
+          capability: "analysis",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [],
+    };
+    const initial = f.store.getDagPlannerInput(f.workId);
+    const accepted = f.store.submitDagProposal(
+      {
+        workItemId: f.workId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: initial.frozen.workRevision,
+        expectedDagRevision: 0,
+        expectedRequirementRevision: initial.frozen.requirementRevision,
+        plannerIdentity: "bootstrap",
+        plannerVersion: "1",
+        plannerInputDigest: initial.digest,
+        reasonCode: "initial",
+        graph,
+      },
+      100,
+    );
+    assert.equal(accepted.status, "accepted");
+
+    let work = f.store.getWorkInternal(f.workId);
+    const oldAttempt = f.store.createWorkAttempt(
+      f.workId,
+      "a",
+      "s",
+      work.stateRevision,
+      {
+        reason: "initial",
+        expertId: "legacy-expert",
+        deploymentId: "legacy-deployment",
+        deploymentConfigVersion: 1,
+      },
+      101,
+    );
+    work = f.store.getWorkInternal(f.workId);
+    const snapshot = f.store.getRequirementSnapshot(f.workId, work.currentRequirementRevision);
+    f.store.updateRequirementSnapshot(
+      f.workId,
+      "a",
+      "s",
+      work.stateRevision,
+      snapshot.revision,
+      [
+        ...snapshot.requirements,
+        {
+          id: "user:new-contract",
+          source: "user",
+          strength: "preferred",
+          condition: { kind: "always" },
+          satisfaction: { kind: "fact", key: "new.contract", equals: true },
+        },
+      ],
+      "test",
+      102,
+    );
+
+    const planner = {
+      identity: "test",
+      version: "1",
+      async propose() {
+        return graph;
+      },
+    };
+    const policyProvider = {
+      resolve(currentWork: ReturnType<WorkOrchestrationStore["getWorkInternal"]>) {
+        const workflow = f.store.getWorkflow(currentWork.workflowId, currentWork.workflowVersion);
+        return {
+          ...workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition),
+          deployment: {
+            deploymentId: "new-deployment",
+            configVersion: 2,
+            expertId: "new-expert",
+            runtimeProfile: "codex-readonly",
+            digest: "new-deployment@2",
+          },
+          digest: "new-policy-context",
+        };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, planner, 30_000, policyProvider),
+      new WorkDagScheduler(f.store, []),
+    );
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 110), true);
+    work = f.store.getWorkInternal(f.workId);
+    assert.equal(work.status, "queued");
+    assert.equal(work.activeWorkAttemptId, null);
+    assert.equal(f.store.getWorkAttempt(oldAttempt.workAttemptId).status, "cancelled");
+    assert.ok(f.store.listDagProposals(f.workId).at(-1)?.decisionCodes.includes("PLAN_POLICY_CONTEXT_DRIFT"));
+
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 120), true);
+    work = f.store.getWorkInternal(f.workId);
+    assert.equal(work.currentDagRevision, 2);
+    assert.match(f.store.getDagRevision(f.workId, 2).policyRevision, /new-policy-context/);
+    assert.equal(f.store.listDagProposals(f.workId).at(-1)?.status, "accepted");
   } finally {
     f.store.close();
     rmSync(f.dir, { recursive: true, force: true });
@@ -570,6 +1174,112 @@ test("external outcome unknown blocks instead of replaying or completing", async
   } finally {
     f.store.close();
     rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("runtime lets a safe independent branch progress before blocking on an unresolved external outcome", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dag-runtime-scoped-unknown-"));
+  const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+  try {
+    const base = store.getWorkflow("investigation").definition;
+    store.putWorkflow("dynamic-scoped-unknown", 1, {
+      ...structuredClone(base),
+      validation: { requiredEvidence: [], required: [] },
+      review: { required: false },
+      publication: { required: false, mode: "work_branch", approvalRequired: false },
+      completion: { require: ["no_unresolved_blocker"] },
+      graph: { mode: "dynamic-dag" },
+    });
+    const work = store.createOrReuseWork({
+      principalId: "a",
+      scope: "s",
+      idempotencyKey: "scoped-unknown-runtime",
+      sourceType: "mcp",
+      title: "scoped unknown",
+      description: "run independent safe work",
+      workflowId: "dynamic-scoped-unknown",
+    });
+    store.ensureRequirementSnapshot(work.workItemId);
+    const graph: DagGraph = {
+      nodes: [
+        {
+          id: "unknown",
+          kind: "agent",
+          capability: "unknown",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "safe-read",
+          kind: "agent",
+          capability: "safe-read",
+          subject: null,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [],
+    };
+    const input = store.getDagPlannerInput(work.workItemId);
+    assert.equal(
+      store.submitDagProposal({
+        workItemId: work.workItemId,
+        principalId: "a",
+        scope: "s",
+        expectedWorkRevision: input.frozen.workRevision,
+        expectedDagRevision: input.frozen.dagRevision,
+        expectedRequirementRevision: input.frozen.requirementRevision,
+        plannerIdentity: "test",
+        plannerVersion: "1",
+        plannerInputDigest: input.digest,
+        reasonCode: "initial",
+        graph,
+      }).status,
+      "accepted",
+    );
+    let safeRuns = 0;
+    const runtime = new WorkDagRuntime(
+      store,
+      new WorkDagPlannerCoordinator(store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(store, [
+        {
+          kind: "agent",
+          capability: "unknown",
+          async execute() {
+            return { status: "external_outcome_unknown", externalRef: "op-unknown" };
+          },
+        },
+        {
+          kind: "agent",
+          capability: "safe-read",
+          async execute() {
+            safeRuns++;
+            return { status: "succeeded", summary: "safe branch done" };
+          },
+        },
+      ]),
+    );
+
+    assert.equal(await runtime.reconcileWork(work.workItemId, "a", "s", 100), true);
+    assert.equal(
+      store.listDagExecutions(work.workItemId).find((item) => item.nodeId === "unknown")?.state,
+      "external_outcome_unknown",
+    );
+
+    assert.equal(await runtime.reconcileWork(work.workItemId, "a", "s", 101), true);
+    assert.equal(safeRuns, 1);
+    assert.notEqual(store.getWorkInternal(work.workItemId).status, "blocked");
+
+    assert.equal(await runtime.reconcileWork(work.workItemId, "a", "s", 102), true);
+    const blocked = store.getWorkInternal(work.workItemId);
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.blockedReason, "DAG_EXTERNAL_OUTCOME_UNKNOWN");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

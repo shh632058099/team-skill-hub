@@ -5,11 +5,20 @@ import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./veri
 import { resolveRuntimeProfilePolicy, type RuntimeProfileId } from "./runtime-profile-policy.js";
 import { DatabaseSync } from "node:sqlite";
 import type { ShadowDagProjection } from "./work-dag-shadow.js";
+import { resolveWorkIntentDeterministically } from "./work-requirement-resolver.js";
+import {
+  policyContextObligations,
+  workDagPolicyContextRef,
+  workflowOnlyDagPolicyContext,
+  type WorkDagPolicyContext,
+} from "./work-dag-policy-context.js";
 import {
   executionKey,
   completion,
   evaluatePredicate,
+  expandResourceEvidenceObligations,
   readyNodes,
+  subjectForResource,
   stableDigest,
   type DagContext,
   type DagExecution,
@@ -42,11 +51,16 @@ import {
 } from "./work-dag-runtime.js";
 import {
   effectiveObligations,
+  classifyRequirementUpdateImpact,
   evidenceRequirementSemanticsDigest,
   effectiveRequirementDigest,
   normalizeWorkRequirements,
+  normalizePinnedPolicyObligations,
+  normalizeUnresolvedWorkRequirements,
   policyIdentity,
   type RequirementSnapshot,
+  type RequirementUpdateImpact,
+  type UnresolvedWorkRequirement,
   type WorkRequirement,
 } from "./work-dag-requirements.js";
 
@@ -158,6 +172,8 @@ export interface WorkSubmission {
   requirementsDigest?: string;
 }
 
+export type WorkOrchestrationEngine = "legacy-single-node" | "dynamic-dag";
+
 export interface WorkItemRecord {
   workItemId: string;
   principalId: string;
@@ -175,6 +191,7 @@ export interface WorkItemRecord {
   stateRevision: number;
   workflowId: string;
   workflowVersion: number;
+  orchestrationEngine: WorkOrchestrationEngine;
   currentRequirementRevision: number;
   currentDagRevision: number;
   activeWorkAttemptId: string | null;
@@ -267,6 +284,8 @@ export interface WorkspaceRecord {
   workspaceKey: string;
   workItemId: string;
   workAttemptId: string;
+  resourceKey: string;
+  repositoryId: string | null;
   ownerWorkerId: string | null;
   path: string | null;
   repositoryUrl: string | null;
@@ -289,6 +308,8 @@ export interface WorkEvidenceRecord {
   evidenceId: string;
   workItemId: string;
   workAttemptId: string;
+  resourceKey: string;
+  repositoryId: string | null;
   taskId: string | null;
   runId: string | null;
   type: string;
@@ -427,6 +448,25 @@ function codeChangePreset(selection?: NonNullable<WorkflowDefinition["selection"
       ],
     },
   });
+}
+
+function dynamicCodeChangePreset(selection?: NonNullable<WorkflowDefinition["selection"]>): WorkflowDefinition {
+  return {
+    ...codeChangePreset(selection),
+    planning: {
+      maxReplans: 12,
+      replanPolicy: [
+        "always_after_agent_turn",
+        "on_new_information",
+        "on_failure",
+        "on_review_rework",
+        "on_blocker_resolution",
+        "on_user_update",
+        "manual",
+      ],
+    },
+    graph: { mode: "dynamic-dag" },
+  };
 }
 
 function readonlyPreset(selection?: NonNullable<WorkflowDefinition["selection"]>): WorkflowDefinition {
@@ -629,6 +669,68 @@ const PLATFORM_PRESET_WORKFLOWS: ReadonlyArray<readonly [string, number, Workflo
       notWhen: ["release activity is only a downstream consequence of another primary code-change task"],
     }),
   ],
+  [
+    "bug-fix",
+    4,
+    dynamicCodeChangePreset({
+      summary: "Fix incorrect existing runtime or business behavior.",
+      useWhen: [
+        "broken existing functionality, regressions, crashes, or incorrect behavior are the primary requested outcome",
+      ],
+      notWhen: [
+        "the primary requested outcome is a new feature, test-only improvement, build-system repair, or release change",
+      ],
+    }),
+  ],
+  [
+    "feature-change",
+    4,
+    dynamicCodeChangePreset({
+      summary: "Implement new or changed externally observable behavior.",
+      useWhen: [
+        "a new feature, requirement, API behavior, or externally observable behavior is the primary requested outcome",
+      ],
+      notWhen: ["the primary requested outcome is only refactoring, tests, buildability, or release preparation"],
+    }),
+  ],
+  [
+    "refactor",
+    4,
+    dynamicCodeChangePreset({
+      summary: "Restructure existing code without an intended behavior change.",
+      useWhen: [
+        "code structure, maintainability, or organization is the primary requested outcome and behavior should stay stable",
+      ],
+      notWhen: ["the user primarily requests a bug fix, new behavior, test change, build repair, or release change"],
+    }),
+  ],
+  [
+    "test-improvement",
+    4,
+    dynamicCodeChangePreset({
+      summary: "Add, fix, or improve tests when the tests themselves are the primary deliverable.",
+      useWhen: ["test coverage, test cases, or test infrastructure are the primary requested outcome"],
+      notWhen: ["tests are secondary work supporting a bug fix or feature change"],
+    }),
+  ],
+  [
+    "build-fix",
+    4,
+    dynamicCodeChangePreset({
+      summary: "Restore compilation, linking, or CI buildability when buildability itself is the primary deliverable.",
+      useWhen: ["build, link, toolchain, or CI buildability repair is the primary requested outcome"],
+      notWhen: ["a feature or bug task merely happens to encounter a build failure during verification"],
+    }),
+  ],
+  [
+    "release-change",
+    4,
+    dynamicCodeChangePreset({
+      summary: "Change versioning, packaging, release, or publishing behavior.",
+      useWhen: ["versioning, packaging, release preparation, or publishing is the primary requested outcome"],
+      notWhen: ["release activity is only a downstream consequence of another primary code-change task"],
+    }),
+  ],
 ];
 const WORK_STATUSES = new Set<WorkStatus>([
   "queued",
@@ -716,6 +818,7 @@ export class WorkOrchestrationStore {
         "  state_revision INTEGER NOT NULL DEFAULT 1,",
         "  workflow_id TEXT NOT NULL,",
         "  workflow_version INTEGER NOT NULL,",
+        "  orchestration_engine TEXT NOT NULL DEFAULT 'legacy-single-node' CHECK(orchestration_engine IN ('legacy-single-node','dynamic-dag')),",
         "  current_requirement_revision INTEGER NOT NULL DEFAULT 0,",
         "  current_dag_revision INTEGER NOT NULL DEFAULT 0,",
         "  active_work_attempt_id TEXT,",
@@ -788,7 +891,9 @@ export class WorkOrchestrationStore {
         "  workspace_id TEXT PRIMARY KEY,",
         "  workspace_key TEXT NOT NULL UNIQUE,",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
-        "  work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+        "  work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+        "  resource_key TEXT NOT NULL DEFAULT 'workspace',",
+        "  repository_id TEXT,",
         "  owner_worker_id TEXT,",
         "  path TEXT,",
         "  repository_url TEXT,",
@@ -797,7 +902,8 @@ export class WorkOrchestrationStore {
         "  state TEXT NOT NULL CHECK(state IN ('allocating','ready','in_use','retained','cleaning','removed','failed')),",
         "  cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
         "  created_at INTEGER NOT NULL,",
-        "  last_used_at INTEGER NOT NULL",
+        "  last_used_at INTEGER NOT NULL,",
+        "  UNIQUE(work_attempt_id,resource_key)",
         ");",
         "CREATE TABLE IF NOT EXISTS work_evidence (",
         "  evidence_id TEXT PRIMARY KEY,",
@@ -874,8 +980,15 @@ export class WorkOrchestrationStore {
         "CREATE TABLE IF NOT EXISTS work_requirement_snapshots (",
         "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
         "  revision INTEGER NOT NULL,",
+        "  resolver_identity TEXT NOT NULL DEFAULT 'legacy-snapshot',",
         "  resolver_version TEXT NOT NULL,",
+        "  original_request TEXT NOT NULL DEFAULT '',",
+        "  original_request_digest TEXT NOT NULL DEFAULT '',",
         "  requirements_json TEXT NOT NULL,",
+        "  unresolved_json TEXT NOT NULL DEFAULT '[]',",
+        "  policy_obligations_json TEXT NOT NULL DEFAULT '[]',",
+        "  policy_context_ref TEXT NOT NULL DEFAULT '',",
+        "  policy_context_digest TEXT NOT NULL DEFAULT '',",
         "  policy_ref TEXT NOT NULL,",
         "  policy_digest TEXT NOT NULL,",
         "  effective_digest TEXT NOT NULL,",
@@ -907,7 +1020,7 @@ export class WorkOrchestrationStore {
         "CREATE INDEX IF NOT EXISTS idx_work_dag_replan_request_item ON work_dag_replan_requests(work_item_id,state,created_at);",
         "CREATE TABLE IF NOT EXISTS work_dag_executions (",
         "  node_execution_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
-        "  node_id TEXT NOT NULL, created_dag_revision INTEGER NOT NULL, generation INTEGER NOT NULL,",
+        "  node_id TEXT NOT NULL, created_dag_revision INTEGER NOT NULL, bound_requirement_revision INTEGER, generation INTEGER NOT NULL,",
         "  state TEXT NOT NULL CHECK(state IN ('pending','claimed','running','succeeded','failed','cancelled','superseded','external_outcome_unknown')),",
         "  fence INTEGER NOT NULL DEFAULT 0, idempotency_key TEXT NOT NULL UNIQUE, subject_revision TEXT, resource_identity TEXT,",
         "  claim_owner TEXT, claim_lease_until INTEGER, started_at INTEGER, finished_at INTEGER, result_json TEXT, result_digest TEXT, external_ref TEXT,",
@@ -924,20 +1037,24 @@ export class WorkOrchestrationStore {
         "CREATE INDEX IF NOT EXISTS idx_work_dag_late_result_item ON work_dag_late_results(work_item_id,late_result_id);",
         "CREATE TABLE IF NOT EXISTS work_dag_facts (",
         "  fact_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
-        "  fact_key TEXT NOT NULL, value_json TEXT NOT NULL, subject_revision TEXT, source_execution_id TEXT NOT NULL, created_at INTEGER NOT NULL",
+        "  fact_key TEXT NOT NULL, value_json TEXT NOT NULL, subject_revision TEXT, resource_identity TEXT, source_execution_id TEXT NOT NULL, created_at INTEGER NOT NULL",
         ");",
         "CREATE INDEX IF NOT EXISTS idx_work_dag_fact_item ON work_dag_facts(work_item_id,fact_key,created_at);",
         "CREATE TABLE IF NOT EXISTS work_dag_evidence (",
         "  evidence_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
-        "  evidence_type TEXT NOT NULL, passed INTEGER NOT NULL CHECK(passed IN (0,1)), subject_revision TEXT,",
+        "  evidence_type TEXT NOT NULL, passed INTEGER NOT NULL CHECK(passed IN (0,1)), subject_revision TEXT, resource_identity TEXT,",
         "  verifier_identity TEXT NOT NULL, artifact_ref TEXT, source_execution_id TEXT NOT NULL, requirement_semantics_digest TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL",
         ");",
         "CREATE INDEX IF NOT EXISTS idx_work_dag_evidence_item ON work_dag_evidence(work_item_id,evidence_type,created_at);",
         "CREATE TABLE IF NOT EXISTS work_dag_artifacts (",
         "  artifact_id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
-        "  artifact_type TEXT NOT NULL, artifact_ref TEXT NOT NULL, subject_revision TEXT, source_execution_id TEXT NOT NULL, created_at INTEGER NOT NULL",
+        "  artifact_type TEXT NOT NULL, artifact_ref TEXT NOT NULL, subject_revision TEXT, resource_identity TEXT, source_execution_id TEXT NOT NULL, created_at INTEGER NOT NULL",
         ");",
         "CREATE INDEX IF NOT EXISTS idx_work_dag_artifact_item ON work_dag_artifacts(work_item_id,artifact_type,created_at);",
+        "CREATE TABLE IF NOT EXISTS work_dag_resource_subjects (",
+        "  work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE, resource_identity TEXT NOT NULL,",
+        "  subject_revision TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(work_item_id,resource_identity)",
+        ");",
         "CREATE TABLE IF NOT EXISTS work_dag_decisions (",
         "  decision_id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
         "  work_state_revision INTEGER NOT NULL, dag_revision INTEGER NOT NULL, requirement_revision INTEGER NOT NULL,",
@@ -977,6 +1094,64 @@ export class WorkOrchestrationStore {
     if (!workColumns.has("current_dag_revision")) {
       this.db.exec("ALTER TABLE work_items ADD COLUMN current_dag_revision INTEGER NOT NULL DEFAULT 0");
     }
+    if (!workColumns.has("orchestration_engine")) {
+      this.db.exec(
+        "ALTER TABLE work_items ADD COLUMN orchestration_engine TEXT NOT NULL DEFAULT 'legacy-single-node' CHECK(orchestration_engine IN ('legacy-single-node','dynamic-dag'))",
+      );
+    }
+    const requirementSnapshotColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_requirement_snapshots)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!requirementSnapshotColumns.has("resolver_identity")) {
+      this.db.exec(
+        "ALTER TABLE work_requirement_snapshots ADD COLUMN resolver_identity TEXT NOT NULL DEFAULT 'legacy-snapshot'",
+      );
+    }
+    if (!requirementSnapshotColumns.has("original_request")) {
+      this.db.exec("ALTER TABLE work_requirement_snapshots ADD COLUMN original_request TEXT NOT NULL DEFAULT ''");
+    }
+    if (!requirementSnapshotColumns.has("original_request_digest")) {
+      this.db.exec(
+        "ALTER TABLE work_requirement_snapshots ADD COLUMN original_request_digest TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (!requirementSnapshotColumns.has("unresolved_json")) {
+      this.db.exec("ALTER TABLE work_requirement_snapshots ADD COLUMN unresolved_json TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!requirementSnapshotColumns.has("policy_obligations_json")) {
+      this.db.exec(
+        "ALTER TABLE work_requirement_snapshots ADD COLUMN policy_obligations_json TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+    if (!requirementSnapshotColumns.has("policy_context_ref")) {
+      this.db.exec("ALTER TABLE work_requirement_snapshots ADD COLUMN policy_context_ref TEXT NOT NULL DEFAULT ''");
+    }
+    if (!requirementSnapshotColumns.has("policy_context_digest")) {
+      this.db.exec("ALTER TABLE work_requirement_snapshots ADD COLUMN policy_context_digest TEXT NOT NULL DEFAULT ''");
+    }
+    const legacyRequirementRows = this.db
+      .prepare(
+        "SELECT s.work_item_id,s.revision,s.original_request,s.original_request_digest,w.description FROM work_requirement_snapshots s JOIN work_items w ON w.work_item_id=s.work_item_id",
+      )
+      .all() as Array<{
+      work_item_id: string;
+      revision: number;
+      original_request: string;
+      original_request_digest: string;
+      description: string;
+    }>;
+    for (const row of legacyRequirementRows) {
+      if (row.original_request && row.original_request_digest) continue;
+      const originalRequest = row.original_request || row.description || "";
+      this.db
+        .prepare(
+          "UPDATE work_requirement_snapshots SET original_request=?,original_request_digest=? WHERE work_item_id=? AND revision=?",
+        )
+        .run(originalRequest, stableDigest(originalRequest), row.work_item_id, row.revision);
+    }
+
     const dagExecutionColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_dag_executions)").all() as Array<{ name: string }>).map(
         (column) => column.name,
@@ -984,6 +1159,9 @@ export class WorkOrchestrationStore {
     );
     if (!dagExecutionColumns.has("external_ref")) {
       this.db.exec("ALTER TABLE work_dag_executions ADD COLUMN external_ref TEXT");
+    }
+    if (!dagExecutionColumns.has("bound_requirement_revision")) {
+      this.db.exec("ALTER TABLE work_dag_executions ADD COLUMN bound_requirement_revision INTEGER");
     }
     const dagRevisionColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_dag_revisions)").all() as Array<{ name: string }>).map(
@@ -1005,6 +1183,14 @@ export class WorkOrchestrationStore {
         "ALTER TABLE work_dag_proposals ADD COLUMN validator_version TEXT NOT NULL DEFAULT 'work-dag-policy@1'",
       );
     }
+    const dagFactColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_dag_facts)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!dagFactColumns.has("resource_identity")) {
+      this.db.exec("ALTER TABLE work_dag_facts ADD COLUMN resource_identity TEXT");
+    }
     const dagEvidenceColumns = new Set(
       (this.db.prepare("PRAGMA table_info(work_dag_evidence)").all() as Array<{ name: string }>).map(
         (column) => column.name,
@@ -1012,6 +1198,17 @@ export class WorkOrchestrationStore {
     );
     if (!dagEvidenceColumns.has("requirement_semantics_digest")) {
       this.db.exec("ALTER TABLE work_dag_evidence ADD COLUMN requirement_semantics_digest TEXT NOT NULL DEFAULT ''");
+    }
+    if (!dagEvidenceColumns.has("resource_identity")) {
+      this.db.exec("ALTER TABLE work_dag_evidence ADD COLUMN resource_identity TEXT");
+    }
+    const dagArtifactColumns = new Set(
+      (this.db.prepare("PRAGMA table_info(work_dag_artifacts)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    if (!dagArtifactColumns.has("resource_identity")) {
+      this.db.exec("ALTER TABLE work_dag_artifacts ADD COLUMN resource_identity TEXT");
     }
     if (!workColumns.has("next_action_context")) {
       this.db.exec("ALTER TABLE work_items ADD COLUMN next_action_context TEXT");
@@ -1060,25 +1257,53 @@ export class WorkOrchestrationStore {
     const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_workspaces'").get() as
       { sql?: string } | undefined;
     const sql = row?.sql ?? "";
-    if (sql.includes("'allocating'") && sql.includes("'cleaning'") && sql.includes("'retain'")) return;
+    const current =
+      sql.includes("'allocating'") &&
+      sql.includes("'cleaning'") &&
+      sql.includes("'retain'") &&
+      sql.includes("resource_key") &&
+      sql.includes("UNIQUE(work_attempt_id,resource_key)");
+    if (current) {
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_work_workspace_attempt_resource ON work_workspaces(work_attempt_id,resource_key)",
+      );
+      return;
+    }
     this.db.exec("PRAGMA foreign_keys=OFF");
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const columns = new Set(
+        (this.db.prepare("PRAGMA table_info(work_workspaces)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      );
+      const resourceExpr = columns.has("resource_key") ? "resource_key" : "'workspace'";
+      const repositoryExpr = columns.has("repository_id")
+        ? "repository_id"
+        : "(SELECT repository_id FROM work_items WHERE work_items.work_item_id=work_workspaces.work_item_id)";
       this.db.exec(
         [
-          "CREATE TABLE work_workspaces_v2 (",
+          "CREATE TABLE work_workspaces_v3 (",
           " workspace_id TEXT PRIMARY KEY,",
           " workspace_key TEXT NOT NULL UNIQUE,",
           " work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
-          " work_attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+          " work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
+          " resource_key TEXT NOT NULL DEFAULT 'workspace', repository_id TEXT,",
           " owner_worker_id TEXT, path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
           " state TEXT NOT NULL CHECK(state IN ('allocating','ready','in_use','retained','cleaning','removed','failed')),",
           " cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
-          " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL",
+          " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,",
+          " UNIQUE(work_attempt_id,resource_key)",
           ");",
-          "INSERT INTO work_workspaces_v2 SELECT workspace_id,workspace_key,work_item_id,work_attempt_id,owner_worker_id,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at FROM work_workspaces;",
+          "INSERT INTO work_workspaces_v3(workspace_id,workspace_key,work_item_id,work_attempt_id,resource_key,repository_id,owner_worker_id,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) " +
+            "SELECT workspace_id,workspace_key,work_item_id,work_attempt_id," +
+            resourceExpr +
+            "," +
+            repositoryExpr +
+            ",owner_worker_id,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at FROM work_workspaces;",
           "DROP TABLE work_workspaces;",
-          "ALTER TABLE work_workspaces_v2 RENAME TO work_workspaces;",
+          "ALTER TABLE work_workspaces_v3 RENAME TO work_workspaces;",
+          "CREATE INDEX IF NOT EXISTS idx_work_workspace_attempt_resource ON work_workspaces(work_attempt_id,resource_key);",
         ].join("\n"),
       );
       this.db.exec("COMMIT");
@@ -1089,7 +1314,6 @@ export class WorkOrchestrationStore {
       this.db.exec("PRAGMA foreign_keys=ON");
     }
   }
-
   private ensureWorkspaceCleanupSchema(): void {
     this.db.exec(
       [
@@ -1733,8 +1957,8 @@ export class WorkOrchestrationStore {
           [
             "INSERT INTO work_items(",
             "work_item_id,principal_id,scope,idempotency_key,request_digest,source_type,source_scope,source_ref,source_url,source_request_id,source_request_slot," +
-              "title,description,status,state_revision,workflow_id,workflow_version,orchestration_epoch,priority,requested_expert_id,requested_deployment_id,repository_id,created_at,updated_at",
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,1,?,?,?,?,?,?)",
+              "title,description,status,state_revision,workflow_id,workflow_version,orchestration_engine,orchestration_epoch,priority,requested_expert_id,requested_deployment_id,repository_id,created_at,updated_at",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,'dynamic-dag',1,?,?,?,?,?,?)",
           ].join(" "),
         )
         .run(
@@ -2193,19 +2417,38 @@ export class WorkOrchestrationStore {
   ensureWorkspace(
     workItemId: string,
     workAttemptId: string,
-    input: { repositoryUrl?: string; branch?: string; baseCommit?: string; cleanupPolicy?: "on_terminal" | "retain" },
+    input: {
+      resourceKey?: string;
+      repositoryId?: string;
+      repositoryUrl?: string;
+      branch?: string;
+      baseCommit?: string;
+      cleanupPolicy?: "on_terminal" | "retain";
+    },
     now = Date.now(),
   ): WorkspaceRecord {
     const attempt = this.getWorkAttempt(workAttemptId);
     const cleanupPolicy = input.cleanupPolicy ?? "on_terminal";
+    const resourceKey = requiredText(input.resourceKey ?? "workspace", 200);
+    if (!resourceKey) throw new Error("INVALID_WORKSPACE_RESOURCE");
+    const work = this.getWorkInternal(workItemId);
+    const repositoryId =
+      optionalText(input.repositoryId, 200) ??
+      (resourceKey.startsWith("repo:")
+        ? requiredText(resourceKey.slice("repo:".length), 200)
+        : resourceKey === "workspace"
+          ? work.repositoryId
+          : null);
     if (attempt.workItemId !== workItemId) throw new Error("WORKSPACE_ATTEMPT_MISMATCH");
-    const existing = this.db.prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=?").get(workAttemptId) as
-      Row | undefined;
+    const existing = this.db
+      .prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=? AND resource_key=?")
+      .get(workAttemptId, resourceKey) as Row | undefined;
     if (existing) {
       if (
+        (existing.repository_id ?? null) !== repositoryId ||
         (existing.repository_url ?? null) !== (input.repositoryUrl?.trim() || null) ||
         (existing.branch ?? null) !== (input.branch?.trim() || null) ||
-        (existing.base_commit ?? null) !== (input.baseCommit?.trim() || null) ||
+        (input.baseCommit !== undefined && (existing.base_commit ?? null) !== (input.baseCommit.trim() || null)) ||
         String(existing.cleanup_policy) !== cleanupPolicy
       ) {
         throw new Error("WORKSPACE_IDENTITY_CONFLICT");
@@ -2214,18 +2457,28 @@ export class WorkOrchestrationStore {
     }
 
     const workspaceId = randomUUID();
-    const workspaceKey = "work-" + workItemId.toLowerCase() + "-a" + String(attempt.sequence);
+    const workspaceKey =
+      resourceKey === "workspace"
+        ? "work-" + workItemId.toLowerCase() + "-a" + String(attempt.sequence)
+        : "work-" +
+          workItemId.toLowerCase() +
+          "-a" +
+          String(attempt.sequence) +
+          "-r" +
+          stableDigest(resourceKey).slice(0, 12);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
         .prepare(
-          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,'allocating',?,?,?)",
+          "INSERT INTO work_workspaces(workspace_id,workspace_key,work_item_id,work_attempt_id,resource_key,repository_id,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,?,?,'allocating',?,?,?)",
         )
         .run(
           workspaceId,
           workspaceKey,
           workItemId,
           workAttemptId,
+          resourceKey,
+          repositoryId,
           input.repositoryUrl?.trim() || null,
           input.branch?.trim() || null,
           input.baseCommit?.trim() || null,
@@ -2233,9 +2486,13 @@ export class WorkOrchestrationStore {
           now,
           now,
         );
-      this.db
-        .prepare("UPDATE work_attempts SET workspace_id=? WHERE work_attempt_id=? AND work_item_id=?")
-        .run(workspaceId, workAttemptId, workItemId);
+      if (resourceKey === "workspace") {
+        this.db
+          .prepare(
+            "UPDATE work_attempts SET workspace_id=COALESCE(workspace_id,?) WHERE work_attempt_id=? AND work_item_id=?",
+          )
+          .run(workspaceId, workAttemptId, workItemId);
+      }
       const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
       this.db.exec("COMMIT");
       return this.fromWorkspaceRow(row);
@@ -2245,6 +2502,22 @@ export class WorkOrchestrationStore {
     }
   }
 
+  getWorkspaceForResource(workAttemptId: string, resourceKey = "workspace"): WorkspaceRecord | null {
+    const resource = requiredText(resourceKey, 200);
+    if (!resource) throw new Error("INVALID_WORKSPACE_RESOURCE");
+    const row = this.db
+      .prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=? AND resource_key=?")
+      .get(workAttemptId, resource) as Row | undefined;
+    return row ? this.fromWorkspaceRow(row) : null;
+  }
+
+  getWorkspaceByKey(workspaceKey: string): WorkspaceRecord {
+    const key = requiredText(workspaceKey, 200);
+    if (!key) throw new Error("INVALID_WORKSPACE_KEY");
+    const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_key=?").get(key) as Row | undefined;
+    if (!row) throw new Error("WORKSPACE_NOT_FOUND");
+    return this.fromWorkspaceRow(row);
+  }
   requestTerminalWorkspaceCleanup(workItemId: string, now = Date.now()): WorkspaceRecord[] {
     const rows = this.db
       .prepare("SELECT * FROM work_workspaces WHERE work_item_id=? ORDER BY created_at")
@@ -2403,6 +2676,69 @@ export class WorkOrchestrationStore {
       Row | undefined;
     if (!row) throw new Error("WORKSPACE_NOT_FOUND");
     return this.fromWorkspaceRow(row);
+  }
+
+  listDagResourceSubjects(workItemId: string): Record<string, string> {
+    const rows = this.db
+      .prepare(
+        "SELECT resource_identity,subject_revision FROM work_dag_resource_subjects WHERE work_item_id=? ORDER BY resource_identity",
+      )
+      .all(workItemId) as Array<{ resource_identity: string; subject_revision: string }>;
+    return Object.fromEntries(rows.map((row) => [row.resource_identity, row.subject_revision]));
+  }
+
+  setDagResourceSubject(
+    workItemId: string,
+    resourceIdentity: string,
+    subjectRevision: string,
+    now = Date.now(),
+  ): WorkItemRecord {
+    const resource = requiredText(resourceIdentity, 500);
+    const subject = requiredText(subjectRevision, 500);
+    if (!resource || !subject) throw new Error("INVALID_DAG_RESOURCE_SUBJECT");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const work = this.getWorkInternal(workItemId);
+      const existing = this.db
+        .prepare("SELECT subject_revision FROM work_dag_resource_subjects WHERE work_item_id=? AND resource_identity=?")
+        .get(workItemId, resource) as { subject_revision?: string } | undefined;
+      if (existing?.subject_revision === subject) {
+        this.db.exec("COMMIT");
+        return work;
+      }
+      this.db
+        .prepare(
+          "INSERT INTO work_dag_resource_subjects(work_item_id,resource_identity,subject_revision,updated_at) VALUES(?,?,?,?) ON CONFLICT(work_item_id,resource_identity) DO UPDATE SET subject_revision=excluded.subject_revision,updated_at=excluded.updated_at",
+        )
+        .run(workItemId, resource, subject, now);
+      const resourceSubjects = this.listDagResourceSubjects(workItemId);
+      const composite = "resources:" + stableDigest(resourceSubjects);
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET current_subject_revision=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
+        )
+        .run(composite, now, workItemId, work.stateRevision);
+      if (changed.changes !== 1) throw new Error("STALE_WORK_REVISION");
+      this.db
+        .prepare("UPDATE work_evidence SET stale=1 WHERE work_item_id=? AND subject_revision<>? AND stale=0")
+        .run(workItemId, composite);
+      this.db
+        .prepare("UPDATE work_approvals SET stale=1 WHERE work_item_id=? AND subject_revision<>? AND stale=0")
+        .run(workItemId, composite);
+      this.event(
+        workItemId,
+        work.activeWorkAttemptId,
+        "work.resource_subject_changed",
+        JSON.stringify({ resourceIdentity: resource, subjectRevision: subject, compositeSubjectRevision: composite }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return this.fromWorkRow(row);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   setCurrentSubjectRevision(
@@ -3077,18 +3413,18 @@ export class WorkOrchestrationStore {
         }),
         now,
       );
-      const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
-      if (workflow.definition.graph.mode === "dynamic-dag") {
+      if (current.orchestrationEngine === "dynamic-dag") {
         this.db
           .prepare(
-            "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,resource_identity,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
           )
           .run(
             randomUUID(),
             workItemId,
             "blocker.resolved",
             JSON.stringify(true),
-            current.currentSubjectRevision,
+            null,
+            null,
             "control:resume:" + (current.stateRevision + 1),
             now,
           );
@@ -3334,7 +3670,7 @@ export class WorkOrchestrationStore {
     ).map((row) => this.fromRequirementSnapshotRow(row));
   }
 
-  ensureRequirementSnapshot(workItemId: string, now = Date.now(), resolverVersion = "typed-v1"): RequirementSnapshot {
+  ensureRequirementSnapshot(workItemId: string, now = Date.now(), resolverVersion?: string): RequirementSnapshot {
     const existingWork = this.getWorkInternal(workItemId);
     if (existingWork.currentRequirementRevision > 0) {
       return this.getRequirementSnapshot(workItemId, existingWork.currentRequirementRevision);
@@ -3348,13 +3684,23 @@ export class WorkOrchestrationStore {
         return existing;
       }
       const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
-      const requirements: WorkRequirement[] = [];
+      const resolved = resolveWorkIntentDeterministically(work.description);
+      const requirements = normalizeWorkRequirements(resolved.requirements);
+      const unresolved = normalizeUnresolvedWorkRequirements(resolved.unresolved);
       const policy = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
+      const policyContext = workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition);
       const snapshot: RequirementSnapshot = {
         workItemId,
         revision: 1,
-        resolverVersion,
+        resolverIdentity: resolved.resolverIdentity,
+        resolverVersion: resolverVersion ?? resolved.resolverVersion,
+        originalRequest: resolved.originalRequest,
+        originalRequestDigest: resolved.originalRequestDigest,
         requirements,
+        unresolved,
+        policyObligations: [],
+        policyContextRef: workDagPolicyContextRef(policyContext),
+        policyContextDigest: policyContext.digest,
         policyRef: policy.policyRef,
         policyDigest: policy.policyDigest,
         effectiveDigest: effectiveRequirementDigest(
@@ -3362,18 +3708,29 @@ export class WorkOrchestrationStore {
           workflow.version,
           workflow.definition,
           requirements,
+          unresolved,
+          resolved.originalRequestDigest,
+          policyContext.digest,
+          [],
         ),
         createdAt: now,
       };
       this.db
         .prepare(
-          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_version,requirements_json,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?)",
+          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_identity,resolver_version,original_request,original_request_digest,requirements_json,unresolved_json,policy_obligations_json,policy_context_ref,policy_context_digest,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           workItemId,
           snapshot.revision,
+          snapshot.resolverIdentity,
           snapshot.resolverVersion,
+          snapshot.originalRequest,
+          snapshot.originalRequestDigest,
           JSON.stringify(snapshot.requirements),
+          JSON.stringify(snapshot.unresolved),
+          JSON.stringify(snapshot.policyObligations),
+          snapshot.policyContextRef,
+          snapshot.policyContextDigest,
           snapshot.policyRef,
           snapshot.policyDigest,
           snapshot.effectiveDigest,
@@ -3389,7 +3746,12 @@ export class WorkOrchestrationStore {
         workItemId,
         work.activeWorkAttemptId,
         "requirement.snapshot_created",
-        JSON.stringify({ revision: 1, effectiveDigest: snapshot.effectiveDigest }),
+        JSON.stringify({
+          revision: 1,
+          resolverIdentity: snapshot.resolverIdentity,
+          unresolved: snapshot.unresolved.map((item) => item.id),
+          effectiveDigest: snapshot.effectiveDigest,
+        }),
         now,
       );
       this.db.exec("COMMIT");
@@ -3399,7 +3761,6 @@ export class WorkOrchestrationStore {
       throw error;
     }
   }
-
   updateRequirementSnapshot(
     workItemId: string,
     principalId: string,
@@ -3409,7 +3770,8 @@ export class WorkOrchestrationStore {
     requirements: readonly WorkRequirement[],
     resolverVersion = "typed-v1",
     now = Date.now(),
-  ): { work: WorkItemRecord; snapshot: RequirementSnapshot } {
+    unresolvedRequirements?: readonly UnresolvedWorkRequirement[],
+  ): { work: WorkItemRecord; snapshot: RequirementSnapshot; impact: RequirementUpdateImpact } {
     const normalized = normalizeWorkRequirements(requirements);
     if (this.getWorkInternal(workItemId).currentRequirementRevision === 0) {
       this.ensureRequirementSnapshot(workItemId, now, resolverVersion);
@@ -3425,14 +3787,34 @@ export class WorkOrchestrationStore {
         throw new Error("STALE_REQUIREMENT_REVISION");
       }
       const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
-      effectiveObligations(workflow.definition, normalized);
+      const previous = this.getRequirementSnapshot(workItemId, expectedRequirementRevision);
+      const unresolved =
+        unresolvedRequirements === undefined
+          ? previous.unresolved
+          : normalizeUnresolvedWorkRequirements(unresolvedRequirements);
+      const impact = classifyRequirementUpdateImpact(
+        workflow.definition,
+        previous.requirements,
+        normalized,
+        previous.unresolved,
+        unresolved,
+        previous.policyObligations,
+      );
+      effectiveObligations(workflow.definition, normalized, unresolved, previous.policyObligations);
       const policy = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
       const nextRevision = expectedRequirementRevision + 1;
       const snapshot: RequirementSnapshot = {
         workItemId,
         revision: nextRevision,
+        resolverIdentity: previous.resolverIdentity,
         resolverVersion,
+        originalRequest: previous.originalRequest,
+        originalRequestDigest: previous.originalRequestDigest,
         requirements: normalized,
+        unresolved,
+        policyObligations: previous.policyObligations,
+        policyContextRef: previous.policyContextRef,
+        policyContextDigest: previous.policyContextDigest,
         policyRef: policy.policyRef,
         policyDigest: policy.policyDigest,
         effectiveDigest: effectiveRequirementDigest(
@@ -3440,18 +3822,29 @@ export class WorkOrchestrationStore {
           workflow.version,
           workflow.definition,
           normalized,
+          unresolved,
+          previous.originalRequestDigest,
+          previous.policyContextDigest,
+          previous.policyObligations,
         ),
         createdAt: now,
       };
       this.db
         .prepare(
-          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_version,requirements_json,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?)",
+          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_identity,resolver_version,original_request,original_request_digest,requirements_json,unresolved_json,policy_obligations_json,policy_context_ref,policy_context_digest,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           workItemId,
           nextRevision,
+          snapshot.resolverIdentity,
           resolverVersion,
+          snapshot.originalRequest,
+          snapshot.originalRequestDigest,
           JSON.stringify(normalized),
+          JSON.stringify(snapshot.unresolved),
+          JSON.stringify(snapshot.policyObligations),
+          snapshot.policyContextRef,
+          snapshot.policyContextDigest,
           snapshot.policyRef,
           snapshot.policyDigest,
           snapshot.effectiveDigest,
@@ -3471,10 +3864,108 @@ export class WorkOrchestrationStore {
           previousRevision: expectedRequirementRevision,
           revision: nextRevision,
           effectiveDigest: snapshot.effectiveDigest,
+          impactKinds: impact.kinds,
+          changedRequirementIds: impact.changedRequirementIds,
+          addedRequiredObligationIds: impact.addedRequiredObligationIds,
+          removedRequiredObligationIds: impact.removedRequiredObligationIds,
         }),
         now,
       );
       const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      this.db.exec("COMMIT");
+      return { work: this.fromWorkRow(row), snapshot, impact };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  bindRequirementPolicyContext(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    expectedWorkRevision: number,
+    expectedRequirementRevision: number,
+    policyContext: WorkDagPolicyContext,
+    now = Date.now(),
+  ): { work: WorkItemRecord; snapshot: RequirementSnapshot } {
+    const current = this.getWork(workItemId, principalId, scope);
+    if (current.stateRevision !== expectedWorkRevision) throw new Error("STALE_WORK_REVISION");
+    if (current.currentRequirementRevision !== expectedRequirementRevision) {
+      throw new Error("STALE_REQUIREMENT_REVISION");
+    }
+    const previous = this.getRequirementSnapshot(workItemId, expectedRequirementRevision);
+    if (previous.policyContextDigest === policyContext.digest) return { work: current, snapshot: previous };
+    if (current.activeWorkAttemptId) {
+      if (previous.policyContextDigest) throw new Error("REQUIREMENT_POLICY_CONTEXT_DRIFT");
+      const activeAttempt = this.getWorkAttempt(current.activeWorkAttemptId);
+      const deployment = policyContext.deployment;
+      if (
+        !deployment ||
+        deployment.deploymentId !== activeAttempt.deploymentId ||
+        deployment.configVersion !== activeAttempt.deploymentConfigVersion ||
+        deployment.expertId !== activeAttempt.expertId
+      ) {
+        throw new Error("REQUIREMENT_POLICY_CONTEXT_DRIFT");
+      }
+    }
+    const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
+    const nextRevision = previous.revision + 1;
+    const policyContextRef = workDagPolicyContextRef(policyContext);
+    const pinnedPolicyObligations = policyContextObligations(workflow.definition, policyContext);
+    const effectiveDigest = effectiveRequirementDigest(
+      workflow.workflowId,
+      workflow.version,
+      workflow.definition,
+      previous.requirements,
+      previous.unresolved,
+      previous.originalRequestDigest,
+      policyContext.digest,
+      pinnedPolicyObligations,
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const changed = this.db
+        .prepare(
+          "UPDATE work_items SET current_requirement_revision=?,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=? AND current_requirement_revision=?",
+        )
+        .run(nextRevision, now, workItemId, principalId, scope, expectedWorkRevision, expectedRequirementRevision);
+      if (changed.changes !== 1) throw new Error("STALE_REQUIREMENT_REVISION");
+      this.db
+        .prepare(
+          "INSERT INTO work_requirement_snapshots(work_item_id,revision,resolver_identity,resolver_version,original_request,original_request_digest,requirements_json,unresolved_json,policy_obligations_json,policy_context_ref,policy_context_digest,policy_ref,policy_digest,effective_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          workItemId,
+          nextRevision,
+          previous.resolverIdentity,
+          previous.resolverVersion,
+          previous.originalRequest,
+          previous.originalRequestDigest,
+          JSON.stringify(previous.requirements),
+          JSON.stringify(previous.unresolved),
+          JSON.stringify(pinnedPolicyObligations),
+          policyContextRef,
+          policyContext.digest,
+          previous.policyRef,
+          previous.policyDigest,
+          effectiveDigest,
+          now,
+        );
+      this.event(
+        workItemId,
+        current.activeWorkAttemptId,
+        "requirement.policy_context_bound",
+        JSON.stringify({
+          previousRevision: previous.revision,
+          revision: nextRevision,
+          policyContextRef,
+          policyContextDigest: policyContext.digest,
+        }),
+        now,
+      );
+      const row = this.db.prepare("SELECT * FROM work_items WHERE work_item_id=?").get(workItemId) as Row;
+      const snapshot = this.getRequirementSnapshot(workItemId, nextRevision);
       this.db.exec("COMMIT");
       return { work: this.fromWorkRow(row), snapshot };
     } catch (error) {
@@ -3483,19 +3974,29 @@ export class WorkOrchestrationStore {
     }
   }
 
+  private getDagObligationsForRequirementRevision(workItemId: string, requirementRevision: number): DagObligation[] {
+    const work = this.getWorkInternal(workItemId);
+    const snapshot = this.getRequirementSnapshot(workItemId, requirementRevision);
+    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+    const identity = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
+    if (snapshot.policyRef !== identity.policyRef || snapshot.policyDigest !== identity.policyDigest) {
+      throw new Error("REQUIREMENT_POLICY_BINDING_MISMATCH");
+    }
+    return effectiveObligations(
+      workflow.definition,
+      snapshot.requirements,
+      snapshot.unresolved,
+      snapshot.policyObligations,
+    );
+  }
+
   getEffectiveDagObligations(workItemId: string): DagObligation[] {
     let work = this.getWorkInternal(workItemId);
     if (work.currentRequirementRevision === 0) {
       this.ensureRequirementSnapshot(workItemId);
       work = this.getWorkInternal(workItemId);
     }
-    const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
-    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
-    const identity = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
-    if (snapshot.policyRef !== identity.policyRef || snapshot.policyDigest !== identity.policyDigest) {
-      throw new Error("REQUIREMENT_POLICY_BINDING_MISMATCH");
-    }
-    return effectiveObligations(workflow.definition, snapshot.requirements);
+    return this.getDagObligationsForRequirementRevision(workItemId, work.currentRequirementRevision);
   }
 
   getDagRevision(workItemId: string, revision?: number): WorkDagRevisionRecord {
@@ -3559,8 +4060,7 @@ export class WorkOrchestrationStore {
       const work = this.getWork(workItemId, principalId, scope);
       if (work.stateRevision !== expectedWorkRevision) throw new Error("STALE_WORK_REVISION");
       if (TERMINAL_WORK_STATUSES.has(work.status)) throw new Error("WORK_ALREADY_TERMINAL");
-      const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
-      if (workflow.definition.graph.mode !== "dynamic-dag") {
+      if (work.orchestrationEngine !== "dynamic-dag") {
         throw new Error("WORK_REPLAN_REQUIRES_DYNAMIC_DAG");
       }
       const existing = this.db
@@ -3647,6 +4147,7 @@ export class WorkOrchestrationStore {
       key: String(row.fact_key),
       value: JSON.parse(String(row.value_json)) as WorkDagFactRecord["value"],
       subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      resourceIdentity: row.resource_identity == null ? null : String(row.resource_identity),
       sourceExecutionId: String(row.source_execution_id),
       createdAt: Number(row.created_at),
     }));
@@ -3663,6 +4164,7 @@ export class WorkOrchestrationStore {
       type: String(row.evidence_type),
       passed: Number(row.passed) === 1,
       subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      resourceIdentity: row.resource_identity == null ? null : String(row.resource_identity),
       verifierIdentity: String(row.verifier_identity),
       artifactRef: row.artifact_ref == null ? null : String(row.artifact_ref),
       sourceExecutionId: String(row.source_execution_id),
@@ -3682,6 +4184,7 @@ export class WorkOrchestrationStore {
       type: String(row.artifact_type),
       ref: String(row.artifact_ref),
       subjectRevision: row.subject_revision == null ? null : String(row.subject_revision),
+      resourceIdentity: row.resource_identity == null ? null : String(row.resource_identity),
       sourceExecutionId: String(row.source_execution_id),
       createdAt: Number(row.created_at),
     }));
@@ -3717,8 +4220,24 @@ export class WorkOrchestrationStore {
         ? this.getRequirementSnapshot(workItemId, work.currentRequirementRevision)
         : null;
     const requirementWorkflow = requirementSnapshot ? this.getWorkflow(work.workflowId, work.workflowVersion) : null;
+    const resourceSubjects = this.listDagResourceSubjects(workItemId);
+    const primaryResource = work.repositoryId ? "repo:" + work.repositoryId : null;
+    const factRecords = this.listDagFacts(workItemId);
+    const factContext: DagContext = {
+      subject: work.currentSubjectRevision,
+      primaryResource,
+      resourceSubjects,
+      facts: {},
+      evidence: [],
+      artifacts: [],
+      blockers: [],
+      cancelled: false,
+    };
     const facts: Record<string, WorkDagFactRecord["value"]> = {};
-    for (const fact of this.listDagFacts(workItemId)) facts[fact.key] = fact.value;
+    for (const fact of factRecords) {
+      const currentSubject = subjectForResource(factContext, fact.resourceIdentity);
+      if (fact.subjectRevision === null || fact.subjectRevision === currentSubject) facts[fact.key] = fact.value;
+    }
 
     const gate = this.evaluateCompletionGate(workItemId, work.principalId, work.scope);
     facts["attempt.latest_succeeded"] = !gate.missing.includes("latest_work_attempt_succeeded");
@@ -3729,7 +4248,16 @@ export class WorkOrchestrationStore {
 
     return {
       subject: work.currentSubjectRevision,
+      primaryResource,
+      resourceSubjects,
       facts,
+      factRecords: factRecords.map((fact) => ({
+        key: fact.key,
+        value: fact.value,
+        subject: fact.subjectRevision,
+        resource: fact.resourceIdentity,
+        createdAt: fact.createdAt,
+      })),
       evidence: [
         ...this.listEvidence(workItemId).map((evidence) => ({
           type: evidence.type,
@@ -3741,9 +4269,24 @@ export class WorkOrchestrationStore {
         ...this.listDagEvidence(workItemId).map((evidence) => ({
           type: evidence.type,
           subject: evidence.subjectRevision,
+          resource: evidence.resourceIdentity,
           passed: evidence.passed,
           stale:
-            (evidence.subjectRevision !== null && evidence.subjectRevision !== work.currentSubjectRevision) ||
+            (evidence.subjectRevision !== null &&
+              evidence.subjectRevision !==
+                subjectForResource(
+                  {
+                    subject: work.currentSubjectRevision,
+                    primaryResource: work.repositoryId ? "repo:" + work.repositoryId : null,
+                    resourceSubjects: this.listDagResourceSubjects(workItemId),
+                    facts: {},
+                    evidence: [],
+                    artifacts: [],
+                    blockers: [],
+                    cancelled: false,
+                  },
+                  evidence.resourceIdentity,
+                )) ||
             !requirementSnapshot ||
             !requirementWorkflow ||
             evidence.requirementSemanticsDigest !==
@@ -3751,6 +4294,8 @@ export class WorkOrchestrationStore {
                 requirementWorkflow.definition,
                 requirementSnapshot.requirements,
                 evidence.type,
+                requirementSnapshot.policyObligations,
+                requirementSnapshot.policyContextDigest,
               ),
           createdAt: evidence.createdAt,
         })),
@@ -3758,6 +4303,7 @@ export class WorkOrchestrationStore {
       artifacts: this.listDagArtifacts(workItemId).map((artifact) => ({
         type: artifact.type,
         subject: artifact.subjectRevision,
+        resource: artifact.resourceIdentity,
       })),
       blockers: work.status === "blocked" ? [work.blockedReason ?? "work.blocked"] : [],
       cancelled: work.status === "cancelled",
@@ -3778,7 +4324,7 @@ export class WorkOrchestrationStore {
       workRevision: work.stateRevision,
       dagRevision: work.currentDagRevision,
       requirementRevision: work.currentRequirementRevision,
-      policyIdentity: snapshot.policyRef + ":" + snapshot.policyDigest,
+      policyIdentity: snapshot.policyRef + ":" + snapshot.policyDigest + ":" + snapshot.policyContextDigest,
       deploymentIdentity: latestAttempt
         ? latestAttempt.deploymentId + "@" + latestAttempt.deploymentConfigVersion
         : null,
@@ -3835,6 +4381,7 @@ export class WorkOrchestrationStore {
       plannerInputDigest: string;
       reasonCode: string;
       graph: DagGraph;
+      policyContext?: WorkDagPolicyContext;
     },
     now = Date.now(),
   ): WorkDagProposalRecord {
@@ -3892,8 +4439,16 @@ export class WorkOrchestrationStore {
       }
 
       const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
-      const obligations = this.getEffectiveDagObligations(input.workItemId);
+      const snapshot = this.getRequirementSnapshot(input.workItemId, current.currentRequirementRevision);
+      const policyContext =
+        input.policyContext ?? workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition);
+
       const dagContext = this.getDagContext(input.workItemId);
+      const obligations = expandResourceEvidenceObligations(
+        this.getEffectiveDagObligations(input.workItemId),
+        input.graph,
+        Object.keys(dagContext.resourceSubjects ?? {}),
+      );
       const dagExecutions: DagExecution[] = this.listDagExecutions(input.workItemId).map((execution) => ({
         nodeId: execution.nodeId,
         generation: execution.generation,
@@ -3902,23 +4457,31 @@ export class WorkOrchestrationStore {
         key: execution.idempotencyKey,
       }));
       const outstandingObligations = obligations.filter((obligation) => {
-        const condition = evaluatePredicate(obligation.condition, dagContext, dagExecutions);
+        const condition = evaluatePredicate(obligation.condition, dagContext, dagExecutions, obligation.resource);
         if (condition !== true) return false;
-        return evaluatePredicate(obligation.satisfaction, dagContext, dagExecutions) !== true;
+        return evaluatePredicate(obligation.satisfaction, dagContext, dagExecutions, obligation.resource) !== true;
       });
       const validationCodes: string[] = [];
-      if (workflow.definition.graph.mode !== "dynamic-dag") validationCodes.push("PLAN_DYNAMIC_DAG_NOT_ENABLED");
+      if (current.orchestrationEngine !== "dynamic-dag") validationCodes.push("PLAN_DYNAMIC_DAG_NOT_ENABLED");
+      if (current.activeWorkAttemptId && !snapshot.policyContextDigest) {
+        validationCodes.push("PLAN_POLICY_CONTEXT_DRIFT");
+      } else if (snapshot.policyContextDigest && snapshot.policyContextDigest !== policyContext.digest) {
+        validationCodes.push("PLAN_POLICY_CONTEXT_DRIFT");
+      }
       validationCodes.push(
-        ...validateDagProposal(input.graph, workflow.definition, outstandingObligations, { outstandingOnly: true })
-          .codes,
+        ...validateDagProposal(input.graph, workflow.definition, outstandingObligations, {
+          outstandingOnly: true,
+          policyContext,
+          reasonCode,
+        }).codes,
       );
       const subjectBoundKinds = new Set(["verification", "review", "publication", "approval", "change_request"]);
       for (const node of input.graph.nodes) {
         if (
-          (node.subject !== null && node.subject !== current.currentSubjectRevision) ||
+          (node.subject !== null && node.subject !== subjectForResource(dagContext, node.resource)) ||
           (subjectBoundKinds.has(node.kind) &&
-            current.currentSubjectRevision !== null &&
-            node.subject !== current.currentSubjectRevision)
+            subjectForResource(dagContext, node.resource) !== null &&
+            node.subject !== subjectForResource(dagContext, node.resource))
         ) {
           validationCodes.push("PLAN_INVALID_SUBJECT_BINDING");
         }
@@ -3965,10 +4528,12 @@ export class WorkOrchestrationStore {
       if (uniqueCodes.length > 0) return finish("rejected", uniqueCodes, null);
 
       const semanticDigest = graphSemanticDigest(input.graph);
-      if (previous?.semanticDigest === semanticDigest) return finish("noop", [], null);
+      const policyRevision = snapshot.policyRef + ":" + snapshot.policyDigest + ":" + snapshot.policyContextDigest;
+      if (previous?.semanticDigest === semanticDigest && previous.policyRevision === policyRevision) {
+        return finish("noop", [], null);
+      }
 
       const nextRevision = current.currentDagRevision + 1;
-      const snapshot = this.getRequirementSnapshot(input.workItemId, current.currentRequirementRevision);
       this.db
         .prepare(
           "INSERT INTO work_dag_revisions(work_item_id,revision,parent_revision,attempt_id,planner_identity,planner_version,validator_version,policy_revision,requirement_revision,reason_code,planner_input_digest,graph_json,semantic_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -3981,7 +4546,7 @@ export class WorkOrchestrationStore {
           plannerIdentity,
           plannerVersion,
           WORK_DAG_POLICY_VALIDATOR_VERSION,
-          snapshot.policyRef + ":" + snapshot.policyDigest,
+          policyRevision,
           current.currentRequirementRevision,
           reasonCode,
           input.plannerInputDigest,
@@ -4117,6 +4682,14 @@ export class WorkOrchestrationStore {
       }
       if (TERMINAL_WORK_STATUSES.has(work.status) || work.status === "blocked") throw new Error("DAG_NODE_NOT_READY");
       const revision = this.getDagRevision(workItemId, expectedDagRevision);
+      if (revision.requirementSnapshotRevision !== work.currentRequirementRevision) {
+        const revalidated = this.db
+          .prepare(
+            "SELECT 1 FROM work_dag_proposals WHERE work_item_id=? AND parent_revision=? AND expected_requirement_revision=? AND reason_code='user_update' AND status='noop' LIMIT 1",
+          )
+          .get(workItemId, expectedDagRevision, work.currentRequirementRevision);
+        if (!revalidated) throw new Error("STALE_DAG_CLAIM");
+      }
       const node = revision.graph.nodes.find((candidate) => candidate.id === nodeId);
       if (!node) throw new Error("DAG_NODE_NOT_FOUND");
       const executions = this.listDagExecutions(workItemId);
@@ -4142,9 +4715,17 @@ export class WorkOrchestrationStore {
       const nextFence = execution.fence + 1;
       const changed = this.db
         .prepare(
-          "UPDATE work_dag_executions SET state='claimed',fence=?,claim_owner=?,claim_lease_until=?,updated_at=? WHERE node_execution_id=? AND state='pending' AND fence=?",
+          "UPDATE work_dag_executions SET state='claimed',fence=?,claim_owner=?,claim_lease_until=?,bound_requirement_revision=?,updated_at=? WHERE node_execution_id=? AND state='pending' AND fence=?",
         )
-        .run(nextFence, owner, now + leaseMs, now, execution.nodeExecutionId, execution.fence);
+        .run(
+          nextFence,
+          owner,
+          now + leaseMs,
+          work.currentRequirementRevision,
+          now,
+          execution.nodeExecutionId,
+          execution.fence,
+        );
       if (changed.changes !== 1) throw new Error("DAG_NODE_NOT_PENDING");
       const snapshot = this.getRequirementSnapshot(workItemId, work.currentRequirementRevision);
       this.recordDagDecisionInternal(
@@ -4274,7 +4855,7 @@ export class WorkOrchestrationStore {
     if (!owner || !ref) throw new Error("INVALID_DAG_EXTERNAL_REF");
     const changed = this.db
       .prepare(
-        "UPDATE work_dag_executions SET external_ref=?,updated_at=? WHERE node_execution_id=? AND state='running' AND claim_owner=? AND fence=? AND (external_ref IS NULL OR external_ref=?)",
+        "UPDATE work_dag_executions SET external_ref=?,updated_at=? WHERE node_execution_id=? AND state IN ('claimed','running') AND claim_owner=? AND fence=? AND (external_ref IS NULL OR external_ref=?)",
       )
       .run(ref, now, nodeExecutionId, owner, fence, ref);
     if (changed.changes !== 1) throw new Error("STALE_DAG_EXECUTION_CLAIM");
@@ -4374,17 +4955,22 @@ export class WorkOrchestrationStore {
         )
         .run(now, execution.workItemId, work.stateRevision);
       if (workChanged.changes !== 1) throw new Error("STALE_WORK_REVISION");
-      const snapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      const executionDagRevision = this.getDagRevision(execution.workItemId, execution.createdDagRevision);
+      const executionRequirementRevision =
+        execution.boundRequirementRevision ?? executionDagRevision.requirementSnapshotRevision;
+      const snapshot = this.getRequirementSnapshot(execution.workItemId, executionRequirementRevision);
       this.recordDagDecisionInternal(
         execution.workItemId,
         work.stateRevision + 1,
-        work.currentDagRevision,
-        work.currentRequirementRevision,
+        execution.createdDagRevision,
+        executionRequirementRevision,
         work.currentSubjectRevision,
         "node.outcome_unknown",
         execution.nodeId,
         "external_outcome_unknown",
-        this.getEffectiveDagObligations(execution.workItemId).map((item) => item.id),
+        this.getDagObligationsForRequirementRevision(execution.workItemId, executionRequirementRevision).map(
+          (item) => item.id,
+        ),
         snapshot.policyRef,
         execution.idempotencyKey,
         digest,
@@ -4512,6 +5098,19 @@ export class WorkOrchestrationStore {
         committed = true;
         throw new Error("STALE_DAG_EXECUTION_CLAIM");
       }
+      const claimDagRevision = this.getDagRevision(execution.workItemId, execution.createdDagRevision);
+      const claimNode = claimDagRevision.graph.nodes.find((node) => node.id === execution.nodeId);
+      if (!claimNode) throw new Error("DAG_NODE_NOT_FOUND");
+      const assertOutputBinding = (resourceIdentity: string | null | undefined, subjectRevision: string | null) => {
+        const outputResource = resourceIdentity ?? execution.resourceIdentity;
+        if (outputResource !== execution.resourceIdentity) throw new Error("DAG_RESULT_RESOURCE_MISMATCH");
+        const subjectPreserving = claimNode.kind === "verification" || claimNode.kind === "review";
+        if (subjectPreserving && execution.subjectRevision !== null && subjectRevision !== execution.subjectRevision) {
+          throw new Error("DAG_RESULT_SUBJECT_MISMATCH");
+        }
+      };
+      for (const artifact of artifacts) assertOutputBinding(artifact.resourceIdentity, artifact.subjectRevision);
+      for (const item of evidence) assertOutputBinding(item.resourceIdentity, item.subjectRevision);
       const changed = this.db
         .prepare(
           "UPDATE work_dag_executions SET state=?,finished_at=?,result_json=?,result_digest=?,updated_at=? WHERE node_execution_id=? AND state IN ('claimed','running') AND claim_owner=? AND fence=?",
@@ -4530,7 +5129,7 @@ export class WorkOrchestrationStore {
       for (const fact of facts) {
         this.db
           .prepare(
-            "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,resource_identity,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
           )
           .run(
             randomUUID(),
@@ -4538,6 +5137,7 @@ export class WorkOrchestrationStore {
             fact.key,
             JSON.stringify(fact.value),
             execution.subjectRevision,
+            execution.resourceIdentity,
             nodeExecutionId,
             now,
           );
@@ -4545,7 +5145,7 @@ export class WorkOrchestrationStore {
       for (const artifact of artifacts) {
         this.db
           .prepare(
-            "INSERT INTO work_dag_artifacts(artifact_id,work_item_id,artifact_type,artifact_ref,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO work_dag_artifacts(artifact_id,work_item_id,artifact_type,artifact_ref,subject_revision,resource_identity,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
           )
           .run(
             artifact.artifactId,
@@ -4553,17 +5153,21 @@ export class WorkOrchestrationStore {
             artifact.type,
             artifact.ref,
             artifact.subjectRevision,
+            artifact.resourceIdentity ?? execution.resourceIdentity,
             nodeExecutionId,
             now,
           );
       }
       const work = this.getWorkInternal(execution.workItemId);
-      const requirementSnapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      const executionDagRevision = this.getDagRevision(execution.workItemId, execution.createdDagRevision);
+      const executionRequirementRevision =
+        execution.boundRequirementRevision ?? executionDagRevision.requirementSnapshotRevision;
+      const requirementSnapshot = this.getRequirementSnapshot(execution.workItemId, executionRequirementRevision);
       const requirementWorkflow = this.getWorkflow(work.workflowId, work.workflowVersion);
       for (const item of evidence) {
         this.db
           .prepare(
-            "INSERT INTO work_dag_evidence(evidence_id,work_item_id,evidence_type,passed,subject_revision,verifier_identity,artifact_ref,source_execution_id,requirement_semantics_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO work_dag_evidence(evidence_id,work_item_id,evidence_type,passed,subject_revision,resource_identity,verifier_identity,artifact_ref,source_execution_id,requirement_semantics_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
           )
           .run(
             item.evidenceId?.trim() || randomUUID(),
@@ -4571,6 +5175,7 @@ export class WorkOrchestrationStore {
             item.type,
             item.passed ? 1 : 0,
             item.subjectRevision,
+            item.resourceIdentity ?? execution.resourceIdentity,
             item.verifierIdentity.trim(),
             item.artifactRef?.trim() || null,
             nodeExecutionId,
@@ -4578,6 +5183,8 @@ export class WorkOrchestrationStore {
               requirementWorkflow.definition,
               requirementSnapshot.requirements,
               item.type,
+              requirementSnapshot.policyObligations,
+              requirementSnapshot.policyContextDigest,
             ),
             now,
           );
@@ -4589,17 +5196,19 @@ export class WorkOrchestrationStore {
         )
         .run(now, execution.workItemId, work.stateRevision);
       if (workChanged.changes !== 1) throw new Error("STALE_WORK_REVISION");
-      const snapshot = this.getRequirementSnapshot(execution.workItemId, work.currentRequirementRevision);
+      const snapshot = requirementSnapshot;
       this.recordDagDecisionInternal(
         execution.workItemId,
         work.stateRevision + 1,
-        work.currentDagRevision,
-        work.currentRequirementRevision,
+        execution.createdDagRevision,
+        executionRequirementRevision,
         work.currentSubjectRevision,
         "node.result",
         execution.nodeId,
         result.status,
-        this.getEffectiveDagObligations(execution.workItemId).map((item) => item.id),
+        this.getDagObligationsForRequirementRevision(execution.workItemId, executionRequirementRevision).map(
+          (item) => item.id,
+        ),
         snapshot.policyRef,
         execution.idempotencyKey,
         digest,
@@ -4713,7 +5322,7 @@ export class WorkOrchestrationStore {
       const factId = randomUUID();
       this.db
         .prepare(
-          "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?)",
+          "INSERT INTO work_dag_facts(fact_id,work_item_id,fact_key,value_json,subject_revision,resource_identity,source_execution_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
         )
         .run(
           factId,
@@ -4726,7 +5335,8 @@ export class WorkOrchestrationStore {
             errorCode: error,
             inputDigest,
           }),
-          work.currentSubjectRevision,
+          null,
+          null,
           "planner:" + factId,
           now,
         );
@@ -4826,8 +5436,11 @@ export class WorkOrchestrationStore {
       const replay = this.db
         .prepare("SELECT correlation_key,payload_digest FROM work_dag_wait_events WHERE event_id=?")
         .get(event) as { correlation_key?: string; payload_digest?: string } | undefined;
-      const row = this.db.prepare("SELECT * FROM work_dag_waits WHERE correlation_key=?").get(correlation) as
-        Row | undefined;
+      const row = this.db
+        .prepare(
+          "SELECT * FROM work_dag_waits WHERE correlation_key=? ORDER BY CASE state WHEN 'waiting' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",
+        )
+        .get(correlation) as Row | undefined;
       if (!row) throw new Error("DAG_WAIT_NOT_FOUND");
       if (replay) {
         if (replay.correlation_key !== correlation || replay.payload_digest !== digest)
@@ -4892,7 +5505,7 @@ export class WorkOrchestrationStore {
     waitingNodeIds: string[];
   } {
     const work = this.getWorkInternal(workItemId);
-    const obligations = this.getEffectiveDagObligations(workItemId);
+    let obligations = this.getEffectiveDagObligations(workItemId);
     if (work.currentDagRevision < 1) {
       const missing = [
         ...(work.status === "cancelled" ? ["WORK_CANCELLED"] : []),
@@ -4910,6 +5523,12 @@ export class WorkOrchestrationStore {
 
     const revision = this.getDagRevision(workItemId, work.currentDagRevision);
     const nodeIds = new Set(revision.graph.nodes.map((node) => node.id));
+    const context = this.getDagContext(workItemId);
+    obligations = expandResourceEvidenceObligations(
+      obligations,
+      revision.graph,
+      Object.keys(context.resourceSubjects ?? {}),
+    );
     const latestByNode = new Map<string, WorkDagNodeExecutionRecord>();
     for (const execution of this.listDagExecutions(workItemId)) {
       if (!nodeIds.has(execution.nodeId)) continue;
@@ -4923,7 +5542,6 @@ export class WorkOrchestrationStore {
       fence: execution.fence,
       key: execution.idempotencyKey,
     }));
-    const context = this.getDagContext(workItemId);
     const core = completion(obligations, executions, context);
     const missing = [...core.missing];
     const activeAttempt = this.getActiveAttempt(workItemId);
@@ -5358,6 +5976,7 @@ export class WorkOrchestrationStore {
       workItemId: String(row.work_item_id),
       nodeId: String(row.node_id),
       createdDagRevision: Number(row.created_dag_revision),
+      boundRequirementRevision: row.bound_requirement_revision == null ? null : Number(row.bound_requirement_revision),
       generation: Number(row.generation),
       state: String(row.state) as WorkDagNodeExecutionRecord["state"],
       fence: Number(row.fence),
@@ -5381,6 +6000,8 @@ export class WorkOrchestrationStore {
       workspaceKey: String(row.workspace_key),
       workItemId: String(row.work_item_id),
       workAttemptId: String(row.work_attempt_id),
+      resourceKey: String(row.resource_key ?? "workspace"),
+      repositoryId: row.repository_id == null ? null : String(row.repository_id),
       ownerWorkerId: row.owner_worker_id == null ? null : String(row.owner_worker_id),
       path: row.path == null ? null : String(row.path),
       repositoryUrl: row.repository_url == null ? null : String(row.repository_url),
@@ -5398,6 +6019,8 @@ export class WorkOrchestrationStore {
       evidenceId: String(row.evidence_id),
       workItemId: String(row.work_item_id),
       workAttemptId: String(row.work_attempt_id),
+      resourceKey: String(row.resource_key ?? "workspace"),
+      repositoryId: row.repository_id == null ? null : String(row.repository_id),
       taskId: row.task_id == null ? null : String(row.task_id),
       runId: row.run_id == null ? null : String(row.run_id),
       type: String(row.type),
@@ -5464,15 +6087,25 @@ export class WorkOrchestrationStore {
     return {
       workItemId: String(row.work_item_id),
       revision: Number(row.revision),
+      resolverIdentity: String(row.resolver_identity ?? "legacy-snapshot"),
       resolverVersion: String(row.resolver_version),
+      originalRequest: String(row.original_request ?? ""),
+      originalRequestDigest: String(row.original_request_digest ?? ""),
       requirements: normalizeWorkRequirements(JSON.parse(String(row.requirements_json)) as WorkRequirement[]),
+      unresolved: normalizeUnresolvedWorkRequirements(
+        JSON.parse(String(row.unresolved_json ?? "[]")) as ReturnType<typeof normalizeUnresolvedWorkRequirements>,
+      ),
+      policyObligations: normalizePinnedPolicyObligations(
+        JSON.parse(String(row.policy_obligations_json ?? "[]")) as DagObligation[],
+      ),
+      policyContextRef: String(row.policy_context_ref ?? ""),
+      policyContextDigest: String(row.policy_context_digest ?? ""),
       policyRef: String(row.policy_ref),
       policyDigest: String(row.policy_digest),
       effectiveDigest: String(row.effective_digest),
       createdAt: Number(row.created_at),
     };
   }
-
   private fromWorkRow(row: Row): WorkItemRecord {
     return {
       workItemId: String(row.work_item_id),
@@ -5491,6 +6124,7 @@ export class WorkOrchestrationStore {
       stateRevision: Number(row.state_revision),
       workflowId: String(row.workflow_id),
       workflowVersion: Number(row.workflow_version),
+      orchestrationEngine: String(row.orchestration_engine) as WorkOrchestrationEngine,
       currentRequirementRevision: Number(row.current_requirement_revision ?? 0),
       currentDagRevision: Number(row.current_dag_revision ?? 0),
       activeWorkAttemptId: row.active_work_attempt_id == null ? null : String(row.active_work_attempt_id),

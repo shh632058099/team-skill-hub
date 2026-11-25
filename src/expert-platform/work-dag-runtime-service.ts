@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { WorkItemRecord, WorkOrchestrationStore, WorkflowDefinition } from "./work-orchestration-store.js";
-import type { DagNode } from "./work-dag.js";
+import { subjectForResource, type DagGraph, type DagNode } from "./work-dag.js";
 import { WorkDagPlannerCoordinator, WorkDagScheduler } from "./work-dag-engine.js";
 import type { WorkDagNodeExecutionRecord, WorkDagProposalRecord } from "./work-dag-runtime.js";
+import { DEFAULT_WORK_DAG_PLANNING_POLICY } from "./work-dag-policy.js";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
@@ -18,19 +19,6 @@ type ReplanTrigger =
   | "manual"
   | "deadlock";
 
-const DEFAULT_REPLAN_POLICY: NonNullable<WorkflowDefinition["planning"]> = {
-  maxReplans: 12,
-  replanPolicy: [
-    "always_after_agent_turn",
-    "on_new_information",
-    "on_failure",
-    "on_review_rework",
-    "on_blocker_resolution",
-    "on_user_update",
-    "manual",
-  ],
-};
-
 function latestCurrentExecutions(
   nodes: readonly DagNode[],
   executions: readonly WorkDagNodeExecutionRecord[],
@@ -45,9 +33,27 @@ function latestCurrentExecutions(
   return result;
 }
 
+function failureActivatedReadyNodeId(
+  graph: DagGraph,
+  failedNodeId: string,
+  readyNodeIds: readonly string[],
+): string | null {
+  const ready = new Set(readyNodeIds);
+  const isFailurePredicate = (predicate: DagGraph["edges"][number]["predicate"]) =>
+    predicate?.kind === "node_result" && predicate.nodeId === failedNodeId && predicate.state === "failed";
+  return (
+    graph.nodes.find(
+      (node) =>
+        ready.has(node.id) &&
+        (node.requirements.some((predicate) => isFailurePredicate(predicate)) ||
+          graph.edges.some((edge) => edge.to === node.id && isFailurePredicate(edge.predicate))),
+    )?.id ?? null
+  );
+}
+
 function triggerAllowed(definition: WorkflowDefinition, trigger: ReplanTrigger): boolean {
   if (trigger === "initial" || trigger === "deadlock") return true;
-  const policy = definition.planning?.replanPolicy ?? DEFAULT_REPLAN_POLICY.replanPolicy;
+  const policy = definition.planning?.replanPolicy ?? DEFAULT_WORK_DAG_PLANNING_POLICY.replanPolicy;
   switch (trigger) {
     case "agent_result":
       return policy.includes("always_after_agent_turn");
@@ -87,6 +93,14 @@ function executorRoutingFailureCode(execution: WorkDagNodeExecutionRecord): stri
   return NON_RETRYABLE_EXECUTOR_ROUTING_CODES.has(summary) ? summary : null;
 }
 
+function semanticAgentBlocker(execution: WorkDagNodeExecutionRecord): { code: string; summary: string } | null {
+  const summary = execution.result?.summary?.trim() ?? "";
+  const firstLine = summary.split(/\r?\n/, 1)[0] ?? "";
+  const match = /^AGENT_BLOCKED(?::([A-Z][A-Z0-9_]{0,79}))?$/.exec(firstLine);
+  if (!match) return null;
+  return { code: match[1] ?? "AGENT_BLOCKED", summary };
+}
+
 export class WorkDagRuntime {
   private readonly ownerId = "work-dag-runtime:" + randomUUID();
 
@@ -99,7 +113,7 @@ export class WorkDagRuntime {
   private planningBudget(work: WorkItemRecord): number {
     return (
       this.store.getWorkflow(work.workflowId, work.workflowVersion).definition.planning?.maxReplans ??
-      DEFAULT_REPLAN_POLICY.maxReplans
+      DEFAULT_WORK_DAG_PLANNING_POLICY.maxReplans
     );
   }
 
@@ -172,6 +186,22 @@ export class WorkDagRuntime {
     }
 
     if (proposal.status === "rejected") {
+      if (proposal.decisionCodes.includes("PLAN_POLICY_CONTEXT_DRIFT")) {
+        const current = this.store.getWork(workItemId, principalId, scope);
+        if (current.activeWorkAttemptId) {
+          this.store.finishWorkAttempt(
+            workItemId,
+            current.activeWorkAttemptId,
+            principalId,
+            scope,
+            current.stateRevision,
+            "cancelled",
+            "queued",
+            now,
+          );
+          return true;
+        }
+      }
       return this.block(
         workItemId,
         principalId,
@@ -236,7 +266,7 @@ export class WorkDagRuntime {
   async reconcileWork(workItemId: string, principalId: string, scope: string, now = Date.now()): Promise<boolean> {
     let work = this.store.getWork(workItemId, principalId, scope);
     const workflow = this.store.getWorkflow(work.workflowId, work.workflowVersion);
-    if (workflow.definition.graph.mode !== "dynamic-dag" || TERMINAL.has(work.status)) return false;
+    if (work.orchestrationEngine !== "dynamic-dag" || TERMINAL.has(work.status)) return false;
     if (work.status === "blocked") return false;
 
     if (work.currentRequirementRevision === 0) {
@@ -261,6 +291,25 @@ export class WorkDagRuntime {
     const currentExecutions = latestCurrentExecutions(revision.graph.nodes, this.store.listDagExecutions(workItemId));
     const unknown = [...currentExecutions.values()].find((execution) => execution.state === "external_outcome_unknown");
     if (unknown) {
+      const scopedEvaluation = this.store.evaluateDagCompletion(workItemId);
+      if (scopedEvaluation.readyNodeIds.length > 0) {
+        try {
+          return await this.scheduler.runOne(workItemId, principalId, scope, this.ownerId, now);
+        } catch (error) {
+          const code =
+            error instanceof Error && /^[A-Z0-9_]{1,100}$/.test(error.message) ? error.message : "DAG_EXECUTOR_FAILED";
+          return this.block(
+            workItemId,
+            principalId,
+            scope,
+            code === "DAG_EXECUTOR_NOT_FOUND" ? "DAG_EXECUTOR_UNAVAILABLE" : "DAG_EXECUTOR_FAILED",
+            JSON.stringify({ code }),
+            now,
+            "dag_executor",
+          );
+        }
+      }
+      if (scopedEvaluation.runningNodeIds.length > 0 || scopedEvaluation.waitingNodeIds.length > 0) return false;
       return this.block(
         workItemId,
         principalId,
@@ -315,18 +364,29 @@ export class WorkDagRuntime {
     }
     if (revision.requirementSnapshotRevision !== work.currentRequirementRevision) {
       if (inFlight) return false;
-      return this.replan(workItemId, principalId, scope, "user_update", now);
+      const requirementUpdateConsumed = this.store
+        .listDagProposals(workItemId)
+        .some(
+          (proposal) =>
+            proposal.parentRevision === revision.revision &&
+            proposal.expectedRequirementRevision === work.currentRequirementRevision &&
+            proposal.reasonCode === "user_update" &&
+            proposal.status === "noop",
+        );
+      if (!requirementUpdateConsumed) {
+        return this.replan(workItemId, principalId, scope, "user_update", now);
+      }
     }
 
     const subjectBoundKinds = new Set(["verification", "review", "publication", "approval", "change_request"]);
+    const dagContext = this.store.getDagContext(workItemId);
     const stalePending = revision.graph.nodes.find((node) => {
       const execution = currentExecutions.get(node.id);
+      const currentSubject = subjectForResource(dagContext, node.resource);
       return (
         execution?.state === "pending" &&
-        ((node.subject !== null && node.subject !== work.currentSubjectRevision) ||
-          (subjectBoundKinds.has(node.kind) &&
-            work.currentSubjectRevision !== null &&
-            node.subject !== work.currentSubjectRevision))
+        ((node.subject !== null && node.subject !== currentSubject) ||
+          (subjectBoundKinds.has(node.kind) && currentSubject !== null && node.subject !== currentSubject))
       );
     });
     if (stalePending) {
@@ -336,6 +396,19 @@ export class WorkDagRuntime {
 
     const failure = this.currentFailureReason(work, revision.graph.nodes, currentExecutions);
     if (failure) {
+      const agentBlocker = semanticAgentBlocker(failure.execution);
+      if (agentBlocker) {
+        return this.block(
+          workItemId,
+          principalId,
+          scope,
+          "DAG_AGENT_BLOCKED",
+          JSON.stringify({ code: agentBlocker.code, nodeId: failure.node.id, summary: agentBlocker.summary }),
+          now,
+          "dag_execution",
+          failure.execution.nodeExecutionId,
+        );
+      }
       const routingCode = executorRoutingFailureCode(failure.execution);
       if (routingCode) {
         return this.block(
@@ -349,6 +422,39 @@ export class WorkDagRuntime {
           failure.execution.nodeExecutionId,
         );
       }
+
+      const failureEvaluation = this.store.evaluateDagCompletion(workItemId);
+      const failureBranchNodeId = failureActivatedReadyNodeId(
+        revision.graph,
+        failure.node.id,
+        failureEvaluation.readyNodeIds,
+      );
+      if (failureBranchNodeId) {
+        try {
+          return await this.scheduler.runOne(
+            workItemId,
+            principalId,
+            scope,
+            this.ownerId,
+            now,
+            undefined,
+            failureBranchNodeId,
+          );
+        } catch (error) {
+          const code =
+            error instanceof Error && /^[A-Z0-9_]{1,100}$/.test(error.message) ? error.message : "DAG_EXECUTOR_FAILED";
+          return this.block(
+            workItemId,
+            principalId,
+            scope,
+            code === "DAG_EXECUTOR_NOT_FOUND" ? "DAG_EXECUTOR_UNAVAILABLE" : "DAG_EXECUTOR_FAILED",
+            JSON.stringify({ code }),
+            now,
+            "dag_executor",
+          );
+        }
+      }
+
       const executorRetry =
         failure.node.kind === "agent" || (failure.node.kind === "review" && work.status !== "rework");
       if (executorRetry) {
@@ -453,13 +559,38 @@ export class WorkDagRuntime {
     return false;
   }
 
+  async reconcileUntilBoundary(
+    workItemId: string,
+    principalId: string,
+    scope: string,
+    now = Date.now(),
+    maxSteps = 16,
+  ): Promise<boolean> {
+    const boundedSteps = Math.max(1, Math.min(64, Math.floor(maxSteps)));
+    let changedAny = false;
+    for (let step = 0; step < boundedSteps; step++) {
+      const before = this.store.getWork(workItemId, principalId, scope);
+      if (before.orchestrationEngine !== "dynamic-dag" || TERMINAL.has(before.status)) return changedAny;
+      const changed = await this.reconcileWork(workItemId, principalId, scope, now + step);
+      changedAny ||= changed;
+      const current = this.store.getWork(workItemId, principalId, scope);
+      if (!changed) return changedAny;
+      if (TERMINAL.has(current.status) || current.status === "blocked" || current.status === "waiting_review") {
+        return changedAny;
+      }
+      if (this.store.listDagExecutions(workItemId).some((execution) => execution.state === "running")) {
+        return changedAny;
+      }
+    }
+    return changedAny;
+  }
+
   async reconcileActive(now = Date.now(), limit = 100): Promise<string[]> {
     const bounded = Math.max(1, Math.min(500, Math.floor(limit)));
     const processed: string[] = [];
     for (const workItemId of this.store.listReconciliationWorkIds(now, bounded)) {
       const work = this.store.getWorkInternal(workItemId);
-      const workflow = this.store.getWorkflow(work.workflowId, work.workflowVersion);
-      if (workflow.definition.graph.mode !== "dynamic-dag") continue;
+      if (work.orchestrationEngine !== "dynamic-dag") continue;
       if (await this.reconcileWork(workItemId, work.principalId, work.scope, now)) {
         processed.push(workItemId);
       }

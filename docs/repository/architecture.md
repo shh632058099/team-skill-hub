@@ -2,7 +2,6 @@
 
 Canonical repository architecture document. It combines the platform context with the concrete Team Skill Hub service design.
 
-
 ## Internal AI Platform for a ~30-person Engineering Team
 
 ### Positioning
@@ -174,7 +173,6 @@ For this team size, the next useful work is:
 3. add change-impact reporting that maps modified assets to affected suites;
 4. build a small Admin UI over health, revision, audit, analytics, and evaluation APIs;
 5. defer external databases and model-based judges until deterministic evaluation is no longer enough.
-
 
 ## Team Skill Hub：基于 MCP 的团队共享 Skill 中台方案
 
@@ -882,21 +880,15 @@ skills-index.json
 
 ### 19. MCP API
 
+默认 Skill / Knowledge 检索由 API Token 解析出的 Principal 与 Repository 权限自动决定搜索范围。调用方不需要、也不应先猜测 Repository。
+
 #### list_skill_repositories
 
-列出用户允许访问的 Skill Repo。
+列出当前调用者允许访问的 Skill Repo。它不是正常 discover/search 的前置步骤；仅在用户明确询问技能库，或明确要求限定某个技能库但尚不知道 Repository ID 时使用。
 
 #### list_skills
 
-支持：
-
-```json
-{
-  "repository": "rd-skills",
-  "domain": "ota",
-  "audience": "developer"
-}
-```
+默认列出调用者可见 Repository 中的 Skill，并支持 domain/category/audience/maturity/client 等元数据过滤，不接受 Repository 过滤。
 
 #### search_skills
 
@@ -905,12 +897,13 @@ skills-index.json
 ```json
 {
   "query": "OTA API 有没有可以删除的接口",
-  "repository": ["rd-skills"],
   "top_k": 5
 }
 ```
 
-返回：
+搜索范围自动等于当前 API Token 可见的全部 Repository。
+
+返回结果仍包含 Repository provenance，供后续精确 `get_skill` 使用：
 
 ```json
 [
@@ -922,6 +915,12 @@ skills-index.json
   }
 ]
 ```
+
+#### discover / discover_scoped
+
+`discover` 是默认统一检索入口，不接受 Repository 条件；Team Skill Hub 在 caller-visible Repository 范围内统一召回 Skills / Knowledge / Prompts / Agents / Tools。
+
+只有用户明确要求“只在某个技能库中查找”时才使用 `discover_scoped`。该工具要求非空 Repository ID 列表，并对每个 ID 做可见性校验；不存在或不可见的 ID 返回 `REPOSITORY_SCOPE_NOT_VISIBLE`，而不是伪装成普通零结果。
 
 #### resolve_skill
 
@@ -2620,10 +2619,7 @@ get_server_info
 {
   "server_version": "1.0.0",
   "skill_schema_versions": [1],
-  "capabilities": [
-    "fts-search",
-    "multi-repository"
-  ]
+  "capabilities": ["fts-search", "multi-repository"]
 }
 ```
 

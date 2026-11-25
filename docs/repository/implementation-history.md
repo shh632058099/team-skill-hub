@@ -2,7 +2,6 @@
 
 Historical implementation notes and completed large refactors. Kept for engineering traceability, not as the source of current product behavior.
 
-
 ## Team Skill Hub — Complete Remaining Work Backlog
 
 > 更新时间：2026-09-30
@@ -114,7 +113,7 @@ Hook Runtime 只有在 `capture_stop_message=true` 时，才会上传经过本�
 
 将普通用户默认行为调整为：
 
-```tex
+````tex
 默认：
 capture_stop_message=true
 自动候选开启
@@ -1130,6 +1129,8 @@ Projec
 
 > 2026-09-30 状态：第一版已完成。新增 MCP `project_recommendations`：根据 cwd/git remote/root/branch 识别项目，使用 task（无 task 时用 repository/branch 上下文）调用统一 discover，并仅在当前 principal 可见且识别出的 Repository 内返回少量 Skills / Knowledge / Prompts / Agents / Tools，保留 ranking reason。
 
+> 2026-11-23 更新：Project Context 不再把识别出的项目 Repository 作为 hard filter，而是作为 ranking preference；召回范围保持为当前 API Token / Principal 可见的全部 Repository，避免跨团队通用 Skill / Knowledge 被项目仓库偏好误过滤。
+
 SessionStart 自动推荐尚未完成：
 
 - Skills。
@@ -1150,6 +1151,8 @@ SessionStart 自动推荐尚未完成：
 ### 39. Unified Discover
 
 > 2026-09-30 状态：已完成。MCP `discover` 已统一返回 Skills / Knowledge / Prompts / Agents / Tools，并复用现有 role/tenant/repository 权限过滤。
+
+> 2026-11-23 更新：默认 `discover`、`list_skills`、`search_skills`、`resolve_skill`、`list_knowledge_sources`、`search_knowledge` 不再接受 Repository narrowing；搜索范围由 API Token -> Principal -> Repository permission 自动决定。仅新增 `discover_scoped` 处理用户明确要求限定技能库的场景，并对每个 Repository ID 做可见性校验。
 
 尚未增加统一 MCP：
 
@@ -2027,7 +2030,7 @@ npm run sandbox:acceptance -- --phase verify --hub-url https://sandbox-skill-hub
 二级：某类数据的筛选 + 分页列表
   ↓
 三级：单条记录完整详情
-```
+````
 
 #### 2.1 一级页面
 
@@ -2399,7 +2402,6 @@ WSL2 Docker 真实 smoke 至少验证：
 8. 实现完成后 review diff，再 commit + push。
 ```
 
-
 ## Team Skill Hub SQLite 存储迁移设计
 
 > 状态：实现完成（Ubuntu-24.04 WSL2 + Docker 已完成 SQLite 切换验证）
@@ -2466,6 +2468,7 @@ rotation 判断
 - Knowledge Gap management（保留 append-only history 语义）；
 
 #### 后续可独立评估
+
 - Repository runtime/governance 状态；
 - Audit metadata；
 - Managed API Key metadata。
@@ -3080,14 +3083,14 @@ Release：100k rows / 1M rows
 
 初始性能目标：
 
-| 场景 | 目标 |
-| --- | ---: |
-| Hook write p95 | < 10 ms |
-| MCP write p95 | < 10 ms |
-| Session 首屏 20 条 | < 100 ms |
-| indexed filter | < 100 ms |
-| Session detail 1000 events | < 200 ms |
-| 30 并发开发者 | 0 storage errors |
+| 场景                       |             目标 |
+| -------------------------- | ---------------: |
+| Hook write p95             |          < 10 ms |
+| MCP write p95              |          < 10 ms |
+| Session 首屏 20 条         |         < 100 ms |
+| indexed filter             |         < 100 ms |
+| Session detail 1000 events |         < 200 ms |
+| 30 并发开发者              | 0 storage errors |
 
 性能目标必须记录机器和数据规模，不作为跨硬件绝对 SLA。
 

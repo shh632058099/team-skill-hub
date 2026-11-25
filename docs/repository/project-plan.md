@@ -2,7 +2,6 @@
 
 Current implementation plan and roadmap. This document should contain current/future work; completed implementation narratives belong in implementation-history.md.
 
-
 ## Team Skill Hub 代码改动计划
 
 ### 1. 目标
@@ -391,10 +390,10 @@ Registry 为当前激活 Revision 建立内存/SQLite 视图。
 核心接口：
 
 ```ts
-listRepositories(context)
-listSkills(context, filter)
-getSkill(context, repository, name)
-getSkillResource(context, repository, name, resource)
+listRepositories(context);
+listSkills(context, filter);
+getSkill(context, repository, name);
+getSkillResource(context, repository, name, resource);
 ```
 
 所有方法必须经过权限层。
@@ -419,7 +418,7 @@ product
 接口：
 
 ```ts
-searchSkills(context, query, filters, topK)
+searchSkills(context, query, filters, topK);
 ```
 
 流程：
@@ -469,9 +468,7 @@ score =
   "selected_skill": "ota-code-review",
   "repository": "rd-skills",
   "confidence": 0.94,
-  "alternatives": [
-    "generic-code-review"
-  ]
+  "alternatives": ["generic-code-review"]
 }
 ```
 
@@ -500,28 +497,31 @@ get_skill_resource
 
 ### 12.1 list_skill_repositories
 
-只返回用户可访问 Repo。
+只返回用户可访问 Repo。该接口用于仓库查询、诊断或用户明确要求限定技能库时解析 Repository ID，不作为正常检索的前置步骤。
 
 ### 12.2 list_skills
 
-支持 repository/domain/category/audience/maturity filter。
+默认范围为 API Token 对应 Principal 可访问的全部 Repository；支持 domain/category/audience/maturity/client 等元数据 filter，不由 Agent 指定 Repository。
 
 ### 12.3 search_skills
 
-主要用于检索。
+主要用于检索。调用方只表达 query/metadata，Team Skill Hub 根据调用者权限自动限定 Repository 范围。
 
 ### 12.4 resolve_skill
 
-用于自动选择。
+用于自动选择，同样在 caller-visible Repository 全范围内工作。
 
-### 12.5 get_skill
+### 12.5 discover_scoped
 
-只在确定需要 Skill 后加载完整 `SKILL.md`。
+仅当用户明确要求限定某个 Team Skill Hub 技能库时使用。Repository ID 必须非空且对当前调用者可见；默认 discover/search 不应调用它，也不应根据 cwd、Git remote、项目名或任务内容猜测 Repository。
 
-### 12.6 get_skill_resource
+### 12.6 get_skill
+
+只在确定需要 Skill 后，使用搜索结果中返回的 Repository provenance 加载完整 `SKILL.md`。
+
+### 12.7 get_skill_resource
 
 按需加载 reference/example/resource。
-
 ---
 
 ## 13. Phase 10：HTTP / Webhook / Health
@@ -962,11 +962,11 @@ get_skill(
 
 ```text
 list_skills(
-  repository = "rd-skills",
   domain = "ota"
 )
 ```
 
+Repository 范围由当前 API Token / Principal 的可见权限自动决定；普通列举和搜索不要先查询、猜测或传入 Repository。
 ---
 
 ## 26. Codex 搜索 Skill
@@ -1488,12 +1488,12 @@ SkillHubApplicationService
 提供：
 
 ```ts
-listRepositories()
-listSkills()
-searchSkills()
-resolveSkill()
-getSkill()
-getSkillResource()
+listRepositories();
+listSkills();
+searchSkills();
+resolveSkill();
+getSkill();
+getSkillResource();
 ```
 
 MCP Server 只是协议适配层。
@@ -1524,11 +1524,7 @@ get_server_info
 {
   "server_version": "1.0.0",
   "skill_schema_versions": [1],
-  "capabilities": [
-    "multi-repository",
-    "fts-search",
-    "resource-read"
-  ]
+  "capabilities": ["multi-repository", "fts-search", "resource-read"]
 }
 ```
 
@@ -1607,7 +1603,6 @@ config-driven repository list
 V1 的原则是：
 
 > 功能做少，边界做对。
-
 
 ## Team Skill Hub V2 Roadmap
 
@@ -1843,7 +1838,6 @@ Load Balancer
 
 原则：在 Skill 数量和调用规模没有达到瓶颈前，不提前引入 PostgreSQL、Redis、Vector DB，优先保持单机部署简单、可调试、可维护。
 
-
 ## Team Skill Hub — Current Remaining Work
 
 > 更新时间：2026-10-10
@@ -2041,7 +2035,7 @@ SKILL_HUB_ALLOWED_HOSTS=172.26.23.136,skill-hub.company.local
 Admin UI 中多个页面仍直接：
 
 ```javascript
-const data = await response.json()
+const data = await response.json();
 ```
 
 Observability 也会并行加载多个 API。某一个 endpoint 返回 HTML、代理错误或非 JSON 时，可能导致整个区域出现笼统的 `Internal Server Error` 或 JS 异常。

@@ -1,6 +1,7 @@
 import type { Claim } from "./task-store.js";
 import type { VerificationEvidenceResult } from "./verification-policy.js";
 import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
+import { agentFailureReason, type AgentExecutionOutcome } from "./agent-execution-outcome.js";
 import type { PublicationOperationLease, PublicationOperationResult } from "./work-publication-store.js";
 import type { ChangeRequestOperationLease, ChangeRequestOperationResult } from "./work-change-request-store.js";
 
@@ -10,6 +11,7 @@ export type WorkerExecutionResult = {
   verificationResults?: VerificationEvidenceResult[];
   workspaceChangeSummary?: WorkspaceChangeSummary;
   runtimeSessionId?: string;
+  executionOutcome?: AgentExecutionOutcome;
 };
 
 export type WorkspaceCleanupLease = {
@@ -121,7 +123,11 @@ export async function runRemoteWorkerOnce(
     } catch (error) {
       await stage("execution.failed", "EXECUTION_FAILED");
       if (leaseLost) throw leaseLost;
-      if (cancellationRequested && error instanceof Error && error.message === "CODEX_CANCELLED") {
+      if (
+        cancellationRequested &&
+        error instanceof Error &&
+        (error.message === "EXECUTOR_CANCELLED" || error.message === "CODEX_CANCELLED")
+      ) {
         await client.failTask(claim, "TASK_CANCELLED");
         return true;
       }
@@ -148,6 +154,11 @@ export async function runRemoteWorkerOnce(
     const verificationResults = typeof execution === "string" ? undefined : execution.verificationResults;
     const workspaceChangeSummary = typeof execution === "string" ? undefined : execution.workspaceChangeSummary;
     const runtimeSessionId = typeof execution === "string" ? undefined : execution.runtimeSessionId;
+    const executionOutcome = typeof execution === "string" ? undefined : execution.executionOutcome;
+    if (executionOutcome && executionOutcome.status !== "succeeded") {
+      await client.failTask(claim, agentFailureReason(result, executionOutcome));
+      return true;
+    }
     await client.completeTask(claim, result, source, verificationResults, workspaceChangeSummary, runtimeSessionId);
     return true;
   } finally {

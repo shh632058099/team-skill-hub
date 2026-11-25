@@ -103,6 +103,7 @@ class WaitDagAdapter implements WorkDagExecutorAdapter {
   constructor(private readonly store: WorkOrchestrationStore) {}
 
   correlationRef(context: WorkDagExecutionContext): string {
+    if (context.node.resource?.startsWith("source-event:")) return context.node.resource;
     return "dag-wait:" + context.execution.idempotencyKey;
   }
 

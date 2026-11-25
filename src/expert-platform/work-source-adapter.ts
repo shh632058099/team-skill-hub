@@ -1,5 +1,6 @@
 import type { WorkItemRecord, WorkOrchestrationStore } from "./work-orchestration-store.js";
 import type { SubmitWorkInput, WorkDetail, WorkOrchestrator } from "./work-orchestrator.js";
+import { sourceEventResourceIdentity } from "./work-dag.js";
 
 export interface WorkSourceIdentity {
   sourceType: string;
@@ -51,6 +52,47 @@ export class WorkSourceIngestion {
     private readonly orchestrator: WorkOrchestrator,
   ) {}
 
+  private signalMatchingWait(
+    workItemId: string,
+    observation: {
+      observationId: string;
+      sourceType: string;
+      sourceScope: string;
+      sourceRef: string;
+      state: "active" | "terminal";
+      detail: string | null;
+      fingerprint: string;
+      observedAt: number;
+    },
+    now: number,
+  ): void {
+    const correlation = sourceEventResourceIdentity(
+      workItemId,
+      observation.sourceType,
+      observation.sourceScope,
+      observation.sourceRef,
+    );
+    try {
+      this.store.signalDagWait(
+        correlation,
+        {
+          sourceType: observation.sourceType,
+          sourceScope: observation.sourceScope,
+          sourceRef: observation.sourceRef,
+          state: observation.state,
+          detail: observation.detail,
+          fingerprint: observation.fingerprint,
+          observedAt: observation.observedAt,
+        },
+        "source-observation:" + observation.observationId,
+        now,
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message === "DAG_WAIT_NOT_FOUND") return;
+      throw error;
+    }
+  }
+
   submit<TSubmit, TSignal, TContext>(
     adapter: WorkSourceAdapter<TSubmit, TSignal, TContext>,
     input: TSubmit,
@@ -93,6 +135,7 @@ export class WorkSourceIngestion {
       },
       now,
     );
+    this.signalMatchingWait(staged.work.workItemId, observation, now);
     const sourceReconciled = this.orchestrator.reconcileSourceObservation(
       observation.observationId,
       actor.principalId,
@@ -127,6 +170,7 @@ export class WorkSourceIngestion {
       },
       now,
     );
+    this.signalMatchingWait(workItemId, observation, now);
     return this.orchestrator.reconcileSourceObservation(observation.observationId, actor.principalId, actor.scope, now);
   }
 }

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { createDockerCodexExecutor, type DockerCodexExecutorOptions } from "./docker-codex-executor.js";
+import { createDockerAgentExecutor, type DockerAgentExecutorOptions } from "./docker-agent-executor.js";
 import { ExpertWorkerClient } from "./grpc-transport.js";
 import { runRemoteWorkerOnce, type RemoteWorkerClient } from "./remote-worker.js";
 import type { ExpertWorkerRuntimeConfig } from "./worker-runtime-config.js";
@@ -21,7 +21,7 @@ interface ClosableRemoteWorkerClient extends RemoteWorkerClient {
 
 export interface ExpertWorkerRuntimeDependencies {
   createClient?: (config: ExpertWorkerRuntimeConfig) => ClosableRemoteWorkerClient;
-  createExecutor?: (options: DockerCodexExecutorOptions) => ReturnType<typeof createDockerCodexExecutor>;
+  createExecutor?: (options: DockerAgentExecutorOptions) => ReturnType<typeof createDockerAgentExecutor>;
   preparePublication?: (input: PrepareGitPublicationInput) => Promise<PreparedGitPublication>;
   pushPublication?: (input: PushGitPublicationInput) => Promise<PushGitPublicationResult>;
   createChangeRequestProvider?: (
@@ -56,7 +56,7 @@ export function createExpertWorkerRuntime(
         supportedRuntimeProfiles: config.supportedRuntimeProfiles ?? [],
       },
     );
-  const onActivity: NonNullable<DockerCodexExecutorOptions["onActivity"]> = async (
+  const onActivity: NonNullable<DockerAgentExecutorOptions["onActivity"]> = async (
     claim,
     stage,
     sequence,
@@ -110,7 +110,7 @@ export function createExpertWorkerRuntime(
         }
       },
     }) ??
-    createDockerCodexExecutor({
+    createDockerAgentExecutor({
       image: config.dockerImage,
       ...(config.executorBackend ? { backend: config.executorBackend } : {}),
       ...(config.executorBackend === "claude"

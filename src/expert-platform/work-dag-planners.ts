@@ -174,7 +174,7 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
       });
     }
 
-    if (nodes.length === 0 && reasonCode === "initial" && input.work.description.trim().length > 0) {
+    if (nodes.length === 0 && reasonCode === "initial" && input.requirementSnapshot.originalRequest.trim().length > 0) {
       add("agent", "analysis", {
         subject: null,
         mutates: input.workflow.definition.change?.mode === "code_change",
@@ -243,18 +243,32 @@ export class WorkDagJsonPlanner implements WorkDagPlanner {
         system: [
           "Propose a Team Skill Hub Dynamic Runtime DAG as strict JSON.",
           "Return exactly {nodes,edges}; never return commands, prose, permissions, evidence claims, or side effects.",
-          "Allowed node kinds: agent, verification, review, approval, publication, change_request, wait.",
+          "Allowed node kinds: agent, verification, review, approval, publication, change_request, wait, external_action.",
           "Logical node IDs are durable identities across revisions: if planned work is retained, keep the exact prior node id and node definition.",
           "Every claimed/running/external-outcome-unknown node in currentGraph must remain present and unchanged; never silently supersede it.",
           "If a pending node's semantics, subject, capability, resource, or mutation intent changes, replace it with a new node id rather than redefining the old id.",
           "Bind verification/review/publication/approval/change_request nodes to the current subject revision. Agent nodes may use subject=null because they may create a new subject.",
           "Never propose two unordered mutating nodes for the same resource.",
+          "For external_action nodes, choose only capabilities advertised by policyContext.executorCapabilities.external_action; never invent URLs, commands, credentials, or low-level action configuration.",
+          "For a wait node that waits on the Work source, use work.sourceEventResource exactly as node.resource; never invent a source-event correlation key.",
           "The platform will independently validate policy, predicates, subject binding, and completion.",
         ].join("\n"),
         payload: {
           reasonCode,
-          work: input.work,
+          work: {
+            workItemId: input.work.workItemId,
+            title: input.work.title,
+            status: input.work.status,
+            workflowId: input.work.workflowId,
+            workflowVersion: input.work.workflowVersion,
+            currentSubjectRevision: input.work.currentSubjectRevision,
+            repositoryId: input.work.repositoryId,
+            activeWorkAttemptId: input.work.activeWorkAttemptId,
+            sourceEventResource: input.work.sourceEventResource,
+          },
           workflow: input.workflow,
+          requirementSnapshot: input.requirementSnapshot,
+          policyContext: input.policyContext,
           frozen: input.frozen,
           currentGraph: input.currentGraph,
           obligations: input.obligations,

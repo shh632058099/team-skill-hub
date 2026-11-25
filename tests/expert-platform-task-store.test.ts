@@ -230,6 +230,34 @@ test("opening a legacy task database migrates expert routing columns in place", 
   }
 });
 
+test("legacy current run migration backfills its reconstructable execution problem", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-run-problem-migration-"));
+  const file = path.join(dir, "runtime.sqlite");
+  try {
+    const legacy = new DatabaseSync(file);
+    legacy.exec(
+      [
+        "CREATE TABLE expert_tasks (task_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, scope TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, problem TEXT NOT NULL, status TEXT NOT NULL, result TEXT, run_id TEXT, worker_id TEXT, lease_until INTEGER, fencing INTEGER NOT NULL DEFAULT 0, UNIQUE(principal_id, scope, idempotency_key));",
+        "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,status,run_id,worker_id,fencing) VALUES('legacy-running','alice','team','legacy-running-key','digest','legacy running prompt','running','legacy-run','worker-a',1);",
+        "CREATE TABLE expert_runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, worker_id TEXT NOT NULL, fencing INTEGER NOT NULL, status TEXT NOT NULL);",
+        "INSERT INTO expert_runs(run_id,task_id,worker_id,fencing,status) VALUES('legacy-run','legacy-running','worker-a',1,'running');",
+        "CREATE TABLE expert_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, run_id TEXT, event_type TEXT NOT NULL, created_at INTEGER NOT NULL);",
+        "INSERT INTO expert_events(task_id,run_id,event_type,created_at) VALUES('legacy-running','legacy-run','running',123456789);",
+      ].join("\n"),
+    );
+    legacy.close();
+
+    const store = new ExpertTaskStore(file);
+    const detail = store.adminTaskDetail("legacy-running")!;
+    const run = (detail.runs as Array<{ run_id: string; problem: string | null }>)[0]!;
+    assert.equal(run.run_id, "legacy-run");
+    assert.equal(run.problem, "legacy running prompt");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("completion persists structured source repository URL, branch, and commit metadata", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-source-metadata-"));
   const file = path.join(dir, "runtime.sqlite");
@@ -732,11 +760,19 @@ test("successful work task can schedule a fenced continuation on the same task",
     const first = store.claim("worker-a", 100, 10_000)!;
     store.complete(first, "first result", 200);
 
-    const continued = store.scheduleContinuation(task.taskId, first.runId, "verification_failed", 300);
+    const continued = store.scheduleContinuation(
+      task.taskId,
+      first.runId,
+      "verification_failed",
+      300,
+      undefined,
+      "inspect with RequirementSnapshot revision 2",
+    );
     assert.equal(continued.taskId, task.taskId);
     assert.equal(continued.status, "queued");
     assert.equal(continued.result, null);
     assert.equal(continued.continuationCount, 1);
+    assert.equal((store.adminTaskDetail(task.taskId)!.task as { problem: string }).problem, "inspect");
 
     assert.throws(
       () => store.scheduleContinuation(task.taskId, first.runId, "duplicate", 301),
@@ -747,7 +783,11 @@ test("successful work task can schedule a fenced continuation on the same task",
     assert.equal(second.taskId, task.taskId);
     assert.notEqual(second.runId, first.runId);
     assert.equal(second.fencing, first.fencing + 1);
+    assert.match(second.problem, /RequirementSnapshot revision 2/);
     assert.match(second.problem, /verification_failed/);
+    const runs = store.adminTaskDetail(task.taskId)!.runs as Array<{ run_id: string; problem: string | null }>;
+    assert.equal(runs.find((run) => run.run_id === first.runId)?.problem, "inspect");
+    assert.match(runs.find((run) => run.run_id === second.runId)?.problem ?? "", /RequirementSnapshot revision 2/);
     store.complete(second, "second result", 500);
 
     assert.throws(() => store.scheduleContinuation(task.taskId, first.runId, "stale", 600), /STALE_RUN/);
@@ -780,6 +820,36 @@ test("continuation can be pinned to its workspace owner worker", () => {
     const second = store.claim("worker-a", 401, 10_000)!;
     assert.equal(second.taskId, task.taskId);
     assert.equal(second.workerId, "worker-a");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("failed task retry preserves required worker affinity", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-retry-owner-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "tenant",
+      idempotencyKey: "retry-owner",
+      problem: "inspect",
+      workItemId: "work-owner-retry",
+      workAttemptId: "attempt-owner-retry",
+      workflowId: "work-default",
+      workflowVersion: 1,
+      workspaceKey: "work-owner-retry-a1",
+    });
+    store.requireWorker(task.taskId, "worker-a");
+    const first = store.claim("worker-a", 100, 10_000)!;
+    store.fail(first, "EXECUTION_FAILED", 200);
+
+    const retried = store.requeueForRetry(task.taskId, "attempt-owner-retry", "EXECUTION_FAILED", 300);
+    assert.equal(retried.requiredWorkerId, "worker-a");
+    assert.equal(store.claim("worker-b", 400, 10_000), null);
+    const second = store.claim("worker-a", 401, 10_000)!;
+    assert.equal(second.taskId, task.taskId);
+    store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

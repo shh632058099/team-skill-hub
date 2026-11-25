@@ -193,6 +193,90 @@ test("publication prepare node waits on existing publication worker and emits co
   rmSync(f.dir, { recursive: true, force: true });
 });
 
+test("delivery nodes bind publication lookup and gateway calls to their repository resource", async () => {
+  const f = baseFixture({ kind: "publication", capability: "prepare" });
+  try {
+    f.store.setDagResourceSubject(f.workId, "repo:repo-b", "workspace:" + "b".repeat(64), 21);
+    const publications: any = {
+      listPublications: () => [
+        {
+          publicationId: "pub-a",
+          workItemId: f.workId,
+          workAttemptId: "a1",
+          repositoryId: "repo-a",
+          state: "preparing",
+          sourceSubjectRevision: "workspace:" + "a".repeat(64),
+          lastErrorCode: null,
+        },
+      ],
+      getPublication: (id: string) => publications.listPublications().find((item: any) => item.publicationId === id),
+    };
+    let observedTarget: any;
+    const gateway: any = {
+      ensurePublication: (_workItemId: string, _principalId: string, _scope: string, _now: number, target: any) => {
+        observedTarget = target;
+        return {
+          ...publications.getPublication("pub-a"),
+          publicationId: "pub-b",
+          repositoryId: "repo-b",
+          sourceSubjectRevision: "workspace:" + "b".repeat(64),
+        };
+      },
+      recordPreparedPublicationArtifact: () => {},
+      ensureChangeRequest: () => {
+        throw new Error("unexpected");
+      },
+    };
+    const adapter = createDeliveryDagAdapters(f.store, publications, undefined, gateway).find(
+      (item) => item.kind === "publication",
+    )!;
+    const work = f.store.getWorkInternal(f.workId);
+    const context: any = {
+      work,
+      node: {
+        id: "delivery-b",
+        kind: "publication",
+        capability: "prepare",
+        subject: "workspace:" + "b".repeat(64),
+        resource: "repo:repo-b",
+        mutates: false,
+        requirements: [],
+      },
+      execution: {
+        nodeExecutionId: "exec-b",
+        workItemId: f.workId,
+        nodeId: "delivery-b",
+        createdDagRevision: 1,
+        generation: 1,
+        state: "running",
+        fence: 1,
+        idempotencyKey: "delivery-b",
+        subjectRevision: "workspace:" + "b".repeat(64),
+        resourceIdentity: "repo:repo-b",
+        claimOwner: "hub",
+        claimLeaseUntil: null,
+        startedAt: 1,
+        finishedAt: null,
+        result: null,
+        externalRef: null,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      dagRevision: 1,
+      signal: new AbortController().signal,
+    };
+    await adapter.execute(context);
+    assert.deepEqual(observedTarget, {
+      resourceKey: "repo:repo-b",
+      repositoryId: "repo-b",
+      subjectRevision: "workspace:" + "b".repeat(64),
+    });
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("publication push and change request nodes consume their existing durable lifecycles", async () => {
   const push = baseFixture({ kind: "publication", capability: "push" });
   try {

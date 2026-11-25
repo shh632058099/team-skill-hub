@@ -3,14 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runCodexProcess } from "../src/expert-platform/codex-process.js";
+import { runAgentProcess } from "../src/expert-platform/agent-process.js";
 
 test("process runner collects bounded JSONL and parses successful result", async () => {
   const event = [
     JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } }),
     JSON.stringify({ type: "turn.completed" }),
   ].join("\n");
-  const result = await runCodexProcess({
+  const result = await runAgentProcess({
     executable: process.execPath,
     args: ["-e", `process.stdout.write(${JSON.stringify(event)})`],
     timeoutMs: 5000,
@@ -21,22 +21,22 @@ test("process runner collects bounded JSONL and parses successful result", async
 test("process runner rejects nonzero exit and limited output", async () => {
   await assert.rejects(
     () =>
-      runCodexProcess({
+      runAgentProcess({
         executable: process.execPath,
         args: ["-e", "process.exit(2)"],
         timeoutMs: 5000,
       }),
-    /CODEX_PROCESS_FAILED/,
+    /EXECUTOR_PROCESS_FAILED/,
   );
   await assert.rejects(
     () =>
-      runCodexProcess({
+      runAgentProcess({
         executable: process.execPath,
         args: ["-e", "process.stdout.write('x'.repeat(10000))"],
         timeoutMs: 5000,
         maxOutputBytes: 100,
       }),
-    /CODEX_OUTPUT_LIMIT/,
+    /EXECUTOR_OUTPUT_LIMIT/,
   );
 });
 
@@ -47,7 +47,7 @@ test("process runner classifies sandbox failures without logging raw stderr", as
   try {
     await assert.rejects(
       () =>
-        runCodexProcess({
+        runAgentProcess({
           executable: process.execPath,
           args: [
             "-e",
@@ -55,7 +55,7 @@ test("process runner classifies sandbox failures without logging raw stderr", as
           ],
           timeoutMs: 5000,
         }),
-      /CODEX_PROCESS_FAILED/,
+      /EXECUTOR_PROCESS_FAILED/,
     );
   } finally {
     console.error = originalError;
@@ -71,7 +71,7 @@ test("process runner distinguishes Docker host config permission without logging
   try {
     await assert.rejects(
       () =>
-        runCodexProcess({
+        runAgentProcess({
           executable: process.execPath,
           args: [
             "-e",
@@ -79,7 +79,7 @@ test("process runner distinguishes Docker host config permission without logging
           ],
           timeoutMs: 5000,
         }),
-      /CODEX_PROCESS_FAILED/,
+      /EXECUTOR_PROCESS_FAILED/,
     );
   } finally {
     console.error = original;
@@ -95,12 +95,12 @@ test("process runner reports only a fixed access target category", async () => {
   try {
     await assert.rejects(
       () =>
-        runCodexProcess({
+        runAgentProcess({
           executable: process.execPath,
           args: ["-e", "process.stderr.write('EACCES: permission denied, open /run/expert-mcp.json'); process.exit(1)"],
           timeoutMs: 5000,
         }),
-      /CODEX_PROCESS_FAILED/,
+      /EXECUTOR_PROCESS_FAILED/,
     );
   } finally {
     console.error = original;
@@ -116,7 +116,7 @@ test("Codex JSONL model errors receive a fixed code without exposing response te
   try {
     await assert.rejects(
       () =>
-        runCodexProcess({
+        runAgentProcess({
           executable: process.execPath,
           args: [
             "-e",
@@ -125,7 +125,7 @@ test("Codex JSONL model errors receive a fixed code without exposing response te
           timeoutMs: 5000,
           streamingBackend: "codex",
         }),
-      /CODEX_PROCESS_FAILED/,
+      /EXECUTOR_PROCESS_FAILED/,
     );
   } finally {
     console.error = original;
@@ -141,7 +141,7 @@ test("Claude JSONL result errors receive a fixed code without exposing response 
   try {
     await assert.rejects(
       () =>
-        runCodexProcess({
+        runAgentProcess({
           executable: process.execPath,
           args: [
             "-e",
@@ -150,11 +150,13 @@ test("Claude JSONL result errors receive a fixed code without exposing response 
           timeoutMs: 5000,
           streamingBackend: "claude",
         }),
-      /CODEX_PROCESS_FAILED/,
+      /EXECUTOR_PROCESS_FAILED/,
     );
   } finally {
     console.error = original;
   }
+  assert.ok(logs.some((line) => line.includes('"event":"expert_worker.executor_process_failed"')));
+  assert.ok(logs.some((line) => line.includes('"backend":"claude"')));
   assert.ok(logs.some((line) => line.includes('"errorCode":"MODEL_RATE_LIMITED"')));
   assert.ok(logs.every((line) => !line.includes("secret-claude")));
 });
@@ -162,40 +164,40 @@ test("Claude JSONL result errors receive a fixed code without exposing response 
 test("process runner enforces deadline and abort", async () => {
   await assert.rejects(
     () =>
-      runCodexProcess({
+      runAgentProcess({
         executable: process.execPath,
         args: ["-e", "setInterval(() => {}, 1000)"],
         timeoutMs: 100,
       }),
-    /CODEX_TIMEOUT/,
+    /EXECUTOR_TIMEOUT/,
   );
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
     () =>
-      runCodexProcess({
+      runAgentProcess({
         executable: process.execPath,
         args: ["--version"],
         timeoutMs: 5000,
         signal: controller.signal,
       }),
-    /CODEX_CANCELLED/,
+    /EXECUTOR_CANCELLED/,
   );
 });
 
 test("process runner enforces optional idle timeout and resets it on output", async () => {
   await assert.rejects(
     () =>
-      runCodexProcess({
+      runAgentProcess({
         executable: process.execPath,
         args: ["-e", "setInterval(() => {}, 1000)"],
         timeoutMs: 1000,
         idleTimeoutMs: 100,
       }),
-    /CODEX_IDLE_TIMEOUT/,
+    /EXECUTOR_IDLE_TIMEOUT/,
   );
 
-  const output = await runCodexProcess({
+  const output = await runAgentProcess({
     executable: process.execPath,
     args: [
       "-e",
@@ -213,7 +215,7 @@ test("process runner abort kills the subprocess process group, including child p
   const pidFile = path.join(dir, "child.pid");
   const controller = new AbortController();
   try {
-    const running = runCodexProcess({
+    const running = runAgentProcess({
       executable: process.execPath,
       args: [
         "-e",
@@ -226,7 +228,7 @@ test("process runner abort kills the subprocess process group, including child p
     assert.ok(existsSync(pidFile), "child process should have started");
     const childPid = Number(readFileSync(pidFile, "utf8"));
     controller.abort();
-    await assert.rejects(() => running, /CODEX_CANCELLED/);
+    await assert.rejects(() => running, /EXECUTOR_CANCELLED/);
     await new Promise((resolve) => setTimeout(resolve, 30));
     let alive = true;
     try {
@@ -243,7 +245,7 @@ test("process runner abort kills the subprocess process group, including child p
 test("process runner awaits container cleanup hook before reporting cancellation", async () => {
   const controller = new AbortController();
   let cleanupCalled = false;
-  const running = runCodexProcess({
+  const running = runAgentProcess({
     executable: process.execPath,
     args: ["-e", "setInterval(()=>{},1000)"],
     timeoutMs: 5000,
@@ -255,6 +257,6 @@ test("process runner awaits container cleanup hook before reporting cancellation
   });
   await new Promise((resolve) => setTimeout(resolve, 40));
   controller.abort();
-  await assert.rejects(() => running, /CODEX_CANCELLED/);
+  await assert.rejects(() => running, /EXECUTOR_CANCELLED/);
   assert.equal(cleanupCalled, true);
 });
