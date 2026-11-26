@@ -642,6 +642,38 @@ test("review executor failure blocks after retry exhaustion instead of being rep
   }
 });
 
+test("deterministic publication stale failure blocks once instead of consuming re-plan budget", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    let calls = 0;
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      async execute() {
+        calls++;
+        return { status: "failed", summary: "PUBLICATION_SOURCE_STALE" };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(f.store, [adapter]),
+    );
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 100), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 101), true);
+    assert.equal(await runtime.reconcileWork(f.workId, "a", "s", 102), true);
+
+    const work = f.store.getWorkInternal(f.workId);
+    assert.equal(work.status, "blocked");
+    assert.equal(work.blockedReason, "DAG_EXECUTOR_FAILED");
+    assert.match(work.blockedContext ?? "", /PUBLICATION_SOURCE_STALE/);
+    assert.equal(calls, 1);
+    assert.equal(f.store.listDagRevisions(f.workId).length, 1);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("deterministic expert routing failure blocks once instead of burning retry and re-plan budgets", async () => {
   const f = fixture(["expert_result"]);
   try {

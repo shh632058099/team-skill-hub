@@ -135,6 +135,9 @@ test("agent and verification DAG nodes bridge to durable ExpertTasks with one sh
     assert.match(agentClaim.problem, /Skill\/Knowledge lookup/i);
     assert.match(agentClaim.problem, /Team Skill Hub checkout of the routed remote repository/i);
     assert.match(agentClaim.problem, /TEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1/);
+    assert.match(agentClaim.problem, /Only judge success or blockage for this DAG node/i);
+    assert.match(agentClaim.problem, /Downstream build, verification, review, publication, and change-request steps/i);
+    assert.match(agentClaim.problem, /Node capability:\s*analysis/i);
     tasks.complete(
       agentClaim,
       "analysis complete",

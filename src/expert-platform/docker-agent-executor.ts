@@ -544,11 +544,9 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
             // Worker runs with umask 0077; the task container still needs to read this non-secret wrapper file.
             chmodSync(mcpConfigFilePath, 0o644);
             const mcpToolNames = mcp.allowedTools.map((tool) => `mcp__skillhub__${tool}`).join(",");
-            for (const flag of ["--tools", "--allowedTools"]) {
-              const toolIndex = commandArgs.indexOf(flag);
-              if (toolIndex < 0) throw new Error("CLAUDE_TOOL_ALLOWLIST_MISSING");
-              commandArgs[toolIndex + 1] += "," + mcpToolNames;
-            }
+            const toolIndex = commandArgs.indexOf("--tools");
+            if (toolIndex < 0) throw new Error("CLAUDE_TOOL_ALLOWLIST_MISSING");
+            commandArgs[toolIndex + 1] += "," + mcpToolNames;
             const separator = commandArgs.indexOf("--");
             if (separator < 0) throw new Error("CLAUDE_ARGUMENT_SEPARATOR_MISSING");
             commandArgs.splice(separator, 0, "--mcp-config", "/run/expert-mcp.json", "--strict-mcp-config");

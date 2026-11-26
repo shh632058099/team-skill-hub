@@ -2177,6 +2177,16 @@ test("prepared publication artifact binds current workspace revision and blocks 
       publication.publicationId,
       130,
     );
+    assert.doesNotThrow(() =>
+      f.orchestrator.recordPreparedPublicationArtifact(
+        work.workItemId,
+        "alice",
+        "team-a",
+        publication.publicationId,
+        131,
+        { resourceKey: "workspace", repositoryId: null, subjectRevision: subject },
+      ),
+    );
     const artifact = f.publications.getPublicationArtifact(publication.publicationId);
     assert.equal(artifact?.sourceSubjectRevision, subject);
     assert.equal(artifact?.commitSha, "c".repeat(40));

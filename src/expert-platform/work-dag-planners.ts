@@ -118,9 +118,10 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
     const needsAgent = forcedRepair || needsExpertResult || needsOpenWorldAgent;
 
     if (needsAgent) {
-      add("agent", forcedRepair ? "repair" : "analysis", {
+      const mutates = input.workflow.definition.change?.mode === "code_change" || (conditionalChange && forcedRepair);
+      add("agent", forcedRepair ? "repair" : mutates ? "code_change" : "analysis", {
         subject: null,
-        mutates: input.workflow.definition.change?.mode === "code_change" || (conditionalChange && forcedRepair),
+        mutates,
       }); // An agent may change the subject. Re-plan after its result rather than binding
       // future verification/review nodes to a subject that is no longer current.
       return { nodes, edges };
@@ -168,9 +169,10 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
     }
 
     if (nodes.length === 0 && needsAttempt && !input.work.activeWorkAttemptId) {
-      add("agent", "analysis", {
+      const mutates = input.workflow.definition.change?.mode === "code_change";
+      add("agent", mutates ? "code_change" : "analysis", {
         subject: null,
-        mutates: input.workflow.definition.change?.mode === "code_change",
+        mutates,
       });
     }
 

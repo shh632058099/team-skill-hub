@@ -24,6 +24,7 @@ import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 import { WorkDagShadowProjector } from "./work-dag-shadow-projector.js";
 import type { WorkDagDeliveryTarget } from "./work-dag-delivery-adapters.js";
+import { subjectForResource } from "./work-dag.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -1424,7 +1425,7 @@ export class WorkOrchestrator {
     const publication = this.publications.getPublication(publicationId);
     if (publication.workItemId !== workItemId) throw new Error("PUBLICATION_WORK_MISMATCH");
     const expectedSubject = target
-      ? (this.workStore.listDagResourceSubjects(workItemId)[target.resourceKey] ?? null)
+      ? subjectForResource(this.workStore.getDagContext(workItemId), target.resourceKey)
       : work.currentSubjectRevision;
     if (
       (target?.repositoryId && publication.repositoryId !== target.repositoryId) ||

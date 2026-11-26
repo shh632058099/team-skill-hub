@@ -10,33 +10,33 @@ import type { Claim } from "../src/expert-platform/task-store.js";
 
 const claim: Claim = { workerId: "w", taskId: "t", runId: "r", fencing: 1, problem: "Read-only OTA analysis" };
 
-test("Claude CLI args enable only read-only tools and reject invalid model", () => {
+test("Claude CLI args trust Docker isolation and do not restrict built-in tools", () => {
   const args = buildClaudeReadOnlyArgs("Find OTA transitions", "sonnet");
-  assert.ok(args.includes("Read,Glob,Grep"));
-  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
-  assert.ok(args.includes("dontAsk"));
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(args[args.indexOf("--tools") + 1], "default");
+  assert.ok(!args.includes("--allowedTools"));
   assert.ok(args.includes("--no-session-persistence"));
   assert.equal(args.at(-1), "Find OTA transitions");
-  assert.ok(!args.some((a) => a.includes("bypassPermissions")));
   assert.throws(() => buildClaudeReadOnlyArgs("ok", "../../unsafe"), /INVALID_CLAUDE_REQUEST/);
 });
 
-test("Claude streaming args preserve sandbox and read-only tool restriction", () => {
+test("Claude streaming args preserve unrestricted built-in tool access inside Docker", () => {
   const args = buildClaudeReadOnlyArgs("review code", "sonnet", true);
   assert.deepEqual(args.slice(args.indexOf("--output-format"), args.indexOf("--max-turns")), [
     "--output-format",
     "stream-json",
     "--verbose",
   ]);
-  assert.ok(args.includes("Read,Glob,Grep"));
-  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
-  assert.ok(args.includes("dontAsk"));
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(args[args.indexOf("--tools") + 1], "default");
+  assert.ok(!args.includes("--allowedTools"));
 });
 
-test("Claude Work session persists and resumes without weakening tool policy", () => {
+test("Claude Work session persists and resumes with Docker-scoped unrestricted built-in tools", () => {
   const initial = buildClaudeArgs("Inspect OTA", "sonnet", true, 12, "read-only", { persist: true });
   assert.ok(!initial.includes("--no-session-persistence"));
-  assert.equal(initial[initial.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
+  assert.equal(initial[initial.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.ok(!initial.includes("--allowedTools"));
 
   const resumed = buildClaudeArgs("Continue OTA", "sonnet", true, 12, "workspace-write", {
     persist: true,
@@ -44,8 +44,9 @@ test("Claude Work session persists and resumes without weakening tool policy", (
   });
   assert.ok(!resumed.includes("--no-session-persistence"));
   assert.equal(resumed[resumed.indexOf("--resume") + 1], "22222222-2222-4222-8222-222222222222");
-  assert.equal(resumed[resumed.indexOf("--allowedTools") + 1], "Read,Glob,Grep,Edit,Write");
-  assert.ok(!resumed.includes("Bash"));
+  assert.equal(resumed[resumed.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.ok(!resumed.includes("--allowedTools"));
+  assert.equal(resumed[resumed.indexOf("--tools") + 1], "default");
 });
 
 test("Claude output accepts successful structured response and rejects failure or malformed response", () => {
@@ -88,7 +89,7 @@ test("Claude executor uses existing Docker isolation and selected model without 
   assert.equal(args[args.indexOf("--max-turns") + 1], "64");
   assert.ok(args.includes("--read-only"));
   assert.ok(args.includes("type=bind,src=/repo,dst=/workspace,readonly"));
-  assert.ok(args.includes("Read,Glob,Grep"));
+  assert.equal(args[args.indexOf("--tools") + 1], "default");
   assert.ok(args.includes("CLAUDE_CONFIG_DIR=/home/expert/.claude"));
   assert.equal(args.at(-1), claim.problem);
   assert.ok(stages.includes("claude.started") && stages.includes("claude.completed"));
@@ -226,16 +227,11 @@ test("Claude max turns is configurable and validated", () => {
   }
 });
 
-test("Claude workspace-write enables Edit and Write but never Bash or NotebookEdit", () => {
+test("Claude workspace-write leaves all built-in tools available inside the isolated container", () => {
   const args = buildClaudeArgs("modify fixture", "sonnet", false, 12, "workspace-write");
-  const tools = args[args.indexOf("--tools") + 1];
-  const allowed = args[args.indexOf("--allowedTools") + 1];
-  assert.equal(tools, "Read,Glob,Grep,Edit,Write");
-  assert.equal(allowed, "Read,Glob,Grep,Edit,Write");
-  for (const forbidden of ["Bash", "NotebookEdit", "Agent"]) {
-    assert.ok(!tools.includes(forbidden));
-    assert.ok(!allowed.includes(forbidden));
-  }
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(args[args.indexOf("--tools") + 1], "default");
+  assert.ok(!args.includes("--allowedTools"));
 });
 
 test("Claude workspace-write profile gets rw workspace while keeping container root read-only", async () => {
@@ -305,8 +301,9 @@ test("Claude workspace-write profile gets rw workspace while keeping container r
     assert.ok(workspaceMount);
     assert.match(workspaceMount!, /work-claude-write-a1/);
     assert.ok(!workspaceMount!.endsWith(",readonly"));
-    assert.ok(args.includes("Read,Glob,Grep,Edit,Write"));
-    assert.ok(!args.join(" ").includes("Bash"));
+    assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
+    assert.equal(args[args.indexOf("--tools") + 1], "default");
+    assert.ok(!args.includes("--allowedTools"));
   } finally {
     rmSync(root, { recursive: true, force: true });
     if (previous === undefined) delete process.env.ANTHROPIC_API_KEY;

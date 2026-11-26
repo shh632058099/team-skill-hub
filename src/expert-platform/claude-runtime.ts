@@ -1,4 +1,4 @@
-/** Claude Code worker uses a constrained tool allowlist. Bash, NotebookEdit and agent tools are never available. */
+/** Claude Code runs inside the worker Docker sandbox with the CLI default built-in tool set available. */
 export type ClaudeRuntimeSessionOptions = { persist: boolean; resumeId?: string };
 
 function validateRuntimeSessionId(value: string): string {
@@ -25,7 +25,7 @@ export function buildClaudeArgs(
     throw new Error("INVALID_CLAUDE_REQUEST");
   const resumeId = session?.resumeId ? validateRuntimeSessionId(session.resumeId) : undefined;
   if (resumeId && session?.persist !== true) throw new Error("INVALID_RUNTIME_SESSION");
-  const tools = permissions === "workspace-write" ? "Read,Glob,Grep,Edit,Write" : "Read,Glob,Grep";
+  void permissions;
   return [
     "-p",
     ...(session?.persist ? [] : ["--no-session-persistence"]),
@@ -38,11 +38,9 @@ export function buildClaudeArgs(
     "--model",
     model,
     "--permission-mode",
-    "dontAsk",
+    "bypassPermissions",
     "--tools",
-    tools,
-    "--allowedTools",
-    tools,
+    "default",
     "--",
     problem,
   ];

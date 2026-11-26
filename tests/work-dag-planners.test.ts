@@ -193,6 +193,27 @@ test("all built-in semantic Workflow policies use the same generic seed planner 
   }
 });
 
+test("code-change seed agent is explicitly scoped as code_change before downstream gates", async () => {
+  const planner = new WorkDagSeedPlanner();
+  const base = context();
+  const graph = await planner.propose(
+    {
+      ...base,
+      workflow: {
+        ...base.workflow,
+        definition: {
+          ...structuredClone(base.workflow.definition),
+          change: { mode: "code_change", delivery: "merge_request" },
+        },
+      } as any,
+    },
+    "initial",
+  );
+  assert.equal(graph.nodes[0]?.kind, "agent");
+  assert.equal(graph.nodes[0]?.capability, "code_change");
+  assert.equal(graph.nodes[0]?.mutates, true);
+});
+
 test("conditional code-change seed plan reviews first, repairs only after rework, then verifies changed work", async () => {
   const planner = new WorkDagSeedPlanner();
   const base = context();
