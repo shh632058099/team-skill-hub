@@ -480,6 +480,17 @@ class AgentDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecuto
       attempt.reviewContext ? "Review context: " + attempt.reviewContext : null,
       attempt.whatShouldChange ? "Required rework: " + attempt.whatShouldChange : null,
     ].filter((item): item is string => Boolean(item));
+    const priorTask = attempt.taskId
+      ? this.tasks.get(attempt.taskId, context.work.principalId, context.work.scope)
+      : null;
+    const retryWorkspaceContext =
+      priorTask?.status === "failed"
+        ? [
+            "Previous Agent turn failed with: " + (priorTask.result ?? "EXECUTION_FAILED") + ".",
+            "The WorkAttempt workspace is durable and has been preserved. Inspect the current workspace before editing.",
+            "Continue from any valid existing changes; do not reset, clean, reclone, or restart from the repository baseline unless the current workspace is demonstrably corrupted.",
+          ]
+        : [];
     const agentProblem = [
       "You are executing one node in a durable Team Skill Hub Dynamic Runtime DAG.",
       "Do not submit or delegate another Work.",
@@ -494,6 +505,7 @@ class AgentDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecuto
       "DAG node: " + context.node.id,
       "Node capability: " + context.node.capability,
       ...attemptContext,
+      ...retryWorkspaceContext,
       "",
       requirementExecutionContext(this.workStore, context.work, executionRequirementRevision(this.workStore, context))
         .promptContext,

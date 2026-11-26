@@ -56,6 +56,7 @@ export function createExpertWorkerRuntime(
         supportedRuntimeProfiles: config.supportedRuntimeProfiles ?? [],
       },
     );
+  let modelAttemptSequenceOffset = 0;
   const onActivity: NonNullable<DockerAgentExecutorOptions["onActivity"]> = async (
     claim,
     stage,
@@ -67,11 +68,11 @@ export function createExpertWorkerRuntime(
     const activity =
       stage === "tool.activity"
         ? {
-            sequence,
+            sequence: sequence + modelAttemptSequenceOffset,
             ...(tool ? { tool } : {}),
             ...(count === undefined ? {} : { count }),
           }
-        : { sequence };
+        : { sequence: sequence + modelAttemptSequenceOffset };
     await client.reportTaskStage?.(claim, stage, details ?? "", activity);
   };
 
@@ -80,7 +81,7 @@ export function createExpertWorkerRuntime(
       image: config.dockerImage,
       ...(config.executorBackend ? { backend: config.executorBackend } : {}),
       ...(config.executorBackend === "claude"
-        ? { claudeModel: config.claudeModel ?? "sonnet", claudeMaxTurns: config.claudeMaxTurns ?? 12 }
+        ? { claudeModel: config.claudeModel ?? "sonnet", claudeMaxTurns: config.claudeMaxTurns ?? 100 }
         : {}),
       sourcePath: config.sourcePath,
       repositoryRoot: config.repositoryRoot,
@@ -115,7 +116,7 @@ export function createExpertWorkerRuntime(
       image: config.dockerImage,
       ...(config.executorBackend ? { backend: config.executorBackend } : {}),
       ...(config.executorBackend === "claude"
-        ? { claudeModel: config.claudeModel ?? "sonnet", claudeMaxTurns: config.claudeMaxTurns ?? 12 }
+        ? { claudeModel: config.claudeModel ?? "sonnet", claudeMaxTurns: config.claudeMaxTurns ?? 100 }
         : {}),
       sourcePath: config.sourcePath,
       repositoryRoot: config.repositoryRoot,
@@ -258,10 +259,19 @@ export function createExpertWorkerRuntime(
           return true;
         }
       }
-      return runRemoteWorkerOnce(client, config.workerId, config.capability, executor, {
-        heartbeatMs: config.heartbeatMs,
-        expertId: config.expertId ?? config.capability,
-      });
+      return runRemoteWorkerOnce(
+        client,
+        config.workerId,
+        config.capability,
+        async (claim, signal, modelAttempt = 1) => {
+          modelAttemptSequenceOffset = (modelAttempt - 1) * 1_000_000;
+          return executor(claim, signal);
+        },
+        {
+          heartbeatMs: config.heartbeatMs,
+          expertId: config.expertId ?? config.capability,
+        },
+      );
     },
     close: () => client.close(),
   };

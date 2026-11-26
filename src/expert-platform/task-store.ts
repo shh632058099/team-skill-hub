@@ -1154,6 +1154,15 @@ export class ExpertTaskStore {
     return { total, limit, offset, tasks: rows };
   }
 
+  latestRunDiagnostic(taskId: string, principalId: string, scope: string): ExecutorFailureDiagnostic | null {
+    this.get(taskId, principalId, scope);
+    const row = this.db
+      .prepare("SELECT diagnostic_json FROM expert_runs WHERE task_id=? ORDER BY rowid DESC LIMIT 1")
+      .get(taskId) as Row | undefined;
+    if (!row || row.diagnostic_json == null) return null;
+    return normalizeExecutorFailureDiagnostic(JSON.parse(String(row.diagnostic_json)));
+  }
+
   adminTaskDetail(taskId: string, query: { limit?: number; offset?: number } = {}) {
     const limit = Number.isFinite(query.limit) ? Math.min(100, Math.max(1, Math.floor(query.limit!))) : 50;
     const offset = Number.isFinite(query.offset) ? Math.min(1000 - limit, Math.max(0, Math.floor(query.offset!))) : 0;
@@ -1515,12 +1524,36 @@ export class ExpertTaskStore {
 
   /** Accept stage metadata only for the active claimed attempt; no raw model output. */
   recordStage(claim: Claim, stage: string, details = "", now = Date.now()) {
-    // Accept only structured stage names and diagnostic codes. Never persist raw log text.
+    // Accept only structured stage names and bounded diagnostics. Never persist raw provider logs.
     if (
-      !/^(repository|container|codex|claude|execution)\.(started|completed|failed)$/.test(stage) ||
-      (details !== "" && !/^[A-Z][A-Z0-9_]{0,79}$/.test(details))
+      !/^(repository|container|codex|claude|execution)\.(started|completed|failed)$/.test(stage) &&
+      stage !== "model.retry" &&
+      stage !== "agent.protocol_warning"
     )
       throw new Error("INVALID_STAGE_EVENT");
+    let safeDetails = details;
+    if (stage === "model.retry") {
+      if (!details) throw new Error("INVALID_STAGE_EVENT");
+      let parsed: ExecutorFailureDiagnostic | null = null;
+      try {
+        parsed = normalizeExecutorFailureDiagnostic(JSON.parse(details));
+      } catch {
+        parsed = null;
+      }
+      if (
+        !parsed ||
+        parsed.retryable !== true ||
+        parsed.retryAttempt === undefined ||
+        parsed.maxAttempts === undefined ||
+        parsed.retryAttempt >= parsed.maxAttempts
+      )
+        throw new Error("INVALID_STAGE_EVENT");
+      safeDetails = JSON.stringify(parsed);
+    } else if (stage === "agent.protocol_warning") {
+      if (details !== "AGENT_OUTCOME_PROTOCOL_MISSING") throw new Error("INVALID_STAGE_EVENT");
+    } else if (details !== "" && !/^[A-Z][A-Z0-9_]{0,79}$/.test(details)) {
+      throw new Error("INVALID_STAGE_EVENT");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db
@@ -1537,7 +1570,6 @@ export class ExpertTaskStore {
         ).n,
       );
       if (count >= 200) throw new Error("EVENT_LIMIT_REACHED");
-      const safeDetails = details;
       this.db
         .prepare("INSERT INTO expert_events(task_id,run_id,event_type,details,created_at) VALUES(?,?,?,?,?)")
         .run(claim.taskId, claim.runId, stage, safeDetails, now);

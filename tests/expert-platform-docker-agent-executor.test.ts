@@ -103,6 +103,13 @@ test("Worker MCP configuration is isolated, read-only and never leaks a key into
           } else {
             assert.ok(content.includes(key), "Claude's task-specific config contains the necessary key");
             assert.ok(options.args.includes("--strict-mcp-config"));
+            const toolIndex = options.args.indexOf("--tools");
+            assert.ok(toolIndex >= 0);
+            const tools = options.args[toolIndex + 1] ?? "";
+            assert.match(tools, /^Bash,Read,Glob,Grep,/);
+            assert.doesNotMatch(tools, /(?:^|,)default(?:,|$)/);
+            assert.match(tools, /mcp__skillhub__search_skills/);
+            assert.match(tools, /mcp__skillhub__search_knowledge/);
             assert.ok(argv.includes("mcp__skillhub__search_skills"));
           }
           return "ok";
@@ -171,6 +178,69 @@ test("Dynamic DAG agent outcome protocol is parsed and stripped before Worker co
     result: "Remote repository access is unavailable.",
     executionOutcome: { status: "blocked", reasonCode: "REMOTE_ACCESS" },
   });
+});
+
+test("Dynamic DAG missing outcome marker falls back to succeeded with an auditable protocol warning", async () => {
+  const stages: Array<{ stage: string; details: string }> = [];
+  const executor = createDockerAgentExecutor({
+    backend: "claude",
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async () => "Implemented the requested changes and handed off verification.",
+    onStage: async (_claim, stage, details = "") => {
+      stages.push({ stage, details });
+    },
+  });
+  const result = await executor(
+    {
+      ...claim,
+      executionKind: "agent",
+      problem: claim.problem + "\nTEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1",
+    },
+    new AbortController().signal,
+  );
+  assert.deepEqual(result, {
+    result: "Implemented the requested changes and handed off verification.",
+    executionOutcome: {
+      status: "succeeded",
+      protocolWarning: "AGENT_OUTCOME_PROTOCOL_MISSING",
+    },
+  });
+  assert.deepEqual(
+    stages.find((entry) => entry.stage === "agent.protocol_warning"),
+    {
+      stage: "agent.protocol_warning",
+      details: "AGENT_OUTCOME_PROTOCOL_MISSING",
+    },
+  );
+});
+
+test("Dynamic DAG malformed outcome marker remains a hard protocol failure", async () => {
+  const executor = createDockerAgentExecutor({
+    backend: "claude",
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async () =>
+      'Done.\n<TEAM_SKILL_HUB_OUTCOME>{"status":"succeeded","reasonCode":"BAD"}</TEAM_SKILL_HUB_OUTCOME>',
+  });
+  await assert.rejects(
+    () =>
+      executor(
+        {
+          ...claim,
+          executionKind: "agent",
+          problem: claim.problem + "\nTEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1",
+        },
+        new AbortController().signal,
+      ),
+    /AGENT_OUTCOME_PROTOCOL_INVALID/,
+  );
 });
 
 test("verification-only execution skips the model and runs pinned verification", async () => {
@@ -507,6 +577,44 @@ test("Docker Codex executor labels UUID-backed execution with task, run and fenc
   assert.ok(args.includes(`team-skill-hub.task-id=${taskId}`));
   assert.ok(args.includes(`team-skill-hub.run-id=${runId}`));
   assert.ok(args.includes("team-skill-hub.fencing=2"));
+});
+
+test("Docker executor preserves agent outcome protocol failure diagnostics", async () => {
+  const stages: string[] = [];
+  const execute = createDockerAgentExecutor({
+    backend: "claude",
+    image: "expert-image",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async () =>
+      'Done.\n<TEAM_SKILL_HUB_OUTCOME>{"status":"succeeded","reasonCode":"BAD"}</TEAM_SKILL_HUB_OUTCOME>',
+    onStage: async (_claim, stage, details) => {
+      stages.push(stage + ":" + details);
+    },
+  });
+  let captured: unknown;
+  try {
+    await execute(
+      {
+        ...claim,
+        problem: claim.problem + "\nTEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1",
+      },
+      new AbortController().signal,
+    );
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof Error);
+  assert.equal(captured.message, "AGENT_OUTCOME_PROTOCOL_INVALID");
+  assert.deepEqual((captured as Error & { diagnostic?: unknown }).diagnostic, {
+    errorCode: "AGENT_OUTCOME_PROTOCOL_INVALID",
+    backend: "claude",
+    message: "Agent final response did not contain a valid Team Skill Hub outcome marker",
+  });
+  assert.ok(stages.includes("claude.failed:AGENT_OUTCOME_PROTOCOL_INVALID"));
+  assert.ok(stages.includes("container.failed:AGENT_OUTCOME_PROTOCOL_INVALID"));
 });
 
 test("Docker executor emits only bounded stage codes for successful execution", async () => {

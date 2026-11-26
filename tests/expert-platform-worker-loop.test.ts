@@ -12,6 +12,7 @@ class FakeClient {
   completed?: string;
   failed?: string;
   failureDiagnostic?: unknown;
+  stages: Array<{ stage: string; details: string }> = [];
   renewResponse: unknown = undefined;
   constructor(
     private readonly claim: Claim | null,
@@ -31,6 +32,9 @@ class FakeClient {
   async failTask(_claim: Claim, reason: string, diagnostic?: unknown): Promise<void> {
     this.failed = reason;
     this.failureDiagnostic = diagnostic;
+  }
+  async reportTaskStage(_claim: Claim, stage: string, details = ""): Promise<void> {
+    this.stages.push({ stage, details });
   }
 }
 
@@ -98,6 +102,123 @@ test("executor failure is reported to Hub with generic reason", async () => {
   assert.equal(client.completed, undefined);
 });
 
+test("transient model failure retries inside the same ExpertTask before failing the task", async () => {
+  const client = new FakeClient(claim);
+  let calls = 0;
+  const transient = new Error("MODEL_RATE_LIMITED") as Error & { diagnostic?: unknown };
+  transient.diagnostic = {
+    errorCode: "MODEL_RATE_LIMITED",
+    backend: "claude",
+    httpStatus: 429,
+    message: "rate limit exceeded",
+  };
+  assert.equal(
+    await runRemoteWorkerOnce(
+      client,
+      "worker-1",
+      "ota",
+      async () => {
+        calls++;
+        if (calls < 3) throw transient;
+        return "recovered";
+      },
+      { modelRetryDelaysMs: [0, 0] },
+    ),
+    true,
+  );
+  assert.equal(calls, 3);
+  assert.equal(client.completed, "recovered");
+  assert.equal(client.failed, undefined);
+  assert.deepEqual(
+    client.stages
+      .filter((entry) => entry.stage === "model.retry")
+      .map((entry) => ({ stage: entry.stage, details: JSON.parse(entry.details) })),
+    [
+      {
+        stage: "model.retry",
+        details: {
+          errorCode: "MODEL_RATE_LIMITED",
+          backend: "claude",
+          httpStatus: 429,
+          message: "rate limit exceeded",
+          retryable: true,
+          retryAttempt: 1,
+          maxAttempts: 3,
+        },
+      },
+      {
+        stage: "model.retry",
+        details: {
+          errorCode: "MODEL_RATE_LIMITED",
+          backend: "claude",
+          httpStatus: 429,
+          message: "rate limit exceeded",
+          retryable: true,
+          retryAttempt: 2,
+          maxAttempts: 3,
+        },
+      },
+    ],
+  );
+});
+
+test("non-transient model failure is not retried inside the ExpertTask", async () => {
+  const client = new FakeClient(claim);
+  let calls = 0;
+  const denied = new Error("AUTHENTICATION_FAILED") as Error & { diagnostic?: unknown };
+  denied.diagnostic = {
+    errorCode: "AUTHENTICATION_FAILED",
+    backend: "claude",
+    httpStatus: 401,
+    message: "authentication rejected",
+  };
+  await runRemoteWorkerOnce(
+    client,
+    "worker-1",
+    "ota",
+    async () => {
+      calls++;
+      throw denied;
+    },
+    { modelRetryDelaysMs: [0, 0] },
+  );
+  assert.equal(calls, 1);
+  assert.equal(client.failed, "AUTHENTICATION_FAILED");
+});
+
+test("exhausted transient model retry forwards safe detailed diagnostic and retry metadata", async () => {
+  const client = new FakeClient(claim);
+  let calls = 0;
+  const transient = new Error("MODEL_REQUEST_FAILED") as Error & { diagnostic?: unknown };
+  transient.diagnostic = {
+    errorCode: "MODEL_REQUEST_FAILED",
+    backend: "claude",
+    exitCode: 1,
+    httpStatus: 503,
+    requestId: "req-503",
+    endpointHost: "router.example.test",
+    message: "upstream overloaded token=[REDACTED]",
+  };
+  await runRemoteWorkerOnce(
+    client,
+    "worker-1",
+    "ota",
+    async () => {
+      calls++;
+      throw transient;
+    },
+    { modelRetryDelaysMs: [0, 0] },
+  );
+  assert.equal(calls, 3);
+  assert.equal(client.failed, "MODEL_REQUEST_FAILED");
+  assert.deepEqual(client.failureDiagnostic, {
+    ...(transient.diagnostic as Record<string, unknown>),
+    retryable: true,
+    retryAttempt: 3,
+    maxAttempts: 3,
+  });
+});
+
 test("worker forwards structured executor diagnostics only through the admin failure channel", async () => {
   const client = new FakeClient(claim);
   const error = new Error("MODEL_RATE_LIMITED") as Error & { diagnostic?: unknown };
@@ -110,11 +231,22 @@ test("worker forwards structured executor diagnostics only through the admin fai
     endpointHost: "api.example.test",
     message: "rate limited token=[REDACTED]",
   };
-  await runRemoteWorkerOnce(client, "worker-1", "ota", async () => {
-    throw error;
-  });
+  await runRemoteWorkerOnce(
+    client,
+    "worker-1",
+    "ota",
+    async () => {
+      throw error;
+    },
+    { modelRetryDelaysMs: [] },
+  );
   assert.equal(client.failed, "MODEL_RATE_LIMITED");
-  assert.deepEqual(client.failureDiagnostic, error.diagnostic);
+  assert.deepEqual(client.failureDiagnostic, {
+    ...(error.diagnostic as Record<string, unknown>),
+    retryable: true,
+    retryAttempt: 1,
+    maxAttempts: 1,
+  });
 });
 
 test("worker forwards safe executor failure classifications to Hub", async () => {
@@ -127,9 +259,15 @@ test("worker forwards safe executor failure classifications to Hub", async () =>
   ]) {
     const client = new FakeClient(claim);
     assert.equal(
-      await runRemoteWorkerOnce(client, "worker-1", "ota", async () => {
-        throw new Error(code + ":private detail must not be forwarded");
-      }),
+      await runRemoteWorkerOnce(
+        client,
+        "worker-1",
+        "ota",
+        async () => {
+          throw new Error(code + ":private detail must not be forwarded");
+        },
+        { modelRetryDelaysMs: [] },
+      ),
       true,
     );
     assert.equal(client.failed, code);

@@ -573,6 +573,9 @@ test("failed runs persist admin-only executor diagnostics", () => {
       requestId: "req-123",
       endpointHost: "api.example.test",
       message: "rate limited token=[REDACTED]",
+      retryable: true,
+      retryAttempt: 3,
+      maxAttempts: 3,
     });
 
     const detail = store.adminTaskDetail(task.taskId)!;
@@ -584,6 +587,21 @@ test("failed runs persist admin-only executor diagnostics", () => {
       requestId: "req-123",
       endpointHost: "api.example.test",
       message: "rate limited token=[REDACTED]",
+      retryable: true,
+      retryAttempt: 3,
+      maxAttempts: 3,
+    });
+    assert.deepEqual(store.latestRunDiagnostic(task.taskId, "owner", "tenant"), {
+      errorCode: "MODEL_RATE_LIMITED",
+      backend: "codex",
+      exitCode: 1,
+      httpStatus: 429,
+      requestId: "req-123",
+      endpointHost: "api.example.test",
+      message: "rate limited token=[REDACTED]",
+      retryable: true,
+      retryAttempt: 3,
+      maxAttempts: 3,
     });
     assert.equal(
       Object.prototype.hasOwnProperty.call((detail.runs as Array<Record<string, unknown>>)[0] ?? {}, "diagnostic_json"),
@@ -619,6 +637,21 @@ test("model output activity persists safe diagnostic details for owner reads", (
       "Investigating retry failure. Authorization: Bearer secret-token",
     );
     store.recordActivity(claim, "model.failed", 2, "", 0, 102, "MODEL_RATE_LIMITED");
+    store.recordStage(
+      claim,
+      "model.retry",
+      JSON.stringify({
+        errorCode: "MODEL_RATE_LIMITED",
+        backend: "codex",
+        httpStatus: 429,
+        message: "rate limited token=[REDACTED]",
+        retryable: true,
+        retryAttempt: 1,
+        maxAttempts: 3,
+      }),
+      102,
+    );
+    store.recordStage(claim, "agent.protocol_warning", "AGENT_OUTCOME_PROTOCOL_MISSING", 103);
     assert.throws(
       () => store.recordActivity(claim, "model.failed", 3, "", 0, 103, "HTTP 429 secret-provider-message"),
       /INVALID_ACTIVITY_EVENT/,
@@ -630,6 +663,19 @@ test("model output activity persists safe diagnostic details for owner reads", (
       "Investigating retry failure. Authorization: Bearer [REDACTED]",
     );
     assert.equal(events.find((event) => event.type === "model.failed")?.details, "MODEL_RATE_LIMITED");
+    assert.equal(
+      events.find((event) => event.type === "agent.protocol_warning")?.details,
+      "AGENT_OUTCOME_PROTOCOL_MISSING",
+    );
+    assert.deepEqual(JSON.parse(events.find((event) => event.type === "model.retry")?.details ?? "{}"), {
+      errorCode: "MODEL_RATE_LIMITED",
+      backend: "codex",
+      httpStatus: 429,
+      message: "rate limited token=[REDACTED]",
+      retryable: true,
+      retryAttempt: 1,
+      maxAttempts: 3,
+    });
     assert.doesNotMatch(JSON.stringify(events), /secret-token|secret-provider-message/);
     store.close();
   } finally {

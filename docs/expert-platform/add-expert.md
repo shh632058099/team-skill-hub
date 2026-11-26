@@ -471,7 +471,7 @@ EXPERT_WORKER_BOOTSTRAP_TOKEN=与Hub部署方安全交付的Token
 EXPERT_EXECUTOR_BACKEND=claude
 EXPERT_RUNTIME_PROFILES=claude-readonly,claude-workspace-write
 EXPERT_DOCKER_IMAGE=team-skill-hub-expert-claude:0.1.0
-EXPERT_CLAUDE_MAX_TURNS=12
+EXPERT_CLAUDE_MAX_TURNS=100
 EXPERT_DOCKER_NETWORK=bridge
 EXPERT_DOCKER_SECCOMP_PROFILE=default
 EXPERT_MODEL_ENV_NAMES=ANTHROPIC_AUTH_TOKEN,HTTPS_PROXY,NO_PROXY
@@ -491,7 +491,7 @@ EXPERT_MCP_CREDENTIAL_FILES_JSON='{"skillhub-readonly":"/etc/team-skill-hub-work
 
 默认 credential/source/repositories 会自动使用 instance-local 路径，通常无需显式填写。
 
-Claude Worker 可通过 `EXPERT_CLAUDE_MAX_TURNS` 控制单个任务允许的 Claude CLI 最大回合数，对应 CLI 参数 `--max-turns`。默认值为 `12`，必须是大于等于 `1` 的安全整数；Team Skill Hub 不再额外设置固定最大值，具体可接受范围由 Claude CLI 自身决定。非法值会在 Worker 配置加载阶段被拒绝。它只影响 Claude 后端，与任务整体超时 `EXPERT_TASK_TIMEOUT_MS` 相互独立。修改后需重启对应 Worker instance 才会生效。
+Claude Worker 可通过 `EXPERT_CLAUDE_MAX_TURNS` 控制单个任务允许的 Claude CLI 最大回合数，对应 CLI 参数 `--max-turns`。默认值为 `100`，必须是大于等于 `1` 的安全整数；Team Skill Hub 不再额外设置固定最大值，具体可接受范围由 Claude CLI 自身决定。非法值会在 Worker 配置加载阶段被拒绝。它只影响 Claude 后端，与任务整体超时 `EXPERT_TASK_TIMEOUT_MS` 相互独立。修改后需重启对应 Worker instance 才会生效。
 
 #### 8.1.1 配置 MCP API Key
 

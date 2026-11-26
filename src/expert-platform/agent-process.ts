@@ -5,6 +5,7 @@ import {
   classifyModelFailureEvent,
   mapExecutionActivity,
   StreamResultCollector,
+  sanitizeModelOutputPreview,
   type ExecutionActivity,
 } from "./execution-activity.js";
 import { ExecutorFailureError, modelFailureDiagnostic, type ExecutorFailureDiagnostic } from "./executor-diagnostic.js";
@@ -57,6 +58,10 @@ function classifyProcessFailure(stderr: string): string {
   if (/EROFS: read-only file system/i.test(stderr)) return "READ_ONLY_FILESYSTEM";
   if (/\bEACCES\b.*permission denied/i.test(stderr)) return "FILE_ACCESS_DENIED";
   if (/permission denied/i.test(stderr)) return "PERMISSION_DENIED";
+  if (/\b429\b|rate[ ._-]?limit/i.test(stderr)) return "MODEL_RATE_LIMITED";
+  if (/\b5(?:00|02|03|04)\b|upstream.*(?:overload|unavailable|failed)|provider.*(?:overload|unavailable)/i.test(stderr))
+    return "MODEL_REQUEST_FAILED";
+  if (/ETIMEDOUT|ECONNRESET|request.*timed? out|model.*timeout/i.test(stderr)) return "MODEL_NETWORK_FAILED";
   if (
     /network is unreachable|could not resolve host|connection refused|temporary failure in name resolution/i.test(
       stderr,
@@ -64,6 +69,44 @@ function classifyProcessFailure(stderr: string): string {
   )
     return "NETWORK_CONNECTION_FAILED";
   return "PROCESS_EXIT_NONZERO";
+}
+
+const FINALIZATION_FAILURE_MESSAGES: Record<string, string> = {
+  CLAUDE_RESULT_MISSING: "Claude CLI exited without a valid final result event",
+  CLAUDE_RESULT_ERROR: "Claude CLI returned a final result event marked as error or invalid",
+  CLAUDE_INVALID_RESULT: "Claude CLI returned an invalid or duplicate final result event",
+  CODEX_TURN_FAILED: "Codex CLI reported that the agent turn failed",
+  CODEX_RESULT_MISSING: "Codex CLI exited without a completed agent result",
+};
+
+function finalizationFailure(error: unknown, backend: "claude" | "codex", exitCode = 0): ExecutorFailureError | null {
+  if (!(error instanceof Error)) return null;
+  const message = FINALIZATION_FAILURE_MESSAGES[error.message];
+  if (!message) return null;
+  return new ExecutorFailureError(error.message, {
+    errorCode: error.message,
+    backend,
+    exitCode,
+    message,
+  });
+}
+
+function modelStderrDiagnostic(
+  stderr: string,
+  backend: "claude" | "codex",
+  errorCode: string,
+  exitCode?: number,
+): ExecutorFailureDiagnostic {
+  const safe = sanitizeModelOutputPreview(stderr, 500);
+  const statusMatch = /(?:HTTP\s*)?(4\d\d|5\d\d)/i.exec(stderr);
+  const httpStatus = statusMatch ? Number(statusMatch[1]) : undefined;
+  return {
+    errorCode,
+    backend,
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(httpStatus && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {}),
+    ...(safe ? { message: safe } : {}),
+  };
 }
 /** Classify only structured model errors; never log raw stdout or provider messages. */
 function inspectJsonlFailure(
@@ -167,7 +210,10 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
           if (sessionId) options.onRuntimeSessionId?.(sessionId);
           resolve(collector ? collector.result() : (options.parseResult ?? parseCodexJsonlResult)(output));
         } catch (parseError) {
-          reject(parseError);
+          const finalized = options.streamingBackend
+            ? finalizationFailure(parseError, options.streamingBackend, 0)
+            : null;
+          reject(finalized ?? parseError);
         }
       }
     };
@@ -267,12 +313,34 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
           }),
         );
       }
+      const fallbackModelFailure =
+        code !== 0 &&
+        options.streamingBackend &&
+        typeof classifiedFailure === "string" &&
+        classifiedFailure.startsWith("MODEL_") &&
+        !inspected
+          ? new ExecutorFailureError(
+              classifiedFailure,
+              modelStderrDiagnostic(stderrOutput, options.streamingBackend, classifiedFailure, code ?? undefined),
+            )
+          : null;
+      const processExitFailure =
+        code !== 0 && options.streamingBackend && !inspected && !fallbackModelFailure
+          ? new ExecutorFailureError(options.streamingBackend.toUpperCase() + "_PROCESS_EXIT_NONZERO", {
+              errorCode: options.streamingBackend.toUpperCase() + "_PROCESS_EXIT_NONZERO",
+              backend: options.streamingBackend,
+              ...(code === null ? {} : { exitCode: code }),
+              ...(sanitizeModelOutputPreview(stderrOutput, 500)
+                ? { message: sanitizeModelOutputPreview(stderrOutput, 500) }
+                : { message: options.streamingBackend + " CLI exited with a non-zero status" }),
+            })
+          : null;
       finish(
         modelFailure && inspected
           ? new ExecutorFailureError(modelFailure, inspected.diagnostic)
-          : code === 0
-            ? undefined
-            : new Error("EXECUTOR_PROCESS_FAILED"),
+          : (fallbackModelFailure ??
+              processExitFailure ??
+              (code === 0 ? undefined : new Error("EXECUTOR_PROCESS_FAILED"))),
       );
     });
   });

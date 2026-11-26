@@ -25,6 +25,8 @@ import { parseAgentExecutionResult, requiresAgentOutcomeProtocol } from "./agent
 import { parseClaudeResult, buildClaudeArgs } from "./claude-runtime.js";
 import { buildAgentDockerArgs } from "./agent-container-executor.js";
 import { runAgentProcess, type AgentProcessOptions } from "./agent-process.js";
+import { ExecutorFailureError } from "./executor-diagnostic.js";
+import { safeExecutorFailureCode } from "./executor-failure.js";
 import type { ExecutionActivity } from "./execution-activity.js";
 import { runVerificationPolicy } from "./verification-runner.js";
 import { assertRuntimeProfileBackend } from "./runtime-profile-policy.js";
@@ -293,7 +295,7 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
             claim.problem,
             claim.deploymentSnapshot?.executor.modelConfig.model ?? options.claudeModel ?? "sonnet",
             streaming,
-            options.claudeMaxTurns ?? 12,
+            options.claudeMaxTurns ?? 100,
             runtimePolicy.agentPermissions,
             runtimeSession,
           )
@@ -426,7 +428,7 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
         claim.problem,
         claim.modelConfig.model,
         streaming,
-        options.claudeMaxTurns ?? 12,
+        options.claudeMaxTurns ?? 100,
         runtimePolicy.agentPermissions,
         runtimeSession,
       );
@@ -663,15 +665,31 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
               : {}),
         });
         if (requiresAgentOutcomeProtocol(claim.problem)) {
-          const parsed = parseAgentExecutionResult(rawResult);
-          result = parsed.result;
-          executionOutcome = parsed.executionOutcome;
+          try {
+            const parsed = parseAgentExecutionResult(rawResult);
+            result = parsed.result;
+            executionOutcome = parsed.executionOutcome;
+            if (parsed.executionOutcome.protocolWarning) {
+              await report("agent.protocol_warning", parsed.executionOutcome.protocolWarning);
+            }
+          } catch (error) {
+            if (error instanceof Error && error.message === "AGENT_OUTCOME_PROTOCOL_INVALID") {
+              throw new ExecutorFailureError("AGENT_OUTCOME_PROTOCOL_INVALID", {
+                errorCode: "AGENT_OUTCOME_PROTOCOL_INVALID",
+                backend,
+                message: "Agent final response did not contain a valid Team Skill Hub outcome marker",
+              });
+            }
+            throw error;
+          }
         } else {
           result = rawResult;
         }
       } catch (error) {
-        await report(`${backend}.failed`, "EXECUTION_FAILED");
-        await report("container.failed", "EXECUTION_FAILED");
+        const code =
+          error instanceof Error ? (safeExecutorFailureCode(error.message) ?? "EXECUTION_FAILED") : "EXECUTION_FAILED";
+        await report(`${backend}.failed`, code);
+        await report("container.failed", code);
         throw error;
       }
       if (streaming) {

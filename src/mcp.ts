@@ -460,6 +460,40 @@ function safeExpertActivityMessage(event: {
   const tool = event.tool && ["Read", "Glob", "Grep", "other"].includes(event.tool) ? event.tool : "other";
   if (event.type === "tool.activity")
     return `Worker 正在执行 ${tool} 操作${event.count ? `（${event.count} 次）` : ""}`;
+  if (event.type === "agent.protocol_warning" && event.details === "AGENT_OUTCOME_PROTOCOL_MISSING") {
+    return "模型已完成本轮工作，但最终响应缺少 Team Skill Hub outcome 标记；已按成功结果容错接受并记录协议告警";
+  }
+  if (event.type === "model.retry" && event.details?.trim()) {
+    try {
+      const diagnostic = JSON.parse(event.details) as {
+        errorCode?: unknown;
+        httpStatus?: unknown;
+        message?: unknown;
+        retryAttempt?: unknown;
+        maxAttempts?: unknown;
+      };
+      const code = typeof diagnostic.errorCode === "string" ? diagnostic.errorCode : "MODEL_REQUEST_FAILED";
+      const attempt = typeof diagnostic.retryAttempt === "number" ? diagnostic.retryAttempt : 1;
+      const maxAttempts = typeof diagnostic.maxAttempts === "number" ? diagnostic.maxAttempts : attempt + 1;
+      const message =
+        typeof diagnostic.message === "string" && diagnostic.message.trim() ? "：" + diagnostic.message : "";
+      const status = typeof diagnostic.httpStatus === "number" ? "（HTTP " + diagnostic.httpStatus + "）" : "";
+      return (
+        "模型请求失败（" +
+        code +
+        "）" +
+        status +
+        message +
+        "，正在自动重试 " +
+        attempt +
+        "/" +
+        Math.max(1, maxAttempts - 1)
+      );
+    } catch {
+      const match = /^([A-Z][A-Z0-9_]{0,79}):([1-9][0-9]*)\/([1-9][0-9]*)$/.exec(event.details.trim());
+      if (match) return "模型请求失败（" + match[1] + "），正在自动重试 " + match[2] + "/" + match[3];
+    }
+  }
   const names: Record<string, string> = {
     queued: "任务已入队",
     running: "Worker 已开始执行",
@@ -2040,17 +2074,39 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               "Get and reconcile one WorkItem owned by the authenticated principal. Returns current Work state, WorkAttempts, current ExpertTask, Run/Turn history, current Workspace, verification summary, evidence and Completion Gate.",
             inputSchema: z.object({ workItemId: z.string().uuid() }),
           },
-          async ({ workItemId }) =>
-            toolResult(
-              await reconcileMcpWork(
-                workOrchestrationStore!,
-                workOrchestrator!,
-                workDagRuntime,
-                workItemId,
-                principal.id,
-                principal.tenantId,
-              ),
-            ),
+          async ({ workItemId }) => {
+            const detail = await reconcileMcpWork(
+              workOrchestrationStore!,
+              workOrchestrator!,
+              workDagRuntime,
+              workItemId,
+              principal.id,
+              principal.tenantId,
+            );
+            return toolResult({
+              ...detail,
+              currentTask: detail.currentTask
+                ? {
+                    ...detail.currentTask,
+                    failureDiagnostic: expertTaskStore.latestRunDiagnostic(
+                      detail.currentTask.taskId,
+                      principal.id,
+                      principal.tenantId,
+                    ),
+                  }
+                : null,
+              reviewTask: detail.reviewTask
+                ? {
+                    ...detail.reviewTask,
+                    failureDiagnostic: expertTaskStore.latestRunDiagnostic(
+                      detail.reviewTask.taskId,
+                      principal.id,
+                      principal.tenantId,
+                    ),
+                  }
+                : null,
+            });
+          },
         );
 
         registerTool(
@@ -2203,6 +2259,11 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
                         runtimeSessionId: task.runtimeSessionId,
                         commitSha: task.commitSha,
                         workspaceKey: task.workspaceKey,
+                        failureDiagnostic: expertTaskStore.latestRunDiagnostic(
+                          task.taskId,
+                          principal.id,
+                          principal.tenantId,
+                        ),
                       }
                     : null;
                 return toolResult({

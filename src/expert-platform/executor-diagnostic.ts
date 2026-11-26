@@ -10,6 +10,9 @@ export interface ExecutorFailureDiagnostic {
   requestId?: string;
   endpointHost?: string;
   message?: string;
+  retryable?: boolean;
+  retryAttempt?: number;
+  maxAttempts?: number;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -119,6 +122,9 @@ export function normalizeExecutorFailureDiagnostic(
     typeof value.message === "string" && value.message.trim()
       ? sanitizeModelOutputPreview(value.message, 500)
       : undefined;
+  const retryable = typeof value.retryable === "boolean" ? value.retryable : undefined;
+  const retryAttempt = safeInteger(value.retryAttempt, 1, 100);
+  const maxAttempts = safeInteger(value.maxAttempts, 1, 100);
   return {
     errorCode,
     backend,
@@ -127,7 +133,30 @@ export function normalizeExecutorFailureDiagnostic(
     ...(requestId ? { requestId } : {}),
     ...(endpointHost ? { endpointHost } : {}),
     ...(message ? { message } : {}),
+    ...(retryable === undefined ? {} : { retryable }),
+    ...(retryAttempt === undefined ? {} : { retryAttempt }),
+    ...(maxAttempts === undefined ? {} : { maxAttempts }),
   };
+}
+
+const TRANSIENT_EXECUTOR_FAILURES = new Set([
+  "MODEL_REQUEST_FAILED",
+  "MODEL_RATE_LIMITED",
+  "MODEL_NETWORK_FAILED",
+  "EXECUTOR_TIMEOUT",
+  "CLAUDE_PROCESS_EXIT_NONZERO",
+  "CODEX_PROCESS_EXIT_NONZERO",
+]);
+
+export function isTransientExecutorFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const diagnostic = executorFailureDiagnostic(error);
+  const code = diagnostic?.errorCode ?? error.message.trim().split(/[:\s]/, 1)[0] ?? "";
+  if (!TRANSIENT_EXECUTOR_FAILURES.has(code)) return false;
+  if (diagnostic?.httpStatus !== undefined) {
+    return diagnostic.httpStatus === 408 || diagnostic.httpStatus === 429 || diagnostic.httpStatus >= 500;
+  }
+  return true;
 }
 
 export class ExecutorFailureError extends Error {

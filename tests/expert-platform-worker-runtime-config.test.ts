@@ -358,7 +358,7 @@ test("worker Claude max turns parses environment and rejects invalid values", ()
     EXPERT_SOURCE_PATH: "/repo",
     EXPERT_DOCKER_NETWORK: "expert-egress",
   };
-  assert.equal(parseExpertWorkerConfig(base).claudeMaxTurns, 12);
+  assert.equal(parseExpertWorkerConfig(base).claudeMaxTurns, 100);
   assert.equal(parseExpertWorkerConfig({ ...base, EXPERT_CLAUDE_MAX_TURNS: "64" }).claudeMaxTurns, 64);
   assert.equal(parseExpertWorkerConfig({ ...base, EXPERT_CLAUDE_MAX_TURNS: "5000" }).claudeMaxTurns, 5000);
   for (const bad of ["0", "-1", "1.5", "oops"]) {

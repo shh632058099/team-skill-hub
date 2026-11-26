@@ -164,6 +164,73 @@ test("structured provider failures carry bounded admin diagnostics without expos
   assert.doesNotMatch(JSON.stringify(diagnostic), /secret-value|secret-query|\/v1\/responses/);
 });
 
+test("stderr-only provider failure becomes a safe structured model diagnostic", async () => {
+  let captured: unknown;
+  try {
+    await runAgentProcess({
+      executable: process.execPath,
+      args: ["-e", "process.stderr.write('HTTP 503 upstream overloaded token=secret-value'); process.exit(1)"],
+      timeoutMs: 5000,
+      streamingBackend: "claude",
+    });
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof Error);
+  assert.equal(captured.message, "MODEL_REQUEST_FAILED");
+  assert.deepEqual((captured as Error & { diagnostic?: unknown }).diagnostic, {
+    errorCode: "MODEL_REQUEST_FAILED",
+    backend: "claude",
+    exitCode: 1,
+    httpStatus: 503,
+    message: "HTTP 503 upstream overloaded token=[REDACTED]",
+  });
+});
+
+test("Claude missing final result exposes a structured finalization diagnostic", async () => {
+  let captured: unknown;
+  try {
+    await runAgentProcess({
+      executable: process.execPath,
+      args: ["-e", "console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'done'}]}}))"],
+      timeoutMs: 5000,
+      streamingBackend: "claude",
+    });
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof Error);
+  assert.equal(captured.message, "CLAUDE_RESULT_MISSING");
+  assert.deepEqual((captured as Error & { diagnostic?: unknown }).diagnostic, {
+    errorCode: "CLAUDE_RESULT_MISSING",
+    backend: "claude",
+    exitCode: 0,
+    message: "Claude CLI exited without a valid final result event",
+  });
+});
+
+test("unclassified Claude nonzero exit exposes process-exit diagnostic instead of generic execution failure", async () => {
+  let captured: unknown;
+  try {
+    await runAgentProcess({
+      executable: process.execPath,
+      args: ["-e", "process.stderr.write('unexpected cli shutdown'); process.exit(7)"],
+      timeoutMs: 5000,
+      streamingBackend: "claude",
+    });
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof Error);
+  assert.equal(captured.message, "CLAUDE_PROCESS_EXIT_NONZERO");
+  assert.deepEqual((captured as Error & { diagnostic?: unknown }).diagnostic, {
+    errorCode: "CLAUDE_PROCESS_EXIT_NONZERO",
+    backend: "claude",
+    exitCode: 7,
+    message: "unexpected cli shutdown",
+  });
+});
+
 test("structured model failure remains classified even when the CLI exits zero", async () => {
   let captured: unknown;
   try {

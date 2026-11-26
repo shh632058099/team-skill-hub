@@ -11,7 +11,7 @@ export function buildClaudeArgs(
   problem: string,
   model: string,
   stream = false,
-  maxTurns = 12,
+  maxTurns = 100,
   permissions: "read-only" | "workspace-write" = "read-only",
   session?: ClaudeRuntimeSessionOptions,
 ): string[] {
@@ -25,7 +25,7 @@ export function buildClaudeArgs(
     throw new Error("INVALID_CLAUDE_REQUEST");
   const resumeId = session?.resumeId ? validateRuntimeSessionId(session.resumeId) : undefined;
   if (resumeId && session?.persist !== true) throw new Error("INVALID_RUNTIME_SESSION");
-  void permissions;
+  const tools = permissions === "workspace-write" ? "Bash,Read,Glob,Grep,Edit,Write" : "Bash,Read,Glob,Grep";
   return [
     "-p",
     ...(session?.persist ? [] : ["--no-session-persistence"]),
@@ -40,13 +40,13 @@ export function buildClaudeArgs(
     "--permission-mode",
     "bypassPermissions",
     "--tools",
-    "default",
+    tools,
     "--",
     problem,
   ];
 }
 
-export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false, maxTurns = 12): string[] {
+export function buildClaudeReadOnlyArgs(problem: string, model: string, stream = false, maxTurns = 100): string[] {
   return buildClaudeArgs(problem, model, stream, maxTurns, "read-only");
 } /** Only completed, successful Claude -p --output-format=json results are accepted. */
 export function parseClaudeResult(output: string): string {

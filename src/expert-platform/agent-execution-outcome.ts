@@ -5,6 +5,7 @@ export type AgentExecutionOutcomeStatus = "succeeded" | "blocked" | "failed";
 export type AgentExecutionOutcome = {
   status: AgentExecutionOutcomeStatus;
   reasonCode?: string;
+  protocolWarning?: "AGENT_OUTCOME_PROTOCOL_MISSING";
 };
 
 export type ParsedAgentExecutionResult = {
@@ -34,8 +35,21 @@ export function requiresAgentOutcomeProtocol(problem: string): boolean {
 }
 
 export function parseAgentExecutionResult(output: string): ParsedAgentExecutionResult {
+  const normalized = output.trim();
+  if (!normalized) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
   const match = OUTCOME_PATTERN.exec(output);
-  if (!match) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
+  if (!match) {
+    if (output.includes("<TEAM_SKILL_HUB_OUTCOME>") || output.includes("</TEAM_SKILL_HUB_OUTCOME>")) {
+      throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
+    }
+    return {
+      result: normalized,
+      executionOutcome: {
+        status: "succeeded",
+        protocolWarning: "AGENT_OUTCOME_PROTOCOL_MISSING",
+      },
+    };
+  }
   const result = output.slice(0, match.index).trim();
   if (!result) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
   let parsed: unknown;

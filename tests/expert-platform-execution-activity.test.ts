@@ -66,7 +66,7 @@ test("structured model failures expose only a fixed diagnostic code", () => {
 test("Claude stream collector validates a single success result and rejects failure", () => {
   const collector = new StreamResultCollector("claude");
   collector.accept({ type: "assistant", message: { content: [{ type: "text", text: "not final" }] } });
-  assert.throws(() => collector.result(), /CLAUDE_EXECUTION_FAILED/);
+  assert.throws(() => collector.result(), /CLAUDE_RESULT_MISSING/);
   collector.accept({ type: "result", subtype: "success", is_error: false, result: "final report" });
   assert.equal(collector.result(), "final report");
   assert.throws(
@@ -75,7 +75,7 @@ test("Claude stream collector validates a single success result and rejects fail
   );
   const failure = new StreamResultCollector("claude");
   failure.accept({ type: "result", subtype: "error", is_error: true, result: "error" });
-  assert.throws(() => failure.result(), /CLAUDE_EXECUTION_FAILED/);
+  assert.throws(() => failure.result(), /CLAUDE_RESULT_ERROR/);
 });
 
 test("Codex adapter yields safe activity and validates completed final message", () => {
@@ -163,6 +163,6 @@ test("streaming subprocess fails when missing terminal result", async () => {
       timeoutMs: 5000,
       streamingBackend: "claude",
     }),
-    /CLAUDE_EXECUTION_FAILED/,
+    /CLAUDE_RESULT_MISSING/,
   );
 });

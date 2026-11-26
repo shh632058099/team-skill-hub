@@ -173,7 +173,9 @@ export class StreamResultCollector {
 
   result(): string {
     if (this.backend === "claude") {
-      if (!this.completed || this.failed || !this.lastReport) throw new Error("CLAUDE_EXECUTION_FAILED");
+      if (this.results === 0) throw new Error("CLAUDE_RESULT_MISSING");
+      if (this.failed) throw new Error("CLAUDE_RESULT_ERROR");
+      if (!this.completed || !this.lastReport) throw new Error("CLAUDE_INVALID_RESULT");
     } else {
       if (this.failed) throw new Error("CODEX_TURN_FAILED");
       if (!this.completed || !this.lastReport) throw new Error("CODEX_RESULT_MISSING");
