@@ -3620,6 +3620,7 @@ export class SkillHubApplicationService {
       title: input.title,
       content: input.content,
       submittedSpecVersion: options.submittedSpecVersion,
+      contentMode: input.contentMode,
     });
     const repositoryId = input.repository ?? this.defaultPublishingRepository("knowledge");
     const match =
@@ -3655,6 +3656,7 @@ export class SkillHubApplicationService {
       validationSpecVersion: normalized.appliedSpecVersion,
       submissionSpecSchemaVersion: normalized.schemaVersion,
       submissionMode: options.submissionMode,
+      contentMode: normalized.contentMode,
     });
     let finalized = created;
     if (!finalized.suggestedPath && finalized.knowledgeRelation?.type !== "updates") {
@@ -3697,6 +3699,7 @@ export class SkillHubApplicationService {
       | "repository"
       | "suggestedPath"
       | "traceId"
+      | "contentMode"
     > & {
       submittedSpecVersion?: number;
       submissionMode?: NonNullable<KnowledgeCandidate["submissionMode"]>;
@@ -3758,8 +3761,13 @@ export class SkillHubApplicationService {
       relation,
       defaultCandidatePath(candidate),
     );
-    const body = candidate.content.trim();
-    const desiredContent = /^#\s+/m.test(body) ? body + "\n" : "# " + candidate.title.trim() + "\n\n" + body + "\n";
+    const desiredContent =
+      candidate.contentMode === "verbatim"
+        ? candidate.content
+        : (() => {
+            const body = candidate.content.trim();
+            return /^#\s+/m.test(body) ? body + "\n" : "# " + candidate.title.trim() + "\n\n" + body + "\n";
+          })();
     return { repositoryId, targetRoot, desiredContent };
   }
 
@@ -4228,19 +4236,27 @@ export class SkillHubApplicationService {
       effectiveType === "knowledge" &&
       (input.content !== undefined || input.title !== undefined || input.suggestedType !== undefined)
     ) {
+      const contentMode = current.contentMode ?? "structured";
       let content = input.content ?? current.content;
       if (input.title !== undefined) {
         const requestedTitle = input.title.trim();
         if (!requestedTitle) throw new Error("Knowledge candidate title is required");
-        content = /^#\s+.+$/m.test(content)
-          ? content.replace(/^#\s+.+$/m, `# ${requestedTitle}`)
-          : `# ${requestedTitle}\n\n${content}`;
+        if (contentMode === "structured") {
+          content = /^#\s+.+$/m.test(content)
+            ? content.replace(/^#\s+.+$/m, `# ${requestedTitle}`)
+            : `# ${requestedTitle}\n\n${content}`;
+        }
       }
-      const normalized = await this.knowledgeSubmission.normalize({ title: input.title ?? current.title, content });
+      const normalized = await this.knowledgeSubmission.normalize({
+        title: input.title ?? current.title,
+        content,
+        contentMode,
+      });
       candidateUpdate = {
         ...candidateUpdate,
         title: normalized.title,
         content: normalized.content,
+        contentMode: normalized.contentMode,
         validationSpecVersion: normalized.appliedSpecVersion,
         submissionSpecSchemaVersion: normalized.schemaVersion,
       };

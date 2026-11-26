@@ -39,6 +39,34 @@ test("parses and canonicalizes the fixed knowledge summary format", () => {
   assert.equal(result.summary.markdown, validSummary);
 });
 
+test("preserves nested markdown headings inside a canonical knowledge section", () => {
+  const input = validSummary.replace(
+    "从最后一个安全检查点恢复，并在启动前校验镜像版本与完整性。",
+    [
+      "完整运维手册如下：",
+      "",
+      "## 1. 架构和流量路径",
+      "客户端 -> HAProxy -> sing-box。",
+      "",
+      "## 2. 健康检查",
+      "运行 systemctl status 和端口检查。",
+      "",
+      "### 2.1 证书检查",
+      "检查证书有效期。",
+    ].join("\n"),
+  );
+
+  const result = normalizeKnowledgeCandidateSummary(input);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  assert.match(result.content, /## 解决方案\n完整运维手册如下：/);
+  assert.match(result.content, /## 1\. 架构和流量路径\n客户端 -> HAProxy -> sing-box。/);
+  assert.match(result.content, /## 2\. 健康检查\n运行 systemctl status 和端口检查。/);
+  assert.match(result.content, /### 2\.1 证书检查\n检查证书有效期。/);
+  assert.match(result.content, /## 验证结果\n运行 12 项回归测试/);
+});
+
 test("accepts large knowledge summaries up to the configured limit", () => {
   const padding = "A".repeat(5_000);
   const input = validSummary.replace("设备升级过程中断电后可能无法恢复。", padding);

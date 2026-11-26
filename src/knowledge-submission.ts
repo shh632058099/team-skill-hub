@@ -2,6 +2,8 @@ import { normalizeKnowledgeCandidateSummary } from "./knowledge-summary.js";
 import type { KnowledgeSectionId, KnowledgeSubmissionSpec } from "./knowledge-submission-spec.js";
 import { KnowledgeSubmissionSpecStore } from "./knowledge-submission-spec.js";
 
+export type KnowledgeContentMode = "structured" | "verbatim";
+
 export interface KnowledgeSubmissionSpecView {
   spec_version: number;
   schema_version: number;
@@ -23,6 +25,7 @@ export interface KnowledgeSubmissionDraft {
 export interface NormalizedKnowledgeSubmission {
   title: string;
   content: string;
+  contentMode: KnowledgeContentMode;
   submittedSpecVersion?: number;
   appliedSpecVersion: number;
   schemaVersion: number;
@@ -66,7 +69,7 @@ export class KnowledgeSubmissionService {
       schema_version: spec.schema_version,
       rules: spec,
       template: this.template(spec),
-      instruction: `Create durable, verified team Knowledge using this specification. Use the template, satisfy every required section, and submit with spec_version=${spec.spec_version}. Never include secrets, credentials, customer-sensitive data, or unverified speculation.`,
+      instruction: `Create durable, verified team Knowledge using this specification. content_mode defaults to structured: use the template and satisfy every required section. Use content_mode=verbatim when the user explicitly asks to preserve the original Markdown/file content without structural rewriting. Verbatim content is still subject to platform safety redaction. Submit with spec_version=${spec.spec_version}. Never include secrets, credentials, customer-sensitive data, or unverified speculation.`,
     };
   }
 
@@ -82,11 +85,38 @@ export class KnowledgeSubmissionService {
     title: string;
     content: string;
     submittedSpecVersion?: number;
+    contentMode?: KnowledgeContentMode;
   }): Promise<NormalizedKnowledgeSubmission> {
     const spec = await this.store.loadCurrent();
     const submitted = input.submittedSpecVersion;
     if (submitted !== undefined && (!Number.isInteger(submitted) || submitted < 1 || submitted > spec.spec_version)) {
       throw new Error(`Unknown knowledge submission spec version: ${String(submitted)}`);
+    }
+    const contentMode = input.contentMode ?? "structured";
+    if (contentMode === "verbatim") {
+      const title = input.title.trim();
+      const reason =
+        !title || isPlaceholder(title)
+          ? "missing-title"
+          : input.content.length > spec.content.max_chars
+            ? "too-long"
+            : !input.content.trim()
+              ? "empty"
+              : undefined;
+      if (reason) {
+        if (submitted !== undefined && submitted < spec.spec_version) {
+          throw new KnowledgeSpecOutdatedError(submitted, spec.spec_version, reason);
+        }
+        throw new Error(`Knowledge candidate content does not satisfy current submission spec: ${reason}`);
+      }
+      return {
+        title: title.slice(0, spec.title.max_chars),
+        content: input.content,
+        contentMode,
+        ...(submitted !== undefined ? { submittedSpecVersion: submitted } : {}),
+        appliedSpecVersion: spec.spec_version,
+        schemaVersion: spec.schema_version,
+      };
     }
     const normalized = normalizeKnowledgeCandidateSummary(input.content, spec);
     if (!normalized.ok) {
@@ -98,6 +128,7 @@ export class KnowledgeSubmissionService {
     return {
       title: normalized.title,
       content: normalized.content,
+      contentMode,
       ...(submitted !== undefined ? { submittedSpecVersion: submitted } : {}),
       appliedSpecVersion: spec.spec_version,
       schemaVersion: spec.schema_version,

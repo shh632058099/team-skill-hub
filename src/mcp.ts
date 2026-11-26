@@ -1326,23 +1326,30 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
       "submit_knowledge_candidate",
       {
         description:
-          "Knowledge ONLY. Submit a Knowledge Artifact Bundle for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. submission_mode defaults to merge; replace explicitly replaces only the selected Knowledge artifact scope. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
+          "Knowledge ONLY. Submit a Knowledge Artifact Bundle for human review using the current server specification returned by get_knowledge_submission_spec. Include that spec_version. content_mode defaults to structured; use verbatim when the user explicitly requests complete/original Markdown preservation without structural rewriting. Existing platform safety redaction still applies. submission_mode defaults to merge; replace explicitly replaces only the selected Knowledge artifact scope. NEVER use this tool for Skills or SKILL.md content; Skills must use submit_skill_bundle. This never publishes directly to Git.",
         inputSchema: z.object({
           trace_id: z.string().min(1).optional(),
           spec_version: z.number().int().min(1),
           title: z.string().min(1).max(200),
           content: z.string().min(1).max(50_000),
+          content_mode: z
+            .enum(["structured", "verbatim"])
+            .optional()
+            .describe(
+              "Defaults to structured. Use verbatim when the user explicitly asks to preserve the complete/original Markdown without structural rewriting.",
+            ),
           source_type: z.enum(["mcp-session", "manual", "codex-summary", "troubleshooting", "review"]).optional(),
           repository: z.string().min(1).optional(),
           submission_mode: z.enum(["merge", "replace"]).nullish(),
         }),
       },
-      async ({ trace_id, spec_version, title, content, source_type, repository, submission_mode }) =>
+      async ({ trace_id, spec_version, title, content, content_mode, source_type, repository, submission_mode }) =>
         toolResult({
           candidate: await appService.submitKnowledgeCandidate(principal, {
             traceId: trace_id,
             title,
             content,
+            contentMode: content_mode ?? "structured",
             sourceType: source_type ?? "mcp-session",
             suggestedType: "knowledge",
             repository,

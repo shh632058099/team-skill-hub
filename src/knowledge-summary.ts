@@ -104,9 +104,12 @@ export function parseKnowledgeSummary(
     }
     const sectionMatch = line.match(/^##\s+(.+?)\s*#*\s*$/);
     if (sectionMatch) {
-      current = sectionForHeading(sectionMatch[1]!, spec);
-      if (current && !sections[current]) sections[current] = [];
-      continue;
+      const nextSection = sectionForHeading(sectionMatch[1]!, spec);
+      if (nextSection) {
+        current = nextSection;
+        if (!sections[current]) sections[current] = [];
+        continue;
+      }
     }
     if (current) sections[current]!.push(line);
   }

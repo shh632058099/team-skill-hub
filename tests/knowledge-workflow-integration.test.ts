@@ -134,6 +134,34 @@ test("published Knowledge is automatically related and updated through review an
     assert.equal(bundleSummary?.replacementRoot, existingPath);
     assert.ok(bundleSummary?.targetScopeSha256);
     assert.ok(bundleSummary?.snapshotSha256);
+
+    const verbatimContent = [
+      "",
+      "# 原始保全文档",
+      "",
+      "## 任意章节",
+      "正文保持原样。",
+      "",
+      "### 任意子章节",
+      "结尾空行也属于原文。",
+      "",
+    ].join("\n");
+    const verbatimCandidate = await service.submitKnowledgeCandidate(principal, {
+      title: "原始保全文档",
+      content: verbatimContent,
+      contentMode: "verbatim",
+      sourceType: "manual",
+      suggestedType: "knowledge",
+      repository: "rd-knowledges",
+    });
+    assert.equal(verbatimCandidate.content, verbatimContent);
+    assert.equal(verbatimCandidate.contentMode, "verbatim");
+    assert.ok(verbatimCandidate.artifactBundleId);
+    const verbatimBundle = service.getSkillBundleImport(verbatimCandidate.artifactBundleId!);
+    assert.ok(verbatimBundle);
+    const verbatimSnapshot = service.getSkillBundleSnapshot(verbatimBundle.snapshotId);
+    assert.equal(verbatimSnapshot?.files[0]?.content, verbatimContent);
+
     const editedCandidate = await service.updateKnowledgeCandidate(candidate.id, {
       content: candidate.content.replace(
         "Updated recovery instructions with new verified checkpoints.",

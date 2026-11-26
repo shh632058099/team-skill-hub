@@ -87,6 +87,7 @@ test("MCP exposes current knowledge submission spec and accepts 50k contract sub
     assert.match(specText, /"spec_version"\s*:\s*1/);
     assert.match(specText, /"max_chars"\s*:\s*50000/);
     assert.match(specText, /## 问题/);
+    assert.match(specText, /content_mode=verbatim/);
 
     const large = summary("A".repeat(12_000));
     const submitText = await call(f.url, 2, "submit_knowledge_candidate", {
@@ -103,6 +104,74 @@ test("MCP exposes current knowledge submission spec and accepts 50k contract sub
     assert.equal(candidates[0]!.submissionSpecSchemaVersion, 1);
     assert.equal(candidates[0]!.submissionMode, "mcp");
     assert.equal(candidates[0]!.bundleSubmissionMode, "merge");
+  } finally {
+    await f.app.close();
+    f.search.close();
+    await rm(f.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("MCP verbatim content mode preserves arbitrary original markdown and records the mode", async () => {
+  const f = await fixture("skill-hub-knowledge-verbatim-mcp-");
+  try {
+    const original = [
+      "# 原始文档",
+      "",
+      "无需转换为六段式。",
+      "",
+      "## 任意二级标题",
+      "正文 A",
+      "",
+      "### 任意三级标题",
+      "正文 B",
+      "",
+      "~~~text",
+      "literal content",
+      "~~~",
+    ].join("\n");
+
+    const submitText = await call(f.url, 20, "submit_knowledge_candidate", {
+      spec_version: 1,
+      title: "原始文档",
+      content: original,
+      content_mode: "verbatim",
+    });
+    assert.match(submitText, /"candidate"/);
+
+    const candidates = await f.service.listKnowledgeCandidates(10);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]!.title, "原始文档");
+    assert.equal(candidates[0]!.content, original);
+    assert.equal(candidates[0]!.contentMode, "verbatim");
+  } finally {
+    await f.app.close();
+    f.search.close();
+    await rm(f.dataDir, { recursive: true, force: true });
+  }
+});
+
+test("verbatim candidate edits preserve body semantics instead of re-normalizing as structured content", async () => {
+  const f = await fixture("skill-hub-knowledge-verbatim-edit-");
+  try {
+    const original = ["# 原始正文标题", "", "## 自定义章节", "正文 A"].join("\n");
+    await call(f.url, 30, "submit_knowledge_candidate", {
+      spec_version: 1,
+      title: "候选元数据标题",
+      content: original,
+      content_mode: "verbatim",
+    });
+    const [created] = await f.service.listKnowledgeCandidates(10);
+    assert.ok(created);
+
+    const renamed = await f.service.updateKnowledgeCandidate(created.id, { title: "新的元数据标题" });
+    assert.equal(renamed.title, "新的元数据标题");
+    assert.equal(renamed.content, original);
+    assert.equal(renamed.contentMode, "verbatim");
+
+    const revisedBody = ["# 完全不同的原文标题", "", "### 任意三级标题", "正文 B"].join("\n");
+    const revised = await f.service.updateKnowledgeCandidate(created.id, { content: revisedBody });
+    assert.equal(revised.content, revisedBody);
+    assert.equal(revised.contentMode, "verbatim");
   } finally {
     await f.app.close();
     f.search.close();

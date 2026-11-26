@@ -203,6 +203,7 @@ export interface KnowledgeCandidate {
   validationSpecVersion?: number;
   submissionSpecSchemaVersion?: number;
   submissionMode?: "mcp" | "admin" | "automatic" | "gap" | "curator" | "server";
+  contentMode?: "structured" | "verbatim";
   artifactBundleId?: string;
   bundleSubmissionMode?: "merge" | "replace";
   automation?: {
@@ -1029,6 +1030,7 @@ export class McpObservabilityStore {
           | "validationSpecVersion"
           | "submissionSpecSchemaVersion"
           | "submissionMode"
+          | "contentMode"
           | "automation"
           | "relatedKnowledge"
           | "relationHint"
@@ -1154,6 +1156,7 @@ export class McpObservabilityStore {
         | "autoRelation"
         | "validationSpecVersion"
         | "submissionSpecSchemaVersion"
+        | "contentMode"
         | "artifactBundleId"
         | "bundleSubmissionMode"
       >
@@ -1195,6 +1198,7 @@ export class McpObservabilityStore {
       ...(input.submissionSpecSchemaVersion !== undefined
         ? { submissionSpecSchemaVersion: input.submissionSpecSchemaVersion }
         : {}),
+      ...(input.contentMode !== undefined ? { contentMode: input.contentMode } : {}),
       ...(input.artifactBundleId !== undefined ? { artifactBundleId: input.artifactBundleId } : {}),
       ...(input.bundleSubmissionMode !== undefined ? { bundleSubmissionMode: input.bundleSubmissionMode } : {}),
       status: current.status === "pending" ? "pending" : "approved",

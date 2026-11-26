@@ -42,7 +42,42 @@ test("service exposes model-ready current spec, template and instruction", async
   assert.equal(view.schema_version, 1);
   assert.match(view.template, /## 问题/);
   assert.match(view.instruction, /spec_version/);
+  assert.match(view.instruction, /content_mode=verbatim/);
   assert.equal(view.rules.content.max_chars, 50_000);
+});
+
+test("verbatim mode preserves arbitrary markdown exactly without requiring the structured template", async () => {
+  const { service } = await serviceWithStore();
+  const original = [
+    "# 原始运维文档",
+    "",
+    "任意前言，不属于六段式。",
+    "",
+    "## 1. 架构",
+    "正文 A",
+    "",
+    "### 1.1 子章节",
+    "正文 B",
+    "",
+    "~~~bash",
+    "echo hello",
+    "~~~",
+    "",
+    "## 自定义章节",
+    "正文 C",
+    "",
+  ].join("\n");
+
+  const normalized = await service.normalize({
+    title: "原始运维文档",
+    content: original,
+    submittedSpecVersion: 1,
+    contentMode: "verbatim",
+  });
+
+  assert.equal(normalized.title, "原始运维文档");
+  assert.equal(normalized.content, original);
+  assert.equal(normalized.contentMode, "verbatim");
 });
 
 test("normalizes English aliases into headings from the active spec", async () => {
