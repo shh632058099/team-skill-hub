@@ -579,6 +579,17 @@ test("dispatch combines workflow workspace access with caller backend preference
     });
     assert.equal(codexRead.deploymentId, "ota-codex-ro");
 
+    const claudeWriteCanReview = dispatch.resolve({
+      principalId: "alice",
+      scope: "org",
+      problem: "review upgrade failure",
+      expertId: "ota",
+      selectionMode: "explicit",
+      deploymentId: "ota-claude-rw",
+      requiredWorkspaceAccess: "read-only",
+    });
+    assert.equal(claudeWriteCanReview.deploymentId, "ota-claude-rw");
+
     assert.throws(
       () =>
         dispatch.resolve({

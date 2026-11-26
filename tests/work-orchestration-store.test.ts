@@ -450,6 +450,118 @@ test("workspace identity is deterministic and records owner affinity", () => {
   });
 });
 
+test("review rework attempt inherits the parent workspace instead of recloning the remote base", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-rework-inherit",
+      sourceType: "mcp",
+      title: "Workspace rework",
+      description: "preserve edits across review rework",
+    });
+    const firstAttempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 2,
+    });
+    const firstWorkspace = store.ensureWorkspace(work.workItemId, firstAttempt.workAttemptId, {
+      repositoryUrl: "https://example.test/ota.git",
+      branch: "main",
+      baseCommit: "a".repeat(40),
+    });
+    store.assignWorkspaceOwner(firstWorkspace.workspaceId, "worker-a", "/srv/work/a", 100, "a".repeat(40));
+    let current = store.getWork(work.workItemId, "alice", "team-a");
+    current = store.finishWorkAttempt(
+      work.workItemId,
+      firstAttempt.workAttemptId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    const secondAttempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", current.stateRevision, {
+      reason: "review_rework",
+      expertId: "ota",
+      deploymentId: "ota-codex",
+      deploymentConfigVersion: 2,
+      parentWorkAttemptId: firstAttempt.workAttemptId,
+    });
+    assert.equal(secondAttempt.workspaceId, firstWorkspace.workspaceId);
+    const inherited = store.getWorkspaceForResource(secondAttempt.workAttemptId, "workspace");
+    assert.equal(inherited?.workspaceId, firstWorkspace.workspaceId);
+    assert.equal(inherited?.workspaceKey, firstWorkspace.workspaceKey);
+    assert.equal(inherited?.path, "/srv/work/a");
+  });
+});
+
+test("review rework inherits parent resource workspaces while unrelated attempts do not", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-resource-rework-inherit",
+      sourceType: "mcp",
+      title: "Resource workspace rework",
+      description: "preserve multi-resource edits",
+      repositoryId: "repo-a",
+    });
+    const firstAttempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "multi",
+      deploymentId: "multi-write",
+      deploymentConfigVersion: 1,
+    });
+    const repoB = store.ensureWorkspace(work.workItemId, firstAttempt.workAttemptId, {
+      resourceKey: "repo:repo-b",
+      repositoryId: "repo-b",
+      repositoryUrl: "https://example.test/repo-b.git",
+      branch: "main",
+      baseCommit: "b".repeat(40),
+    });
+    let current = store.getWork(work.workItemId, "alice", "team-a");
+    current = store.finishWorkAttempt(
+      work.workItemId,
+      firstAttempt.workAttemptId,
+      "alice",
+      "team-a",
+      current.stateRevision,
+      "succeeded",
+      "waiting_review",
+    );
+    const secondAttempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", current.stateRevision, {
+      reason: "review_rework",
+      expertId: "multi",
+      deploymentId: "multi-write",
+      deploymentConfigVersion: 1,
+      parentWorkAttemptId: firstAttempt.workAttemptId,
+    });
+    assert.equal(
+      store.getWorkspaceForResource(secondAttempt.workAttemptId, "repo:repo-b")?.workspaceId,
+      repoB.workspaceId,
+    );
+
+    current = store.finishWorkAttempt(
+      work.workItemId,
+      secondAttempt.workAttemptId,
+      "alice",
+      "team-a",
+      store.getWorkInternal(work.workItemId).stateRevision,
+      "succeeded",
+      "running",
+    );
+    const independent = store.createWorkAttempt(work.workItemId, "alice", "team-a", current.stateRevision, {
+      reason: "policy_replan",
+      expertId: "multi",
+      deploymentId: "multi-write",
+      deploymentConfigVersion: 1,
+    });
+    assert.equal(store.getWorkspaceForResource(independent.workAttemptId, "repo:repo-b"), null);
+  });
+});
+
 test("terminal workspace cleanup is durable, owner-scoped and fenced", () => {
   withStore((store) => {
     const work = store.createOrReuseWork({
@@ -1012,7 +1124,7 @@ test("new authoritative verification binding stales older evidence for the same 
       idempotencyKey: "binding-stale",
       sourceType: "mcp",
       title: "Verification binding",
-      description: "latest authoritative verification context must win",
+      description: "latest authoritative verification context wins",
       workflowId: "binding-stale",
     });
     const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
@@ -1609,7 +1721,7 @@ test("new WorkAttempt invalidates prior attempt evidence even when subject revis
       idempotencyKey: "attempt-bound-evidence",
       sourceType: "mcp",
       title: "Attempt evidence",
-      description: "evidence must belong to latest attempt",
+      description: "evidence belongs to latest attempt",
       workflowId: "attempt-bound-evidence",
     });
     const first = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {

@@ -55,6 +55,10 @@ function deploymentRuntimePolicy(runtimeProfile: string) {
   }
 }
 
+function satisfiesWorkspaceAccess(actual: "read-only" | "read-write", required: "read-only" | "read-write"): boolean {
+  return required === "read-only" || actual === "read-write";
+}
+
 export class ExpertDispatchService {
   constructor(
     private readonly experts: ExpertStore,
@@ -114,7 +118,8 @@ export class ExpertDispatchService {
     const preferredBackend = input.preferredBackend;
     if (requiredRuntimeProfile && requiredWorkspaceAccess) {
       const policy = deploymentRuntimePolicy(requiredRuntimeProfile);
-      if (!policy || policy.workspaceAccess !== requiredWorkspaceAccess) throw new Error("RUNTIME_PROFILE_MISMATCH");
+      if (!policy || !satisfiesWorkspaceAccess(policy.workspaceAccess, requiredWorkspaceAccess))
+        throw new Error("RUNTIME_PROFILE_MISMATCH");
     }
 
     const expertDeployments = deployments.filter(
@@ -133,7 +138,7 @@ export class ExpertDispatchService {
     }
     if (explicitDeployment && requiredWorkspaceAccess) {
       const policy = deploymentRuntimePolicy(explicitDeployment.runtimeProfile);
-      if (!policy || policy.workspaceAccess !== requiredWorkspaceAccess) {
+      if (!policy || !satisfiesWorkspaceAccess(policy.workspaceAccess, requiredWorkspaceAccess)) {
         throw new Error("RUNTIME_PROFILE_MISMATCH");
       }
     }
@@ -142,8 +147,11 @@ export class ExpertDispatchService {
     if (requiredRuntimeProfile) {
       runtimeEligible = runtimeEligible.filter((deployment) => deployment.runtimeProfile === requiredRuntimeProfile);
     } else if (requiredWorkspaceAccess) {
-      runtimeEligible = runtimeEligible.filter(
-        (deployment) => deploymentRuntimePolicy(deployment.runtimeProfile)?.workspaceAccess === requiredWorkspaceAccess,
+      runtimeEligible = runtimeEligible.filter((deployment) =>
+        (() => {
+          const policy = deploymentRuntimePolicy(deployment.runtimeProfile);
+          return policy ? satisfiesWorkspaceAccess(policy.workspaceAccess, requiredWorkspaceAccess) : false;
+        })(),
       );
     }
     if (runtimeEligible.length === 0) {
@@ -169,6 +177,12 @@ export class ExpertDispatchService {
         return deployment.executor?.backend === preferredBackend || policy?.backend === preferredBackend;
       });
       if (preferred.length > 0) eligible = preferred;
+    }
+    if (!input.deploymentId && requiredWorkspaceAccess && eligible.length > 1) {
+      const exact = eligible.filter(
+        (deployment) => deploymentRuntimePolicy(deployment.runtimeProfile)?.workspaceAccess === requiredWorkspaceAccess,
+      );
+      if (exact.length > 0) eligible = exact;
     }
 
     const selected = input.deploymentId

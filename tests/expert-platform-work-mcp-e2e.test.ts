@@ -1255,6 +1255,16 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.match(notifications, /notifications\/progress/);
     assert.match(notifications, /progress-work-e2e/);
     assert.match(notifications, /Worker/);
+    const progressMessages = notifications
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)))
+      .filter((message) => message.method === "notifications/progress")
+      .map((message) => message.params?.message as string);
+    assert.ok(
+      progressMessages.some((message) => message.includes("Reviewing the failing retry path")),
+      "wait_work progress notifications must include safe model output previews, not only generic activity labels",
+    );
 
     const waiting = await callMcp(mcpUrl, apiKey, 5, "wait_work", {
       workItemId: workId,
@@ -1263,6 +1273,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       timeoutMs: 500,
     });
     assert.equal(waiting.work.status, "waiting_review");
+    assert.equal(waiting.latestModelOutput, "Reviewing the failing retry path");
     assert.equal(waiting.humanActionRequired, true);
     assert.equal(waiting.evidence, undefined);
     assert.equal(waiting.turns, undefined);
@@ -1400,7 +1411,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(approvalWaiting.work.status, "waiting_review");
     assert.equal(approvalWaiting.work.currentSubjectRevision, approvalSubject);
     assert.ok(approvalWaiting.gate.missing.includes("policy:review_accepted"));
-    assert.ok(approvalWaiting.gate.missing.includes("policy:required_approvals_approved"));
+    assert.ok(approvalWaiting.gate.missing.includes("policy:approval:work_completion:workspace_revision"));
     assert.deepEqual(approvalWaiting.runtime, {
       requiredProfile: "codex-workspace-write",
       effectiveProfile: "codex-workspace-write",
@@ -1416,7 +1427,7 @@ test("MCP Work API drives durable work through review, rework, authorization and
       decision: "accepted",
     });
     assert.equal(approvalReviewed.work.status, "running");
-    assert.ok(approvalReviewed.gate.missing.includes("policy:required_approvals_approved"));
+    assert.ok(approvalReviewed.gate.missing.includes("policy:approval:work_completion:workspace_revision"));
     assert.ok(approvalReviewed.gate.missing.some((item: string) => item.startsWith("NODE_RUNNING:approval:")));
     assert.equal(approvalReviewed.reviews.at(-1).decision, "accepted");
     assert.equal(approvalReviewed.reviews.at(-1).subjectRevision, approvalSubject);
@@ -1626,6 +1637,52 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.equal(visibleJson.includes("publish-ref"), false);
     assert.equal(visibleJson.includes("executionSnapshot"), false);
     const publicationSubject = "publication:" + preparedPublication.publicationId + ":" + preparedPublication.commitSha;
+
+    const compactChangeRequests = new WorkChangeRequestStore(runtimeDb);
+    const compactChangeRequest = compactChangeRequests.createOrReuse(
+      {
+        workItemId: publicationSubmission.work.workItemId,
+        workAttemptId: publicationReviewed.attempts.at(-1).workAttemptId,
+        publicationId: preparedPublication.publicationId,
+        ownerWorkerId: "worker-a",
+        repositoryIdentity: "https://example.test/ota.git",
+        repositoryUrl: "https://example.test/ota.git",
+        headBranch: "skillhub/work/mcp-publication-a1",
+        headCommit: "2".repeat(40),
+        baseBranch: "main",
+        title: "Publication approval MCP",
+        body: "Created by MCP E2E",
+        idempotencyKey: "mcp-publication-change-request",
+        credentialGrantRef: "publish-ref",
+      },
+      13_200,
+    );
+    const compactClaim = compactChangeRequests.claim("worker-a", 13_300, 30_000)!;
+    assert.equal(compactClaim.changeRequestId, compactChangeRequest.changeRequestId);
+    compactChangeRequests.complete(
+      compactClaim,
+      {
+        success: true,
+        provider: "github",
+        externalId: "8",
+        url: "https://github.com/example/ota/pull/8",
+        headCommit: "2".repeat(40),
+        baseBranch: "main",
+      },
+      13_400,
+    );
+    compactChangeRequests.close();
+    const compactPublicationWait = await callMcp(mcpUrl, apiKey, 820, "wait_work", {
+      workItemId: publicationSubmission.work.workItemId,
+      afterEventId: 0,
+      timeoutMs: 0,
+    });
+    assert.deepEqual(compactPublicationWait.changeRequest, {
+      state: "created",
+      provider: "github",
+      externalId: "8",
+      url: "https://github.com/example/ota/pull/8",
+    });
 
     await assert.rejects(
       () =>

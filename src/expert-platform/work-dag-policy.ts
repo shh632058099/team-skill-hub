@@ -1,4 +1,5 @@
 import type { WorkflowDefinition } from "./work-orchestration-store.js";
+import { parseApprovalRequirementFactKey } from "./work-dag-requirements.js";
 import {
   canonicalResourceIdentity,
   stableDigest,
@@ -123,6 +124,13 @@ function knownObligationProducer(graph: DagGraph, obligation: DagObligation): { 
       if (key === "approval.required_approved") {
         return { known: true, produced: has((node) => node.kind === "approval") };
       }
+      const approval = parseApprovalRequirementFactKey(key);
+      if (approval) {
+        return {
+          known: true,
+          produced: has((node) => node.kind === "approval" && node.capability === approval.scope),
+        };
+      }
       if (key === "publication.succeeded") {
         return { known: true, produced: has((node) => node.kind === "publication" && node.capability === "push") };
       }
@@ -239,8 +247,11 @@ export function validateDagProposal(
       codes.add("PLAN_CONTINUATION_LIMIT_REACHED");
     }
   }
+  const dynamicForbidsWorkspaceWrite =
+    options.outstandingOnly && policyContext?.executionConstraints?.workspaceMutation === "forbidden";
+  const legacyForbidsWorkspaceWrite = !options.outstandingOnly && workflow.change?.mode === "readonly";
   if (
-    workflow.change?.mode === "readonly" &&
+    (dynamicForbidsWorkspaceWrite || legacyForbidsWorkspaceWrite) &&
     graph.nodes.some(
       (node) =>
         node.mutates && (node.resource === "workspace" || node.resource?.startsWith("repo:") || node.kind === "agent"),
@@ -249,6 +260,7 @@ export function validateDagProposal(
     codes.add("PLAN_WORKSPACE_WRITE_NOT_ALLOWED");
   }
   if (
+    !options.outstandingOnly &&
     (workflow.change?.mode === "code_change" || workflow.change?.mode === "conditional_code_change") &&
     graph.nodes.some(
       (node) =>
@@ -304,8 +316,23 @@ export function validateDagProposal(
   const requiresChangeRequest = options.outstandingOnly
     ? hasOutstandingFact("change_request.created")
     : workflow.completion.require.includes("change_request_created");
+  const outstandingApprovalScopes = new Set(
+    obligations
+      .filter(
+        (obligation) =>
+          obligation.satisfaction.kind === "fact" &&
+          obligation.satisfaction.equals === true &&
+          parseApprovalRequirementFactKey(obligation.satisfaction.key) !== null,
+      )
+      .map((obligation) =>
+        obligation.satisfaction.kind === "fact"
+          ? parseApprovalRequirementFactKey(obligation.satisfaction.key)!.scope
+          : null,
+      )
+      .filter((scope): scope is "work_completion" | "publish_work_branch" => scope !== null),
+  );
   const requiresApprovalFact = options.outstandingOnly
-    ? hasOutstandingFact("approval.required_approved")
+    ? hasOutstandingFact("approval.required_approved") || outstandingApprovalScopes.size > 0
     : workflow.completion.require.includes("required_approvals_approved");
   for (const type of requiredEvidence) {
     if (!type) continue;
@@ -354,11 +381,12 @@ export function validateDagProposal(
     }
   }
 
-  const requiresPublishApproval =
-    requiresApprovalFact &&
-    workflow.completion.requiredApprovals?.some(
-      (approval) => approval.scope === "publish_work_branch" && approval.subjectType === "publication_artifact",
-    ) === true;
+  const requiresPublishApproval = options.outstandingOnly
+    ? outstandingApprovalScopes.has("publish_work_branch")
+    : requiresApprovalFact &&
+      workflow.completion.requiredApprovals?.some(
+        (approval) => approval.scope === "publish_work_branch" && approval.subjectType === "publication_artifact",
+      ) === true;
   if (requiresPublishApproval) {
     if (publishApprovalIds.size === 0 && !deferredAfterAgent) {
       codes.add("PLAN_PUBLICATION_WITHOUT_APPROVAL");
@@ -377,11 +405,12 @@ export function validateDagProposal(
     }
   }
 
-  const requiresWorkCompletionApproval =
-    requiresApprovalFact &&
-    workflow.completion.requiredApprovals?.some(
-      (approval) => approval.scope === "work_completion" && approval.subjectType === "workspace_revision",
-    ) === true;
+  const requiresWorkCompletionApproval = options.outstandingOnly
+    ? outstandingApprovalScopes.has("work_completion")
+    : requiresApprovalFact &&
+      workflow.completion.requiredApprovals?.some(
+        (approval) => approval.scope === "work_completion" && approval.subjectType === "workspace_revision",
+      ) === true;
   if (
     requiresWorkCompletionApproval &&
     !graph.nodes.some((node) => node.kind === "approval" && node.capability === "work_completion") &&

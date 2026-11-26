@@ -58,6 +58,8 @@ import {
   normalizePinnedPolicyObligations,
   normalizeUnresolvedWorkRequirements,
   policyIdentity,
+  policyObligations,
+  parseApprovalRequirementFactKey,
   type RequirementSnapshot,
   type RequirementUpdateImpact,
   type UnresolvedWorkRequirement,
@@ -2264,6 +2266,14 @@ export class WorkOrchestrationStore {
         );
       }
 
+      let inheritedWorkspaceId: string | null = null;
+      if ((input.reason === "human_rework" || input.reason === "review_rework") && input.parentWorkAttemptId?.trim()) {
+        const parent = this.getWorkAttempt(input.parentWorkAttemptId.trim());
+        if (parent.workItemId !== workItemId) throw new Error("INVALID_REWORK_REQUEST");
+        const parentWorkspace = this.getWorkspaceForResource(parent.workAttemptId, "workspace");
+        inheritedWorkspaceId = parentWorkspace?.workspaceId ?? null;
+      }
+
       const workAttemptId = randomUUID();
       this.db
         .prepare(
@@ -2291,6 +2301,11 @@ export class WorkOrchestrationStore {
           now,
           input.dispatchBinding ? JSON.stringify(input.dispatchBinding) : null,
         );
+      if (inheritedWorkspaceId) {
+        this.db
+          .prepare("UPDATE work_attempts SET workspace_id=? WHERE work_attempt_id=? AND work_item_id=?")
+          .run(inheritedWorkspaceId, workAttemptId, workItemId);
+      }
       const changed = this.db
         .prepare(
           "UPDATE work_items SET active_work_attempt_id=?,status='running',state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND state_revision=?",
@@ -2505,10 +2520,27 @@ export class WorkOrchestrationStore {
   getWorkspaceForResource(workAttemptId: string, resourceKey = "workspace"): WorkspaceRecord | null {
     const resource = requiredText(resourceKey, 200);
     if (!resource) throw new Error("INVALID_WORKSPACE_RESOURCE");
-    const row = this.db
-      .prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=? AND resource_key=?")
-      .get(workAttemptId, resource) as Row | undefined;
-    return row ? this.fromWorkspaceRow(row) : null;
+    let currentAttemptId = requiredText(workAttemptId, 200);
+    if (!currentAttemptId) throw new Error("INVALID_WORK_ATTEMPT");
+    const visited = new Set<string>();
+    let expectedWorkItemId: string | null = null;
+    while (currentAttemptId) {
+      if (visited.has(currentAttemptId)) throw new Error("WORK_ATTEMPT_PARENT_CYCLE");
+      visited.add(currentAttemptId);
+      const attempt = this.db
+        .prepare("SELECT work_item_id,parent_work_attempt_id FROM work_attempts WHERE work_attempt_id=?")
+        .get(currentAttemptId) as Row | undefined;
+      if (!attempt) throw new Error("WORK_ATTEMPT_NOT_FOUND");
+      const workItemId = String(attempt.work_item_id);
+      if (expectedWorkItemId === null) expectedWorkItemId = workItemId;
+      else if (expectedWorkItemId !== workItemId) throw new Error("WORK_ATTEMPT_PARENT_MISMATCH");
+      const row = this.db
+        .prepare("SELECT * FROM work_workspaces WHERE work_attempt_id=? AND resource_key=?")
+        .get(currentAttemptId, resource) as Row | undefined;
+      if (row) return this.fromWorkspaceRow(row);
+      currentAttemptId = attempt.parent_work_attempt_id == null ? "" : String(attempt.parent_work_attempt_id);
+    }
+    return null;
   }
 
   getWorkspaceByKey(workspaceKey: string): WorkspaceRecord {
@@ -3152,9 +3184,11 @@ export class WorkOrchestrationStore {
   }
 
   getEffectiveRequiredEvidence(workItemId: string): string[] {
-    const work = this.getWorkInternal(workItemId);
-    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
-    const required = new Set(workflow.definition.validation.requiredEvidence);
+    const required = new Set(
+      this.getEffectiveDagObligations(workItemId)
+        .filter((obligation) => obligation.satisfaction.kind === "evidence")
+        .map((obligation) => (obligation.satisfaction.kind === "evidence" ? obligation.satisfaction.type : "")),
+    );
     const latestAttempt = this.db
       .prepare("SELECT task_id FROM work_attempts WHERE work_item_id=? ORDER BY sequence DESC LIMIT 1")
       .get(workItemId) as { task_id?: string | null } | undefined;
@@ -3172,131 +3206,215 @@ export class WorkOrchestrationStore {
         for (const step of steps) required.add(step.evidenceType);
       }
     }
+    required.delete("");
     return [...required];
   }
 
-  evaluateCompletionGate(workItemId: string, principalId: string, scope: string): CompletionGateResult {
-    const work = this.getWork(workItemId, principalId, scope);
-    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+  private completionRuntimeFacts(
+    workItemId: string,
+    work: WorkItemRecord,
+    obligations: readonly DagObligation[],
+  ): Record<string, WorkDagFactRecord["value"]> {
+    const facts: Record<string, WorkDagFactRecord["value"]> = {};
     const latestAttempt = this.db
       .prepare("SELECT * FROM work_attempts WHERE work_item_id=? ORDER BY sequence DESC LIMIT 1")
       .get(workItemId) as Row | undefined;
-    const missing: string[] = [];
-    if (workflow.definition.completion.require.includes("latest_work_attempt_succeeded")) {
-      if (!latestAttempt || latestAttempt.status !== "succeeded") missing.push("latest_work_attempt_succeeded");
+    facts["attempt.latest_succeeded"] = latestAttempt?.status === "succeeded";
+
+    const review = work.currentSubjectRevision
+      ? (this.db
+          .prepare(
+            "SELECT decision FROM work_review_decisions WHERE work_item_id=? AND subject_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+          )
+          .get(workItemId, work.currentSubjectRevision) as Row | undefined)
+      : undefined;
+    facts["review.accepted"] = review?.decision === "accepted";
+
+    const needsPublicationState = obligations.some((obligation) => {
+      if (obligation.satisfaction.kind !== "fact") return false;
+      if (
+        obligation.satisfaction.key === "publication.succeeded" ||
+        obligation.satisfaction.key === "change_request.created"
+      ) {
+        return true;
+      }
+      const approval = parseApprovalRequirementFactKey(obligation.satisfaction.key);
+      return approval?.scope === "publish_work_branch";
+    });
+    const hasPublicationTable = needsPublicationState
+      ? Boolean(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_publications'").get())
+      : false;
+    const publication =
+      hasPublicationTable && work.currentSubjectRevision
+        ? (this.db
+            .prepare(
+              "SELECT publication_id,commit_sha,artifact_ref,state FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
+        : undefined;
+    const publicationSubject =
+      publication?.publication_id && publication.commit_sha
+        ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
+        : null;
+    const publicationEvidence = publicationSubject
+      ? (this.db
+          .prepare(
+            "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type='publication' AND status='passed' AND source='worker_verified' AND stale=0 AND subject_revision=? AND artifact_ref=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+          )
+          .get(workItemId, publicationSubject, String(publication?.artifact_ref ?? "")) as Row | undefined)
+      : undefined;
+    if (hasPublicationTable) {
+      facts["publication.succeeded"] = publication?.state === "pushed" && Boolean(publicationEvidence);
     }
-    if (workflow.definition.completion.require.includes("required_evidence_passed")) {
-      for (const requiredType of this.getEffectiveRequiredEvidence(workItemId)) {
-        const evidence = work.currentSubjectRevision
+
+    const changeRequestEvidence = publicationSubject
+      ? (this.db
+          .prepare(
+            "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type='pull_request' AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC,rowid DESC LIMIT 1",
+          )
+          .get(workItemId, publicationSubject) as Row | undefined)
+      : undefined;
+    if (hasPublicationTable) {
+      facts["change_request.created"] = Boolean(changeRequestEvidence);
+    }
+
+    const approvalRequirements = obligations
+      .filter((obligation) => obligation.satisfaction.kind === "fact" && obligation.satisfaction.equals === true)
+      .map((obligation) =>
+        obligation.satisfaction.kind === "fact"
+          ? {
+              key: obligation.satisfaction.key,
+              parsed: parseApprovalRequirementFactKey(obligation.satisfaction.key),
+            }
+          : null,
+      )
+      .filter(
+        (
+          item,
+        ): item is {
+          key: string;
+          parsed: NonNullable<ReturnType<typeof parseApprovalRequirementFactKey>>;
+        } => item !== null && item.parsed !== null,
+      );
+
+    const approvalSatisfied = (
+      scope: "work_completion" | "publish_work_branch",
+      subjectType: "workspace_revision" | "publication_artifact",
+    ) => {
+      const requiredSubject =
+        scope === "publish_work_branch" && subjectType === "publication_artifact"
+          ? publicationSubject
+          : work.currentSubjectRevision;
+      if (!requiredSubject) return false;
+      const approval =
+        scope === "work_completion"
           ? (this.db
               .prepare(
-                "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND work_attempt_id=? AND type=? AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC LIMIT 1",
+                "SELECT decision FROM work_approvals WHERE work_item_id=? AND work_attempt_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
               )
-              .get(
-                workItemId,
-                String(latestAttempt?.work_attempt_id ?? ""),
-                requiredType,
-                work.currentSubjectRevision,
-              ) as Row | undefined)
-          : undefined;
-        if (!evidence) missing.push("required_evidence:" + requiredType);
+              .get(workItemId, String(latestAttempt?.work_attempt_id ?? ""), scope, subjectType, requiredSubject) as
+              Row | undefined)
+          : (this.db
+              .prepare(
+                "SELECT decision FROM work_approvals WHERE work_item_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
+              )
+              .get(workItemId, scope, subjectType, requiredSubject) as Row | undefined);
+      return approval?.decision === "approved";
+    };
+
+    for (const requirement of approvalRequirements) {
+      facts[requirement.key] = approvalSatisfied(requirement.parsed.scope, requirement.parsed.subjectType);
+    }
+
+    if (
+      obligations.some(
+        (obligation) =>
+          obligation.satisfaction.kind === "fact" &&
+          obligation.satisfaction.key === "approval.required_approved" &&
+          obligation.satisfaction.equals === true,
+      )
+    ) {
+      // Legacy snapshot compatibility only. New snapshots use scoped approval facts.
+      const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+      const legacyRequirements = workflow.definition.completion.requiredApprovals ?? [];
+      facts["approval.required_approved"] =
+        legacyRequirements.length > 0 &&
+        legacyRequirements.every((required) => approvalSatisfied(required.scope, required.subjectType));
+    }
+    return facts;
+  }
+
+  evaluateCompletionGate(workItemId: string, principalId: string, scope: string): CompletionGateResult {
+    let work = this.getWork(workItemId, principalId, scope);
+    if (work.currentRequirementRevision === 0) {
+      this.ensureRequirementSnapshot(workItemId);
+      work = this.getWork(workItemId, principalId, scope);
+    }
+    const obligations = this.getEffectiveDagObligations(workItemId);
+    const requiredEvidence = this.getEffectiveRequiredEvidence(workItemId);
+    const obligationEvidence = new Set(
+      obligations
+        .filter((obligation) => obligation.satisfaction.kind === "evidence")
+        .map((obligation) => (obligation.satisfaction.kind === "evidence" ? obligation.satisfaction.type : "")),
+    );
+    for (const evidenceType of requiredEvidence) {
+      if (!obligationEvidence.has(evidenceType)) {
+        obligations.push({
+          id: "compat:required_evidence:" + evidenceType,
+          condition: { kind: "always" },
+          satisfaction: { kind: "evidence", type: evidenceType },
+        });
       }
     }
-    if (workflow.definition.completion.require.includes("no_unresolved_blocker") && work.status === "blocked") {
-      missing.push("no_unresolved_blocker");
-    }
-    if (workflow.definition.completion.require.includes("review_accepted")) {
-      const review = work.currentSubjectRevision
-        ? (this.db
-            .prepare(
-              "SELECT decision FROM work_review_decisions WHERE work_item_id=? AND subject_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
-            )
-            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
-        : undefined;
-      if (!review || review.decision !== "accepted") missing.push("review_accepted");
-    }
-    if (workflow.definition.completion.require.includes("required_approvals_approved")) {
-      for (const required of workflow.definition.completion.requiredApprovals ?? []) {
-        let requiredSubject = work.currentSubjectRevision;
-        if (required.scope === "publish_work_branch" && required.subjectType === "publication_artifact") {
-          const publication = work.currentSubjectRevision
-            ? (this.db
-                .prepare(
-                  "SELECT publication_id,commit_sha FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
-                )
-                .get(workItemId, work.currentSubjectRevision) as Row | undefined)
-            : undefined;
-          requiredSubject =
-            publication?.publication_id && publication.commit_sha
-              ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
-              : null;
+    const context = this.getDagContext(workItemId);
+    const executions: DagExecution[] = this.listDagExecutions(workItemId).map((execution) => ({
+      nodeId: execution.nodeId,
+      generation: execution.generation,
+      state: execution.state,
+      fence: execution.fence,
+      key: execution.idempotencyKey,
+    }));
+    const missing: string[] = [];
+    const addMissing = (value: string) => {
+      if (!missing.includes(value)) missing.push(value);
+    };
+    for (const obligation of obligations) {
+      const condition = evaluatePredicate(obligation.condition, context, executions, obligation.resource);
+      if (condition === false) continue;
+      const satisfied = evaluatePredicate(obligation.satisfaction, context, executions, obligation.resource);
+      if (satisfied === true) continue;
+      switch (obligation.satisfaction.kind) {
+        case "evidence":
+          addMissing("required_evidence:" + obligation.satisfaction.type);
+          break;
+        case "no_blocker":
+          addMissing("no_unresolved_blocker");
+          break;
+        case "fact": {
+          const key = obligation.satisfaction.key;
+          if (key === "attempt.latest_succeeded") addMissing("latest_work_attempt_succeeded");
+          else if (key === "review.accepted") addMissing("review_accepted");
+          else if (key === "publication.succeeded") addMissing("publication_succeeded");
+          else if (key === "change_request.created") addMissing("change_request_created");
+          else {
+            const approval = parseApprovalRequirementFactKey(key);
+            if (approval) addMissing("required_approval:" + approval.scope);
+            else if (key === "approval.required_approved") {
+              const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
+              for (const required of workflow.definition.completion.requiredApprovals ?? []) {
+                addMissing("required_approval:" + required.scope);
+              }
+              if (!(workflow.definition.completion.requiredApprovals ?? []).length) addMissing(obligation.id);
+            } else addMissing(obligation.id);
+          }
+          break;
         }
-        const approval = requiredSubject
-          ? required.scope === "work_completion"
-            ? (this.db
-                .prepare(
-                  "SELECT decision FROM work_approvals WHERE work_item_id=? AND work_attempt_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
-                )
-                .get(
-                  workItemId,
-                  String(latestAttempt?.work_attempt_id ?? ""),
-                  required.scope,
-                  required.subjectType,
-                  requiredSubject,
-                ) as Row | undefined)
-            : (this.db
-                .prepare(
-                  "SELECT decision FROM work_approvals WHERE work_item_id=? AND approval_scope=? AND subject_type=? AND subject_revision=? AND stale=0 ORDER BY created_at DESC,rowid DESC LIMIT 1",
-                )
-                .get(workItemId, required.scope, required.subjectType, requiredSubject) as Row | undefined)
-          : undefined;
-        if (!approval || approval.decision !== "approved") {
-          missing.push("required_approval:" + required.scope);
-        }
+        default:
+          addMissing(obligation.id);
+          break;
       }
     }
-    if (workflow.definition.completion.require.includes("publication_succeeded")) {
-      const publication = work.currentSubjectRevision
-        ? (this.db
-            .prepare(
-              "SELECT publication_id,commit_sha,artifact_ref FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND state='pushed' AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
-            )
-            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
-        : undefined;
-      const publicationSubject =
-        publication?.publication_id && publication.commit_sha
-          ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
-          : null;
-      const evidence = publicationSubject
-        ? (this.db
-            .prepare(
-              "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type='publication' AND status='passed' AND source='worker_verified' AND stale=0 AND subject_revision=? AND artifact_ref=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
-            )
-            .get(workItemId, publicationSubject, String(publication!.artifact_ref ?? "")) as Row | undefined)
-        : undefined;
-      if (!publication || !evidence) missing.push("publication_succeeded");
-    }
-    if (workflow.definition.completion.require.includes("change_request_created")) {
-      const publication = work.currentSubjectRevision
-        ? (this.db
-            .prepare(
-              "SELECT publication_id,commit_sha FROM work_publications WHERE work_item_id=? AND source_subject_revision=? AND state='pushed' AND commit_sha IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1",
-            )
-            .get(workItemId, work.currentSubjectRevision) as Row | undefined)
-        : undefined;
-      const publicationSubject =
-        publication?.publication_id && publication.commit_sha
-          ? "publication:" + String(publication.publication_id) + ":" + String(publication.commit_sha)
-          : null;
-      const changeRequestEvidence = publicationSubject
-        ? (this.db
-            .prepare(
-              "SELECT evidence_id FROM work_evidence WHERE work_item_id=? AND type='pull_request' AND status='passed' AND stale=0 AND subject_revision=? AND source<>'agent_reported' ORDER BY created_at DESC,rowid DESC LIMIT 1",
-            )
-            .get(workItemId, publicationSubject) as Row | undefined)
-        : undefined;
-      if (!changeRequestEvidence) missing.push("change_request_created");
-    }
+    const workflow = this.getWorkflow(work.workflowId, work.workflowVersion);
     return {
       ready: missing.length === 0,
       missing,
@@ -3689,6 +3807,7 @@ export class WorkOrchestrationStore {
       const unresolved = normalizeUnresolvedWorkRequirements(resolved.unresolved);
       const policy = policyIdentity(workflow.workflowId, workflow.version, workflow.definition);
       const policyContext = workflowOnlyDagPolicyContext(workflow.workflowId, workflow.version, workflow.definition);
+      const pinnedPolicyObligations = policyObligations(workflow.definition);
       const snapshot: RequirementSnapshot = {
         workItemId,
         revision: 1,
@@ -3698,7 +3817,7 @@ export class WorkOrchestrationStore {
         originalRequestDigest: resolved.originalRequestDigest,
         requirements,
         unresolved,
-        policyObligations: [],
+        policyObligations: pinnedPolicyObligations,
         policyContextRef: workDagPolicyContextRef(policyContext),
         policyContextDigest: policyContext.digest,
         policyRef: policy.policyRef,
@@ -3711,7 +3830,7 @@ export class WorkOrchestrationStore {
           unresolved,
           resolved.originalRequestDigest,
           policyContext.digest,
-          [],
+          pinnedPolicyObligations,
         ),
         createdAt: now,
       };
@@ -3912,7 +4031,16 @@ export class WorkOrchestrationStore {
     const workflow = this.getWorkflow(current.workflowId, current.workflowVersion);
     const nextRevision = previous.revision + 1;
     const policyContextRef = workDagPolicyContextRef(policyContext);
-    const pinnedPolicyObligations = policyContextObligations(workflow.definition, policyContext);
+    const baseEffectiveObligations = effectiveObligations(
+      workflow.definition,
+      previous.requirements,
+      previous.unresolved,
+      previous.policyObligations,
+    );
+    const pinnedPolicyObligations = normalizePinnedPolicyObligations([
+      ...previous.policyObligations,
+      ...policyContextObligations(baseEffectiveObligations, policyContext),
+    ]);
     const effectiveDigest = effectiveRequirementDigest(
       workflow.workflowId,
       workflow.version,
@@ -4214,7 +4342,11 @@ export class WorkOrchestrationStore {
   }
 
   getDagContext(workItemId: string): DagContext {
-    const work = this.getWorkInternal(workItemId);
+    let work = this.getWorkInternal(workItemId);
+    if (work.currentRequirementRevision === 0) {
+      this.ensureRequirementSnapshot(workItemId);
+      work = this.getWorkInternal(workItemId);
+    }
     const requirementSnapshot =
       work.currentRequirementRevision > 0
         ? this.getRequirementSnapshot(workItemId, work.currentRequirementRevision)
@@ -4239,12 +4371,14 @@ export class WorkOrchestrationStore {
       if (fact.subjectRevision === null || fact.subjectRevision === currentSubject) facts[fact.key] = fact.value;
     }
 
-    const gate = this.evaluateCompletionGate(workItemId, work.principalId, work.scope);
-    facts["attempt.latest_succeeded"] = !gate.missing.includes("latest_work_attempt_succeeded");
-    facts["review.accepted"] = !gate.missing.includes("review_accepted");
-    facts["approval.required_approved"] = !gate.missing.some((item) => item.startsWith("required_approval:"));
-    facts["publication.succeeded"] = !gate.missing.includes("publication_succeeded");
-    facts["change_request.created"] = !gate.missing.includes("change_request_created");
+    Object.assign(
+      facts,
+      this.completionRuntimeFacts(
+        workItemId,
+        work,
+        this.getDagObligationsForRequirementRevision(workItemId, work.currentRequirementRevision),
+      ),
+    );
 
     return {
       subject: work.currentSubjectRevision,
@@ -5126,6 +5260,22 @@ export class WorkOrchestrationStore {
         throw new Error("STALE_DAG_EXECUTION_CLAIM");
       }
 
+      const work = this.getWorkInternal(execution.workItemId);
+      const resultFactSubject = claimNode.mutates
+        ? subjectForResource(
+            {
+              subject: work.currentSubjectRevision,
+              primaryResource: work.repositoryId ? "repo:" + work.repositoryId : null,
+              resourceSubjects: this.listDagResourceSubjects(execution.workItemId),
+              facts: {},
+              evidence: [],
+              artifacts: [],
+              blockers: [],
+              cancelled: false,
+            },
+            execution.resourceIdentity,
+          )
+        : execution.subjectRevision;
       for (const fact of facts) {
         this.db
           .prepare(
@@ -5136,7 +5286,7 @@ export class WorkOrchestrationStore {
             execution.workItemId,
             fact.key,
             JSON.stringify(fact.value),
-            execution.subjectRevision,
+            resultFactSubject,
             execution.resourceIdentity,
             nodeExecutionId,
             now,
@@ -5158,7 +5308,6 @@ export class WorkOrchestrationStore {
             now,
           );
       }
-      const work = this.getWorkInternal(execution.workItemId);
       const executionDagRevision = this.getDagRevision(execution.workItemId, execution.createdDagRevision);
       const executionRequirementRevision =
         execution.boundRequirementRevision ?? executionDagRevision.requirementSnapshotRevision;

@@ -231,10 +231,14 @@ export async function prepareRepositoryWorkspace(
     }
     mkdirSync(workspaceRoot, { recursive: true });
     const destination = path.join(workspaceRoot, input.id);
-    const existingWorkspace = existsSync(path.join(destination, ".git"));
+    let existingWorkspace = existsSync(path.join(destination, ".git"));
     const checkoutMarker = input.workspaceKey
       ? path.join(destination, ".git", "team-skill-hub-workspace-ready")
       : undefined;
+    if (existingWorkspace && checkoutMarker && !existsSync(checkoutMarker)) {
+      rmSync(destination, { recursive: true, force: true });
+      existingWorkspace = false;
+    }
     if (!existingWorkspace) {
       if (existsSync(destination)) throw new Error("SOURCE_REPOSITORY_PATH_NOT_EMPTY");
       await run(
@@ -254,7 +258,6 @@ export async function prepareRepositoryWorkspace(
         env,
       );
     } else {
-      if (checkoutMarker && !existsSync(checkoutMarker)) throw new Error("WORKSPACE_PREPARATION_INCOMPLETE");
       const remote = await new Promise<string>((resolve, reject) => {
         const child = spawn("git", ["-C", destination, "remote", "get-url", "origin"], {
           env,

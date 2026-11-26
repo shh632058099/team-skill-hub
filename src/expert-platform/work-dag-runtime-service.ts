@@ -155,6 +155,9 @@ export class WorkDagRuntime {
   ): Promise<boolean> {
     const work = this.store.getWork(workItemId, principalId, scope);
     const workflow = this.store.getWorkflow(work.workflowId, work.workflowVersion);
+    if (trigger === "deadlock" && !this.store.evaluateDagCompletion(workItemId).deadlocked) {
+      return true;
+    }
     if (!triggerAllowed(workflow.definition, trigger)) {
       return this.block(workItemId, principalId, scope, "DAG_REPLAN_NOT_ALLOWED", JSON.stringify({ trigger }), now);
     }

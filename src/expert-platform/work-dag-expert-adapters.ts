@@ -4,7 +4,6 @@ import type { ExpertTaskStore, TaskRecord } from "./task-store.js";
 import type { WorkAttemptRecord, WorkItemRecord, WorkOrchestrationStore } from "./work-orchestration-store.js";
 import type { VerificationPolicyStep } from "./verification-policy.js";
 import { normalizeVerificationPolicy } from "./verification-policy.js";
-import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 import {
   requirementPromptContext,
   requirementRoutingProblems,
@@ -15,16 +14,8 @@ import type { DagNodeResult } from "./work-dag-runtime.js";
 import { subjectForResource } from "./work-dag.js";
 import { agentOutcomeProtocolInstructions } from "./agent-execution-outcome.js";
 
-function workspaceAccess(
-  workflow: ReturnType<WorkOrchestrationStore["getWorkflow"]>,
-): "read-only" | "read-write" | undefined {
-  if (
-    workflow.definition.change?.mode === "code_change" ||
-    workflow.definition.change?.mode === "conditional_code_change"
-  )
-    return "read-write";
-  if (workflow.definition.change?.mode === "readonly") return "read-only";
-  return undefined;
+function nodeWorkspaceAccess(context: WorkDagExecutionContext): "read-only" | "read-write" {
+  return context.node.mutates ? "read-write" : "read-only";
 }
 
 function preferredBackend(work: WorkItemRecord): "claude" | "codex" | undefined {
@@ -274,10 +265,10 @@ class ExpertTaskDagAdapterBase {
     attempt?: WorkAttemptRecord,
     repositoryIdOverride?: string,
     requirementRevision = work.currentRequirementRevision,
+    requiredWorkspaceAccess?: "read-only" | "read-write",
   ): ResolvedDispatch {
     const binding = attempt?.dispatchBinding ? asResolved(attempt.dispatchBinding) : null;
     if (binding && (!repositoryIdOverride || binding.repositoryId === repositoryIdOverride)) return binding;
-    const workflow = this.workStore.getWorkflow(work.workflowId, work.workflowVersion);
     const resolveForProblem = (problem: string) =>
       this.dispatch.resolve({
         principalId: work.principalId,
@@ -287,8 +278,7 @@ class ExpertTaskDagAdapterBase {
         selectionMode: attempt?.expertId || work.requestedExpertId ? "explicit" : "auto",
         repositoryId: repositoryIdOverride ?? work.repositoryId ?? undefined,
         deploymentId: attempt?.deploymentId ?? work.requestedDeploymentId ?? undefined,
-        requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile,
-        requiredWorkspaceAccess: workspaceAccess(workflow),
+        ...(requiredWorkspaceAccess ? { requiredWorkspaceAccess } : {}),
         preferredBackend: preferredBackend(work),
       });
     const resolved =
@@ -312,24 +302,38 @@ class ExpertTaskDagAdapterBase {
     const requirementRevision = executionRequirementRevision(this.workStore, context);
     let attempt = this.workStore.getActiveAttempt(context.work.workItemId);
     if (attempt) {
-      const resolved = this.resolve(context.work, attempt, resource.repositoryId, requirementRevision);
+      const resolved = this.resolve(
+        context.work,
+        attempt,
+        resource.repositoryId,
+        requirementRevision,
+        nodeWorkspaceAccess(context),
+      );
       const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
-      this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
-        resourceKey: resource.resourceKey,
-        repositoryId: resolved.repositoryId,
-        ...(resolved.deploymentSnapshot?.repository?.url
-          ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
-          : {}),
-        ...(resolved.deploymentSnapshot?.repository?.branch
-          ? { branch: resolved.deploymentSnapshot.repository.branch }
-          : {}),
-        cleanupPolicy: workflow.definition.execution.workspace.cleanup,
-      });
+      if (!this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey)) {
+        this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
+          resourceKey: resource.resourceKey,
+          repositoryId: resolved.repositoryId,
+          ...(resolved.deploymentSnapshot?.repository?.url
+            ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
+            : {}),
+          ...(resolved.deploymentSnapshot?.repository?.branch
+            ? { branch: resolved.deploymentSnapshot.repository.branch }
+            : {}),
+          cleanupPolicy: workflow.definition.execution.workspace.cleanup,
+        });
+      }
       return { attempt, resolved };
     }
 
     const currentWork = this.workStore.getWorkInternal(context.work.workItemId);
-    const resolved = this.resolve(currentWork, undefined, resource.repositoryId, requirementRevision);
+    const resolved = this.resolve(
+      currentWork,
+      undefined,
+      resource.repositoryId,
+      requirementRevision,
+      nodeWorkspaceAccess(context),
+    );
     const attempts = this.workStore.listAttempts(context.work.workItemId);
     const pending = pendingAttemptContext(currentWork);
     const reason = attempts.length === 0 ? "initial" : (pending?.reason ?? "policy_replan");
@@ -352,17 +356,19 @@ class ExpertTaskDagAdapterBase {
       },
     );
     const workflow = this.workStore.getWorkflow(attempt.workflowId, attempt.workflowVersion);
-    this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
-      resourceKey: resource.resourceKey,
-      repositoryId: resolved.repositoryId,
-      ...(resolved.deploymentSnapshot?.repository?.url
-        ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
-        : {}),
-      ...(resolved.deploymentSnapshot?.repository?.branch
-        ? { branch: resolved.deploymentSnapshot.repository.branch }
-        : {}),
-      cleanupPolicy: workflow.definition.execution.workspace.cleanup,
-    });
+    if (!this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey)) {
+      this.workStore.ensureWorkspace(context.work.workItemId, attempt.workAttemptId, {
+        resourceKey: resource.resourceKey,
+        repositoryId: resolved.repositoryId,
+        ...(resolved.deploymentSnapshot?.repository?.url
+          ? { repositoryUrl: resolved.deploymentSnapshot.repository.url }
+          : {}),
+        ...(resolved.deploymentSnapshot?.repository?.branch
+          ? { branch: resolved.deploymentSnapshot.repository.branch }
+          : {}),
+        cleanupPolicy: workflow.definition.execution.workspace.cleanup,
+      });
+    }
     return { attempt: this.workStore.getWorkAttempt(attempt.workAttemptId), resolved };
   }
 
@@ -491,6 +497,18 @@ class AgentDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecuto
       "",
       requirementExecutionContext(this.workStore, context.work, executionRequirementRevision(this.workStore, context))
         .promptContext,
+      "",
+      "Progress update protocol:",
+      "Before the first tool call, emit one short visible progress update.",
+      "After each meaningful batch of tool calls (roughly 3-5 calls) or whenever you confirm an important finding, emit another short visible progress update before continuing.",
+      "Each progress update must summarize only: current focus; confirmed finding (or 'none yet'); next action.",
+      "Keep each update concise (1-3 sentences). Do not expose hidden chain-of-thought, private reasoning, tool arguments, credentials, or speculative internal analysis.",
+      "These progress updates are operational status messages and do not replace the required final response/outcome protocol.",
+      "",
+      "Node completion criterion: complete the code edits required by this node in the provided workspace.",
+      "For code_change or repair nodes, downstream build, test, review, publication, and MR/PR execution are separate DAG responsibilities.",
+      "If those downstream tools are unavailable in this agent node, mention that validation is deferred, but do not return blocked because build, test, review, publication, or MR/PR execution is unavailable here.",
+      "Return blocked only when this node's own code-edit responsibility cannot be completed because a required input, repository access, editing capability, or other tool needed to make the code change is unavailable.",
     ].join("\n");
     const submitNew = () => {
       this.assertAgentTurnAvailable(attempt);
@@ -730,7 +748,13 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
           : null
         : (this.workStore.getWorkspaceForResource(attempt.workAttemptId, resource.resourceKey) ??
           (() => {
-            const resourceDispatch = this.resolve(current, attempt, resource.repositoryId, requirementRevision);
+            const resourceDispatch = this.resolve(
+              current,
+              attempt,
+              resource.repositoryId,
+              requirementRevision,
+              "read-only",
+            );
             return this.workStore.ensureWorkspace(current.workItemId, attempt.workAttemptId, {
               resourceKey: resource.resourceKey,
               repositoryId: resourceDispatch.repositoryId,
@@ -761,10 +785,7 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
       }
       return keyed;
     }
-    const expectsKeyedTask =
-      context.execution.externalRef !== null &&
-      correlationBaseRef(context.execution.externalRef) === "expert-task-key:" + taskKey(context);
-    if (!expectsKeyedTask && attempt.reviewTaskId) {
+    if (attempt.reviewTaskId) {
       let existing = this.tasks.get(attempt.reviewTaskId, current.principalId, current.scope);
       const canReuseExisting =
         this.taskMatchesResource(context, attempt, existing) && !this.taskHasOtherActiveDagExecution(context, existing);
@@ -818,13 +839,6 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
       requiredWorkspaceAccess: "read-only",
       preferredBackend: preferredBackend(current),
     });
-    if (
-      !resolved.runtimeProfile ||
-      resolveRuntimeProfilePolicy(resolved.runtimeProfile).workspaceAccess !== "read-only"
-    ) {
-      throw new Error("RUNTIME_PROFILE_MISMATCH");
-    }
-
     let task = this.dispatch.submitResolved(
       {
         principalId: current.principalId,

@@ -214,6 +214,62 @@ test("code-change seed agent is explicitly scoped as code_change before downstre
   assert.equal(graph.nodes[0]?.mutates, true);
 });
 
+test("seed planner derives conditional mutation from obligations instead of workflow change mode", async () => {
+  const planner = new WorkDagSeedPlanner();
+  const base = context();
+  const workflow: any = {
+    ...base.workflow,
+    definition: {
+      ...structuredClone(base.workflow.definition),
+      change: { mode: "readonly" },
+    },
+  };
+  const obligations: any = [
+    {
+      id: "review",
+      condition: { kind: "always" },
+      satisfaction: { kind: "fact", key: "review.accepted", equals: true },
+    },
+    {
+      id: "build-if-changed",
+      condition: { kind: "fact", key: "workspace.changed", equals: true },
+      satisfaction: { kind: "evidence", type: "build" },
+    },
+    {
+      id: "unit-if-changed",
+      condition: { kind: "fact", key: "workspace.changed", equals: true },
+      satisfaction: { kind: "evidence", type: "unit_test" },
+    },
+  ];
+
+  const initial = await planner.propose(context({ workflow, obligations }), "initial");
+  assert.deepEqual(
+    initial.nodes.map((node) => [node.kind, node.capability, node.mutates]),
+    [["review", "review", false]],
+  );
+
+  const repair = await planner.propose(
+    context({
+      workflow,
+      obligations,
+      work: { ...base.work, status: "rework", currentSubjectRevision: "workspace:s1" },
+      runtime: {
+        subject: "workspace:s1",
+        facts: { "review.rework": true, "workspace.changed": false },
+        evidence: [],
+        artifacts: [],
+        blockers: [],
+        cancelled: false,
+      },
+    }),
+    "review_rework",
+  );
+  assert.deepEqual(
+    repair.nodes.map((node) => [node.kind, node.capability, node.mutates]),
+    [["agent", "repair", true]],
+  );
+});
+
 test("conditional code-change seed plan reviews first, repairs only after rework, then verifies changed work", async () => {
   const planner = new WorkDagSeedPlanner();
   const base = context();

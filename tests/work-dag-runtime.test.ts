@@ -25,12 +25,14 @@ function fixture(
     "on_blocker_resolution",
     "manual",
   ],
+  changeMode?: "readonly" | "code_change" | "conditional_code_change",
 ) {
   const dir = mkdtempSync(join(tmpdir(), "dag-runtime-"));
   const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
   const base = store.getWorkflow("investigation").definition;
   store.putWorkflow("dynamic-runtime", 1, {
     ...structuredClone(base),
+    change: changeMode ? { mode: changeMode } : undefined,
     validation: { requiredEvidence, required: [] },
     review: { required: false },
     publication: { required: false, mode: "work_branch", approvalRequired: false },
@@ -1395,8 +1397,44 @@ test("runtime lets a safe independent branch progress before blocking on an unre
   }
 });
 
+test("stale deadlock trigger is revalidated before invoking the planner", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    let plannerCalls = 0;
+    const planner: any = {
+      identity: "deadlock-guard",
+      version: "1",
+      async propose() {
+        plannerCalls++;
+        return { nodes: [], edges: [] };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, planner),
+      new WorkDagScheduler(f.store, []),
+    );
+    const original = f.store.evaluateDagCompletion.bind(f.store);
+    (f.store as any).evaluateDagCompletion = () => ({
+      ready: false,
+      deadlocked: false,
+      missing: ["ACTIVE_WORK_ATTEMPT:test"],
+      readyNodeIds: [],
+      runningNodeIds: [],
+      waitingNodeIds: [],
+    });
+    const changed = await (runtime as any).replan(f.workId, "a", "s", "deadlock", 100);
+    assert.equal(changed, true);
+    assert.equal(plannerCalls, 0);
+    (f.store as any).evaluateDagCompletion = original;
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("validator rejection or exhausted replan budget becomes diagnosable blocked state", async () => {
-  const f = fixture(["expert_result"], 1);
+  const f = fixture(["expert_result"], 1, undefined, "readonly");
   try {
     const badPlanner: any = {
       identity: "bad",

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { WorkflowDefinition } from "../src/expert-platform/work-orchestration-store.js";
+import { workflowOnlyDagPolicyContext } from "../src/expert-platform/work-dag-policy-context.js";
 import { type DagGraph, type DagNode } from "../src/expert-platform/work-dag.js";
 import {
   validateDagProposal,
@@ -48,6 +49,37 @@ const node = (id: string, kind: DagNode["kind"], mutates = false): DagNode => ({
   resource: "w",
   mutates,
   requirements: [],
+});
+
+test("dynamic validator uses explicit PolicyContext mutation constraint instead of inferring deny from missing obligations", () => {
+  const wf = workflow("readonly");
+  const mutating: DagGraph = {
+    nodes: [{ ...node("change", "agent", true), capability: "repair", resource: "workspace" }],
+    edges: [],
+  };
+  const baseContext = workflowOnlyDagPolicyContext("wf", 1, wf);
+  assert.equal(
+    validateDagProposal(mutating, wf, [], {
+      outstandingOnly: true,
+      policyContext: {
+        ...baseContext,
+        executionConstraints: { workspaceMutation: "unspecified" },
+      },
+      reasonCode: "initial",
+    }).codes.includes("PLAN_WORKSPACE_WRITE_NOT_ALLOWED"),
+    false,
+  );
+  assert.equal(
+    validateDagProposal(mutating, wf, [], {
+      outstandingOnly: true,
+      policyContext: {
+        ...baseContext,
+        executionConstraints: { workspaceMutation: "forbidden" },
+      },
+      reasonCode: "initial",
+    }).codes.includes("PLAN_WORKSPACE_WRITE_NOT_ALLOWED"),
+    true,
+  );
 });
 
 test("policy validator rejects writable plans under readonly policy", () => {

@@ -48,6 +48,28 @@ export interface RequirementUpdateImpact {
 }
 const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$/;
 
+export type ApprovalRequirementScope = "work_completion" | "publish_work_branch";
+export type ApprovalRequirementSubjectType = "workspace_revision" | "publication_artifact";
+
+export function approvalRequirementFactKey(
+  scope: ApprovalRequirementScope,
+  subjectType: ApprovalRequirementSubjectType,
+): string {
+  return "approval." + scope + "." + subjectType + ".approved";
+}
+
+export function parseApprovalRequirementFactKey(
+  key: string,
+): { scope: ApprovalRequirementScope; subjectType: ApprovalRequirementSubjectType } | null {
+  const match =
+    /^approval\.(work_completion|publish_work_branch)\.(workspace_revision|publication_artifact)\.approved$/.exec(key);
+  if (!match) return null;
+  return {
+    scope: match[1] as ApprovalRequirementScope,
+    subjectType: match[2] as ApprovalRequirementSubjectType,
+  };
+}
+
 function validateRequirementPredicate(predicate: DagPredicate): void {
   if (!predicate || typeof predicate !== "object") throw new Error("INVALID_WORK_REQUIREMENT");
   switch (predicate.kind) {
@@ -261,17 +283,33 @@ export function policyObligations(workflow: WorkflowDefinition): DagObligation[]
       case "review_accepted":
         add("policy:review_accepted", { kind: "fact", key: "review.accepted", equals: true });
         break;
-      case "required_approvals_approved":
-        add(
-          "policy:required_approvals_approved",
-          {
-            kind: "fact",
-            key: "approval.required_approved",
-            equals: true,
-          },
-          conditionalChange ? changedCondition : { kind: "always" },
-        );
+      case "required_approvals_approved": {
+        const requiredApprovals = workflow.completion.requiredApprovals ?? [];
+        if (requiredApprovals.length === 0) {
+          add(
+            "policy:required_approvals_approved",
+            {
+              kind: "fact",
+              key: "approval.required_approved",
+              equals: true,
+            },
+            conditionalChange ? changedCondition : { kind: "always" },
+          );
+          break;
+        }
+        for (const required of requiredApprovals) {
+          add(
+            "policy:approval:" + required.scope + ":" + required.subjectType,
+            {
+              kind: "fact",
+              key: approvalRequirementFactKey(required.scope, required.subjectType),
+              equals: true,
+            },
+            conditionalChange ? changedCondition : { kind: "always" },
+          );
+        }
         break;
+      }
       case "publication_succeeded":
         add(
           "policy:publication_succeeded",
@@ -292,12 +330,12 @@ export function policyObligations(workflow: WorkflowDefinition): DagObligation[]
 }
 
 export function effectiveObligations(
-  workflow: WorkflowDefinition,
+  _workflow: WorkflowDefinition,
   requirements: readonly WorkRequirement[],
   unresolved: readonly UnresolvedWorkRequirement[] = [],
   pinnedPolicyObligations: readonly DagObligation[] = [],
 ): DagObligation[] {
-  const result = policyObligations(workflow);
+  const result: DagObligation[] = [];
   const ids = new Set(result.map((item) => item.id));
   const add = (obligation: DagObligation) => {
     if (ids.has(obligation.id)) throw new Error("WORK_REQUIREMENT_POLICY_ID_CONFLICT");

@@ -447,7 +447,16 @@ const WORKER_MCP_READ_ONLY_TOOLS = new Set([
 ]);
 
 const activeExpertWaits = new Map<string, number>();
-function safeExpertActivityMessage(event: { type: string; tool: string | null; count: number | null }): string {
+function safeExpertActivityMessage(event: {
+  type: string;
+  tool: string | null;
+  count: number | null;
+  details?: string | null;
+}): string {
+  if (event.type === "model.output" && event.details?.trim()) {
+    const preview = event.details.trim();
+    return "模型输出摘要：" + (preview.length > 500 ? preview.slice(0, 487) + "…[truncated]" : preview);
+  }
   const tool = event.tool && ["Read", "Glob", "Grep", "other"].includes(event.tool) ? event.tool : "other";
   if (event.type === "tool.activity")
     return `Worker 正在执行 ${tool} 操作${event.count ? `（${event.count} 次）` : ""}`;
@@ -2135,10 +2144,13 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
               ) {
                 lastNotify = performance.now();
                 const latestWork = page.events.at(-1);
-                const latestActivity = newActivity.at(-1);
+                const latestActivity =
+                  [...newActivity].reverse().find((event) => event.type === "model.output") ?? newActivity.at(-1);
                 const useActivity =
                   latestActivity !== undefined &&
-                  (latestWork === undefined || latestActivity.timestampMs >= latestWork.createdAt);
+                  (latestActivity.type === "model.output" ||
+                    latestWork === undefined ||
+                    latestActivity.timestampMs >= latestWork.createdAt);
                 const message = useActivity
                   ? `${latestActivity!.role === "review" ? "Reviewer" : "Worker"}：${safeExpertActivityMessage(latestActivity!)}`
                   : safeWorkProgressMessage(latestWork!);
@@ -2216,6 +2228,14 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
                   },
                   currentTask: compactTask(detail.currentTask),
                   reviewTask: compactTask(detail.reviewTask),
+                  changeRequest: detail.changeRequest
+                    ? {
+                        state: detail.changeRequest.state,
+                        provider: detail.changeRequest.provider,
+                        externalId: detail.changeRequest.externalId,
+                        url: detail.changeRequest.url,
+                      }
+                    : null,
                   gate: {
                     ready: detail.gate.ready,
                     missing: detail.gate.missing,
@@ -2224,6 +2244,8 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
                   nextEventId: cursor,
                   hasMore: moreWork > 0,
                   activityEvents,
+                  latestModelOutput:
+                    activityEvents.filter((event) => event.type === "model.output").at(-1)?.details ?? null,
                   nextActivityEventId: activityCursor,
                   activityHasMore: moreActivity > 0,
                   followUp: active

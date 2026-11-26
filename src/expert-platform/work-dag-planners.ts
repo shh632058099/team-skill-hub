@@ -1,5 +1,6 @@
 import { evaluatePredicate, validateGraph, type DagExecution, type DagGraph, type DagNode } from "./work-dag.js";
 import type { WorkDagPlanner, WorkDagPlannerContext } from "./work-dag-engine.js";
+import { parseApprovalRequirementFactKey } from "./work-dag-requirements.js";
 
 function currentExecutions(input: WorkDagPlannerContext): DagExecution[] {
   return input.executions.map((execution) => ({
@@ -11,6 +12,44 @@ function currentExecutions(input: WorkDagPlannerContext): DagExecution[] {
   }));
 }
 
+function isWorkspaceChangedCondition(obligation: WorkDagPlannerContext["obligations"][number]): boolean {
+  return (
+    obligation.condition.kind === "fact" &&
+    obligation.condition.key === "workspace.changed" &&
+    obligation.condition.equals === true
+  );
+}
+
+function hasConditionalMutationContract(input: WorkDagPlannerContext): boolean {
+  const hasChangedConditional = input.obligations.some(isWorkspaceChangedCondition);
+  const hasUnconditionalReview = input.obligations.some(
+    (obligation) =>
+      obligation.condition.kind === "always" &&
+      obligation.satisfaction.kind === "fact" &&
+      obligation.satisfaction.key === "review.accepted" &&
+      obligation.satisfaction.equals === true,
+  );
+  return hasChangedConditional && hasUnconditionalReview;
+}
+
+function requiresMutationForOpenWorldAgent(input: WorkDagPlannerContext): boolean {
+  const forbidsMutation = input.obligations.some(
+    (obligation) =>
+      obligation.satisfaction.kind === "fact" &&
+      obligation.satisfaction.key === "workspace.changed" &&
+      obligation.satisfaction.equals === false,
+  );
+  if (forbidsMutation) return false;
+  return input.obligations.some(
+    (obligation) =>
+      obligation.condition.kind === "always" &&
+      ((obligation.satisfaction.kind === "evidence" &&
+        (obligation.satisfaction.type === "build" || obligation.satisfaction.type === "unit_test")) ||
+        (obligation.satisfaction.kind === "fact" &&
+          (obligation.satisfaction.key === "publication.succeeded" ||
+            obligation.satisfaction.key === "change_request.created"))),
+  );
+}
 function outstandingObligations(input: WorkDagPlannerContext) {
   const executions = currentExecutions(input);
   return input.obligations.filter((obligation) => {
@@ -58,7 +97,7 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
       reasonCode === "review_rework" ||
       reasonCode === "human_rework" ||
       reasonCode === "new_information";
-    const conditionalChange = input.workflow.definition.change?.mode === "conditional_code_change";
+    const conditionalChange = hasConditionalMutationContract(input);
     if (conditionalChange && reasonCode === "initial" && !Object.hasOwn(input.runtime.facts, "workspace.changed")) {
       add("review", "review", { subject: input.work.currentSubjectRevision, mutates: false });
       return { nodes, edges };
@@ -68,7 +107,8 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
     let needsReview = false;
     let needsPublication = false;
     let needsChangeRequest = false;
-    let needsApproval = false;
+    const approvalCapabilities = new Set<"work_completion" | "publish_work_branch">();
+    let legacyAggregateApproval = false;
     let needsAttempt = false;
     let needsOpenWorldAgent = false;
 
@@ -82,6 +122,9 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
             case "attempt.latest_succeeded":
               needsAttempt = true;
               break;
+            case "workspace.changed":
+              if (obligation.satisfaction.equals === true) needsOpenWorldAgent = true;
+              break;
             case "review.accepted":
               needsReview = true;
               break;
@@ -92,11 +135,17 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
               needsChangeRequest = true;
               break;
             case "approval.required_approved":
-              needsApproval = true;
+              legacyAggregateApproval = true;
               break;
-            default:
+            default: {
+              const approval = parseApprovalRequirementFactKey(obligation.satisfaction.key);
+              if (approval) {
+                approvalCapabilities.add(approval.scope);
+                break;
+              }
               needsOpenWorldAgent = true;
               break;
+            }
           }
           break;
         case "artifact":
@@ -113,12 +162,16 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
       }
     }
 
+    if (legacyAggregateApproval) {
+      approvalCapabilities.add(needsPublication ? "publish_work_branch" : "work_completion");
+    }
+
     const needsExpertResult = evidenceTypes.delete("expert_result");
     evidenceTypes.delete("publication");
     const needsAgent = forcedRepair || needsExpertResult || needsOpenWorldAgent;
 
     if (needsAgent) {
-      const mutates = input.workflow.definition.change?.mode === "code_change" || (conditionalChange && forcedRepair);
+      const mutates = requiresMutationForOpenWorldAgent(input) || (conditionalChange && forcedRepair);
       add("agent", forcedRepair ? "repair" : mutates ? "code_change" : "analysis", {
         subject: null,
         mutates,
@@ -143,7 +196,7 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
       add("publication", "prepare", {
         subject: input.work.currentSubjectRevision,
       });
-      if (needsApproval) {
+      if (approvalCapabilities.has("publish_work_branch")) {
         add("approval", "publish_work_branch", {
           subject: input.work.currentSubjectRevision,
           resource: null,
@@ -152,10 +205,9 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
       add("publication", "push", {
         subject: input.work.currentSubjectRevision,
       });
-    } else if (
-      needsApproval &&
-      input.workflow.definition.completion.requiredApprovals?.some((approval) => approval.scope === "work_completion")
-    ) {
+    }
+
+    if (approvalCapabilities.has("work_completion")) {
       add("approval", "work_completion", {
         subject: input.work.currentSubjectRevision,
         resource: null,
@@ -169,7 +221,7 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
     }
 
     if (nodes.length === 0 && needsAttempt && !input.work.activeWorkAttemptId) {
-      const mutates = input.workflow.definition.change?.mode === "code_change";
+      const mutates = requiresMutationForOpenWorldAgent(input);
       add("agent", mutates ? "code_change" : "analysis", {
         subject: null,
         mutates,
@@ -179,7 +231,7 @@ export class WorkDagSeedPlanner implements WorkDagPlanner {
     if (nodes.length === 0 && reasonCode === "initial" && input.requirementSnapshot.originalRequest.trim().length > 0) {
       add("agent", "analysis", {
         subject: null,
-        mutates: input.workflow.definition.change?.mode === "code_change",
+        mutates: requiresMutationForOpenWorldAgent(input),
       });
     }
 

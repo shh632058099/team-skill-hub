@@ -11,6 +11,7 @@ import {
   ADMIN_OBSERVABILITY_HTML,
   ADMIN_OBSERVABILITY_INDEX_HTML,
 } from "../src/admin-ui.js";
+import { ADMIN_EXPERTS_HTML } from "../src/expert-admin-ui.js";
 
 function assertContainsAll(text: string, values: string[]): void {
   for (const value of values) assert.ok(text.includes(value), `expected HTML to contain ${value}`);
@@ -422,4 +423,11 @@ test("dedicated API key management page exposes filters and defaults to 10 rows"
     "创建 API Key",
     "if(!(d.keys||[]).length&&Number(page.cursor||0)>0&&page.previousCursor!==undefined)",
   ]);
+});
+
+test("expert admin presents Workflow as a policy preset and no longer exposes runtime profile authority", () => {
+  assert.match(ADMIN_EXPERTS_HTML, /策略模板/);
+  assert.match(ADMIN_EXPERTS_HTML, /Dynamic DAG/);
+  assert.doesNotMatch(ADMIN_EXPERTS_HTML, /name="requiredRuntimeProfile"/);
+  assert.doesNotMatch(ADMIN_EXPERTS_HTML, />Workflows</);
 });

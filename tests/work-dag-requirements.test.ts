@@ -5,12 +5,48 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
-import { workflowOnlyDagPolicyContext } from "../src/expert-platform/work-dag-policy-context.js";
+import {
+  policyContextObligations,
+  workflowOnlyDagPolicyContext,
+} from "../src/expert-platform/work-dag-policy-context.js";
 import {
   classifyRequirementUpdateImpact,
+  effectiveObligations,
   evidenceRequirementSemanticsDigest,
   policyObligations,
 } from "../src/expert-platform/work-dag-requirements.js";
+
+test("RequirementSnapshot pins legacy workflow policy obligations once and runtime effective obligations ignore later workflow shape", () => {
+  const dir = mkdtempSync(join(tmpdir(), "work-pinned-policy-obligations-"));
+  try {
+    const store = new WorkOrchestrationStore(join(dir, "db.sqlite"));
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team",
+      idempotencyKey: "pin-policy",
+      sourceType: "test",
+      title: "pin",
+      description: "fix code",
+      workflowId: "bug-fix",
+    });
+    const snapshot = store.ensureRequirementSnapshot(work.workItemId);
+    assert.ok(snapshot.policyObligations.length > 0);
+    assert.ok(snapshot.policyObligations.some((item) => item.id === "policy:review_accepted"));
+
+    const changedWorkflow: any = structuredClone(store.getWorkflow("bug-fix").definition);
+    changedWorkflow.validation.requiredEvidence = ["integration_test"];
+    changedWorkflow.completion.require = [];
+    const effective = effectiveObligations(changedWorkflow, [], [], snapshot.policyObligations);
+    assert.ok(effective.some((item) => item.id === "policy:review_accepted"));
+    assert.equal(
+      effective.some((item) => item.satisfaction.kind === "evidence" && item.satisfaction.type === "integration_test"),
+      false,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("conditional code-change policy activates build/publication obligations only after a workspace change", () => {
   const dir = mkdtempSync(join(tmpdir(), "work-conditional-policy-"));
@@ -98,6 +134,62 @@ test("conditional code-change may omit delivery while preserving build, unit-tes
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("repository verification policy activates from an effective mutation requirement without workflow change mode", () => {
+  const obligations = policyContextObligations(
+    [
+      {
+        id: "user:workspace-change",
+        condition: { kind: "always" },
+        satisfaction: { kind: "fact", key: "workspace.changed", equals: true },
+      },
+    ],
+    {
+      workflowRef: "readonly@1",
+      workflowDigest: "wf",
+      executionConstraints: { workspaceMutation: "forbidden" },
+      organization: {
+        ref: "organization:default@1",
+        digest: "org",
+        allowedNodeKinds: [
+          "agent",
+          "verification",
+          "review",
+          "approval",
+          "publication",
+          "change_request",
+          "wait",
+          "external_action",
+        ],
+      },
+      repository: {
+        repositoryId: "repo",
+        policyDigest: "repo-policy",
+        verificationCapabilities: ["ctest", "integration_test"],
+        requiredEvidence: ["integration_test"],
+        publicationPermissions: [],
+      },
+      deployment: null,
+      executorCapabilities: {
+        agent: ["*"],
+        verification: ["ctest", "integration_test"],
+        review: ["review"],
+        approval: ["work_completion", "publish_work_branch"],
+        publication: [],
+        change_request: [],
+        wait: ["*"],
+        external_action: [],
+      },
+      resourcePolicies: {},
+      limits: { maxReplans: 12, maxReworks: 2, maxTurnsPerRun: 20 },
+      usage: { replansUsed: 0, reworksUsed: 0, continuationTurns: 0 },
+      digest: "context",
+    },
+  );
+  assert.ok(
+    obligations.some((item) => item.satisfaction.kind === "evidence" && item.satisfaction.type === "integration_test"),
+  );
 });
 
 test("policy context binding revisions requirements before execution and rejects active-attempt drift", () => {
@@ -1147,6 +1239,184 @@ test("initial RequirementSnapshot durably resolves explicit hard verification in
     assert.equal(reopened.originalRequest, snapshot.originalRequest);
     assert.deepEqual(reopened.requirements, snapshot.requirements);
     assert.equal(reopened.effectiveDigest, snapshot.effectiveDigest);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("delivery intent normalizes equivalent MR/PR phrasing to the same conditional obligations", () => {
+  const variants = [
+    "If any code changes were made, create a working branch and MR/PR.",
+    "Create a merge request with the changes.",
+    "Open a PR for the fix.",
+    "Submit the resulting changes as an MR.",
+    "After fixing issues, raise a pull request.",
+    "有修改则创建工作分支并提交 MR。",
+    "修复后提 PR。",
+  ];
+  const normalized = variants.map((description, index) => {
+    const dir = mkdtempSync(join(tmpdir(), "work-delivery-intent-" + index + "-"));
+    try {
+      const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+      const work = store.createOrReuseWork({
+        principalId: "alice",
+        scope: "team",
+        idempotencyKey: "delivery-intent-" + index,
+        sourceType: "mcp",
+        title: "Delivery",
+        description,
+        workflowId: "bug-fix",
+      });
+      const snapshot = store.ensureRequirementSnapshot(work.workItemId);
+      assert.equal(snapshot.unresolved.length, 0, description);
+      const facts = snapshot.requirements
+        .filter((item) => item.satisfaction.kind === "fact")
+        .map((item) => ({
+          key: item.satisfaction.kind === "fact" ? item.satisfaction.key : "",
+          condition: item.condition,
+        }))
+        .filter((item) => item.key === "publication.succeeded" || item.key === "change_request.created")
+        .sort((a, b) => a.key.localeCompare(b.key));
+      store.close();
+      return facts;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  for (const item of normalized) assert.deepEqual(item, normalized[0]);
+  assert.deepEqual(normalized[0], [
+    {
+      key: "change_request.created",
+      condition: { kind: "fact", key: "workspace.changed", equals: true },
+    },
+    {
+      key: "publication.succeeded",
+      condition: { kind: "fact", key: "workspace.changed", equals: true },
+    },
+  ]);
+});
+
+test("latest review request keeps MR delivery conditional on actual workspace changes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "work-delivery-latest-request-"));
+  try {
+    const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team",
+      idempotencyKey: "delivery-latest-request",
+      sourceType: "mcp",
+      title: "Review and fix",
+      description:
+        "Use the Team Skill Hub expert and its remote repository workspace to review the pthread repository, focusing on example programs, multithreading correctness/safety, and C++ compatibility. Fix confirmed issues, run the relevant unit tests (and report exact commands/results), and create a merge request with the changes. If no actionable defects are found, still report review and tests, and explain whether an MR is warranted.",
+      workflowId: "review-fix-verify",
+    });
+    const snapshot = store.ensureRequirementSnapshot(work.workItemId);
+    const delivery = snapshot.requirements
+      .filter(
+        (item) =>
+          item.satisfaction.kind === "fact" &&
+          (item.satisfaction.key === "publication.succeeded" || item.satisfaction.key === "change_request.created"),
+      )
+      .sort((a, b) =>
+        (a.satisfaction.kind === "fact" ? a.satisfaction.key : "").localeCompare(
+          b.satisfaction.kind === "fact" ? b.satisfaction.key : "",
+        ),
+      );
+    assert.equal(snapshot.unresolved.length, 0);
+    assert.equal(delivery.length, 2);
+    assert.ok(
+      delivery.every(
+        (item) =>
+          item.condition.kind === "fact" &&
+          item.condition.key === "workspace.changed" &&
+          item.condition.equals === true,
+      ),
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("mentioning whether an MR is warranted does not create a delivery requirement", () => {
+  const dir = mkdtempSync(join(tmpdir(), "work-delivery-discussion-"));
+  try {
+    const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team",
+      idempotencyKey: "delivery-discussion",
+      sourceType: "mcp",
+      title: "Review only",
+      description: "If no actionable defects are found, explain whether an MR is warranted.",
+      workflowId: "review-fix-verify",
+    });
+    const snapshot = store.ensureRequirementSnapshot(work.workItemId);
+    assert.equal(
+      snapshot.requirements.some(
+        (item) =>
+          item.satisfaction.kind === "fact" &&
+          (item.satisfaction.key === "publication.succeeded" || item.satisfaction.key === "change_request.created"),
+      ),
+      false,
+    );
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unconditional delivery language stays unconditional", () => {
+  const dir = mkdtempSync(join(tmpdir(), "work-delivery-always-"));
+  try {
+    const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team",
+      idempotencyKey: "delivery-always",
+      sourceType: "mcp",
+      title: "Delivery",
+      description: "Always create a branch and PR even if there are no code changes.",
+      workflowId: "bug-fix",
+    });
+    const snapshot = store.ensureRequirementSnapshot(work.workItemId);
+    const delivery = snapshot.requirements.filter(
+      (item) =>
+        item.satisfaction.kind === "fact" &&
+        (item.satisfaction.key === "publication.succeeded" || item.satisfaction.key === "change_request.created"),
+    );
+    assert.equal(delivery.length, 2);
+    assert.ok(delivery.every((item) => item.condition.kind === "always"));
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("conditional branch and MR requirement resolves into typed publication obligations", () => {
+  const dir = mkdtempSync(join(tmpdir(), "work-intent-publication-"));
+  try {
+    const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team",
+      idempotencyKey: "intent-publication",
+      sourceType: "mcp",
+      title: "Publish changes",
+      description: "If any code changes were made and validation passes, create a working branch and MR/PR.",
+      workflowId: "bug-fix",
+    });
+    const snapshot = store.ensureRequirementSnapshot(work.workItemId);
+    assert.equal(snapshot.unresolved.length, 0);
+    const publication = snapshot.requirements.find(
+      (item) => item.satisfaction.kind === "fact" && item.satisfaction.key === "publication.succeeded",
+    );
+    const changeRequest = snapshot.requirements.find(
+      (item) => item.satisfaction.kind === "fact" && item.satisfaction.key === "change_request.created",
+    );
+    assert.deepEqual(publication?.condition, { kind: "fact", key: "workspace.changed", equals: true });
+    assert.deepEqual(changeRequest?.condition, { kind: "fact", key: "workspace.changed", equals: true });
     store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

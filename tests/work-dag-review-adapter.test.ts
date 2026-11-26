@@ -12,7 +12,10 @@ import { workflowOnlyDagPolicyContext } from "../src/expert-platform/work-dag-po
 import { createExpertTaskDagAdapters } from "../src/expert-platform/work-dag-expert-adapters.js";
 import type { DagGraph } from "../src/expert-platform/work-dag.js";
 
-function fixture(reviewerExpertId?: string) {
+function fixture(
+  reviewerExpertId?: string,
+  reviewerRuntimeProfile: "codex-readonly" | "codex-workspace-write" = "codex-readonly",
+) {
   const dir = mkdtempSync(join(tmpdir(), "dag-review-adapter-"));
   const file = join(dir, "runtime.db");
   const experts = new ExpertStore(file);
@@ -60,7 +63,7 @@ function fixture(reviewerExpertId?: string) {
         { id: "repo-b", url: "https://example.test/repo-b.git", branch: "main" },
       ],
       principals: ["alice"],
-      runtimeProfile: "codex-readonly",
+      runtimeProfile: reviewerRuntimeProfile,
       active: true,
       executor: {
         backend: "codex",
@@ -213,6 +216,24 @@ function installReview(
   assert.equal(proposal.status, "accepted", JSON.stringify(proposal.decisionCodes));
 }
 
+test("review node can use a read-write deployment for a read-only review task", async () => {
+  const f = fixture("reviewer", "codex-workspace-write");
+  try {
+    installReview(f.works, f.workId);
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const execution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    const task = f.tasks.getByIdempotency("alice", "team", "dag:" + execution.idempotencyKey);
+    assert.ok(task);
+    assert.equal(task.deploymentSnapshot?.runtimeProfile, "codex-workspace-write");
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("agent review prompt uses the current RequirementSnapshot authority", async () => {
   const f = fixture("reviewer");
   try {
@@ -326,6 +347,10 @@ test("conditional code-change can start with an agent review and complete the no
     const base = works.getWorkflow("bug-fix").definition;
     works.putWorkflow("conditional-review", 1, {
       ...structuredClone(base),
+      execution: {
+        ...structuredClone(base.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
       change: { mode: "conditional_code_change" },
       validation: { requiredEvidence: ["build", "unit_test"], required: [] },
       review: { required: true, reviewerExpertId: "reviewer" },
@@ -660,6 +685,44 @@ test("stale succeeded agent review is rerun before it can authorize a newer subj
   }
 });
 
+test("failed review generation reuses the WorkAttempt review task on DAG retry", async () => {
+  const f = fixture("reviewer");
+  try {
+    installReview(f.works, f.workId);
+    const scheduler = new WorkDagScheduler(f.works, createExpertTaskDagAdapters(f.works, f.tasks, f.dispatch));
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 30), true);
+    const firstExecution = f.works.listDagExecutions(f.workId).find((item) => item.nodeId === "review")!;
+    const firstTask = f.tasks.getByIdempotency("alice", "team", "dag:" + firstExecution.idempotencyKey)!;
+    const firstClaim = f.tasks.claim("worker-1", 31, 1000, "reviewer", {
+      backend: "codex",
+      runtimeProfiles: ["codex-readonly"],
+    })!;
+    f.tasks.fail(firstClaim, "REPOSITORY_PREPARATION_FAILED", 32);
+    assert.equal(await scheduler.reconcileOne(f.workId, "alice", "team", "hub", 33), true);
+    assert.equal(f.works.getActiveAttempt(f.workId)?.reviewTaskId, firstTask.taskId);
+
+    f.works.retryDagNode(f.workId, "review", "executor_failure:EXECUTION_FAILED", 34);
+    const retryExecution = f.works
+      .listDagExecutions(f.workId)
+      .find((item) => item.nodeId === "review" && item.generation === 2)!;
+    assert.equal(retryExecution.state, "pending");
+    assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 36), true);
+    const owned = f.tasks.get(firstTask.taskId, "alice", "team");
+    assert.equal(owned.status, "queued");
+    assert.equal(owned.executionRef, retryExecution.idempotencyKey);
+    assert.equal(f.works.getActiveAttempt(f.workId)?.reviewTaskId, firstTask.taskId);
+    assert.equal(
+      f.tasks.listByWorkAttempt(f.attemptId, "alice", "team").filter((task) => task.executionKind === "agent").length,
+      1,
+    );
+  } finally {
+    f.works.close();
+    f.tasks.close();
+    f.experts.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("agent review task is not reused across repository resources in one WorkAttempt", async () => {
   const f = fixture("reviewer");
   try {
@@ -964,11 +1027,16 @@ test("review rework creates a new review_rework WorkAttempt on the next Agent no
     assert.equal(latest.reason, "review_rework");
     assert.equal(latest.parentWorkAttemptId, f.attemptId);
     assert.equal(latest.whatShouldChange, "fix review issue");
+    const parentWorkspace = f.works.getWorkspaceForResource(f.attemptId, "workspace");
+    const reworkWorkspace = f.works.getWorkspaceForResource(latest.workAttemptId, "workspace");
+    assert.equal(reworkWorkspace?.workspaceId, parentWorkspace?.workspaceId);
+    assert.equal(reworkWorkspace?.workspaceKey, parentWorkspace?.workspaceKey);
     const repairClaim = f.tasks.claim("worker", 52, 1000, "ota", {
       backend: "codex",
       runtimeProfiles: ["codex-readonly"],
     })!;
     assert.match(repairClaim.problem, /fix review issue/);
+    assert.equal(repairClaim.workspaceKey, parentWorkspace?.workspaceKey);
   } finally {
     f.works.close();
     f.tasks.close();

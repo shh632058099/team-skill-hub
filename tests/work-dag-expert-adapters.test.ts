@@ -1375,6 +1375,19 @@ test("verification failure context reaches the repair continuation Worker prompt
     assert.match(repairClaim.problem, /verification task completed|unit_test|TEST_FAILED/);
     assert.match(repairClaim.problem, /RequirementSnapshot revision: 2/);
     assert.match(repairClaim.problem, /repair-snapshot-v2/);
+    assert.match(
+      repairClaim.problem,
+      /Progress update protocol:[\s\S]*Before the first tool call[\s\S]*After each meaningful batch of tool calls[\s\S]*current focus[\s\S]*confirmed finding[\s\S]*next action/i,
+    );
+    assert.match(repairClaim.problem, /Do not expose hidden chain-of-thought/i);
+    assert.match(
+      repairClaim.problem,
+      /Node completion criterion:[\s\S]*code edits required by this node[\s\S]*do not return blocked because build, test, review, publication, or MR\/PR execution is unavailable here/i,
+    );
+    assert.ok(
+      repairClaim.problem.lastIndexOf("Node completion criterion:") >
+        repairClaim.problem.lastIndexOf("RequirementSnapshot revision: 2"),
+    );
     tasks.complete(
       repairClaim,
       "repair complete",

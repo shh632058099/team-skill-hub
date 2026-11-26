@@ -53,6 +53,9 @@ export interface WorkDagPolicyUsage {
 export interface WorkDagPolicyContext {
   workflowRef: string;
   workflowDigest: string;
+  executionConstraints?: {
+    workspaceMutation: "allowed" | "forbidden" | "unspecified";
+  };
   organization: WorkDagOrganizationPolicyContext;
   repository: WorkDagRepositoryPolicyContext | null;
   deployment: WorkDagDeploymentPolicyContext | null;
@@ -129,6 +132,12 @@ export function createWorkDagOrganizationPolicyProviderFromEnv(
 function defaultOrganizationPolicy(): WorkDagOrganizationPolicyContext {
   return DEFAULT_ORGANIZATION_POLICY_PROVIDER.resolve({ principalId: "platform", scope: "default" });
 }
+function legacyWorkspaceMutationConstraint(workflow: WorkflowDefinition): "allowed" | "forbidden" | "unspecified" {
+  if (workflow.change?.mode === "readonly") return "forbidden";
+  if (workflow.change?.mode === "code_change" || workflow.change?.mode === "conditional_code_change") return "allowed";
+  return "unspecified";
+}
+
 function limits(workflow: WorkflowDefinition): WorkDagPolicyLimits {
   return {
     maxReplans: workflow.planning?.maxReplans ?? 12,
@@ -203,6 +212,9 @@ export function workflowOnlyDagPolicyContext(
   return finalize({
     workflowRef: workflowId + "@" + workflowVersion,
     workflowDigest: stableDigest(workflow),
+    executionConstraints: {
+      workspaceMutation: legacyWorkspaceMutationConstraint(workflow),
+    },
     organization: structuredClone(organization),
     repository: null,
     deployment: null,
@@ -214,8 +226,7 @@ export function workflowOnlyDagPolicyContext(
   });
 }
 
-function repositoryRequiredEvidence(workflow: WorkflowDefinition, resolved: ResolvedDispatch): string[] {
-  if (workflow.change?.mode !== "code_change" && workflow.change?.mode !== "conditional_code_change") return [];
+function repositoryRequiredEvidence(resolved: ResolvedDispatch): string[] {
   const steps = normalizeVerificationPolicy(
     resolved.deploymentSnapshot?.repository?.verificationPolicy?.required ?? [],
   );
@@ -239,13 +250,6 @@ function configuredPublicationCapabilities(resolved: ResolvedDispatch): {
   if (permissions.includes("prepare-commit")) capabilities.push("prepare");
   if (permissions.includes("push-work-branch")) capabilities.push("push");
   return { permissions, capabilities };
-}
-
-function requiredWorkspaceAccess(workflow: WorkflowDefinition): "read-only" | "read-write" | undefined {
-  if (workflow.change?.mode === "readonly") return "read-only";
-  if (workflow.change?.mode === "code_change" || workflow.change?.mode === "conditional_code_change")
-    return "read-write";
-  return undefined;
 }
 
 function preferredBackend(work: WorkItemRecord): "claude" | "codex" | undefined {
@@ -279,7 +283,7 @@ function resolvedResourcePolicy(
       publicationPolicy: repositorySnapshot.publicationPolicy ?? null,
     }),
     verificationCapabilities,
-    requiredEvidence: repositoryRequiredEvidence(workflow, resolved),
+    requiredEvidence: repositoryRequiredEvidence(resolved),
     publicationPermissions: publication.permissions,
   };
   const deployment: WorkDagDeploymentPolicyContext = {
@@ -312,8 +316,29 @@ function resolvedResourcePolicy(
   };
 }
 
-export function policyContextObligations(workflow: WorkflowDefinition, context: WorkDagPolicyContext): DagObligation[] {
-  if (workflow.change?.mode !== "code_change" && workflow.change?.mode !== "conditional_code_change") return [];
+export function policyContextObligations(
+  baseObligations: readonly DagObligation[],
+  context: WorkDagPolicyContext,
+): DagObligation[] {
+  const conditionalMutation = baseObligations.some(
+    (obligation) =>
+      obligation.condition.kind === "fact" &&
+      obligation.condition.key === "workspace.changed" &&
+      obligation.condition.equals === true,
+  );
+  const mutationContract =
+    conditionalMutation ||
+    baseObligations.some(
+      (obligation) =>
+        (obligation.satisfaction.kind === "evidence" &&
+          (obligation.satisfaction.type === "build" || obligation.satisfaction.type === "unit_test")) ||
+        (obligation.satisfaction.kind === "fact" &&
+          obligation.satisfaction.equals === true &&
+          (obligation.satisfaction.key === "workspace.changed" ||
+            obligation.satisfaction.key === "publication.succeeded" ||
+            obligation.satisfaction.key === "change_request.created")),
+    );
+  if (!mutationContract) return [];
   const result: DagObligation[] = [];
   const seen = new Set<string>();
   const primaryResource = context.repository ? "repo:" + context.repository.repositoryId : null;
@@ -327,7 +352,9 @@ export function policyContextObligations(workflow: WorkflowDefinition, context: 
       const id = "policy:repository:" + repository.repositoryId + ":evidence:" + evidenceType + ":resource:" + resource;
       result.push({
         id,
-        condition: { kind: "resource_active" },
+        condition: conditionalMutation
+          ? { kind: "fact", key: "workspace.changed", equals: true }
+          : { kind: "resource_active" },
         satisfaction: { kind: "evidence", type: evidenceType },
         resource,
       });
@@ -403,12 +430,6 @@ export class WorkDagPolicyContextResolver {
         ...(work.repositoryId ? { repositoryId: work.repositoryId } : {}),
         ...(work.requestedDeploymentId ? { deploymentId: work.requestedDeploymentId } : {}),
         ...(preferredBackend(work) ? { preferredBackend: preferredBackend(work) } : {}),
-        ...(workflow.definition.execution.requiredRuntimeProfile
-          ? { requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile }
-          : {}),
-        ...(requiredWorkspaceAccess(workflow.definition)
-          ? { requiredWorkspaceAccess: requiredWorkspaceAccess(workflow.definition) }
-          : {}),
       });
     let resolved: ResolvedDispatch;
     try {
@@ -443,12 +464,6 @@ export class WorkDagPolicyContextResolver {
                 selectionMode: "explicit",
                 repositoryId,
                 deploymentId: resolved.deploymentId,
-                ...(workflow.definition.execution.requiredRuntimeProfile
-                  ? { requiredRuntimeProfile: workflow.definition.execution.requiredRuntimeProfile }
-                  : {}),
-                ...(requiredWorkspaceAccess(workflow.definition)
-                  ? { requiredWorkspaceAccess: requiredWorkspaceAccess(workflow.definition) }
-                  : {}),
               });
         const resourcePolicy = resolvedResourcePolicy(
           workflow.definition,

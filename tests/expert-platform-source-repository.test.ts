@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -252,12 +252,15 @@ test("interrupted checkout cannot be misclassified as a ready WorkAttempt worksp
     assert.ok(existsSync(path.join(destination, ".git")), "failed clone left Git metadata");
     assert.equal(existsSync(path.join(destination, "README.md")), false, "checkout did not complete");
 
-    await assert.rejects(
-      prepareRepositoryWorkspace(input),
-      /WORKSPACE_PREPARATION_INCOMPLETE/,
-      "a retry may not treat an unhydrated workspace as ready",
+    const recovered = await prepareRepositoryWorkspace(input);
+    assert.equal(recovered.path, destination);
+    assert.match(recovered.commitSha, /^[a-f0-9]{40}$/);
+    assert.equal(readFileSync(path.join(destination, "README.md"), "utf8"), "source exists\\n");
+    assert.equal(
+      existsSync(path.join(destination, ".git", "team-skill-hub-workspace-ready")),
+      true,
+      "successful retry marks the workspace ready",
     );
-    assert.equal(existsSync(path.join(destination, "README.md")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -71,11 +71,11 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /Work Items/);
     assert.match(html, /id="workItems"/);
     assert.match(html, /Source Observations/);
-    assert.match(html, /Workflows/);
+    assert.match(html, /策略模板/);
     assert.match(html, /id="workflows"/);
     assert.match(html, /所有新 Work 统一使用 Dynamic DAG/);
-    assert.match(html, /Workflow 只定义策略/);
-    assert.match(html, /执行引擎/);
+    assert.match(html, /策略模板只为 Requirement/);
+    assert.match(html, /Deployment\/Worker capability/);
     assert.match(html, /\/admin\/api\/workflows/);
     const workflowsResponse = await fetch(base + "/admin/api/workflows");
     assert.equal(workflowsResponse.status, 200);
@@ -122,7 +122,7 @@ test("Admin expert configuration UI manages definitions and execution configurat
     assert.match(html, /最大 WorkAttempt/);
     assert.match(html, /验证步骤/);
     assert.match(html, /从表单更新 JSON/);
-    assert.match(html, /由 Deployment 决定（推荐）/);
+    assert.match(html, /由 Deployment \/ Worker capability 决定/);
     assert.match(html, /执行权限/);
     assert.match(html, /Workspace 可写/);
     assert.match(html, /实际 Runtime Profile/);

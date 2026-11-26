@@ -626,6 +626,81 @@ test("node result cannot forge evidence or artifacts for another repository reso
   }
 });
 
+test("mutating node facts bind to the authoritative post-mutation resource subject", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dag-mutating-fact-subject-"));
+  try {
+    const store = new WorkOrchestrationStore(join(dir, "runtime.db"));
+    writableWorkflow(store);
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team",
+      idempotencyKey: "mutating-fact-subject",
+      sourceType: "mcp",
+      title: "change",
+      description: "change repo a",
+      workflowId: "multi-repo-write",
+      repositoryId: "repo-a",
+    });
+    store.ensureRequirementSnapshot(work.workItemId);
+    store.setDagResourceSubject(work.workItemId, "repo:repo-a", "workspace:a1", 10);
+    const input = store.getDagPlannerInput(work.workItemId);
+    const proposal = store.submitDagProposal({
+      workItemId: work.workItemId,
+      principalId: "alice",
+      scope: "team",
+      expectedWorkRevision: input.frozen.workRevision,
+      expectedDagRevision: 0,
+      expectedRequirementRevision: input.frozen.requirementRevision,
+      plannerIdentity: "test",
+      plannerVersion: "1",
+      plannerInputDigest: input.digest,
+      reasonCode: "initial",
+      policyContext: permissiveResourcePolicyContext(store, work.workItemId, ["repo:repo-a"]),
+      graph: {
+        nodes: [
+          {
+            id: "change-a",
+            kind: "agent",
+            capability: "repair",
+            subject: "workspace:a1",
+            resource: "repo:repo-a",
+            mutates: true,
+            requirements: [],
+          },
+        ],
+        edges: [],
+      },
+    });
+    assert.equal(proposal.status, "accepted", JSON.stringify(proposal.decisionCodes));
+    const current = store.getWorkInternal(work.workItemId);
+    const claimed = store.claimDagNode(
+      work.workItemId,
+      "alice",
+      "team",
+      "change-a",
+      "hub",
+      current.stateRevision,
+      current.currentDagRevision,
+      20,
+    );
+    const running = store.startDagNodeExecution(claimed.nodeExecutionId, "hub", claimed.fence, 21);
+    store.setDagResourceSubject(work.workItemId, "repo:repo-a", "workspace:a2", 22);
+    store.reconcileDagNodeResult(
+      running.nodeExecutionId,
+      "hub",
+      running.fence,
+      { status: "succeeded", facts: [{ key: "workspace.changed", value: true }] },
+      23,
+    );
+    const fact = store.listDagFacts(work.workItemId).find((item) => item.key === "workspace.changed");
+    assert.equal(fact?.subjectRevision, "workspace:a2");
+    assert.equal(fact?.resourceIdentity, "repo:repo-a");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runtime compares repo-scoped pending nodes against the repository subject instead of the composite Work subject", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dag-resource-stale-runtime-"));
   try {
