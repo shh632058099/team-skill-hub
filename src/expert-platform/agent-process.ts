@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 import { parseCodexJsonlResult } from "./codex-runtime.js";
 import { JsonlReader } from "./jsonl-reader.js";
-import { mapExecutionActivity, StreamResultCollector, type ExecutionActivity } from "./execution-activity.js";
+import {
+  classifyModelFailureEvent,
+  mapExecutionActivity,
+  StreamResultCollector,
+  type ExecutionActivity,
+} from "./execution-activity.js";
+import { ExecutorFailureError, modelFailureDiagnostic, type ExecutorFailureDiagnostic } from "./executor-diagnostic.js";
 
 function sanitizedStderrHint(stderr: string): string {
   if (/install: cannot open .* for reading: Permission denied/i.test(stderr))
@@ -60,33 +66,20 @@ function classifyProcessFailure(stderr: string): string {
   return "PROCESS_EXIT_NONZERO";
 }
 /** Classify only structured model errors; never log raw stdout or provider messages. */
-function classifyJsonlFailure(output: string): string | undefined {
+function inspectJsonlFailure(
+  output: string,
+  backend: "claude" | "codex",
+  exitCode?: number,
+): { errorCode: string; diagnostic: ExecutorFailureDiagnostic } | undefined {
   for (const line of output.split("\n")) {
     if (line.length > 16384 || !line.startsWith("{")) continue;
-    let event: Record<string, unknown>;
     try {
-      event = JSON.parse(line) as Record<string, unknown>;
+      const event = JSON.parse(line);
+      const errorCode = classifyModelFailureEvent(event);
+      if (errorCode) return { errorCode, diagnostic: modelFailureDiagnostic(event, backend, errorCode, exitCode) };
     } catch {
       continue;
     }
-    if (event.type !== "error" && event.type !== "turn.failed" && !(event.type === "result" && event.is_error === true))
-      continue;
-    const failure = event.error;
-    const code = failure && typeof failure === "object" ? (failure as Record<string, unknown>).code : undefined;
-    if (code === "insufficient_quota") return "MODEL_QUOTA_EXCEEDED";
-    const message =
-      failure && typeof failure === "object"
-        ? (failure as Record<string, unknown>).message
-        : typeof event.message === "string"
-          ? event.message
-          : event.result;
-    if (typeof message !== "string") return "MODEL_REQUEST_FAILED";
-    if (/401|unauthorized|invalid.api.key|authentication/i.test(message)) return "AUTHENTICATION_FAILED";
-    if (/403|access.denied|forbidden/i.test(message)) return "MODEL_ACCESS_DENIED";
-    if (/429|rate.limit|quota/i.test(message)) return "MODEL_RATE_LIMITED";
-    if (/model.*(not.found|unsupported)|404/i.test(message)) return "MODEL_NOT_FOUND";
-    if (/proxy|ECONNREFUSED|ENOTFOUND|TLS|certificate|connection|timeout/i.test(message)) return "MODEL_NETWORK_FAILED";
-    return "MODEL_REQUEST_FAILED";
   }
   return undefined;
 }
@@ -129,11 +122,17 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
     let terminating = false;
     let output = "";
     let structuredErrorCode: string | undefined;
+    let structuredDiagnostic: ExecutorFailureDiagnostic | undefined;
     const collector = options.streamingBackend ? new StreamResultCollector(options.streamingBackend) : undefined;
     const reader = collector
       ? new JsonlReader((event) => {
           collector.accept(event);
-          if (!structuredErrorCode) structuredErrorCode = classifyJsonlFailure(JSON.stringify(event));
+          if (!structuredErrorCode) {
+            structuredErrorCode = classifyModelFailureEvent(event) ?? undefined;
+            if (structuredErrorCode) {
+              structuredDiagnostic = modelFailureDiagnostic(event, options.streamingBackend!, structuredErrorCode);
+            }
+          }
           for (const activity of mapExecutionActivity(options.streamingBackend!, event)) {
             try {
               options.onActivity?.(activity);
@@ -192,7 +191,12 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
           }
         }
         kill();
-        finish(new Error(reason));
+        finish(
+          new ExecutorFailureError(reason, {
+            errorCode: reason,
+            backend: options.streamingBackend ?? "generic",
+          }),
+        );
       })();
     };
     const onAbort = () => terminate("EXECUTOR_CANCELLED");
@@ -230,8 +234,24 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
     child.once("error", () => finish(new Error("EXECUTOR_PROCESS_FAILED")));
     child.once("close", (code) => {
       if (terminating) return;
-      const modelFailure = code === 0 ? null : (structuredErrorCode ?? classifyJsonlFailure(output) ?? null);
-      const classifiedFailure = code === 0 ? null : (modelFailure ?? classifyProcessFailure(stderrOutput));
+      const inspected = !options.streamingBackend
+        ? undefined
+        : structuredErrorCode
+          ? {
+              errorCode: structuredErrorCode,
+              diagnostic: {
+                ...(structuredDiagnostic ?? {
+                  errorCode: structuredErrorCode,
+                  backend: options.streamingBackend,
+                }),
+                ...(code === null ? {} : { exitCode: code }),
+              },
+            }
+          : code === 0
+            ? undefined
+            : inspectJsonlFailure(output, options.streamingBackend, code ?? undefined);
+      const modelFailure = inspected?.errorCode ?? null;
+      const classifiedFailure = code === 0 ? modelFailure : (modelFailure ?? classifyProcessFailure(stderrOutput));
       if (code !== 0) {
         console.error(
           JSON.stringify({
@@ -240,11 +260,20 @@ export async function runAgentProcess(options: AgentProcessOptions): Promise<str
             exitCode: code,
             errorCode: classifiedFailure,
             stderrHint: sanitizedStderrHint(stderrOutput),
+            ...(inspected?.diagnostic.httpStatus ? { httpStatus: inspected.diagnostic.httpStatus } : {}),
+            ...(inspected?.diagnostic.requestId ? { requestId: inspected.diagnostic.requestId } : {}),
+            ...(inspected?.diagnostic.endpointHost ? { endpointHost: inspected.diagnostic.endpointHost } : {}),
             ...(accessTarget(stderrOutput) ? { accessTarget: accessTarget(stderrOutput) } : {}),
           }),
         );
       }
-      finish(code === 0 ? undefined : new Error(modelFailure ?? "EXECUTOR_PROCESS_FAILED"));
+      finish(
+        modelFailure && inspected
+          ? new ExecutorFailureError(modelFailure, inspected.diagnostic)
+          : code === 0
+            ? undefined
+            : new Error("EXECUTOR_PROCESS_FAILED"),
+      );
     });
   });
 }

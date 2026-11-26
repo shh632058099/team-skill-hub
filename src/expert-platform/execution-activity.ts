@@ -1,10 +1,12 @@
-/** Safe, fixed-vocabulary activity metadata; never copy model text or tool arguments. */
+/** Safe bounded activity metadata; visible assistant text may be previewed, never thinking blocks or tool arguments. */
 export type ActivityTool = "Read" | "Glob" | "Grep" | "other";
-export type ActivityKind = "model.started" | "model.active" | "model.completed" | "model.failed" | "tool.activity";
+export type ActivityKind =
+  "model.started" | "model.active" | "model.output" | "model.completed" | "model.failed" | "tool.activity";
 export interface ExecutionActivity {
   kind: ActivityKind;
   tool?: ActivityTool;
   count?: number;
+  details?: string;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -16,6 +18,49 @@ function safeTool(raw: unknown): ActivityTool {
   return raw === "Read" || raw === "Glob" || raw === "Grep" ? raw : "other";
 }
 
+export function sanitizeModelOutputPreview(raw: string, maxChars = 1600): string {
+  const printable = Array.from(raw.replace(/\r\n?/g, "\n"))
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return character === "\n" || character === "\t" || (code >= 0x20 && code !== 0x7f);
+    })
+    .join("");
+  const cleaned = printable
+    .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|token|password|secret)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      (_match, name: string) => name + "=[REDACTED]",
+    )
+    .trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  return cleaned.slice(0, Math.max(0, maxChars - 13)) + "…[truncated]";
+}
+
+export function classifyModelFailureEvent(raw: unknown): string | null {
+  const event = object(raw);
+  if (!event) return null;
+  if (event.type !== "error" && event.type !== "turn.failed" && !(event.type === "result" && event.is_error === true))
+    return null;
+  const failure = object(event.error);
+  const code = failure?.code;
+  if (code === "insufficient_quota") return "MODEL_QUOTA_EXCEEDED";
+  const message =
+    typeof failure?.message === "string"
+      ? failure.message
+      : typeof event.message === "string"
+        ? event.message
+        : typeof event.result === "string"
+          ? event.result
+          : "";
+  if (!message) return "MODEL_REQUEST_FAILED";
+  if (/401|unauthorized|invalid.api.key|authentication/i.test(message)) return "AUTHENTICATION_FAILED";
+  if (/403|access.denied|forbidden/i.test(message)) return "MODEL_ACCESS_DENIED";
+  if (/429|rate.limit|quota/i.test(message)) return "MODEL_RATE_LIMITED";
+  if (/model.*(not.found|unsupported)|404/i.test(message)) return "MODEL_NOT_FOUND";
+  if (/proxy|ECONNREFUSED|ENOTFOUND|TLS|certificate|connection|timeout/i.test(message)) return "MODEL_NETWORK_FAILED";
+  return "MODEL_REQUEST_FAILED";
+}
+
 /** CLI-version tolerant event adapter. Unsupported events never reach the Hub. */
 export function mapExecutionActivity(backend: "claude" | "codex", raw: unknown): ExecutionActivity[] {
   const event = object(raw);
@@ -23,24 +68,42 @@ export function mapExecutionActivity(backend: "claude" | "codex", raw: unknown):
   if (backend === "claude") {
     if (event.type === "system" && event.subtype === "init") return [{ kind: "model.started" }];
     if (event.type === "result") {
-      return [{ kind: event.is_error === false && event.subtype === "success" ? "model.completed" : "model.failed" }];
+      if (event.is_error === false && event.subtype === "success") return [{ kind: "model.completed" }];
+      return [{ kind: "model.failed", details: classifyModelFailureEvent(event) ?? "MODEL_REQUEST_FAILED" }];
     }
     if (event.type !== "assistant") return [];
     const message = object(event.message);
     const content = Array.isArray(message?.content) ? message.content : [];
-    const tools = content
-      .map(object)
-      .filter((block): block is Record<string, unknown> => block !== null && block.type === "tool_use")
-      .map((block) => ({ kind: "tool.activity", tool: safeTool(block.name), count: 1 }) as const);
-    return tools.length ? tools : [{ kind: "model.active" }];
+    const activities: ExecutionActivity[] = [];
+    for (const rawBlock of content) {
+      const block = object(rawBlock);
+      if (!block) continue;
+      if (block.type === "tool_use") {
+        activities.push({ kind: "tool.activity", tool: safeTool(block.name), count: 1 });
+        continue;
+      }
+      if (block.type === "text" && typeof block.text === "string") {
+        const details = sanitizeModelOutputPreview(block.text);
+        if (details) activities.push({ kind: "model.output", details });
+      }
+    }
+    return activities.length ? activities : [{ kind: "model.active" }];
   }
   if (event.type === "thread.started" || event.type === "turn.started") return [{ kind: "model.started" }];
   if (event.type === "turn.completed") return [{ kind: "model.completed" }];
-  if (event.type === "turn.failed" || event.type === "error") return [{ kind: "model.failed" }];
+  if (event.type === "turn.failed" || event.type === "error")
+    return [{ kind: "model.failed", details: classifyModelFailureEvent(event) ?? "MODEL_REQUEST_FAILED" }];
   if (event.type !== "item.started" && event.type !== "item.completed") return [];
   const item = object(event.item);
-  if (!item || event.type !== "item.started") return [];
-  if (item.type === "command_execution" || item.type === "file_change" || item.type === "mcp_tool_call") {
+  if (!item) return [];
+  if (event.type === "item.completed" && item.type === "agent_message" && typeof item.text === "string") {
+    const details = sanitizeModelOutputPreview(item.text);
+    return details ? [{ kind: "model.output", details }] : [];
+  }
+  if (
+    event.type === "item.started" &&
+    (item.type === "command_execution" || item.type === "file_change" || item.type === "mcp_tool_call")
+  ) {
     return [{ kind: "tool.activity", tool: "other", count: 1 }];
   }
   return [];

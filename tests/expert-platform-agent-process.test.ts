@@ -134,6 +134,63 @@ test("Codex JSONL model errors receive a fixed code without exposing response te
   assert.ok(logs.every((line) => !line.includes("secret-example")));
 });
 
+test("structured provider failures carry bounded admin diagnostics without exposing credentials", async () => {
+  let captured: unknown;
+  try {
+    await runAgentProcess({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "console.log(JSON.stringify({type:'turn.failed',error:{message:'HTTP 429 rate limited token=secret-value',status:429,request_id:'req-abc-123',url:'https://api.example.test/v1/responses?api_key=secret-query'}})); process.exit(1)",
+      ],
+      timeoutMs: 5000,
+      streamingBackend: "codex",
+    });
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof Error);
+  assert.equal(captured.message, "MODEL_RATE_LIMITED");
+  const diagnostic = (captured as Error & { diagnostic?: Record<string, unknown> }).diagnostic;
+  assert.deepEqual(diagnostic, {
+    errorCode: "MODEL_RATE_LIMITED",
+    backend: "codex",
+    exitCode: 1,
+    httpStatus: 429,
+    requestId: "req-abc-123",
+    endpointHost: "api.example.test",
+    message: "HTTP 429 rate limited token=[REDACTED]",
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostic), /secret-value|secret-query|\/v1\/responses/);
+});
+
+test("structured model failure remains classified even when the CLI exits zero", async () => {
+  let captured: unknown;
+  try {
+    await runAgentProcess({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "console.log(JSON.stringify({type:'turn.failed',error:{message:'HTTP 429 rate limited',status:429,request_id:'req-zero'}}))",
+      ],
+      timeoutMs: 5000,
+      streamingBackend: "codex",
+    });
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof Error);
+  assert.equal(captured.message, "MODEL_RATE_LIMITED");
+  assert.deepEqual((captured as Error & { diagnostic?: unknown }).diagnostic, {
+    errorCode: "MODEL_RATE_LIMITED",
+    backend: "codex",
+    exitCode: 0,
+    httpStatus: 429,
+    requestId: "req-zero",
+    message: "HTTP 429 rate limited",
+  });
+});
+
 test("Claude JSONL result errors receive a fixed code without exposing response text", async () => {
   const logs: string[] = [];
   const original = console.error;

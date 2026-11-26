@@ -35,12 +35,19 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     await client.reportTaskStage(claim!, "repository.completed");
     await client.reportTaskStage(claim!, "tool.activity", "", { sequence: 1, tool: "Read", count: 3 });
     await client.reportTaskStage(claim!, "tool.activity", "", { sequence: 1, tool: "Read", count: 3 });
+    await client.reportTaskStage(claim!, "model.output", "Investigating retry path. api_key=secret-token", {
+      sequence: 2,
+    });
     await assert.rejects(
       () => client.reportTaskStage(claim!, "tool.activity", "", { sequence: 1, tool: "Read", count: 4 }),
       /PROGRESS_SEQUENCE_CONFLICT/,
     );
     const observed = tasks.ownerEvents(submitted.taskId, "alice", "org", 0, 50);
     assert.equal(observed.events.filter((event) => event.type === "tool.activity").length, 1);
+    assert.equal(
+      observed.events.find((event) => event.type === "model.output")?.details,
+      "Investigating retry path. api_key=[REDACTED]",
+    );
 
     await assert.rejects(() => client.reportTaskStage(claim!, "codex.started", "Bearer secret"), /INVALID_STAGE_EVENT/);
     await client.completeTask(
@@ -67,6 +74,53 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     assert.equal(completed.commitSha, "abcdef0123456789abcdef0123456789abcdef01");
     assert.equal(completed.runtimeSessionId, "99999999-9999-4999-8999-999999999999");
 
+    client.close();
+    await server.close();
+    tasks.close();
+    workers.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gRPC failure transports safe run diagnostics to admin detail", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-grpc-diag-"));
+  try {
+    const tasks = new ExpertTaskStore(path.join(dir, "tasks.sqlite"));
+    const workers = new PersistentWorkerRegistry(path.join(dir, "workers.sqlite"));
+    workers.enroll("worker-1", ["ota"]);
+    workers.approve("worker-1");
+    const token = workers.issueCredential("worker-1");
+    const submitted = tasks.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "grpc-diag",
+      problem: "debug provider failure",
+      expertId: "ota",
+    });
+    const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0");
+    const client = new ExpertWorkerClient(server.address, { workerId: "worker-1", credential: token });
+    const claim = await client.claimTask("worker-1", "ota");
+    assert.ok(claim);
+    await client.failTask(claim!, "MODEL_RATE_LIMITED", {
+      errorCode: "MODEL_RATE_LIMITED",
+      backend: "claude",
+      exitCode: 1,
+      httpStatus: 429,
+      requestId: "req-grpc",
+      endpointHost: "anthropic.example.test",
+      message: "rate limited",
+    });
+    const run = (tasks.adminTaskDetail(submitted.taskId)!.runs as Array<{ diagnostic?: unknown }>)[0];
+    assert.deepEqual(run?.diagnostic, {
+      errorCode: "MODEL_RATE_LIMITED",
+      backend: "claude",
+      exitCode: 1,
+      httpStatus: 429,
+      requestId: "req-grpc",
+      endpointHost: "anthropic.example.test",
+      message: "rate limited",
+    });
     client.close();
     await server.close();
     tasks.close();

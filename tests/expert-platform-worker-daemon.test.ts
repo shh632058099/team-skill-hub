@@ -119,9 +119,14 @@ test("daemon forwards executor verification results when completing a task", asy
 });
 
 test("daemon strips tool/count metadata from model activity before reporting to Hub", async () => {
-  const reports: Array<{ stage: string; activity?: { sequence: number; tool?: string; count?: number } }> = [];
+  const reports: Array<{
+    stage: string;
+    details?: string;
+    activity?: { sequence: number; tool?: string; count?: number };
+  }> = [];
   let onActivity:
-    ((claim: any, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>) | undefined;
+    | ((claim: any, stage: string, sequence: number, tool?: string, count?: number, details?: string) => Promise<void>)
+    | undefined;
   const runtime = createExpertWorkerRuntime(
     {
       hubAddress: "hub:7443",
@@ -153,7 +158,7 @@ test("daemon strips tool/count metadata from model activity before reporting to 
           _details,
           activity?: { sequence: number; tool?: string; count?: number },
         ) => {
-          reports.push({ stage, ...(activity ? { activity } : {}) });
+          reports.push({ stage, ...(_details ? { details: _details } : {}), ...(activity ? { activity } : {}) });
         },
         close: () => undefined,
       }),
@@ -167,12 +172,14 @@ test("daemon strips tool/count metadata from model activity before reporting to 
   assert.equal(typeof onActivity, "function");
   const claim = { workerId: "ota-worker-01", taskId: "task-1", runId: "run-1", fencing: 1, problem: "x" };
   await onActivity!(claim, "model.started", 1, undefined, 1);
-  await onActivity!(claim, "tool.activity", 2, "Read", 3);
-  await onActivity!(claim, "model.completed", 3, undefined, 1);
+  await onActivity!(claim, "model.output", 2, undefined, 1, "Analyzing retry path");
+  await onActivity!(claim, "tool.activity", 3, "Read", 3);
+  await onActivity!(claim, "model.completed", 4, undefined, 1);
   assert.deepEqual(reports, [
     { stage: "model.started", activity: { sequence: 1 } },
-    { stage: "tool.activity", activity: { sequence: 2, tool: "Read", count: 3 } },
-    { stage: "model.completed", activity: { sequence: 3 } },
+    { stage: "model.output", details: "Analyzing retry path", activity: { sequence: 2 } },
+    { stage: "tool.activity", activity: { sequence: 3, tool: "Read", count: 3 } },
+    { stage: "model.completed", activity: { sequence: 4 } },
   ]);
   runtime.close();
 });

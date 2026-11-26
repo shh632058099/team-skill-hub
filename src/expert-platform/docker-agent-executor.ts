@@ -25,6 +25,7 @@ import { parseAgentExecutionResult, requiresAgentOutcomeProtocol } from "./agent
 import { parseClaudeResult, buildClaudeArgs } from "./claude-runtime.js";
 import { buildAgentDockerArgs } from "./agent-container-executor.js";
 import { runAgentProcess, type AgentProcessOptions } from "./agent-process.js";
+import type { ExecutionActivity } from "./execution-activity.js";
 import { runVerificationPolicy } from "./verification-runner.js";
 import { assertRuntimeProfileBackend } from "./runtime-profile-policy.js";
 import { computeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
@@ -51,7 +52,14 @@ export interface DockerAgentExecutorOptions {
   verificationTmpfsMb?: number;
   maxOutputBytes?: number;
   onStage?: (claim: Claim, stage: string, details?: string) => Promise<void>;
-  onActivity?: (claim: Claim, stage: string, sequence: number, tool?: string, count?: number) => Promise<void>;
+  onActivity?: (
+    claim: Claim,
+    stage: string,
+    sequence: number,
+    tool?: string,
+    count?: number,
+    details?: string,
+  ) => Promise<void>;
   runProcess?: (options: AgentProcessOptions) => Promise<string>;
   runVerificationPolicy?: typeof runVerificationPolicy;
 }
@@ -586,17 +594,25 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
       let lastActivityAt = 0;
       let pendingActivity = Promise.resolve();
       let inflight = 0;
-      const activityCounts = new Map<string, number>();
+      const activityCounts = new Map<string, { activity: ExecutionActivity; count: number }>();
       const flushActivity = () => {
-        for (const [key, count] of activityCounts) {
+        for (const [key, entry] of activityCounts) {
           activityCounts.delete(key);
-          const [stage, tool] = key.split("|");
-          if (!stage) continue;
+          const { activity, count } = entry;
           if (!options.onActivity || inflight >= 100) continue;
           const sequence = ++sourceSequence;
           inflight++;
           pendingActivity = pendingActivity
-            .then(() => options.onActivity!(claim, stage, sequence, tool || undefined, count || undefined))
+            .then(() =>
+              options.onActivity!(
+                claim,
+                activity.kind,
+                sequence,
+                activity.tool,
+                activity.kind === "tool.activity" ? count : undefined,
+                activity.details,
+              ),
+            )
             .catch(() => {
               /* progress transport is best effort */
             })
@@ -631,9 +647,13 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
           ...(streaming
             ? {
                 streamingBackend: backend,
-                onActivity: (activity: import("./execution-activity.js").ExecutionActivity) => {
-                  const key = activity.kind + "|" + (activity.tool ?? "");
-                  activityCounts.set(key, Math.min(100, (activityCounts.get(key) ?? 0) + (activity.count ?? 1)));
+                onActivity: (activity: ExecutionActivity) => {
+                  const key = JSON.stringify([activity.kind, activity.tool ?? "", activity.details ?? ""]);
+                  const current = activityCounts.get(key);
+                  activityCounts.set(key, {
+                    activity,
+                    count: Math.min(100, (current?.count ?? 0) + (activity.count ?? 1)),
+                  });
                   if (Date.now() - lastActivityAt >= 2000) {
                     lastActivityAt = Date.now();
                     flushActivity();

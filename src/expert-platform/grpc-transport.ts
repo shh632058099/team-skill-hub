@@ -5,6 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-store.js";
+import { normalizeExecutorFailureDiagnostic, type ExecutorFailureDiagnostic } from "./executor-diagnostic.js";
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
 import type { WorkOrchestrationStore } from "./work-orchestration-store.js";
@@ -78,6 +79,7 @@ interface CompleteTaskRequest {
 interface FailTaskRequest {
   claim?: LeaseRequest;
   reason: string;
+  diagnostic_json?: string;
 }
 interface TaskStageRequest {
   claim?: LeaseRequest;
@@ -551,7 +553,16 @@ export async function startExpertWorkerGrpcServer(
       const claim = toClaim(call.request.claim);
       const worker = workers.get(claim.workerId);
       if (worker.status !== "active") throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_FORBIDDEN");
-      tasks.fail(claim, call.request.reason);
+      let diagnostic: ExecutorFailureDiagnostic | undefined;
+      if (call.request.diagnostic_json) {
+        const parsed = normalizeExecutorFailureDiagnostic(
+          JSON.parse(call.request.diagnostic_json),
+          call.request.reason,
+        );
+        if (!parsed) throw new Error("INVALID_EXECUTOR_DIAGNOSTIC");
+        diagnostic = parsed;
+      }
+      tasks.fail(claim, call.request.reason, Date.now(), diagnostic);
       callback(null, {});
     } catch (error) {
       callback(
@@ -616,6 +627,8 @@ export async function startExpertWorkerGrpcServer(
           sequence,
           call.request.tool_code || "",
           call.request.count || 0,
+          Date.now(),
+          call.request.details || "",
         );
       } else tasks.recordStage(claim, call.request.stage, call.request.details || "");
       callback(null, {});
@@ -1322,9 +1335,17 @@ export class ExpertWorkerClient {
     );
   }
 
-  failTask(claim: Claim, reason: string): Promise<Empty> {
+  failTask(claim: Claim, reason: string, diagnostic?: ExecutorFailureDiagnostic): Promise<Empty> {
     return unary((callback) =>
-      this.client.FailTask({ claim: this.claimRequest(claim), reason }, this.metadata, callback),
+      this.client.FailTask(
+        {
+          claim: this.claimRequest(claim),
+          reason,
+          diagnostic_json: diagnostic ? JSON.stringify(diagnostic) : "",
+        },
+        this.metadata,
+        callback,
+      ),
     );
   }
 

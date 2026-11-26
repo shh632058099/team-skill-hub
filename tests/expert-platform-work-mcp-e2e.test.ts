@@ -1245,9 +1245,10 @@ test("MCP Work API drives durable work through review, rework, authorization and
       return await response.text();
     });
     await new Promise((resolve) => setTimeout(resolve, 200));
-    tasks.recordActivity(claim, "tool.activity", 2, "Grep", 1, 1_200);
+    tasks.recordActivity(claim, "model.output", 2, "", 0, 1_175, "Reviewing the failing retry path");
+    tasks.recordActivity(claim, "tool.activity", 3, "Grep", 1, 1_200);
     await new Promise((resolve) => setTimeout(resolve, 1_100));
-    tasks.recordActivity(claim, "model.completed", 3, "", 0, 1_300);
+    tasks.recordActivity(claim, "model.completed", 4, "", 0, 1_300);
     tasks.complete(claim, "OTA analysis complete", 2_000, { commitSha: "a".repeat(40) });
 
     const notifications = await notifiedProgress;
@@ -1270,6 +1271,12 @@ test("MCP Work API drives durable work through review, rework, authorization and
     assert.ok(Array.isArray(waiting.events));
     assert.ok(Number(waiting.nextEventId) > 0);
     assert.ok(Array.isArray(waiting.activityEvents));
+    assert.ok(
+      waiting.activityEvents.some(
+        (event: { type?: string; details?: string }) =>
+          event.type === "model.output" && event.details === "Reviewing the failing retry path",
+      ),
+    );
     assert.ok(Number(waiting.nextActivityEventId) > 0);
     assert.deepEqual(waiting.followUp, {
       required: true,

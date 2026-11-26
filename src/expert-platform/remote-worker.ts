@@ -3,6 +3,7 @@ import type { VerificationEvidenceResult } from "./verification-policy.js";
 import type { WorkspaceChangeSummary } from "./workspace-change-summary.js";
 import { agentFailureReason, type AgentExecutionOutcome } from "./agent-execution-outcome.js";
 import { safeExecutorFailureCode } from "./executor-failure.js";
+import { executorFailureDiagnostic, type ExecutorFailureDiagnostic } from "./executor-diagnostic.js";
 import type { PublicationOperationLease, PublicationOperationResult } from "./work-publication-store.js";
 import type { ChangeRequestOperationLease, ChangeRequestOperationResult } from "./work-change-request-store.js";
 
@@ -42,7 +43,7 @@ export interface RemoteWorkerClient {
     workspaceChangeSummary?: WorkspaceChangeSummary,
     runtimeSessionId?: string,
   ): Promise<unknown>;
-  failTask(claim: Claim, reason: string): Promise<unknown>;
+  failTask(claim: Claim, reason: string, diagnostic?: ExecutorFailureDiagnostic): Promise<unknown>;
   reportTaskStage?(claim: Claim, stage: string, details?: string): Promise<unknown>;
 }
 export interface RemoteWorkerOptions {
@@ -147,7 +148,7 @@ export async function runRemoteWorkerOnce(
           errorCode: /^[A-Z0-9_]{1,80}$/.test(errorCode) ? errorCode : "UNCLASSIFIED",
         }),
       );
-      await client.failTask(claim, forwardedCode);
+      await client.failTask(claim, forwardedCode, executorFailureDiagnostic(error));
       return true;
     }
     if (leaseLost) throw leaseLost;

@@ -10,6 +10,8 @@ import {
   type VerificationPolicyStep,
 } from "./verification-policy.js";
 import { normalizeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
+import { sanitizeModelOutputPreview } from "./execution-activity.js";
+import { normalizeExecutorFailureDiagnostic, type ExecutorFailureDiagnostic } from "./executor-diagnostic.js";
 
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type ExpertTaskFeedbackDisposition = "adopted" | "partially_adopted" | "not_adopted";
@@ -261,6 +263,7 @@ export class ExpertTaskStore {
       "UPDATE expert_tasks SET execution_reservation_ref=execution_ref WHERE execution_reservation_ref IS NULL AND execution_ref IS NOT NULL",
     );
     this.ensureRunColumn("problem", "TEXT");
+    this.ensureRunColumn("diagnostic_json", "TEXT");
     this.db.exec(
       `UPDATE expert_runs
        SET problem=(
@@ -786,8 +789,10 @@ export class ExpertTaskStore {
     return this.cancellationRequested(claim);
   }
 
-  fail(claim: Claim, reason: string, now = Date.now()): void {
+  fail(claim: Claim, reason: string, now = Date.now(), diagnostic?: ExecutorFailureDiagnostic): void {
     if (!reason.trim()) throw new Error("INVALID_REQUEST");
+    const safeDiagnostic = diagnostic ? normalizeExecutorFailureDiagnostic(diagnostic, reason) : null;
+    if (diagnostic && !safeDiagnostic) throw new Error("INVALID_EXECUTOR_DIAGNOSTIC");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db
@@ -803,7 +808,9 @@ export class ExpertTaskStore {
         )
         .run(terminalStatus, reason, claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
       if (changed.changes !== 1) throw new Error("STALE_ATTEMPT");
-      this.db.prepare("UPDATE expert_runs SET status=? WHERE run_id=?").run(terminalStatus, claim.runId);
+      this.db
+        .prepare("UPDATE expert_runs SET status=?,diagnostic_json=? WHERE run_id=?")
+        .run(terminalStatus, safeDiagnostic ? JSON.stringify(safeDiagnostic) : null, claim.runId);
       this.closeActiveRunTurn(claim.runId, "failed", now);
       this.event(claim.taskId, claim.runId, terminalStatus);
       this.db.exec("COMMIT");
@@ -1159,9 +1166,23 @@ export class ExpertTaskStore {
     const feedbackRow = this.db
       .prepare("SELECT task_id,disposition,reason,needs_rework,updated_at FROM expert_task_feedback WHERE task_id=?")
       .get(taskId) as Row | undefined;
-    const runs = this.db
-      .prepare("SELECT run_id,task_id,worker_id,fencing,status,problem FROM expert_runs WHERE task_id=? ORDER BY rowid")
-      .all(taskId);
+    const runRows = this.db
+      .prepare(
+        "SELECT run_id,task_id,worker_id,fencing,status,problem,diagnostic_json FROM expert_runs WHERE task_id=? ORDER BY rowid",
+      )
+      .all(taskId) as Row[];
+    const runs = runRows.map((row) => ({
+      run_id: row.run_id,
+      task_id: row.task_id,
+      worker_id: row.worker_id,
+      fencing: row.fencing,
+      status: row.status,
+      problem: row.problem,
+      diagnostic:
+        row.diagnostic_json == null
+          ? null
+          : normalizeExecutorFailureDiagnostic(JSON.parse(String(row.diagnostic_json))),
+    }));
     const total = Number(
       (this.db.prepare("SELECT count(*) AS n FROM expert_events WHERE task_id=?").get(taskId) as { n: number }).n,
     );
@@ -1413,18 +1434,33 @@ export class ExpertTaskStore {
     toolCode = "",
     count = 0,
     now = Date.now(),
+    details = "",
   ): void {
+    const safeDetails =
+      stage === "model.output" ? sanitizeModelOutputPreview(details) : stage === "model.failed" ? details.trim() : "";
     if (
-      !(["model.started", "model.active", "model.completed", "model.failed", "tool.activity"] as string[]).includes(
-        stage,
-      ) ||
+      !(
+        [
+          "model.started",
+          "model.active",
+          "model.output",
+          "model.completed",
+          "model.failed",
+          "tool.activity",
+        ] as string[]
+      ).includes(stage) ||
       !Number.isSafeInteger(sourceSequence) ||
       sourceSequence < 1 ||
       !["", "Read", "Glob", "Grep", "other"].includes(toolCode) ||
       !Number.isInteger(count) ||
       count < 0 ||
       count > 100 ||
-      (stage === "tool.activity" ? !toolCode || count < 1 : toolCode !== "" || count !== 0)
+      (stage === "tool.activity" ? !toolCode || count < 1 : toolCode !== "" || count !== 0) ||
+      (stage === "model.output"
+        ? !safeDetails || safeDetails.length > 1600
+        : stage === "model.failed"
+          ? safeDetails !== "" && !/^[A-Z][A-Z0-9_]{0,79}$/.test(safeDetails)
+          : details !== "")
     )
       throw new Error("INVALID_ACTIVITY_EVENT");
     this.db.exec("BEGIN IMMEDIATE");
@@ -1437,10 +1473,15 @@ export class ExpertTaskStore {
         .get(claim.taskId, claim.runId, claim.workerId, claim.fencing, now);
       if (!row) throw new Error("STALE_ATTEMPT");
       const prior = this.db
-        .prepare(`SELECT event_type,tool_code,count FROM expert_events WHERE run_id=? AND source_sequence=?`)
+        .prepare(`SELECT event_type,details,tool_code,count FROM expert_events WHERE run_id=? AND source_sequence=?`)
         .get(claim.runId, sourceSequence) as Row | undefined;
       if (prior) {
-        if (prior.event_type !== stage || (prior.tool_code ?? "") !== toolCode || Number(prior.count ?? 0) !== count)
+        if (
+          prior.event_type !== stage ||
+          String(prior.details ?? "") !== safeDetails ||
+          (prior.tool_code ?? "") !== toolCode ||
+          Number(prior.count ?? 0) !== count
+        )
           throw new Error("PROGRESS_SEQUENCE_CONFLICT");
       } else {
         const used = this.db
@@ -1450,9 +1491,9 @@ export class ExpertTaskStore {
           this.db
             .prepare(
               `INSERT INTO expert_events(task_id,run_id,event_type,details,source_sequence,tool_code,count,created_at)
-          VALUES(?,?,?,'',?,?,?,?)`,
+          VALUES(?,?,?,?,?,?,?,?)`,
             )
-            .run(claim.taskId, claim.runId, stage, sourceSequence, toolCode || null, count || null, now);
+            .run(claim.taskId, claim.runId, stage, safeDetails, sourceSequence, toolCode || null, count || null, now);
         this.updateRunTurnFromActivity(claim, stage, sourceSequence, now);
         this.trimTaskEvents(claim.taskId);
       }

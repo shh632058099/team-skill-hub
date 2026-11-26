@@ -559,6 +559,84 @@ test("activity events are bounded, deduplicated and owner-cursor scoped", () => 
   }
 });
 
+test("failed runs persist admin-only executor diagnostics", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-run-diagnostic-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({ principalId: "owner", scope: "tenant", idempotencyKey: "run-diag", problem: "debug" });
+    const claim = store.claim("worker", 100, 100_000)!;
+    store.fail(claim, "MODEL_RATE_LIMITED", 110, {
+      errorCode: "MODEL_RATE_LIMITED",
+      backend: "codex",
+      exitCode: 1,
+      httpStatus: 429,
+      requestId: "req-123",
+      endpointHost: "api.example.test",
+      message: "rate limited token=[REDACTED]",
+    });
+
+    const detail = store.adminTaskDetail(task.taskId)!;
+    assert.deepEqual((detail.runs as Array<{ diagnostic?: unknown }>)[0]?.diagnostic, {
+      errorCode: "MODEL_RATE_LIMITED",
+      backend: "codex",
+      exitCode: 1,
+      httpStatus: 429,
+      requestId: "req-123",
+      endpointHost: "api.example.test",
+      message: "rate limited token=[REDACTED]",
+    });
+    assert.equal(
+      Object.prototype.hasOwnProperty.call((detail.runs as Array<Record<string, unknown>>)[0] ?? {}, "diagnostic_json"),
+      false,
+    );
+    const ownerEvents = store.ownerEvents(task.taskId, "owner", "tenant", 0, 50);
+    assert.doesNotMatch(JSON.stringify(ownerEvents), /req-123|api\.example\.test/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("model output activity persists safe diagnostic details for owner reads", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-model-output-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.sqlite"));
+    const task = store.submit({
+      principalId: "owner",
+      scope: "tenant",
+      idempotencyKey: "model-output",
+      problem: "debug",
+    });
+    const claim = store.claim("worker", 100, 100_000)!;
+
+    store.recordActivity(
+      claim,
+      "model.output",
+      1,
+      "",
+      0,
+      101,
+      "Investigating retry failure. Authorization: Bearer secret-token",
+    );
+    store.recordActivity(claim, "model.failed", 2, "", 0, 102, "MODEL_RATE_LIMITED");
+    assert.throws(
+      () => store.recordActivity(claim, "model.failed", 3, "", 0, 103, "HTTP 429 secret-provider-message"),
+      /INVALID_ACTIVITY_EVENT/,
+    );
+
+    const events = store.ownerEvents(task.taskId, "owner", "tenant", 0, 20).events;
+    assert.equal(
+      events.find((event) => event.type === "model.output")?.details,
+      "Investigating retry failure. Authorization: Bearer [REDACTED]",
+    );
+    assert.equal(events.find((event) => event.type === "model.failed")?.details, "MODEL_RATE_LIMITED");
+    assert.doesNotMatch(JSON.stringify(events), /secret-token|secret-provider-message/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("run turns are persisted, deduplicated and fenced by the active run", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-run-turns-"));
   try {

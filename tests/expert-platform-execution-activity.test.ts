@@ -22,24 +22,45 @@ test("JSONL fails closed on malformed, oversized lines and overall limits", () =
   assert.throws(() => new JsonlReader(() => {}).push(Buffer.from('"not an object"\n')), /EXPERT_INVALID_STREAM_EVENT/);
 });
 
-test("Claude activity adapter emits safe tool vocabulary only", () => {
+test("Claude activity exposes bounded visible model text without tool arguments or thinking blocks", () => {
   const raw = {
     type: "assistant",
     message: {
       content: [
         { type: "tool_use", name: "Read", input: { file_path: "/secret/key" } },
+        { type: "thinking", thinking: "hidden chain of thought" },
+        { type: "text", text: "Reviewing retry path. Authorization: Bearer secret-token" },
         { type: "tool_use", name: "DangerousTool", input: "do not expose" },
-        { type: "text", text: "private thinking" },
       ],
     },
   };
   const output = mapExecutionActivity("claude", raw);
   assert.deepEqual(output, [
     { kind: "tool.activity", tool: "Read", count: 1 },
+    { kind: "model.output", details: "Reviewing retry path. Authorization: Bearer [REDACTED]" },
     { kind: "tool.activity", tool: "other", count: 1 },
   ]);
-  assert.doesNotMatch(JSON.stringify(output), /secret|private|DangerousTool/);
+  assert.doesNotMatch(JSON.stringify(output), /\/secret\/key|hidden chain|secret-token|DangerousTool|do not expose/);
   assert.deepEqual(mapExecutionActivity("claude", { type: "system", subtype: "init" }), [{ kind: "model.started" }]);
+});
+
+test("structured model failures expose only a fixed diagnostic code", () => {
+  assert.deepEqual(
+    mapExecutionActivity("claude", {
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "HTTP 429 quota exceeded secret-provider-message",
+    }),
+    [{ kind: "model.failed", details: "MODEL_RATE_LIMITED" }],
+  );
+  assert.deepEqual(
+    mapExecutionActivity("codex", {
+      type: "turn.failed",
+      error: { message: "TLS connection timeout secret-provider-message" },
+    }),
+    [{ kind: "model.failed", details: "MODEL_NETWORK_FAILED" }],
+  );
 });
 
 test("Claude stream collector validates a single success result and rejects failure", () => {
@@ -69,6 +90,13 @@ test("Codex adapter yields safe activity and validates completed final message",
       item: { type: "command_execution", command: "cat /secret" },
     }),
     [{ kind: "tool.activity", tool: "other", count: 1 }],
+  );
+  assert.deepEqual(
+    mapExecutionActivity("codex", {
+      type: "item.completed",
+      item: { type: "agent_message", text: "Build is still running; token=secret-value" },
+    }),
+    [{ kind: "model.output", details: "Build is still running; token=[REDACTED]" }],
   );
   const failure = new StreamResultCollector("codex");
   failure.accept({ type: "turn.failed" });

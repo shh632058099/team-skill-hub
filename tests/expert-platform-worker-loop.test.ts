@@ -11,6 +11,7 @@ class FakeClient {
   renews = 0;
   completed?: string;
   failed?: string;
+  failureDiagnostic?: unknown;
   renewResponse: unknown = undefined;
   constructor(
     private readonly claim: Claim | null,
@@ -27,8 +28,9 @@ class FakeClient {
   async completeTask(_claim: Claim, result: string): Promise<void> {
     this.completed = result;
   }
-  async failTask(_claim: Claim, reason: string): Promise<void> {
+  async failTask(_claim: Claim, reason: string, diagnostic?: unknown): Promise<void> {
     this.failed = reason;
+    this.failureDiagnostic = diagnostic;
   }
 }
 
@@ -94,6 +96,25 @@ test("executor failure is reported to Hub with generic reason", async () => {
   );
   assert.equal(client.failed, "EXECUTION_FAILED");
   assert.equal(client.completed, undefined);
+});
+
+test("worker forwards structured executor diagnostics only through the admin failure channel", async () => {
+  const client = new FakeClient(claim);
+  const error = new Error("MODEL_RATE_LIMITED") as Error & { diagnostic?: unknown };
+  error.diagnostic = {
+    errorCode: "MODEL_RATE_LIMITED",
+    backend: "codex",
+    exitCode: 1,
+    httpStatus: 429,
+    requestId: "req-123",
+    endpointHost: "api.example.test",
+    message: "rate limited token=[REDACTED]",
+  };
+  await runRemoteWorkerOnce(client, "worker-1", "ota", async () => {
+    throw error;
+  });
+  assert.equal(client.failed, "MODEL_RATE_LIMITED");
+  assert.deepEqual(client.failureDiagnostic, error.diagnostic);
 });
 
 test("worker forwards safe executor failure classifications to Hub", async () => {

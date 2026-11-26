@@ -62,6 +62,7 @@ export function createExpertWorkerRuntime(
     sequence,
     tool,
     count,
+    details,
   ) => {
     const activity =
       stage === "tool.activity"
@@ -71,7 +72,7 @@ export function createExpertWorkerRuntime(
             ...(count === undefined ? {} : { count }),
           }
         : { sequence };
-    await client.reportTaskStage?.(claim, stage, "", activity);
+    await client.reportTaskStage?.(claim, stage, details ?? "", activity);
   };
 
   const executor =
