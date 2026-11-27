@@ -105,7 +105,7 @@ EOF
   chmod 0644 "$BASE/.no-systemd"
   echo "Installed Worker runtime $VERSION (unprivileged user mode; systemd disabled)."
   echo "Next: $BASE/current/worker-control.sh init <instance>"
-  echo "Then: $BASE/current/worker-control.sh <instance> start"
+  echo "Then: $BASE/current/worker-control.sh start <instance>"
   echo "Inventory: $BASE/current/worker-control.sh list"
   exit 0
 fi
@@ -220,7 +220,7 @@ else
     echo "Installed Worker runtime $VERSION (no running systemd)."
   fi
   echo "Next: $BASE/current/worker-control.sh init <instance>"
-  echo "Then: $BASE/current/worker-control.sh <instance> start"
+  echo "Then: $BASE/current/worker-control.sh start <instance>"
 fi
 # A privileged reinstall converts any previous user-mode install back to system mode.
 rm -f "$BASE/.worker-runtime-mode" "$BASE/.worker-runtime-etc" "$BASE/.worker-runtime-data"

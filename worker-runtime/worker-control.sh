@@ -66,7 +66,8 @@ usage() {
 Usage:
   $0 init <instance> [--backend claude|codex] [--access readonly|workspace-write] [--runtime-profile PROFILE] [--docker-network NETWORK] [--mcp-credential-ref REF]
   $0 list [--json]
-  $0 <instance> {start|stop|restart|status|logs}
+  $0 {start|stop|restart|status|logs} <instance>
+  $0 restart-all
 EOF
   exit 2
 }
@@ -401,6 +402,31 @@ stop_worker() {
   echo "Worker $INSTANCE stopped"
 }
 
+restart_all_workers() {
+  local file instance found=0 failed=0
+  for file in "$WORKERS_DIR"/*.env; do
+    [[ -e "$file" ]] || continue
+    config_is_valid_for_inventory "$file" || continue
+    instance=$(basename "$file" .env)
+    validate_instance "$instance" || continue
+    found=1
+    load_instance_context "$instance"
+    if ! stop_worker; then
+      echo "Failed to stop Worker $instance" >&2
+      failed=1
+      continue
+    fi
+    if ! start_worker; then
+      echo "Failed to start Worker $instance" >&2
+      failed=1
+    fi
+  done
+  if [[ $found -eq 0 ]]; then
+    echo "No Worker instances configured."
+  fi
+  return "$failed"
+}
+
 require_root
 
 if [[ $# -ge 1 && "$1" == "init" ]]; then
@@ -417,9 +443,15 @@ if [[ $# -ge 1 && "$1" == "list" ]]; then
   exit
 fi
 
+if [[ $# -eq 1 && "$1" == "restart-all" ]]; then
+  restart_all_workers
+  exit
+fi
+
 [[ $# -eq 2 ]] || usage
-load_instance_context "$1"
-case "$2" in
+command=$1
+load_instance_context "$2"
+case "$command" in
   start) start_worker ;;
   stop) stop_worker ;;
   restart) stop_worker; start_worker ;;

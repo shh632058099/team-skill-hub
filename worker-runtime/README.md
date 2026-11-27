@@ -164,12 +164,15 @@ Neither inventory form prints tokens, credentials, key contents, or model secret
 On hosts without systemd, or on any host installed with `--no-systemd`:
 
 ```bash
-sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 start
-sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 status
-sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 logs
-sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 restart
-sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" claude-01 stop
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" start claude-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" status claude-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" logs claude-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" restart claude-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" stop claude-01
+sudo "$WORKER_INSTALL_DIR/current/worker-control.sh" restart-all
 ```
+
+restart-all restarts every valid configured Worker instance. It continues with the remaining instances if one restart fails and returns non-zero when any instance fails.
 
 The control script resolves its Runtime and bundled Node from its own physical script location; commands work from any current directory. The config and data roots remain `/etc/team-skill-hub-worker` and `/var/lib/team-skill-hub-worker` regardless of the Runtime install directory.
 

@@ -581,10 +581,10 @@ sudo journalctl -u team-skill-hub-worker@claude-01 -n 80 --no-pager
 以下以默认安装目录为例；自定义目录时将路径替换为安装时指定的目录：
 
 ```bash
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 start
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 status
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 logs
-sudo /opt/team-skill-hub-worker/current/worker-control.sh claude-01 stop
+sudo /opt/team-skill-hub-worker/current/worker-control.sh start claude-01
+sudo /opt/team-skill-hub-worker/current/worker-control.sh status claude-01
+sudo /opt/team-skill-hub-worker/current/worker-control.sh logs claude-01
+sudo /opt/team-skill-hub-worker/current/worker-control.sh stop claude-01
 ```
 
 `worker-control.sh` 会根据自身真实路径定位 `current`、release 和安装目录中的 Node，不依赖执行命令时所在的当前目录。配置仍保存在 `/etc/team-skill-hub-worker`，运行数据仍保存在 `/var/lib/team-skill-hub-worker`。
@@ -784,7 +784,7 @@ sudo systemctl status "team-skill-hub-worker@${INSTANCE}" --no-pager
 sudo journalctl -u "team-skill-hub-worker@${INSTANCE}" -n 100 --no-pager
 ```
 
-如果没有 systemd，使用 `/opt/team-skill-hub-worker/current/worker-control.sh <instance> status` 和 `/opt/team-skill-hub-worker/current/worker-control.sh <instance> logs`。确认 `EXPERT_HUB_ADDRESS` 指向 Worker 实际可达的 Hub 地址，而不是容器内部地址或 `0.0.0.0`；同时检查防火墙、WSL2 端口转发和 TLS/mTLS 配置。TCP 可达不代表 TLS 证书或 gRPC 协议一定正确。
+如果没有 systemd，使用 `/opt/team-skill-hub-worker/current/worker-control.sh status <instance>` 和 `/opt/team-skill-hub-worker/current/worker-control.sh logs <instance>`。确认 `EXPERT_HUB_ADDRESS` 指向 Worker 实际可达的 Hub 地址，而不是容器内部地址或 `0.0.0.0`；同时检查防火墙、WSL2 端口转发和 TLS/mTLS 配置。TCP 可达不代表 TLS 证书或 gRPC 协议一定正确。
 
 如果以上检查无法定位，记录错误发生时间（含时区）、Worker ID、instance 名称、Expert ID、Worker capability 和 Hub 地址，交由 Hub 管理员关联同一时间段的 gRPC/应用日志。分享日志前先脱敏地址、用户名、Token、credential 和仓库私有信息。
 

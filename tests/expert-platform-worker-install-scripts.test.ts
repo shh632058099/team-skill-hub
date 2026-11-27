@@ -435,16 +435,39 @@ test("non-root user can install, initialize, start, inspect and stop Worker with
   assert.match(rootInvocation.stderr, /do not run worker-control\.sh with sudo\/root/);
   const initialized = asUser([control, "init", "test-01"]);
   assert.equal(initialized.status, 0, initialized.stderr);
-  const started = asUser([control, "test-01", "start"]);
+  const initializedSecond = asUser([control, "init", "test-02"]);
+  assert.equal(initializedSecond.status, 0, initializedSecond.stderr);
+
+  const started = asUser([control, "start", "test-01"]);
   assert.equal(started.status, 0, started.stderr);
-  const status = asUser([control, "test-01", "status"]);
+  const startedSecond = asUser([control, "start", "test-02"]);
+  assert.equal(startedSecond.status, 0, startedSecond.stderr);
+
+  const status = asUser([control, "status", "test-01"]);
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /running/);
-  const stopped = asUser([control, "test-01", "stop"]);
+  const statusSecond = asUser([control, "status", "test-02"]);
+  assert.equal(statusSecond.status, 0, statusSecond.stderr);
+  assert.match(statusSecond.stdout, /running/);
+
+  const restartedAll = asUser([control, "restart-all"]);
+  assert.equal(restartedAll.status, 0, restartedAll.stderr);
+  assert.match(restartedAll.stdout, /Worker test-01 stopped/);
+  assert.match(restartedAll.stdout, /Worker test-01 started/);
+  assert.match(restartedAll.stdout, /Worker test-02 stopped/);
+  assert.match(restartedAll.stdout, /Worker test-02 started/);
+
+  const stopped = asUser([control, "stop", "test-01"]);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.match(stopped.stdout, /stopped/);
-  const data = path.join(installDir, "data", "test-01");
-  assert.equal(existsSync(path.join(data, "worker.log")), true);
+  const stoppedSecond = asUser([control, "stop", "test-02"]);
+  assert.equal(stoppedSecond.status, 0, stoppedSecond.stderr);
+  assert.match(stoppedSecond.stdout, /stopped/);
+
+  for (const instance of ["test-01", "test-02"]) {
+    const data = path.join(installDir, "data", instance);
+    assert.equal(existsSync(path.join(data, "worker.log")), true);
+  }
 });
 
 test("user-mode controller derives etc template from install root, not a stale etc marker", (t) => {
