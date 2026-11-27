@@ -353,6 +353,40 @@ test("agent-only partial revision is legal only with mandatory after-agent repla
   assert.deepEqual(validateDagProposal(graph, dynamic, obligations).codes, []);
 });
 
+test("initial conditional review may stage unconditional obligations for the guaranteed deadlock replan", () => {
+  const wf: WorkflowDefinition = {
+    ...workflow("code_change", ["build", "unit_test"]),
+    change: { mode: "conditional_code_change", delivery: "merge_request" },
+    planning: { maxReplans: 5, replanPolicy: ["on_failure", "on_review_rework"] },
+  };
+  const graph: DagGraph = {
+    nodes: [{ ...node("review", "review"), capability: "review", subject: null, resource: "workspace" }],
+    edges: [],
+  };
+  const obligations = [
+    {
+      id: "review",
+      condition: { kind: "always" as const },
+      satisfaction: { kind: "fact" as const, key: "review.accepted", equals: true },
+    },
+    {
+      id: "ctest-even-without-changes",
+      condition: { kind: "always" as const },
+      satisfaction: { kind: "evidence" as const, type: "ctest" },
+    },
+    {
+      id: "build-if-changed",
+      condition: { kind: "fact" as const, key: "workspace.changed", equals: true },
+      satisfaction: { kind: "evidence" as const, type: "build" },
+    },
+  ];
+
+  assert.deepEqual(
+    validateDagProposal(graph, wf, obligations, { outstandingOnly: true, reasonCode: "initial" }).codes,
+    [],
+  );
+});
+
 test("evidence consumers never count as producers for required evidence", () => {
   const wf = {
     ...workflow("readonly", ["ctest"]),

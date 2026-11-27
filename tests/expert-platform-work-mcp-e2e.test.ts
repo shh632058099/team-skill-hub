@@ -420,6 +420,35 @@ test("MCP dynamic DAG control plane versions requirements, signals waits, and re
       /WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS/,
     );
 
+    for (const [suffix, satisfaction] of [
+      ["review-findings", { kind: "evidence", type: "review_findings" }],
+      ["generic-test-results", { kind: "evidence", type: "test_results" }],
+      ["merge-request", { kind: "artifact", type: "merge_request" }],
+    ] as const) {
+      await assert.rejects(
+        () =>
+          callMcp(mcpUrl, apiKey, 2100 + suffix.length, "submit_work", {
+            title: "Reject invented lifecycle requirement " + suffix,
+            description: "Lifecycle outcomes must use Team Skill Hub canonical workflow semantics.",
+            idempotencyKey: "dag-control-invalid-lifecycle-" + suffix,
+            workflowId: "mcp-dynamic",
+            routingMode: "explicit",
+            expertId: "noop",
+            repositoryId: "repo",
+            deploymentId: "dep",
+            requirements: [
+              {
+                id: "user:" + suffix,
+                strength: "required",
+                condition: { kind: "always" },
+                satisfaction,
+              },
+            ],
+          }),
+        /WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS/,
+      );
+    }
+
     const initialRequirements = [
       {
         id: "user:ctest",

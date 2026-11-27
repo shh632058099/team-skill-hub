@@ -164,7 +164,8 @@ const workRequirementInputSchema = z
 
 type McpWorkRequirementInput = z.infer<typeof workRequirementInputSchema>;
 
-const UNSUPPORTED_MCP_LIFECYCLE_EVIDENCE = new Set(["review", "verification"]);
+const UNSUPPORTED_MCP_LIFECYCLE_EVIDENCE = new Set(["review", "verification", "review_findings", "test_results"]);
+const UNSUPPORTED_MCP_LIFECYCLE_ARTIFACTS = new Set(["merge_request"]);
 const UNSUPPORTED_MCP_POLICY_FACTS = new Set([
   "publication_required",
   "review_required",
@@ -176,6 +177,9 @@ function validateMcpWorkRequirements(requirements: readonly McpWorkRequirementIn
   for (const requirement of requirements) {
     const satisfaction = requirement.satisfaction;
     if (satisfaction.kind === "evidence" && UNSUPPORTED_MCP_LIFECYCLE_EVIDENCE.has(satisfaction.type)) {
+      throw new Error("WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS:" + satisfaction.type);
+    }
+    if (satisfaction.kind === "artifact" && UNSUPPORTED_MCP_LIFECYCLE_ARTIFACTS.has(satisfaction.type)) {
       throw new Error("WORK_REQUIREMENT_UNSUPPORTED_LIFECYCLE_ALIAS:" + satisfaction.type);
     }
     if (satisfaction.kind === "fact" && UNSUPPORTED_MCP_POLICY_FACTS.has(satisfaction.key)) {
@@ -1860,7 +1864,7 @@ export function createSkillHubMcpHandler(appService: SkillHubApplicationService,
                 .max(200)
                 .optional()
                 .describe(
-                  "Typed EXTRA user requirements for dynamic-dag workflows. Usually OMIT this field when the selected Workflow already captures the user's review/fix/rework/verify/no-publication lifecycle. Do NOT restate lifecycle intent as generic evidence such as review/verification or policy meta-facts such as publication_required. Use requirements only for explicit additional hard/preferred obligations the user actually stated, for example 'even if no code changes, ctest must run'. Do not encode commands or arbitrary expressions.",
+                  "Typed EXTRA user requirements for dynamic-dag workflows. Usually OMIT this field when the selected Workflow already captures the user's review/fix/rework/verify/no-publication lifecycle. Do NOT restate lifecycle intent as generic evidence/artifacts such as review, review_findings, verification, test_results, or merge_request, nor as policy meta-facts such as publication_required. Use requirements only for explicit additional hard/preferred obligations the user actually stated, for example 'even if no code changes, ctest must run'. Do not encode commands or arbitrary expressions.",
                 ),
               workflowId: z
                 .string()

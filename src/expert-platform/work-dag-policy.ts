@@ -296,6 +296,14 @@ export function validateDagProposal(
   const effectiveReplanPolicy = workflow.planning?.replanPolicy ?? DEFAULT_WORK_DAG_PLANNING_POLICY.replanPolicy;
   const deferredAfterAgent =
     graph.nodes.some((node) => node.kind === "agent") && effectiveReplanPolicy.includes("always_after_agent_turn");
+  const deferredAfterInitialConditionalReview =
+    options.outstandingOnly === true &&
+    options.reasonCode === "initial" &&
+    workflow.change?.mode === "conditional_code_change" &&
+    graph.nodes.length === 1 &&
+    graph.nodes[0]?.kind === "review" &&
+    effectiveReplanPolicy.includes("on_review_rework");
+  const deferredAfterReplanBoundary = deferredAfterAgent || deferredAfterInitialConditionalReview;
 
   const requiredEvidence = new Set(options.outstandingOnly ? [] : workflow.validation.requiredEvidence);
   const requiredEvidenceObligations = obligations.filter((item) => item.satisfaction.kind === "evidence");
@@ -341,11 +349,11 @@ export function validateDagProposal(
     );
     if (resourceBound.length > 0) {
       for (const obligation of resourceBound) {
-        if (!hasEvidenceProducer(graph, type, obligation.resource) && !deferredAfterAgent) {
+        if (!hasEvidenceProducer(graph, type, obligation.resource) && !deferredAfterReplanBoundary) {
           codes.add("PLAN_MISSING_REQUIRED_EVIDENCE_PATH");
         }
       }
-    } else if (!hasEvidenceProducer(graph, type) && !deferredAfterAgent) {
+    } else if (!hasEvidenceProducer(graph, type) && !deferredAfterReplanBoundary) {
       codes.add("PLAN_MISSING_REQUIRED_EVIDENCE_PATH");
     }
   }
@@ -353,7 +361,7 @@ export function validateDagProposal(
   for (const obligation of obligations) {
     if (obligation.satisfaction.kind === "evidence") continue;
     const producer = knownObligationProducer(graph, obligation);
-    if (!producer.known || (!producer.produced && !deferredAfterAgent)) {
+    if (!producer.known || (!producer.produced && !deferredAfterReplanBoundary)) {
       codes.add("PLAN_MISSING_REQUIRED_OBLIGATION_PATH");
     }
   }
@@ -388,7 +396,7 @@ export function validateDagProposal(
         (approval) => approval.scope === "publish_work_branch" && approval.subjectType === "publication_artifact",
       ) === true;
   if (requiresPublishApproval) {
-    if (publishApprovalIds.size === 0 && !deferredAfterAgent) {
+    if (publishApprovalIds.size === 0 && !deferredAfterReplanBoundary) {
       codes.add("PLAN_PUBLICATION_WITHOUT_APPROVAL");
     }
     for (const approvalId of publishApprovalIds) {
@@ -414,12 +422,12 @@ export function validateDagProposal(
   if (
     requiresWorkCompletionApproval &&
     !graph.nodes.some((node) => node.kind === "approval" && node.capability === "work_completion") &&
-    !deferredAfterAgent
+    !deferredAfterReplanBoundary
   ) {
     codes.add("PLAN_PUBLICATION_WITHOUT_APPROVAL");
   }
 
-  if (requiresPublication && pushIds.size === 0 && !deferredAfterAgent) {
+  if (requiresPublication && pushIds.size === 0 && !deferredAfterReplanBoundary) {
     codes.add("PLAN_PUBLICATION_PATH_MISSING");
   }
 
@@ -429,7 +437,11 @@ export function validateDagProposal(
       codes.add("PLAN_CHANGE_REQUEST_WITHOUT_PUBLICATION");
     }
   }
-  if (requiresChangeRequest && !graph.nodes.some((node) => node.kind === "change_request") && !deferredAfterAgent) {
+  if (
+    requiresChangeRequest &&
+    !graph.nodes.some((node) => node.kind === "change_request") &&
+    !deferredAfterReplanBoundary
+  ) {
     codes.add("PLAN_CHANGE_REQUEST_WITHOUT_PUBLICATION");
   }
   const ordered: DagPlanValidationCode[] = [
