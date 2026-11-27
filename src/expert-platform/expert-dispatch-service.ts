@@ -24,6 +24,7 @@ export interface DispatchInput {
   workspaceKey?: string;
   validationSnapshot?: VerificationPolicyStep[];
   executionKind?: TaskExecutionKind;
+  executionWorkspaceAccess?: "read-only" | "read-write";
   requiredRuntimeProfile?: string;
   requiredWorkspaceAccess?: "read-only" | "read-write";
   preferredBackend?: "claude" | "codex";
@@ -273,6 +274,7 @@ export class ExpertDispatchService {
       workspaceKey: input.workspaceKey,
       validationSnapshot: input.validationSnapshot,
       executionKind: input.executionKind,
+      executionWorkspaceAccess: input.executionWorkspaceAccess,
       problem: input.problem,
       expertId: resolved.expertId,
       repositoryId: resolved.repositoryId,

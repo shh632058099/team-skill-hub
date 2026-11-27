@@ -275,7 +275,12 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
         if (!(error instanceof Error) || error.message !== "UNKNOWN_RUNTIME_PROFILE") throw error;
       }
     }
-    const workspaceAccess = runtimePolicy.workspaceAccess;
+    const requestedWorkspaceAccess = claim.executionWorkspaceAccess ?? runtimePolicy.workspaceAccess;
+    if (requestedWorkspaceAccess === "read-write" && runtimePolicy.workspaceAccess !== "read-write") {
+      throw new Error("RUNTIME_PROFILE_MISMATCH");
+    }
+    const workspaceAccess = requestedWorkspaceAccess;
+    const agentPermissions = workspaceAccess === "read-only" ? "read-only" : runtimePolicy.agentPermissions;
     if (claim.deploymentSnapshot && claim.deploymentSnapshot.executor.backend !== backend)
       throw new Error("EXPERT_BACKEND_UNSUPPORTED");
     if (
@@ -296,10 +301,10 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
             claim.deploymentSnapshot?.executor.modelConfig.model ?? options.claudeModel ?? "sonnet",
             streaming,
             options.claudeMaxTurns ?? 100,
-            runtimePolicy.agentPermissions,
+            agentPermissions,
             runtimeSession,
           )
-        : buildCodexArgs(claim.problem, runtimePolicy.agentPermissions, runtimeSession);
+        : buildCodexArgs(claim.problem, agentPermissions, runtimeSession);
     // URL-backed repository IDs are the new source-repository contract. If the
     // Hub cannot resolve their URL/branch, fail the task instead of analyzing the
     // worker's unrelated default sourcePath. Legacy IDs retain compatibility.
@@ -356,12 +361,14 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
       if ((claim.validationSnapshot?.length ?? 0) === 0) throw new Error("VERIFICATION_POLICY_REQUIRED");
       const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
       let workspaceChangeSummary: WorkspaceChangeSummary | undefined;
-      if (workspaceAccess === "read-write") {
+      if (claim.workspaceKey) {
         workspaceChangeSummary = await computeWorkspaceChangeSummary(
           preparedRepository.path,
           preparedRepository.commitSha,
         );
-        grantExecutionContainerAccess(preparedRepository.path, "read-only");
+        if (workspaceAccess === "read-write") {
+          grantExecutionContainerAccess(preparedRepository.path, "read-only");
+        }
       }
       const verificationRunner = options.runVerificationPolicy ?? runVerificationPolicy;
       const rawVerification = await verificationRunner(
@@ -387,11 +394,13 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
         `image:${options.image}`,
       ].join("|");
       const verifierIdentity = `team-skill-hub-worker@1|policy:${validationPolicyHash}`;
+      const verificationSubject =
+        workspaceChangeSummary && workspaceChangeSummary.diffStat.filesChanged > 0
+          ? `workspace:${workspaceChangeSummary.contentRevision}`
+          : preparedRepository.commitSha;
       const verificationResults = rawVerification.map((verification) => ({
         ...verification,
-        subjectRevision: workspaceChangeSummary
-          ? `workspace:${workspaceChangeSummary.contentRevision}`
-          : preparedRepository.commitSha,
+        subjectRevision: verificationSubject,
         environmentIdentity: verificationEnvironmentIdentity,
         verifierIdentity,
       }));
@@ -429,7 +438,7 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
         claim.modelConfig.model,
         streaming,
         options.claudeMaxTurns ?? 100,
-        runtimePolicy.agentPermissions,
+        agentPermissions,
         runtimeSession,
       );
     }

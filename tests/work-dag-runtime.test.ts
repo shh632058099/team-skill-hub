@@ -614,6 +614,21 @@ test("review executor failure blocks after retry exhaustion instead of being rep
       workflowId: "conditional-review-failure",
     });
     store.ensureRequirementSnapshot(work.workItemId);
+    let currentWork = store.getWorkInternal(work.workItemId);
+    const activeAttempt = store.createWorkAttempt(
+      work.workItemId,
+      "a",
+      "s",
+      currentWork.stateRevision,
+      {
+        reason: "initial",
+        expertId: "reviewer",
+        deploymentId: "review-deployment",
+        deploymentConfigVersion: 1,
+      },
+      90,
+    );
+    assert.equal(store.getActiveAttempt(work.workItemId)?.workAttemptId, activeAttempt.workAttemptId);
     let calls = 0;
     const review: WorkDagExecutorAdapter = {
       kind: "review",
@@ -636,6 +651,9 @@ test("review executor failure blocks after retry exhaustion instead of being rep
     assert.equal(current.status, "blocked");
     assert.equal(current.blockedReason, "DAG_EXECUTOR_FAILED");
     assert.equal(current.currentDagRevision, 1);
+    assert.equal(current.activeWorkAttemptId, null);
+    assert.equal(store.getActiveAttempt(work.workItemId), null);
+    assert.equal(store.listAttempts(work.workItemId).at(-1)?.status, "failed");
     assert.equal(store.listDagRevisions(work.workItemId).length, 1);
     assert.equal(store.listDagProposals(work.workItemId).length, 1);
   } finally {

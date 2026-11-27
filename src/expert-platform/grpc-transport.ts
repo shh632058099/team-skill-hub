@@ -59,6 +59,7 @@ interface ClaimTaskResponse {
   validation_snapshot_json?: string;
   runtime_session_id?: string;
   execution_kind?: string;
+  execution_workspace_access?: string;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -472,6 +473,7 @@ export async function startExpertWorkerGrpcServer(
                 validation_snapshot_json: JSON.stringify(claim.validationSnapshot ?? []),
                 runtime_session_id: claim.runtimeSessionId ?? "",
                 execution_kind: claim.executionKind ?? "agent",
+                execution_workspace_access: claim.executionWorkspaceAccess ?? "",
               };
             })()
           : { has_task: false },
@@ -1084,6 +1086,10 @@ export class ExpertWorkerClient {
       fencing,
       problem: response.problem,
       executionKind: response.execution_kind === "verification" ? "verification" : "agent",
+      executionWorkspaceAccess:
+        response.execution_workspace_access === "read-only" || response.execution_workspace_access === "read-write"
+          ? response.execution_workspace_access
+          : null,
       repositoryId: response.repository_id || null,
       ...(response.repository_url ? { repositoryUrl: response.repository_url } : {}),
       ...(response.repository_branch ? { repositoryBranch: response.repository_branch } : {}),

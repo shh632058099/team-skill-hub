@@ -13,7 +13,7 @@ export type ParsedAgentExecutionResult = {
   executionOutcome: AgentExecutionOutcome;
 };
 
-const OUTCOME_PATTERN = /\n?<TEAM_SKILL_HUB_OUTCOME>(\{[^\n]*\})<\/TEAM_SKILL_HUB_OUTCOME>\s*$/;
+const OUTCOME_PATTERN = /<TEAM_SKILL_HUB_OUTCOME>(\{[^\n]*\})<\/TEAM_SKILL_HUB_OUTCOME>/g;
 const REASON_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,79}$/;
 
 export function agentOutcomeProtocolInstructions(): string[] {
@@ -37,8 +37,8 @@ export function requiresAgentOutcomeProtocol(problem: string): boolean {
 export function parseAgentExecutionResult(output: string): ParsedAgentExecutionResult {
   const normalized = output.trim();
   if (!normalized) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
-  const match = OUTCOME_PATTERN.exec(output);
-  if (!match) {
+  const matches = [...output.matchAll(OUTCOME_PATTERN)];
+  if (matches.length === 0) {
     if (output.includes("<TEAM_SKILL_HUB_OUTCOME>") || output.includes("</TEAM_SKILL_HUB_OUTCOME>")) {
       throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
     }
@@ -50,7 +50,22 @@ export function parseAgentExecutionResult(output: string): ParsedAgentExecutionR
       },
     };
   }
-  const result = output.slice(0, match.index).trim();
+  if (matches.length !== 1) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
+  const match = matches[0]!;
+  const markerStart = match.index;
+  if (markerStart === undefined) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
+  const markerEnd = markerStart + match[0].length;
+  const before = output.slice(0, markerStart).trim();
+  const after = output.slice(markerEnd).trim();
+  if (
+    before.includes("<TEAM_SKILL_HUB_OUTCOME>") ||
+    before.includes("</TEAM_SKILL_HUB_OUTCOME>") ||
+    after.includes("<TEAM_SKILL_HUB_OUTCOME>") ||
+    after.includes("</TEAM_SKILL_HUB_OUTCOME>")
+  ) {
+    throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
+  }
+  const result = [before, after].filter(Boolean).join("\n");
   if (!result) throw new Error("AGENT_OUTCOME_PROTOCOL_INVALID");
   let parsed: unknown;
   try {

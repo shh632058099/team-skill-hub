@@ -226,6 +226,7 @@ test("review node can use a read-write deployment for a read-only review task", 
     const task = f.tasks.getByIdempotency("alice", "team", "dag:" + execution.idempotencyKey);
     assert.ok(task);
     assert.equal(task.deploymentSnapshot?.runtimeProfile, "codex-workspace-write");
+    assert.equal(task.executionWorkspaceAccess, "read-only");
   } finally {
     f.works.close();
     f.tasks.close();
@@ -762,6 +763,8 @@ test("agent review task is not reused across repository resources in one WorkAtt
     assert.equal(secondTask.repositoryId, "repo-b");
     assert.equal(secondTask.workspaceKey, workspaceB.workspaceKey);
     assert.equal(secondTask.requiredWorkerId, "worker-2");
+    assert.equal(secondExecution.state, "running");
+    assert.equal(f.works.getActiveAttempt(f.workId)?.reviewTaskId, firstTask.taskId);
   } finally {
     f.works.close();
     f.tasks.close();

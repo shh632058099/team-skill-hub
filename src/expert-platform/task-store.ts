@@ -51,6 +51,7 @@ export type DeploymentTaskSnapshot = {
 };
 
 export type TaskExecutionKind = "agent" | "verification";
+export type TaskWorkspaceAccess = "read-only" | "read-write";
 
 export type Submission = {
   principalId: string;
@@ -74,6 +75,7 @@ export type Submission = {
   workspaceKey?: string;
   validationSnapshot?: VerificationPolicyStep[];
   executionKind?: TaskExecutionKind;
+  executionWorkspaceAccess?: TaskWorkspaceAccess;
 };
 export type TaskRecord = {
   taskId: string;
@@ -85,6 +87,7 @@ export type TaskRecord = {
   selectionMode: "explicit" | "auto";
   schemaVersion: number;
   executionKind: TaskExecutionKind;
+  executionWorkspaceAccess: TaskWorkspaceAccess | null;
   deploymentId?: string | null;
   deploymentConfigVersion?: number | null;
   deploymentSnapshot?: DeploymentTaskSnapshot | null;
@@ -137,6 +140,7 @@ export type Claim = {
   fencing: number;
   problem: string;
   executionKind?: TaskExecutionKind;
+  executionWorkspaceAccess?: TaskWorkspaceAccess | null;
   repositoryId?: string | null;
   repositoryUrl?: string;
   repositoryBranch?: string;
@@ -225,6 +229,10 @@ export class ExpertTaskStore {
     this.ensureTaskColumn(
       "execution_kind",
       "TEXT NOT NULL DEFAULT 'agent' CHECK (execution_kind IN ('agent','verification'))",
+    );
+    this.ensureTaskColumn(
+      "execution_workspace_access",
+      "TEXT CHECK (execution_workspace_access IN ('read-only','read-write') OR execution_workspace_access IS NULL)",
     );
     this.ensureTaskColumn("repository_id", "TEXT");
     this.ensureTaskColumn(
@@ -364,6 +372,7 @@ export class ExpertTaskStore {
     const selectionMode = input.selectionMode ?? "explicit";
     const schemaVersion = input.schemaVersion ?? (input.deploymentSnapshot ? 2 : 1);
     const executionKind = input.executionKind ?? "agent";
+    const executionWorkspaceAccess = input.executionWorkspaceAccess ?? null;
     const snapshot = input.deploymentSnapshot;
     const sourceRequestSlot =
       input.sourceRequestSlot ??
@@ -385,6 +394,9 @@ export class ExpertTaskStore {
     if (
       (selectionMode !== "explicit" && selectionMode !== "auto") ||
       (executionKind !== "agent" && executionKind !== "verification") ||
+      (executionWorkspaceAccess !== null &&
+        executionWorkspaceAccess !== "read-only" &&
+        executionWorkspaceAccess !== "read-write") ||
       !Number.isSafeInteger(schemaVersion) ||
       schemaVersion <= 0
     ) {
@@ -414,6 +426,7 @@ export class ExpertTaskStore {
           selectionMode,
           schemaVersion,
           executionKind,
+          executionWorkspaceAccess,
           workItemId: input.workItemId?.trim() || null,
           workAttemptId: input.workAttemptId?.trim() || null,
           workflowId: input.workflowId?.trim() || null,
@@ -514,7 +527,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,execution_kind,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,execution_kind,execution_workspace_access,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -524,6 +537,7 @@ export class ExpertTaskStore {
           digest,
           input.problem.trim(),
           executionKind,
+          executionWorkspaceAccess,
           expertId,
           repositoryId,
           selectionMode,
@@ -556,6 +570,7 @@ export class ExpertTaskStore {
         selectionMode,
         schemaVersion,
         executionKind,
+        executionWorkspaceAccess,
         ...(snapshot
           ? {
               deploymentId: snapshot.deploymentId,
@@ -682,6 +697,10 @@ export class ExpertTaskStore {
         fencing,
         problem: claimProblem,
         executionKind: (row.execution_kind ?? "agent") as TaskExecutionKind,
+        executionWorkspaceAccess:
+          row.execution_workspace_access == null
+            ? null
+            : (String(row.execution_workspace_access) as TaskWorkspaceAccess),
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
         workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
         validationSnapshot: normalizeVerificationPolicy(
@@ -1637,6 +1656,8 @@ export class ExpertTaskStore {
       selectionMode: (row.selection_mode ?? "explicit") as "explicit" | "auto",
       schemaVersion: Number(row.schema_version ?? 1),
       executionKind: (row.execution_kind ?? "agent") as TaskExecutionKind,
+      executionWorkspaceAccess:
+        row.execution_workspace_access == null ? null : (String(row.execution_workspace_access) as TaskWorkspaceAccess),
       ...(row.deployment_id
         ? {
             deploymentId: String(row.deployment_id),

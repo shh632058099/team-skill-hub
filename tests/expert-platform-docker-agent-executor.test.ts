@@ -218,6 +218,65 @@ test("Dynamic DAG missing outcome marker falls back to succeeded with an auditab
   );
 });
 
+test("Dynamic DAG accepts one valid outcome marker before trailing human-readable text", async () => {
+  const executor = createDockerAgentExecutor({
+    backend: "claude",
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async () =>
+      [
+        "Implemented the requested change.",
+        '<TEAM_SKILL_HUB_OUTCOME>{"status":"succeeded"}</TEAM_SKILL_HUB_OUTCOME>',
+        "Verification remains downstream.",
+      ].join("\n"),
+  });
+  const result = await executor(
+    {
+      ...claim,
+      executionKind: "agent",
+      problem: claim.problem + "\nTEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1",
+    },
+    new AbortController().signal,
+  );
+  assert.deepEqual(result, {
+    result: "Implemented the requested change.\nVerification remains downstream.",
+    executionOutcome: { status: "succeeded" },
+  });
+});
+
+test("Dynamic DAG rejects multiple complete outcome markers", async () => {
+  const executor = createDockerAgentExecutor({
+    backend: "claude",
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    runProcess: async () =>
+      [
+        "Done.",
+        '<TEAM_SKILL_HUB_OUTCOME>{"status":"succeeded"}</TEAM_SKILL_HUB_OUTCOME>',
+        "More text.",
+        '<TEAM_SKILL_HUB_OUTCOME>{"status":"succeeded"}</TEAM_SKILL_HUB_OUTCOME>',
+      ].join("\n"),
+  });
+  await assert.rejects(
+    () =>
+      executor(
+        {
+          ...claim,
+          executionKind: "agent",
+          problem: claim.problem + "\nTEAM_SKILL_HUB_AGENT_OUTCOME_PROTOCOL=v1",
+        },
+        new AbortController().signal,
+      ),
+    /AGENT_OUTCOME_PROTOCOL_INVALID/,
+  );
+});
+
 test("Dynamic DAG malformed outcome marker remains a hard protocol failure", async () => {
   const executor = createDockerAgentExecutor({
     backend: "claude",
@@ -716,6 +775,58 @@ test("Docker executor keeps legacy profiles read-only and rejects write profile 
   assert.ok(legacy.args().includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
   assert.ok(legacy.args().includes("read-only"));
 });
+test("task-level read-only access narrows a write-capable Claude deployment", async () => {
+  const modelConfig = {
+    providerId: "router",
+    model: "test-model",
+    baseUrl: "https://router.example/v1",
+    wireApi: "anthropic-messages" as const,
+    allowedEnvNames: ["ANTHROPIC_API_KEY"],
+  };
+  let args: readonly string[] = [];
+  const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "test-key";
+  const executor = createDockerAgentExecutor({
+    backend: "claude",
+    image: "worker",
+    sourcePath: "/work/repo",
+    network: "expert-egress",
+    envNames: ["ANTHROPIC_API_KEY"],
+    timeoutMs: 1000,
+    verificationTmpfsMb: 2048,
+    runProcess: async (options) => {
+      args = options.args;
+      return "done";
+    },
+  });
+
+  try {
+    await executor(
+      {
+        ...claim,
+        executionWorkspaceAccess: "read-only",
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "deployment",
+          configVersion: 1,
+          runtimeProfile: "claude-workspace-write",
+          repository: { id: "repo", url: "https://example.org/repo.git", branch: "main" },
+          executor: { backend: "claude", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+
+    assert.ok(args.includes("type=bind,src=/work/repo,dst=/workspace,readonly"));
+    const toolIndex = args.indexOf("--tools");
+    assert.ok(toolIndex >= 0);
+    assert.equal(args[toolIndex + 1], "Bash,Read,Glob,Grep");
+  } finally {
+    if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+  }
+});
+
 test("workspace-write executor captures deterministic change summary before verification", async () => {
   const { execFileSync } = await import("node:child_process");
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
@@ -903,6 +1014,135 @@ test("workspace-write verification observes mutated content and binds evidence t
       "workspace:" + typed.workspaceChangeSummary.contentRevision,
     );
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("read-only verification on an existing mutated workspace preserves the workspace subject revision", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, readFileSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "expert-readonly-verification-"));
+  const origin = path.join(root, "origin");
+  const checkouts = path.join(root, "checkouts");
+  const savedOpenAiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  try {
+    execFileSync("git", ["init", "-b", "main", origin]);
+    writeFileSync(path.join(origin, "fixture.txt"), "before\n");
+    execFileSync("git", ["-C", origin, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      origin,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+    const modelConfig = {
+      providerId: "router",
+      model: "test-model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    const workspaceKey = "work-readonly-verify-a1";
+    const executor = createDockerAgentExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: origin,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: ["OPENAI_API_KEY"],
+      timeoutMs: 1000,
+      verificationTmpfsMb: 2048,
+      onStage: async () => undefined,
+      runProcess: async (options) => {
+        const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
+        assert.ok(mount);
+        const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+        writeFileSync(path.join(source, "fixture.txt"), "after\n");
+        return "changed";
+      },
+      runVerificationPolicy: async (workspace, policy) => {
+        assert.equal(readFileSync(path.join(workspace, "fixture.txt"), "utf8"), "after\n");
+        return policy.map((step) => ({
+          stepId: step.id,
+          type: step.type,
+          evidenceType: step.evidenceType,
+          status: "passed" as const,
+          exitCode: 0,
+          durationMs: 1,
+          errorCode: null,
+        }));
+      },
+    });
+    const deploymentSnapshot = {
+      deploymentId: "write",
+      configVersion: 1,
+      runtimeProfile: "codex-workspace-write",
+      repository: { id: "repo-readonly-verify", url: origin, branch: "main" },
+      executor: { backend: "codex" as const, modelConfig },
+    };
+
+    const changed = await executor(
+      {
+        ...claim,
+        taskId: "task-write",
+        runId: "run-write",
+        repositoryId: "repo-readonly-verify",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey,
+        executionWorkspaceAccess: "read-write",
+        modelConfig,
+        deploymentSnapshot,
+      },
+      new AbortController().signal,
+    );
+    assert.equal(typeof changed, "object");
+    const changedSummary = (changed as { workspaceChangeSummary: { contentRevision: string } }).workspaceChangeSummary;
+    assert.ok(changedSummary.contentRevision);
+
+    const verified = await executor(
+      {
+        ...claim,
+        taskId: "task-verify",
+        runId: "run-verify",
+        repositoryId: "repo-readonly-verify",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey,
+        executionKind: "verification",
+        executionWorkspaceAccess: "read-only",
+        validationSnapshot: [
+          {
+            id: "build",
+            type: "command",
+            argv: ["node", "-e", "process.exit(0)"],
+            timeoutMs: 1000,
+            evidenceType: "build",
+          },
+        ],
+        modelConfig,
+        deploymentSnapshot,
+      },
+      new AbortController().signal,
+    );
+    assert.equal(typeof verified, "object");
+    const typed = verified as {
+      workspaceChangeSummary: { contentRevision: string };
+      verificationResults: Array<{ subjectRevision: string }>;
+    };
+    assert.equal(typed.workspaceChangeSummary.contentRevision, changedSummary.contentRevision);
+    assert.equal(typed.verificationResults[0]!.subjectRevision, "workspace:" + changedSummary.contentRevision);
+  } finally {
+    if (savedOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = savedOpenAiKey;
     rmSync(root, { recursive: true, force: true });
   }
 });

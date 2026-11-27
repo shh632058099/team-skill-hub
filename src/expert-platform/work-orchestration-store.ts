@@ -3450,11 +3450,22 @@ export class WorkOrchestrationStore {
       const current = this.getWork(workItemId, principalId, scope);
       if (current.stateRevision !== expectedRevision) throw new Error("STALE_WORK_REVISION");
       this.assertWorkOrchestrationFence(current, fence);
+      const finishDynamicAttempt = current.orchestrationEngine === "dynamic-dag" && current.activeWorkAttemptId;
+      if (finishDynamicAttempt) {
+        const changedAttempt = this.db
+          .prepare(
+            "UPDATE work_attempts SET status='failed',finished_at=? WHERE work_attempt_id=? AND work_item_id=? AND status='active'",
+          )
+          .run(now, finishDynamicAttempt, workItemId);
+        if (changedAttempt.changes !== 1) throw new Error("STALE_WORK_ATTEMPT");
+        this.event(workItemId, finishDynamicAttempt, "work_attempt.failed", null, now);
+      }
       const changed = this.db
         .prepare(
-          "UPDATE work_items SET status='blocked',blocked_reason=?,blocked_context=?,blocked_at=?,resume_condition=?,blocked_by_type=?,blocked_by_ref=?,next_action_type=CASE WHEN ?=1 THEN next_action_type ELSE NULL END,next_action_at=NULL,next_action_context=CASE WHEN ?=1 THEN next_action_context ELSE NULL END,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
+          "UPDATE work_items SET status='blocked',active_work_attempt_id=CASE WHEN ?=1 THEN NULL ELSE active_work_attempt_id END,blocked_reason=?,blocked_context=?,blocked_at=?,resume_condition=?,blocked_by_type=?,blocked_by_ref=?,next_action_type=CASE WHEN ?=1 THEN next_action_type ELSE NULL END,next_action_at=NULL,next_action_context=CASE WHEN ?=1 THEN next_action_context ELSE NULL END,state_revision=state_revision+1,updated_at=? WHERE work_item_id=? AND principal_id=? AND scope=? AND state_revision=?",
         )
         .run(
+          finishDynamicAttempt ? 1 : 0,
           blockedReason,
           context,
           now,

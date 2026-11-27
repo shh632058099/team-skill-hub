@@ -411,6 +411,7 @@ class ExpertTaskDagAdapterBase {
         workspaceKey: workspace.workspaceKey,
         validationSnapshot,
         executionKind,
+        executionWorkspaceAccess: nodeWorkspaceAccess(context),
       },
       resolved,
     );
@@ -715,6 +716,34 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
     return Boolean(workflow.review.reviewerExpertId) || workflow.change?.mode === "conditional_code_change";
   }
 
+  private matchingReviewTask(
+    context: WorkDagExecutionContext,
+    attempt: WorkAttemptRecord,
+    reviewerExpertId: string,
+  ): TaskRecord | null {
+    const candidates: TaskRecord[] = [];
+    if (attempt.reviewTaskId) {
+      try {
+        candidates.push(this.tasks.get(attempt.reviewTaskId, context.work.principalId, context.work.scope));
+      } catch {
+        // Compatibility pointer may refer to a removed legacy task; fall back to durable task history.
+      }
+    }
+    for (const task of this.tasks
+      .listByWorkAttempt(attempt.workAttemptId, context.work.principalId, context.work.scope)
+      .toReversed()) {
+      if (!candidates.some((candidate) => candidate.taskId === task.taskId)) candidates.push(task);
+    }
+    return (
+      candidates.find(
+        (task) =>
+          task.sourceClient === "work_dag_review" &&
+          task.expertId === reviewerExpertId &&
+          this.taskMatchesResource(context, attempt, task),
+      ) ?? null
+    );
+  }
+
   correlationRef(context: WorkDagExecutionContext): string {
     if (this.usesAgentReview(context)) {
       const current = this.workStore.getWorkInternal(context.work.workItemId);
@@ -725,12 +754,13 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
       const keyed = this.tasks.getByIdempotency(context.work.principalId, context.work.scope, taskKey(context));
       if (keyed) return "expert-task:" + keyed.taskId + authoritySuffix;
       const attempt = this.workStore.getActiveAttempt(context.work.workItemId);
-      if (attempt?.reviewTaskId) {
-        const existing = this.tasks.get(attempt.reviewTaskId, current.principalId, current.scope);
-        if (
-          this.taskMatchesResource(context, attempt, existing) &&
-          !this.taskHasOtherActiveDagExecution(context, existing)
-        ) {
+      if (attempt) {
+        const existing = this.matchingReviewTask(
+          context,
+          attempt,
+          this.configuredReviewerExpertId(context) ?? attempt.expertId,
+        );
+        if (existing) {
           if (
             existing.executionRef === context.execution.idempotencyKey ||
             existing.executionReservationRef === context.execution.idempotencyKey
@@ -740,6 +770,9 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
           if (existing.status === "succeeded" || existing.status === "failed") {
             const reserved = this.reserveTaskForExecution(context, existing);
             if (reserved) return "expert-task:" + reserved.taskId + authoritySuffix;
+          }
+          if (!this.taskHasOtherActiveDagExecution(context, existing) && this.correlationPinsTask(context, existing)) {
+            return "expert-task:" + existing.taskId + authoritySuffix;
           }
         }
       }
@@ -797,43 +830,61 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
       }
       return keyed;
     }
-    if (attempt.reviewTaskId) {
-      let existing = this.tasks.get(attempt.reviewTaskId, current.principalId, current.scope);
-      const canReuseExisting =
-        this.taskMatchesResource(context, attempt, existing) && !this.taskHasOtherActiveDagExecution(context, existing);
-      if (!canReuseExisting && this.correlationPinsTask(context, existing)) {
-        return existing;
-      }
-      if (canReuseExisting) {
-        if (existing.expertId !== effectiveReviewerExpertId) {
-          throw new Error("WORK_ATTEMPT_REVIEW_TASK_CONFLICT");
-        }
-        if (existing.executionRef === context.execution.idempotencyKey) {
+    {
+      let existing = this.matchingReviewTask(context, attempt, effectiveReviewerExpertId);
+      if (existing) {
+        if (
+          existing.executionRef === context.execution.idempotencyKey ||
+          existing.executionReservationRef === context.execution.idempotencyKey
+        ) {
+          if (existing.status === "failed") {
+            existing = this.tasks.requeueForRetry(
+              existing.taskId,
+              attempt.workAttemptId,
+              "dag:" + context.node.id,
+              Date.now(),
+              reviewProblem,
+              context.execution.idempotencyKey,
+            );
+          } else if (existing.status === "succeeded" && existing.runId) {
+            existing = this.tasks.scheduleContinuation(
+              existing.taskId,
+              existing.runId,
+              "dag:" + context.node.id,
+              Date.now(),
+              workspace.ownerWorkerId ?? undefined,
+              reviewProblem,
+              context.execution.idempotencyKey,
+            );
+          }
           return existing;
         }
-        if (existing.status === "failed") {
-          existing = this.tasks.requeueForRetry(
-            existing.taskId,
-            attempt.workAttemptId,
-            "dag:" + context.node.id,
-            Date.now(),
-            reviewProblem,
-            context.execution.idempotencyKey,
-          );
-          return existing;
+        if (existing.status === "failed" || (existing.status === "succeeded" && existing.runId)) {
+          const reserved = this.reserveTaskForExecution(context, existing);
+          if (reserved) {
+            existing = reserved;
+            if (existing.status === "failed") {
+              return this.tasks.requeueForRetry(
+                existing.taskId,
+                attempt.workAttemptId,
+                "dag:" + context.node.id,
+                Date.now(),
+                reviewProblem,
+                context.execution.idempotencyKey,
+              );
+            }
+            return this.tasks.scheduleContinuation(
+              existing.taskId,
+              existing.runId!,
+              "dag:" + context.node.id,
+              Date.now(),
+              workspace.ownerWorkerId ?? undefined,
+              reviewProblem,
+              context.execution.idempotencyKey,
+            );
+          }
         }
-        if (existing.status === "succeeded" && existing.runId) {
-          existing = this.tasks.scheduleContinuation(
-            existing.taskId,
-            existing.runId,
-            "dag:" + context.node.id,
-            Date.now(),
-            workspace.ownerWorkerId ?? undefined,
-            reviewProblem,
-            context.execution.idempotencyKey,
-          );
-          return existing;
-        }
+        if (this.correlationPinsTask(context, existing)) return existing;
       }
     }
     if (["removed", "failed", "cleaning"].includes(workspace.state)) {
@@ -869,13 +920,16 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
         workspaceKey: workspace.workspaceKey,
         validationSnapshot: [],
         executionKind: "agent",
+        executionWorkspaceAccess: "read-only",
       },
       resolved,
     );
     if (task.status === "queued" && workspace.ownerWorkerId) {
       task = this.tasks.requireWorker(task.taskId, workspace.ownerWorkerId);
     }
-    this.workStore.linkAttemptReviewTask(attempt.workAttemptId, task.taskId);
+    if (!attempt.reviewTaskId) {
+      this.workStore.linkAttemptReviewTask(attempt.workAttemptId, task.taskId);
+    }
     return task;
   }
 

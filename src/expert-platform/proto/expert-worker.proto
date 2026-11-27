@@ -52,6 +52,7 @@ message ClaimTaskResponse {
   string validation_snapshot_json = 14;
   string runtime_session_id = 15;
   string execution_kind = 16;
+  string execution_workspace_access = 17;
 }
 
 message LeaseRequest {

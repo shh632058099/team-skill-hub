@@ -20,7 +20,6 @@ import {
 import { WorkPublicationStore, type WorkPublicationRecord } from "./work-publication-store.js";
 import { WorkChangeRequestStore, type WorkChangeRequestRecord } from "./work-change-request-store.js";
 import { buildPublicationCommitMetadata, buildWorkBranchName } from "./publication-policy.js";
-import { resolveRuntimeProfilePolicy } from "./runtime-profile-policy.js";
 import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./verification-policy.js";
 import { WorkDagShadowProjector } from "./work-dag-shadow-projector.js";
 import type { WorkDagDeliveryTarget } from "./work-dag-delivery-adapters.js";
@@ -1709,6 +1708,7 @@ export class WorkOrchestrator {
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
         validationSnapshot,
+        executionWorkspaceAccess: requiredWorkspaceAccessForWorkflow(workflow),
       },
       resolved,
     );
@@ -1736,12 +1736,6 @@ export class WorkOrchestrator {
       requiredWorkspaceAccess: "read-only",
       preferredBackend: preferredBackendForWork(work),
     });
-    if (
-      !resolved.runtimeProfile ||
-      resolveRuntimeProfilePolicy(resolved.runtimeProfile).workspaceAccess !== "read-only"
-    ) {
-      throw new Error("RUNTIME_PROFILE_MISMATCH: review requires read-only runtime");
-    }
     const task = this.dispatch.submitResolved(
       {
         principalId: work.principalId,
@@ -1764,6 +1758,7 @@ export class WorkOrchestrator {
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
         validationSnapshot: [],
+        executionWorkspaceAccess: "read-only",
       },
       resolved,
     );

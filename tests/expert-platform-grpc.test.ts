@@ -23,6 +23,7 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
       problem: "investigate OTA failure",
       expertId: "ota",
       workspaceKey: "grpc-work-a1",
+      executionWorkspaceAccess: "read-only",
     });
 
     const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0");
@@ -30,6 +31,7 @@ test("approved remote worker claims, renews and completes over real gRPC TCP", a
     const claim = await client.claimTask("worker-1", "ota");
     assert.equal(claim?.problem, "investigate OTA failure");
     assert.equal(claim?.taskId, submitted.taskId);
+    assert.equal(claim?.executionWorkspaceAccess, "read-only");
     await client.renewLease(claim!);
     await client.reportTaskStage(claim!, "repository.started");
     await client.reportTaskStage(claim!, "repository.completed");

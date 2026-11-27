@@ -946,15 +946,19 @@ test("Admin expert configuration UI manages definitions and execution configurat
       Date.now(),
       { resumeCondition: "manual", blockedByType: "operator", blockedByRef: "admin" },
     );
-    blockedStore.close();
     assert.equal(blockedAdminWork.status, "blocked");
+    assert.equal(blockedAdminWork.activeWorkAttemptId, null);
+    assert.equal(blockedStore.getActiveAttempt(adminWork.workItemId), null);
+    assert.equal(blockedStore.listAttempts(adminWork.workItemId).at(-1)?.status, "failed");
+    blockedStore.close();
 
     const workResume = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/resume", {
       method: "POST",
     });
     assert.equal(workResume.status, 200);
     const resumedAdminWork = await workResume.json();
-    assert.equal(resumedAdminWork.work.status, "running");
+    assert.equal(resumedAdminWork.work.status, "queued");
+    assert.equal(resumedAdminWork.work.activeWorkAttemptId, null);
     assert.equal(resumedAdminWork.work.blockedReason, null);
 
     const workCancel = await fetch(base + "/admin/api/work-items/" + adminWork.workItemId + "/cancel", {
