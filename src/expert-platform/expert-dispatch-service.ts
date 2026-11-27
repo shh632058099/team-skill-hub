@@ -22,6 +22,9 @@ export interface DispatchInput {
   workflowId?: string;
   workflowVersion?: number;
   workspaceKey?: string;
+  workspacePermissionModel?: "shared-gid-v1" | "single-uid-v2";
+  workspaceOwnerUid?: number;
+  workspaceOwnerGid?: number;
   validationSnapshot?: VerificationPolicyStep[];
   executionKind?: TaskExecutionKind;
   executionWorkspaceAccess?: "read-only" | "read-write";
@@ -272,6 +275,9 @@ export class ExpertDispatchService {
       workflowId: input.workflowId,
       workflowVersion: input.workflowVersion,
       workspaceKey: input.workspaceKey,
+      workspacePermissionModel: input.workspacePermissionModel,
+      workspaceOwnerUid: input.workspaceOwnerUid,
+      workspaceOwnerGid: input.workspaceOwnerGid,
       validationSnapshot: input.validationSnapshot,
       executionKind: input.executionKind,
       executionWorkspaceAccess: input.executionWorkspaceAccess,

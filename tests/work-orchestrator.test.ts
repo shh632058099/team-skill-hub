@@ -5,12 +5,16 @@ import path from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { ExpertDispatchService } from "../src/expert-platform/expert-dispatch-service.js";
-import { ExpertStore } from "../src/expert-platform/expert-store.js";
+import { ExpertStore, type ExpertSourceRepository } from "../src/expert-platform/expert-store.js";
 import { ExpertTaskStore } from "../src/expert-platform/task-store.js";
 import { WorkOrchestrationStore } from "../src/expert-platform/work-orchestration-store.js";
 import { WorkPublicationStore } from "../src/expert-platform/work-publication-store.js";
 import { WorkChangeRequestStore } from "../src/expert-platform/work-change-request-store.js";
 import { WorkOrchestrator } from "../src/expert-platform/work-orchestrator.js";
+import { WorkDagScheduler } from "../src/expert-platform/work-dag-engine.js";
+import { createExpertTaskDagAdapters } from "../src/expert-platform/work-dag-expert-adapters.js";
+import { createDeliveryDagAdapters } from "../src/expert-platform/work-dag-delivery-adapters.js";
+import type { DagGraph } from "../src/expert-platform/work-dag.js";
 
 function markPreCutoverLegacy(dbPath: string, workItemId: string) {
   const db = new DatabaseSync(dbPath);
@@ -1985,6 +1989,10 @@ test("deterministic workspace owner and shared-group violations block without re
     "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
     "WORKSPACE_PREPARATION_INCOMPLETE",
     "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+    "WORKSPACE_IDENTITY_MISMATCH",
+    "INVALID_WORKSPACE_OWNER_IDENTITY",
+    "WORKSPACE_GIT_LAYOUT_UNSUPPORTED",
+    "WORKSPACE_GIT_METADATA_OWNERSHIP_INVALID",
   ]) {
     const f = fixture();
     try {
@@ -2383,6 +2391,7 @@ test("ensurePublication creates an owner-affine prepared-work command only after
       "/srv/workspaces/" + workspace.workspaceKey,
       1100,
       "b".repeat(40),
+      { permissionModel: "single-uid-v2", ownerUid: 999, ownerGid: 988 },
     );
     const claim = f.tasks.claim("worker-a", 1000, 30_000, "ota", {
       backend: "codex",
@@ -2418,6 +2427,9 @@ test("ensurePublication creates an owner-affine prepared-work command only after
     assert.equal(publication.executionSnapshot?.repositoryUrl, "https://example.test/ota.git");
     assert.equal(publication.executionSnapshot?.credentialRef, "publish-ref");
     assert.equal(publication.executionSnapshot?.expectedContentRevision, summary.contentRevision);
+    assert.equal((publication.executionSnapshot as any)?.workspacePermissionModel, "single-uid-v2");
+    assert.equal((publication.executionSnapshot as any)?.workspaceOwnerUid, 999);
+    assert.equal((publication.executionSnapshot as any)?.workspaceOwnerGid, 988);
     assert.deepEqual(publication.executionSnapshot?.approvedChangeSummary, summary);
 
     f.experts.putDeployment({
@@ -2808,6 +2820,440 @@ test("pushed publication recovers into a durable change request and completes af
     assert.equal(prEvidence?.subjectRevision, "publication:" + publication.publicationId + ":" + "c".repeat(40));
     assert.equal(prEvidence?.artifactRef, "change-request:github:17");
     assert.equal(detail.gate.ready, true);
+  } finally {
+    f.close();
+  }
+});
+
+test("single-uid-v2 survives review rework and repeated verification into publication", async () => {
+  const f = fixture(() => true, true);
+  try {
+    const modelConfig = {
+      providerId: "router",
+      model: "model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: ["OPENAI_API_KEY"],
+    };
+    f.experts.putDefinition({
+      id: "reviewer",
+      displayName: "Reviewer",
+      capabilities: ["review"],
+      keywords: ["review"],
+      active: true,
+    });
+    const repository: ExpertSourceRepository = {
+      id: "ota-repo",
+      url: "https://example.test/ota.git",
+      branch: "main",
+      verificationPolicy: {
+        version: 1,
+        required: [
+          {
+            id: "build",
+            type: "command" as const,
+            argv: ["true"],
+            timeoutMs: 60_000,
+            evidenceType: "build",
+          },
+          {
+            id: "unit",
+            type: "command" as const,
+            argv: ["true"],
+            timeoutMs: 60_000,
+            evidenceType: "unit_test",
+          },
+        ],
+      },
+      publicationPolicy: {
+        version: 1,
+        permissions: ["prepare-commit", "push-work-branch", "create-change-request"],
+        branchPrefix: "skillhub/work/",
+        protectedBranches: ["main"],
+        allowedPushRemote: "origin",
+        credentialRef: "publish-ref",
+        allowForcePush: false,
+        allowDeleteRef: false,
+      },
+    };
+    f.experts.putDeployment({
+      id: "ota-v2",
+      expertId: "ota",
+      repositoryIds: ["ota-repo"],
+      repositories: [repository],
+      principals: ["alice"],
+      runtimeProfile: "codex-workspace-write",
+      active: true,
+      executor: { backend: "codex", modelConfig },
+    });
+    f.experts.putDeployment({
+      id: "reviewer-ro",
+      expertId: "reviewer",
+      repositoryIds: ["ota-repo"],
+      repositories: [repository],
+      principals: ["alice"],
+      runtimeProfile: "codex-readonly",
+      active: true,
+      executor: { backend: "codex", modelConfig },
+    });
+
+    const baseWorkflow = f.work.getWorkflow("code-fix-default").definition;
+    f.work.putWorkflow("dynamic-v2-acceptance", 1, {
+      ...structuredClone(baseWorkflow),
+      execution: {
+        ...structuredClone(baseWorkflow.execution),
+        requiredRuntimeProfile: "codex-workspace-write",
+      },
+      validation: {
+        requiredEvidence: ["build", "unit_test"],
+        required: [],
+      },
+      review: { required: true, reviewerExpertId: "reviewer" },
+      change: { mode: "code_change", delivery: "merge_request" },
+      publication: { required: true, mode: "work_branch", approvalRequired: false },
+      completion: {
+        require: [
+          "latest_work_attempt_succeeded",
+          "required_evidence_passed",
+          "no_unresolved_blocker",
+          "review_accepted",
+          "publication_succeeded",
+          "change_request_created",
+        ],
+      },
+      graph: { mode: "dynamic-dag" },
+    });
+
+    const submitted = f.dynamicOrchestrator.submitWork(
+      {
+        ...submission,
+        idempotencyKey: "single-uid-v2-dag-acceptance",
+        workflowId: "dynamic-v2-acceptance",
+        deploymentId: "ota-v2",
+        repositoryId: "ota-repo",
+        description: "repair, verify, review, rework if needed, then publish",
+      },
+      100,
+    );
+    const workId = submitted.work.workItemId;
+    const dispatch = new ExpertDispatchService(f.experts, f.tasks);
+    const scheduler = new WorkDagScheduler(f.work, [
+      ...createExpertTaskDagAdapters(f.work, f.tasks, dispatch),
+      ...createDeliveryDagAdapters(f.work, f.publications, f.changeRequests, f.dynamicOrchestrator),
+    ]);
+
+    const submitGraph = (graph: DagGraph, reasonCode: string, now: number) => {
+      const input = f.work.getDagPlannerInput(workId);
+      const proposal = f.work.submitDagProposal(
+        {
+          workItemId: workId,
+          principalId: "alice",
+          scope: "team-a",
+          expectedWorkRevision: input.frozen.workRevision,
+          expectedDagRevision: input.frozen.dagRevision,
+          expectedRequirementRevision: input.frozen.requirementRevision,
+          plannerIdentity: "acceptance",
+          plannerVersion: "1",
+          plannerInputDigest: input.digest,
+          reasonCode,
+          graph,
+        },
+        now,
+      );
+      assert.equal(proposal.status, "accepted", JSON.stringify(proposal.decisionCodes));
+    };
+    const repairGraph = (round: number): DagGraph => ({
+      nodes: [
+        {
+          id: "repair-" + round,
+          kind: "agent",
+          capability: "repair",
+          subject: null,
+          resource: "workspace",
+          mutates: true,
+          requirements: [],
+        },
+      ],
+      edges: [],
+    });
+    const validationReviewGraph = (round: number, subject: string): DagGraph => ({
+      nodes: [
+        {
+          id: "verify-build-" + round,
+          kind: "verification",
+          capability: "build",
+          subject,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "verify-unit-" + round,
+          kind: "verification",
+          capability: "unit_test",
+          subject,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "review-" + round,
+          kind: "review",
+          capability: "review",
+          subject,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "publish-prepare-" + round,
+          kind: "publication",
+          capability: "prepare",
+          subject,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "publish-push-" + round,
+          kind: "publication",
+          capability: "push",
+          subject,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+        {
+          id: "change-request-" + round,
+          kind: "change_request",
+          capability: "create",
+          subject,
+          resource: "workspace",
+          mutates: false,
+          requirements: [],
+        },
+      ],
+      edges: [
+        { from: "verify-build-" + round, to: "verify-unit-" + round },
+        { from: "verify-unit-" + round, to: "review-" + round },
+        { from: "review-" + round, to: "publish-prepare-" + round },
+        { from: "publish-prepare-" + round, to: "publish-push-" + round },
+        { from: "publish-push-" + round, to: "change-request-" + round },
+      ],
+    });
+    const workerCompatibility = {
+      backend: "codex" as const,
+      runtimeProfiles: ["codex-workspace-write", "codex-readonly"],
+      workspacePermissionModels: ["shared-gid-v1", "single-uid-v2"],
+    };
+    const identity = { permissionModel: "single-uid-v2" as const, ownerUid: 999, ownerGid: 988 };
+    const baseCommit = "b".repeat(40);
+    let durableWorkspaceId = "";
+
+    type Summary = {
+      baseCommit: string;
+      changedFiles: string[];
+      addedFiles: string[];
+      deletedFiles: string[];
+      diffStat: { filesChanged: number; insertions: number; deletions: number };
+      contentRevision: string;
+    };
+
+    const completeRepair = async (round: number, revisionChar: string, now: number): Promise<Summary> => {
+      assert.equal(await scheduler.runOne(workId, "alice", "team-a", "hub", now), true);
+      const execution = f.work.listDagExecutions(workId).find((item) => item.nodeId === "repair-" + round)!;
+      const task = f.tasks.getByIdempotency("alice", "team-a", "dag:" + execution.idempotencyKey)!;
+      const claim = f.tasks.claim("worker-v2", now + 1, 1000, "ota", workerCompatibility)!;
+      assert.equal(claim.taskId, task.taskId);
+      const attempt = f.work.getActiveAttempt(workId)!;
+      const workspace = f.work.getWorkspace(attempt.workspaceId!);
+      if (round === 1) {
+        durableWorkspaceId = workspace.workspaceId;
+        assert.equal(claim.workspacePermissionModel, "single-uid-v2");
+        f.tasks.bindWorkspaceIdentity(claim.taskId, workspace.workspaceKey, identity);
+        f.work.assignWorkspaceOwner(
+          workspace.workspaceId,
+          "worker-v2",
+          "/srv/workspaces/" + workspace.workspaceKey,
+          now + 2,
+          baseCommit,
+          identity,
+        );
+      } else {
+        assert.equal(workspace.workspaceId, durableWorkspaceId);
+        assert.equal(workspace.permissionModel, "single-uid-v2");
+        assert.equal(workspace.ownerUid, 999);
+        assert.equal(workspace.ownerGid, 988);
+        assert.equal(task.workspacePermissionModel, "single-uid-v2");
+        assert.equal(task.workspaceOwnerUid, 999);
+        assert.equal(task.workspaceOwnerGid, 988);
+      }
+      const summary: Summary = {
+        baseCommit,
+        changedFiles: ["README.md"],
+        addedFiles: [],
+        deletedFiles: [],
+        diffStat: { filesChanged: 1, insertions: round, deletions: round - 1 },
+        contentRevision: revisionChar.repeat(64),
+      };
+      f.tasks.complete(
+        claim,
+        "repair " + round,
+        now + 3,
+        { repositoryUrl: repository.url, repositoryBranch: repository.branch, commitSha: baseCommit },
+        undefined,
+        summary,
+      );
+      assert.equal(await scheduler.reconcileOne(workId, "alice", "team-a", "hub", now + 4), true);
+      return summary;
+    };
+
+    const completeVerification = async (
+      round: number,
+      capability: "build" | "unit_test",
+      summary: Summary,
+      now: number,
+    ) => {
+      assert.equal(await scheduler.runOne(workId, "alice", "team-a", "hub", now), true);
+      const nodeId = capability === "build" ? "verify-build-" + round : "verify-unit-" + round;
+      const execution = f.work.listDagExecutions(workId).find((item) => item.nodeId === nodeId)!;
+      const task = f.tasks.getByIdempotency("alice", "team-a", "dag:" + execution.idempotencyKey)!;
+      assert.equal(task.workspacePermissionModel, "single-uid-v2");
+      assert.equal(task.workspaceOwnerUid, 999);
+      assert.equal(task.workspaceOwnerGid, 988);
+      assert.equal(task.requiredWorkerId, "worker-v2");
+      const claim = f.tasks.claim("worker-v2", now + 1, 1000, "ota", workerCompatibility)!;
+      const subject = "workspace:" + summary.contentRevision;
+      f.tasks.complete(
+        claim,
+        capability + " verification " + round,
+        now + 2,
+        { repositoryUrl: repository.url, repositoryBranch: repository.branch, commitSha: baseCommit },
+        [
+          {
+            stepId: capability === "build" ? "build" : "unit",
+            type: "command",
+            evidenceType: capability,
+            status: "passed",
+            exitCode: 0,
+            durationMs: 1,
+            errorCode: null,
+            subjectRevision: subject,
+            environmentIdentity: "worker:worker-v2",
+            verifierIdentity: "team-skill-hub-worker",
+          },
+        ],
+        summary,
+      );
+      assert.equal(await scheduler.reconcileOne(workId, "alice", "team-a", "hub", now + 3), true);
+    };
+
+    const completeReview = async (round: number, decision: "accepted" | "rework", now: number) => {
+      assert.equal(await scheduler.runOne(workId, "alice", "team-a", "hub", now), true);
+      const execution = f.work.listDagExecutions(workId).find((item) => item.nodeId === "review-" + round)!;
+      const task = f.tasks.getByIdempotency("alice", "team-a", "dag:" + execution.idempotencyKey)!;
+      assert.equal(task.workspacePermissionModel, "single-uid-v2");
+      assert.equal(task.workspaceOwnerUid, 999);
+      assert.equal(task.workspaceOwnerGid, 988);
+      assert.equal(task.requiredWorkerId, "worker-v2");
+      const claim = f.tasks.claim("worker-v2", now + 1, 1000, "reviewer", workerCompatibility)!;
+      f.tasks.complete(
+        claim,
+        JSON.stringify({
+          decision,
+          reason: decision === "rework" ? "fix the remaining review issue" : "accepted after second repair",
+        }),
+        now + 2,
+      );
+      assert.equal(await scheduler.reconcileOne(workId, "alice", "team-a", "hub", now + 3), true);
+    };
+
+    submitGraph(repairGraph(1), "initial", 110);
+    const summary1 = await completeRepair(1, "a", 120);
+    const subject1 = "workspace:" + summary1.contentRevision;
+    assert.equal(f.work.getWorkInternal(workId).currentSubjectRevision, subject1);
+    submitGraph(validationReviewGraph(1, subject1), "new_information", 125);
+    await completeVerification(1, "build", summary1, 130);
+    await completeVerification(1, "unit_test", summary1, 135);
+    await completeReview(1, "rework", 140);
+    assert.equal(f.work.getWorkInternal(workId).status, "rework");
+
+    submitGraph(repairGraph(2), "review_rework", 150);
+    const summary2 = await completeRepair(2, "c", 160);
+    const secondAttempt = f.work.getActiveAttempt(workId)!;
+    assert.equal(secondAttempt.reason, "review_rework");
+    assert.equal(f.work.getWorkspace(secondAttempt.workspaceId!).workspaceId, durableWorkspaceId);
+    const subject2 = "workspace:" + summary2.contentRevision;
+    assert.equal(f.work.getWorkInternal(workId).currentSubjectRevision, subject2);
+    submitGraph(validationReviewGraph(2, subject2), "new_information", 165);
+    await completeVerification(2, "build", summary2, 170);
+    await completeVerification(2, "unit_test", summary2, 175);
+    await completeReview(2, "accepted", 180);
+    assert.equal(f.work.getDagContext(workId).facts["review.accepted"], true);
+
+    assert.equal(await scheduler.runOne(workId, "alice", "team-a", "hub", 190), true);
+    let publication = f.publications.listPublications(workId).at(-1)!;
+    assert.equal(publication.workspaceId, durableWorkspaceId);
+    assert.equal(publication.ownerWorkerId, "worker-v2");
+    assert.equal(publication.executionSnapshot?.workspacePermissionModel, "single-uid-v2");
+    assert.equal(publication.executionSnapshot?.workspaceOwnerUid, 999);
+    assert.equal(publication.executionSnapshot?.workspaceOwnerGid, 988);
+    assert.equal(publication.executionSnapshot?.expectedContentRevision, summary2.contentRevision);
+
+    const prepare = f.publications.claimPublicationOperation("worker-v2", 191, 1000)!;
+    assert.equal(prepare.operation, "prepare");
+    assert.equal(prepare.executionSnapshot?.workspacePermissionModel, "single-uid-v2");
+    assert.equal(prepare.executionSnapshot?.workspaceOwnerUid, 999);
+    assert.equal(prepare.executionSnapshot?.workspaceOwnerGid, 988);
+    f.publications.completePublicationOperation(
+      prepare,
+      {
+        success: true,
+        commitSha: "d".repeat(40),
+        treeSha: "e".repeat(40),
+        artifactRef: "publication:" + publication.publicationId,
+        pushRefspec: "d".repeat(40) + ":refs/heads/" + publication.branchName,
+      },
+      192,
+    );
+    assert.equal(await scheduler.reconcileOne(workId, "alice", "team-a", "hub", 193), true);
+    assert.equal(
+      f.work.listDagExecutions(workId).find((item) => item.nodeId === "publish-prepare-2")?.state,
+      "succeeded",
+    );
+
+    assert.equal(await scheduler.runOne(workId, "alice", "team-a", "hub", 194), true);
+    publication = f.publications.getPublication(publication.publicationId);
+    assert.equal(publication.state, "approved");
+    const push = f.publications.claimPublicationOperation("worker-v2", 195, 1000)!;
+    assert.equal(push.operation, "push");
+    f.publications.completePublicationOperation(push, { success: true }, 196);
+    assert.equal(await scheduler.reconcileOne(workId, "alice", "team-a", "hub", 197), true);
+    assert.equal(f.work.listDagExecutions(workId).find((item) => item.nodeId === "publish-push-2")?.state, "succeeded");
+
+    assert.equal(await scheduler.runOne(workId, "alice", "team-a", "hub", 198), true);
+    const changeRequest = f.changeRequests!.getByPublication(publication.publicationId)!;
+    assert.equal(changeRequest.ownerWorkerId, "worker-v2");
+    const changeClaim = f.changeRequests!.claim("worker-v2", 199, 1000)!;
+    f.changeRequests!.complete(
+      changeClaim,
+      {
+        success: true,
+        provider: "github",
+        externalId: "42",
+        url: "https://github.com/example/project/pull/42",
+        headCommit: "d".repeat(40),
+        baseBranch: "main",
+      },
+      200,
+    );
+    assert.equal(await scheduler.reconcileOne(workId, "alice", "team-a", "hub", 201), true);
+    assert.equal(
+      f.work.listDagExecutions(workId).find((item) => item.nodeId === "change-request-2")?.state,
+      "succeeded",
+    );
+    assert.equal(f.work.getDagContext(workId).facts["publication.succeeded"], true);
+    assert.equal(f.work.getDagContext(workId).facts["change_request.created"], true);
   } finally {
     f.close();
   }

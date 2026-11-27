@@ -39,6 +39,55 @@ test("Docker Codex executor builds a constrained read-only invocation", () => {
   assert.equal(args.at(-6), "team-skill-hub-expert-worker-prototype");
 });
 
+test("Docker agent scratch tmpfs permits executing locally built tools and tests", () => {
+  const args = buildAgentDockerArgs({
+    image: "worker",
+    sourcePath: "/work/repo",
+    network: "expert-egress",
+    primaryGroupId: 988,
+    envNames: [],
+    commandArgs: ["exec", "inspect"],
+  });
+
+  assert.ok(args.includes("/tmp:rw,exec,uid=10001,gid=988,size=32m"));
+});
+
+test("single-uid-v2 agent uses Worker identity, executable scratch, and read-only git metadata", () => {
+  const args = buildAgentDockerArgs({
+    image: "worker",
+    sourcePath: "/work/repo",
+    workspaceAccess: "read-write",
+    network: "expert-egress",
+    supplementalGroupId: 1234,
+    primaryGroupId: 988,
+    runAsUid: 999,
+    runAsGid: 988,
+    gitMetadataPath: "/work/repo/.git",
+    envNames: [],
+    commandArgs: ["exec", "edit"],
+  } as any);
+
+  assert.ok(args.some((arg, index) => arg === "--user" && args[index + 1] === "999:988"));
+  assert.ok(!args.includes("--group-add"), "v2 must not inherit supplementary groups");
+  assert.ok(args.includes("type=bind,src=/work/repo,dst=/workspace"));
+  assert.ok(args.includes("type=bind,src=/work/repo/.git,dst=/workspace/.git,readonly"));
+  assert.ok(args.includes("/tmp:rw,exec,uid=999,gid=988,size=32m"));
+  assert.ok(args.includes("/home/expert:rw,uid=999,gid=988,size=64m"));
+  assert.ok(args.some((arg, index) => arg === "--env" && args[index + 1] === "GIT_OPTIONAL_LOCKS=0"));
+});
+
+test("single-uid-v2 agent rejects root or partial execution identity", () => {
+  const base = {
+    image: "worker",
+    sourcePath: "/work/repo",
+    network: "expert-egress",
+    envNames: [],
+    commandArgs: ["exec", "edit"],
+  };
+  assert.throws(() => buildAgentDockerArgs({ ...base, runAsUid: 0, runAsGid: 988 } as any), /INVALID_RUN_AS_IDENTITY/);
+  assert.throws(() => buildAgentDockerArgs({ ...base, runAsUid: 999 } as any), /INVALID_RUN_AS_IDENTITY/);
+});
+
 test("Docker Codex executor rejects host networking and protected env names", () => {
   assert.throws(
     () =>

@@ -281,6 +281,8 @@ export interface WorkAttemptRecord {
   dispatchBinding: Record<string, unknown> | null;
 }
 
+export type WorkspacePermissionModel = "shared-gid-v1" | "single-uid-v2";
+
 export interface WorkspaceRecord {
   workspaceId: string;
   workspaceKey: string;
@@ -289,6 +291,9 @@ export interface WorkspaceRecord {
   resourceKey: string;
   repositoryId: string | null;
   ownerWorkerId: string | null;
+  permissionModel: WorkspacePermissionModel;
+  ownerUid: number | null;
+  ownerGid: number | null;
   path: string | null;
   repositoryUrl: string | null;
   branch: string | null;
@@ -303,6 +308,9 @@ export interface WorkspaceCleanupClaim {
   workspaceId: string;
   workspaceKey: string;
   ownerWorkerId: string;
+  permissionModel: WorkspacePermissionModel;
+  ownerUid: number | null;
+  ownerGid: number | null;
   fencing: number;
 }
 
@@ -897,6 +905,9 @@ export class WorkOrchestrationStore {
         "  resource_key TEXT NOT NULL DEFAULT 'workspace',",
         "  repository_id TEXT,",
         "  owner_worker_id TEXT,",
+        "  permission_model TEXT NOT NULL DEFAULT 'shared-gid-v1' CHECK(permission_model IN ('shared-gid-v1','single-uid-v2')),",
+        "  owner_uid INTEGER,",
+        "  owner_gid INTEGER,",
         "  path TEXT,",
         "  repository_url TEXT,",
         "  branch TEXT,",
@@ -1266,6 +1277,17 @@ export class WorkOrchestrationStore {
       sql.includes("resource_key") &&
       sql.includes("UNIQUE(work_attempt_id,resource_key)");
     if (current) {
+      const columns = new Set(
+        (this.db.prepare("PRAGMA table_info(work_workspaces)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      );
+      if (!columns.has("permission_model"))
+        this.db.exec(
+          "ALTER TABLE work_workspaces ADD COLUMN permission_model TEXT NOT NULL DEFAULT 'shared-gid-v1' CHECK(permission_model IN ('shared-gid-v1','single-uid-v2'))",
+        );
+      if (!columns.has("owner_uid")) this.db.exec("ALTER TABLE work_workspaces ADD COLUMN owner_uid INTEGER");
+      if (!columns.has("owner_gid")) this.db.exec("ALTER TABLE work_workspaces ADD COLUMN owner_gid INTEGER");
       this.db.exec(
         "CREATE INDEX IF NOT EXISTS idx_work_workspace_attempt_resource ON work_workspaces(work_attempt_id,resource_key)",
       );
@@ -1283,6 +1305,9 @@ export class WorkOrchestrationStore {
       const repositoryExpr = columns.has("repository_id")
         ? "repository_id"
         : "(SELECT repository_id FROM work_items WHERE work_items.work_item_id=work_workspaces.work_item_id)";
+      const permissionModelExpr = columns.has("permission_model") ? "permission_model" : "'shared-gid-v1'";
+      const ownerUidExpr = columns.has("owner_uid") ? "owner_uid" : "NULL";
+      const ownerGidExpr = columns.has("owner_gid") ? "owner_gid" : "NULL";
       this.db.exec(
         [
           "CREATE TABLE work_workspaces_v3 (",
@@ -1291,18 +1316,25 @@ export class WorkOrchestrationStore {
           " work_item_id TEXT NOT NULL REFERENCES work_items(work_item_id) ON DELETE CASCADE,",
           " work_attempt_id TEXT NOT NULL REFERENCES work_attempts(work_attempt_id) ON DELETE CASCADE,",
           " resource_key TEXT NOT NULL DEFAULT 'workspace', repository_id TEXT,",
-          " owner_worker_id TEXT, path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
+          " owner_worker_id TEXT, permission_model TEXT NOT NULL DEFAULT 'shared-gid-v1' CHECK(permission_model IN ('shared-gid-v1','single-uid-v2')), owner_uid INTEGER, owner_gid INTEGER,",
+          " path TEXT, repository_url TEXT, branch TEXT, base_commit TEXT,",
           " state TEXT NOT NULL CHECK(state IN ('allocating','ready','in_use','retained','cleaning','removed','failed')),",
           " cleanup_policy TEXT NOT NULL CHECK(cleanup_policy IN ('on_terminal','retain')),",
           " created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,",
           " UNIQUE(work_attempt_id,resource_key)",
           ");",
-          "INSERT INTO work_workspaces_v3(workspace_id,workspace_key,work_item_id,work_attempt_id,resource_key,repository_id,owner_worker_id,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) " +
+          "INSERT INTO work_workspaces_v3(workspace_id,workspace_key,work_item_id,work_attempt_id,resource_key,repository_id,owner_worker_id,permission_model,owner_uid,owner_gid,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at) " +
             "SELECT workspace_id,workspace_key,work_item_id,work_attempt_id," +
             resourceExpr +
             "," +
             repositoryExpr +
-            ",owner_worker_id,path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at FROM work_workspaces;",
+            ",owner_worker_id," +
+            permissionModelExpr +
+            "," +
+            ownerUidExpr +
+            "," +
+            ownerGidExpr +
+            ",path,repository_url,branch,base_commit,state,cleanup_policy,created_at,last_used_at FROM work_workspaces;",
           "DROP TABLE work_workspaces;",
           "ALTER TABLE work_workspaces_v3 RENAME TO work_workspaces;",
           "CREATE INDEX IF NOT EXISTS idx_work_workspace_attempt_resource ON work_workspaces(work_attempt_id,resource_key);",
@@ -2600,7 +2632,7 @@ export class WorkOrchestrationStore {
     try {
       const row = this.db
         .prepare(
-          "SELECT * FROM work_workspace_cleanup_requests WHERE owner_worker_id=? AND (status='pending' OR (status='running' AND lease_until<?)) ORDER BY created_at LIMIT 1",
+          "SELECT r.*,w.permission_model,w.owner_uid,w.owner_gid FROM work_workspace_cleanup_requests r JOIN work_workspaces w ON w.workspace_id=r.workspace_id WHERE r.owner_worker_id=? AND (r.status='pending' OR (r.status='running' AND r.lease_until<?)) ORDER BY r.created_at LIMIT 1",
         )
         .get(normalizedWorker, now) as Row | undefined;
       if (!row) {
@@ -2619,6 +2651,9 @@ export class WorkOrchestrationStore {
         workspaceId: String(row.workspace_id),
         workspaceKey: String(row.workspace_key),
         ownerWorkerId: normalizedWorker,
+        permissionModel: String(row.permission_model ?? "shared-gid-v1") as WorkspacePermissionModel,
+        ownerUid: row.owner_uid == null ? null : Number(row.owner_uid),
+        ownerGid: row.owner_gid == null ? null : Number(row.owner_gid),
         fencing,
       };
     } catch (error) {
@@ -2674,6 +2709,7 @@ export class WorkOrchestrationStore {
     workspacePath: string,
     now = Date.now(),
     baseCommit?: string,
+    identity?: { permissionModel: WorkspacePermissionModel; ownerUid: number | null; ownerGid: number | null },
   ): WorkspaceRecord {
     const normalizedWorker = requiredText(workerId, 200);
     if (!normalizedWorker || !path.isAbsolute(workspacePath) || workspacePath === path.parse(workspacePath).root) {
@@ -2681,6 +2717,21 @@ export class WorkOrchestrationStore {
     }
     const normalizedCommit = baseCommit?.trim() || null;
     if (normalizedCommit && !/^[a-f0-9]{40,64}$/i.test(normalizedCommit)) throw new Error("INVALID_WORKSPACE_COMMIT");
+    const permissionModel = identity?.permissionModel ?? "shared-gid-v1";
+    const ownerUid = identity?.ownerUid ?? null;
+    const ownerGid = identity?.ownerGid ?? null;
+    if (
+      permissionModel === "single-uid-v2" &&
+      (!Number.isSafeInteger(ownerUid) ||
+        !Number.isSafeInteger(ownerGid) ||
+        Number(ownerUid) <= 0 ||
+        Number(ownerGid) <= 0)
+    ) {
+      throw new Error("INVALID_WORKSPACE_OWNER_IDENTITY");
+    }
+    if (permissionModel === "shared-gid-v1" && (ownerUid !== null || ownerGid !== null)) {
+      throw new Error("INVALID_WORKSPACE_OWNER_IDENTITY");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as
@@ -2689,11 +2740,21 @@ export class WorkOrchestrationStore {
       if (current.owner_worker_id && String(current.owner_worker_id) !== normalizedWorker) {
         throw new Error("WORKSPACE_OWNER_CONFLICT");
       }
+      const currentState = String(current.state);
+      const currentPermissionModel = String(current.permission_model ?? "shared-gid-v1") as WorkspacePermissionModel;
+      const currentOwnerUid = current.owner_uid == null ? null : Number(current.owner_uid);
+      const currentOwnerGid = current.owner_gid == null ? null : Number(current.owner_gid);
+      if (
+        currentState !== "allocating" &&
+        (currentPermissionModel !== permissionModel || currentOwnerUid !== ownerUid || currentOwnerGid !== ownerGid)
+      ) {
+        throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+      }
       this.db
         .prepare(
-          "UPDATE work_workspaces SET owner_worker_id=?,path=?,base_commit=COALESCE(?,base_commit),state='ready',last_used_at=? WHERE workspace_id=?",
+          "UPDATE work_workspaces SET owner_worker_id=?,permission_model=?,owner_uid=?,owner_gid=?,path=?,base_commit=COALESCE(?,base_commit),state='ready',last_used_at=? WHERE workspace_id=?",
         )
-        .run(normalizedWorker, workspacePath, normalizedCommit, now, workspaceId);
+        .run(normalizedWorker, permissionModel, ownerUid, ownerGid, workspacePath, normalizedCommit, now, workspaceId);
       const row = this.db.prepare("SELECT * FROM work_workspaces WHERE workspace_id=?").get(workspaceId) as Row;
       this.db.exec("COMMIT");
       return this.fromWorkspaceRow(row);
@@ -4382,14 +4443,14 @@ export class WorkOrchestrationStore {
       if (fact.subjectRevision === null || fact.subjectRevision === currentSubject) facts[fact.key] = fact.value;
     }
 
-    Object.assign(
-      facts,
-      this.completionRuntimeFacts(
-        workItemId,
-        work,
-        this.getDagObligationsForRequirementRevision(workItemId, work.currentRequirementRevision),
-      ),
+    const compatibilityFacts = this.completionRuntimeFacts(
+      workItemId,
+      work,
+      this.getDagObligationsForRequirementRevision(workItemId, work.currentRequirementRevision),
     );
+    for (const [key, value] of Object.entries(compatibilityFacts)) {
+      if (!Object.hasOwn(facts, key)) facts[key] = value;
+    }
 
     return {
       subject: work.currentSubjectRevision,
@@ -6163,6 +6224,9 @@ export class WorkOrchestrationStore {
       resourceKey: String(row.resource_key ?? "workspace"),
       repositoryId: row.repository_id == null ? null : String(row.repository_id),
       ownerWorkerId: row.owner_worker_id == null ? null : String(row.owner_worker_id),
+      permissionModel: String(row.permission_model ?? "shared-gid-v1") as WorkspacePermissionModel,
+      ownerUid: row.owner_uid == null ? null : Number(row.owner_uid),
+      ownerGid: row.owner_gid == null ? null : Number(row.owner_gid),
       path: row.path == null ? null : String(row.path),
       repositoryUrl: row.repository_url == null ? null : String(row.repository_url),
       branch: row.branch == null ? null : String(row.branch),

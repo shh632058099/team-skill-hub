@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
-import { chmod, chown, lstat, rm } from "node:fs/promises";
+import { chmod, chown, lstat, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { EXECUTION_CONTAINER_UID } from "./repository-workspace.js";
 
 export interface WorkspaceCleanupOptions {
   image: string;
   workerGroupId: number;
+  permissionModel?: "shared-gid-v1" | "single-uid-v2";
+  workerUid?: number;
   runDocker?: (args: readonly string[]) => Promise<number>;
   removeDirectory?: (target: string) => Promise<void>;
 }
@@ -54,6 +56,23 @@ function permissionFailure(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EACCES");
 }
 
+async function repairSingleUidOwnerPermissions(target: string, workerUid: number): Promise<void> {
+  if (!Number.isSafeInteger(workerUid) || workerUid <= 0) throw new Error("WORKSPACE_CLEANUP_OWNER_INVALID");
+  const stat = await lstat(target);
+  if (stat.isSymbolicLink()) return;
+  if (stat.uid !== workerUid) throw new Error("WORKSPACE_CLEANUP_OWNER_INVALID");
+  if (stat.isDirectory()) {
+    await chmod(target, (stat.mode & 0o7777) | 0o700);
+    for (const entry of await readdir(target)) {
+      await repairSingleUidOwnerPermissions(path.join(target, entry), workerUid);
+    }
+    return;
+  }
+  if (stat.isFile()) {
+    await chmod(target, (stat.mode & 0o7777) | 0o600);
+  }
+}
+
 export async function removeWorkspaceDirectory(
   repositoryRoot: string,
   workspaceKey: string,
@@ -74,6 +93,11 @@ export async function removeWorkspaceDirectory(
     await removeDirectory(target);
   } catch (error) {
     if (!options || !permissionFailure(error)) throw error;
+    if (options.permissionModel === "single-uid-v2") {
+      await repairSingleUidOwnerPermissions(target, options.workerUid ?? 0);
+      await removeDirectory(target);
+      return target;
+    }
     const stat = await lstat(target);
     const workerUid = typeof process.getuid === "function" ? process.getuid() : 0;
     if (!stat.isDirectory() || stat.uid !== workerUid) throw new Error("WORKSPACE_CLEANUP_OWNER_INVALID");

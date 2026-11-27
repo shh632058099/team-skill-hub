@@ -185,9 +185,18 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
     work.linkAttemptTask(attempt.workAttemptId, task.taskId);
 
     const server = await startExpertWorkerGrpcServer(tasks, workers, "127.0.0.1:0", { workStore: work });
-    const client = new ExpertWorkerClient(server.address, { workerId: "worker-1", credential: token });
+    const client = new ExpertWorkerClient(server.address, { workerId: "worker-1", credential: token }, {
+      supportedWorkspacePermissionModels: ["shared-gid-v1", "single-uid-v2"],
+    } as any);
     const claim = await client.claimTask("worker-1", "ota");
     assert.equal(claim?.workspaceKey, workspace.workspaceKey);
+    assert.equal((claim as any)?.workspacePermissionModel, "single-uid-v2");
+    assert.equal((claim as any)?.workspaceOwnerUid, null);
+    assert.equal((claim as any)?.workspaceOwnerGid, null);
+    const selectedBeforeReady = tasks.getByIdempotency("alice", "org", "grpc-workspace-task");
+    assert.equal((selectedBeforeReady as any)?.workspacePermissionModel, "single-uid-v2");
+    assert.equal((selectedBeforeReady as any)?.workspaceOwnerUid, null);
+    assert.equal((selectedBeforeReady as any)?.workspaceOwnerGid, null);
     assert.deepEqual(claim?.validationSnapshot, [
       {
         id: "unit-test",
@@ -205,6 +214,9 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
         workspaceKey: workspace.workspaceKey,
         path: "/srv/expert/workspaces/" + workspace.workspaceKey,
         commitSha: "a".repeat(40),
+        permissionModel: "single-uid-v2",
+        ownerUid: 999,
+        ownerGid: 988,
       }),
     );
     const ready = work.getWorkspace(workspace.workspaceId);
@@ -212,8 +224,33 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
     assert.equal(ready.ownerWorkerId, "worker-1");
     assert.equal(ready.path, "/srv/expert/workspaces/" + workspace.workspaceKey);
     assert.equal(ready.baseCommit, "a".repeat(40));
+    assert.equal((ready as any).permissionModel, "single-uid-v2");
+    assert.equal((ready as any).ownerUid, 999);
+    assert.equal((ready as any).ownerGid, 988);
 
     await client.completeTask(claim!, "done");
+
+    const followup = tasks.submit({
+      principalId: "alice",
+      scope: "org",
+      idempotencyKey: "grpc-workspace-v2-followup",
+      problem: "review existing workspace",
+      expertId: "ota",
+      workspaceKey: workspace.workspaceKey,
+      workspacePermissionModel: "single-uid-v2",
+      workspaceOwnerUid: 999,
+      workspaceOwnerGid: 988,
+    } as any);
+    const legacyClient = new ExpertWorkerClient(server.address, { workerId: "worker-1", credential: token });
+    assert.equal(await legacyClient.claimTask("worker-1", "ota"), null);
+    legacyClient.close();
+
+    const v2Claim = await client.claimTask("worker-1", "ota");
+    assert.equal(v2Claim?.taskId, followup.taskId);
+    assert.equal((v2Claim as any)?.workspacePermissionModel, "single-uid-v2");
+    assert.equal((v2Claim as any)?.workspaceOwnerUid, 999);
+    assert.equal((v2Claim as any)?.workspaceOwnerGid, 988);
+    await client.completeTask(v2Claim!, "done");
     await assert.rejects(
       () =>
         client.reportTaskStage(
@@ -235,6 +272,28 @@ test("workspace.ready updates the durable Workspace and stale reports are fenced
     workers.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cleanup client treats old Hub responses without permission identity as shared-gid-v1", async () => {
+  const client = new ExpertWorkerClient("127.0.0.1:1", { workerId: "worker-old-hub", credential: "token" });
+  const raw = (client as any).client;
+  raw.ClaimWorkspaceCleanup = (...args: any[]) => {
+    const callback = args.at(-1);
+    callback(null, {
+      has_cleanup: true,
+      workspace_id: "workspace-old",
+      workspace_key: "work-old-a1",
+      fencing: "1",
+    });
+  };
+  try {
+    const cleanup = await client.claimWorkspaceCleanup("worker-old-hub");
+    assert.equal(cleanup?.permissionModel, "shared-gid-v1");
+    assert.equal(cleanup?.ownerUid, null);
+    assert.equal(cleanup?.ownerGid, null);
+  } finally {
+    client.close();
   }
 });
 
@@ -272,6 +331,7 @@ test("workspace cleanup RPC is owner-scoped and fenced", async () => {
       "/srv/workspaces/" + workspace.workspaceKey,
       100,
       "a".repeat(40),
+      { permissionModel: "single-uid-v2", ownerUid: 999, ownerGid: 988 },
     );
     work.requestTerminalWorkspaceCleanup(item.workItemId, 200);
 
@@ -282,6 +342,9 @@ test("workspace cleanup RPC is owner-scoped and fenced", async () => {
     const clientA = new ExpertWorkerClient(server.address, { workerId: "worker-a", credential: tokenA });
     const cleanup = await clientA.claimWorkspaceCleanup("worker-a");
     assert.equal(cleanup?.workspaceId, workspace.workspaceId);
+    assert.equal((cleanup as any)?.permissionModel, "single-uid-v2");
+    assert.equal((cleanup as any)?.ownerUid, 999);
+    assert.equal((cleanup as any)?.ownerGid, 988);
     await clientA.completeWorkspaceCleanup(cleanup!, true);
     assert.equal(work.getWorkspace(workspace.workspaceId).state, "removed");
     await assert.rejects(() => clientA.completeWorkspaceCleanup(cleanup!, true), /STALE_WORKSPACE_CLEANUP/);

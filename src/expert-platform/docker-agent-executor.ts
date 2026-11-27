@@ -15,6 +15,7 @@ import { spawn } from "node:child_process";
 import type { Claim } from "./task-store.js";
 import type { ExpertModelConfig } from "./expert-store.js";
 import {
+  ensureSingleUidWorkspaceOwnerAccess,
   grantExecutionContainerAccess,
   prepareRepositoryWorkspace,
   prepareRuntimeStateDirectory,
@@ -31,6 +32,7 @@ import type { ExecutionActivity } from "./execution-activity.js";
 import { runVerificationPolicy } from "./verification-runner.js";
 import { assertRuntimeProfileBackend } from "./runtime-profile-policy.js";
 import { computeWorkspaceChangeSummary, type WorkspaceChangeSummary } from "./workspace-change-summary.js";
+import { assertWorkspaceProcessIdentity, supportsSingleUidWorkspace } from "./workspace-process-identity.js";
 
 export interface DockerAgentExecutorOptions {
   image: string;
@@ -64,6 +66,8 @@ export interface DockerAgentExecutorOptions {
   ) => Promise<void>;
   runProcess?: (options: AgentProcessOptions) => Promise<string>;
   runVerificationPolicy?: typeof runVerificationPolicy;
+  prepareRepositoryWorkspace?: typeof prepareRepositoryWorkspace;
+  workerIdentity?: { uid: number; gid: number };
 }
 
 const PROXY_ENV_NAMES = new Set([
@@ -281,6 +285,29 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
     }
     const workspaceAccess = requestedWorkspaceAccess;
     const agentPermissions = workspaceAccess === "read-only" ? "read-only" : runtimePolicy.agentPermissions;
+    const workerUid = options.workerIdentity?.uid ?? (typeof process.getuid === "function" ? process.getuid() : 0);
+    const workerGid = options.workerIdentity?.gid ?? (typeof process.getgid === "function" ? process.getgid() : 0);
+    const currentIdentitySupportsV2 = supportsSingleUidWorkspace({ uid: workerUid, gid: workerGid });
+    if (claim.workspacePermissionModel === "single-uid-v2") {
+      const hasOwnerUid = claim.workspaceOwnerUid !== null && claim.workspaceOwnerUid !== undefined;
+      const hasOwnerGid = claim.workspaceOwnerGid !== null && claim.workspaceOwnerGid !== undefined;
+      if (hasOwnerUid !== hasOwnerGid) throw new Error("WORKSPACE_IDENTITY_MISMATCH");
+      if (hasOwnerUid) {
+        assertWorkspaceProcessIdentity(
+          {
+            permissionModel: claim.workspacePermissionModel,
+            ownerUid: claim.workspaceOwnerUid,
+            ownerGid: claim.workspaceOwnerGid,
+          },
+          { uid: workerUid, gid: workerGid },
+        );
+      } else if (!currentIdentitySupportsV2) {
+        throw new Error("WORKSPACE_IDENTITY_MISMATCH");
+      }
+    }
+    const workspacePermissionModel = claim.workspacePermissionModel ?? "shared-gid-v1";
+    const workspaceOwnerUid = workspacePermissionModel === "single-uid-v2" ? workerUid : null;
+    const workspaceOwnerGid = workspacePermissionModel === "single-uid-v2" ? workerGid : null;
     if (claim.deploymentSnapshot && claim.deploymentSnapshot.executor.backend !== backend)
       throw new Error("EXPERT_BACKEND_UNSUPPORTED");
     if (
@@ -321,13 +348,16 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
     await report("repository.started");
     let preparedRepository: Awaited<ReturnType<typeof prepareRepositoryWorkspace>> | undefined;
     try {
+      const prepareWorkspace = options.prepareRepositoryWorkspace ?? prepareRepositoryWorkspace;
       preparedRepository =
         claim.repositoryUrl && claim.repositoryBranch && claim.repositoryId
-          ? await prepareRepositoryWorkspace({
+          ? await prepareWorkspace({
               id: claim.repositoryId,
               url: claim.repositoryUrl,
               branch: claim.repositoryBranch,
               workspaceAccess,
+              workspacePermissionModel,
+              ...(workspacePermissionModel === "single-uid-v2" ? { workspaceOwnerUid: workerUid } : {}),
               ...(claim.repositoryGitProxyUrl ? { gitProxyUrl: claim.repositoryGitProxyUrl } : {}),
               root: options.repositoryRoot ?? `${options.sourcePath.replace(/\/[^/]+$/, "")}/expert-repositories`,
               ...(claim.workspaceKey ? { workspaceKey: claim.workspaceKey } : {}),
@@ -352,6 +382,10 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
           workspaceKey: claim.workspaceKey,
           path: preparedRepository.path,
           commitSha: preparedRepository.commitSha,
+          permissionModel: workspacePermissionModel,
+          ...(workspacePermissionModel === "single-uid-v2"
+            ? { ownerUid: workspaceOwnerUid, ownerGid: workspaceOwnerGid }
+            : {}),
         }),
       );
     }
@@ -366,7 +400,7 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
           preparedRepository.path,
           preparedRepository.commitSha,
         );
-        if (workspaceAccess === "read-write") {
+        if (workspaceAccess === "read-write" && workspacePermissionModel === "shared-gid-v1") {
           grantExecutionContainerAccess(preparedRepository.path, "read-only");
         }
       }
@@ -378,8 +412,9 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
         {
           image: options.image,
           containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
-          primaryGroupId: workerGroupId,
-          supplementalGroupId: workerGroupId,
+          ...(workspacePermissionModel === "single-uid-v2"
+            ? { runAsUid: workerUid, runAsGid: workerGid }
+            : { primaryGroupId: workerGroupId, supplementalGroupId: workerGroupId }),
           tmpfsSizeMb: options.verificationTmpfsMb ?? 1024,
         },
       );
@@ -420,7 +455,12 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
     if (preparedRepository && claim.workspaceKey) {
       runtimeStatePath = path.join(path.dirname(preparedRepository.path), ".runtime-session", backend);
       const workerGroupId = typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
-      prepareRuntimeStateDirectory(runtimeStatePath, workerGroupId);
+      if (workspacePermissionModel === "single-uid-v2") {
+        mkdirSync(path.dirname(runtimeStatePath), { recursive: true });
+        mkdirSync(runtimeStatePath, { recursive: true, mode: 0o700 });
+      } else {
+        prepareRuntimeStateDirectory(runtimeStatePath, workerGroupId);
+      }
       runtimeStateTarget = backend === "claude" ? "/home/expert/.claude" : "/home/expert/.codex";
     }
     let generatedConfigDir: string | undefined;
@@ -578,8 +618,13 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
         workspaceAccess,
         network: options.network,
         seccompProfile: options.seccompProfile,
-        primaryGroupId: workerGroupId,
-        supplementalGroupId: workerGroupId,
+        ...(workspacePermissionModel === "single-uid-v2"
+          ? {
+              runAsUid: workerUid,
+              runAsGid: workerGid,
+              ...(preparedRepository ? { gitMetadataPath: path.join(preparedRepository.path, ".git") } : {}),
+            }
+          : { primaryGroupId: workerGroupId, supplementalGroupId: workerGroupId }),
         envNames,
         authFilePath: options.authFilePath,
         configFilePath,
@@ -719,11 +764,16 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
       await report(`${backend}.completed`);
       let workspaceChangeSummary: WorkspaceChangeSummary | undefined;
       if (workspaceAccess === "read-write") {
+        if (workspacePermissionModel === "single-uid-v2") {
+          ensureSingleUidWorkspaceOwnerAccess(preparedRepository!.path, workerUid);
+        }
         workspaceChangeSummary = await computeWorkspaceChangeSummary(
           preparedRepository!.path,
           preparedRepository!.commitSha,
         );
-        grantExecutionContainerAccess(preparedRepository!.path, "read-only");
+        if (workspacePermissionModel === "shared-gid-v1") {
+          grantExecutionContainerAccess(preparedRepository!.path, "read-only");
+        }
       }
       let verificationResults: import("./verification-policy.js").VerificationEvidenceResult[] | undefined;
       if ((claim.validationSnapshot?.length ?? 0) > 0) {
@@ -736,8 +786,9 @@ export function createDockerAgentExecutor(options: DockerAgentExecutorOptions) {
           {
             image: options.image,
             containerNamePrefix: `task-${createHash("sha256").update(`${claim.taskId}:${claim.runId}`).digest("hex").slice(0, 20)}`,
-            primaryGroupId: workerGroupId,
-            supplementalGroupId: workerGroupId,
+            ...(workspacePermissionModel === "single-uid-v2"
+              ? { runAsUid: workerUid, runAsGid: workerGid }
+              : { primaryGroupId: workerGroupId, supplementalGroupId: workerGroupId }),
             tmpfsSizeMb: options.verificationTmpfsMb ?? 1024,
           },
         );

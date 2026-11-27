@@ -4,7 +4,12 @@ import { subjectForResource, type DagGraph, type DagNode } from "./work-dag.js";
 import { WorkDagPlannerCoordinator, WorkDagScheduler } from "./work-dag-engine.js";
 import type { WorkDagNodeExecutionRecord, WorkDagProposalRecord } from "./work-dag-runtime.js";
 import { DEFAULT_WORK_DAG_PLANNING_POLICY } from "./work-dag-policy.js";
-import { executorFailureDisposition, executorRetryDelayMs, safeExecutorFailureCode } from "./executor-failure.js";
+import {
+  deterministicWorkspaceFailureCode,
+  executorFailureDisposition,
+  executorRetryDelayMs,
+  safeExecutorFailureCode,
+} from "./executor-failure.js";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
@@ -459,8 +464,10 @@ export class WorkDagRuntime {
         }
       }
 
-      const executorFailureCode = safeExecutorFailureCode(failure.execution.result?.summary ?? "");
-      const executorDisposition = executorFailureDisposition(failure.execution.result?.summary ?? "");
+      const failureSummary = failure.execution.result?.summary ?? "";
+      const executorFailureCode = safeExecutorFailureCode(failureSummary);
+      const deterministicWorkspaceCode = deterministicWorkspaceFailureCode(failureSummary);
+      const executorDisposition = executorFailureDisposition(failureSummary);
       if (executorDisposition === "timeout") {
         return this.block(
           workItemId,
@@ -483,7 +490,7 @@ export class WorkDagRuntime {
           workItemId,
           principalId,
           scope,
-          "DAG_EXECUTOR_FAILED",
+          deterministicWorkspaceCode ?? "DAG_EXECUTOR_FAILED",
           JSON.stringify({
             code: executorFailureCode,
             nodeId: failure.node.id,

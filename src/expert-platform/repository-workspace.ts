@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -24,6 +25,8 @@ export interface PrepareRepositoryInput {
   root: string;
   workspaceKey?: string;
   workspaceAccess?: WorkspaceAccess;
+  workspacePermissionModel?: "shared-gid-v1" | "single-uid-v2";
+  workspaceOwnerUid?: number;
   credentialRef?: string;
   gitProxyUrl?: string;
   credentials?: Readonly<Record<string, GitCredentialConfig>>;
@@ -104,8 +107,12 @@ export function grantExecutionContainerAccess(
       const desiredMode = (stat.mode & 0o707) | (groupBits << 3) | setgid;
       if ((stat.mode & 0o7777) !== desiredMode) chmodSync(file, desiredMode);
     } else {
+      // Every execution container uses the stable EXECUTION_CONTAINER_UID, so a later
+      // repair turn can write execution-owned paths through their owner permissions.
+      // The shared group only needs to let the unprivileged Worker inspect and traverse
+      // those paths for diffing, verification, publication and cleanup handoff.
       const groupBits = (stat.mode >> 3) & 0o7;
-      const requiredBits = access === "read-write" ? (stat.isDirectory() ? 0o7 : 0o6) : stat.isDirectory() ? 0o5 : 0o4;
+      const requiredBits = stat.isDirectory() ? 0o5 : 0o4;
       if ((groupBits & requiredBits) !== requiredBits) throw new Error("WORKER_CHECKOUT_PERMISSION_NOT_SHARED");
     }
 
@@ -151,6 +158,67 @@ export function grantExecutionContainerReadAccess(
 ): void {
   grantExecutionContainerAccess(root, "read-only", containerGid);
 }
+
+export function ensureSingleUidWorkspaceOwnerAccess(root: string, expectedOwnerUid: number): void {
+  if (!path.isAbsolute(root) || root === path.parse(root).root) throw new Error("INVALID_SOURCE_PATH");
+  if (!Number.isSafeInteger(expectedOwnerUid) || expectedOwnerUid <= 0) {
+    throw new Error("INVALID_WORKSPACE_OWNER_IDENTITY");
+  }
+  const visit = (candidate: string, isRoot: boolean): void => {
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink()) return;
+    if (!stat.isDirectory() && !stat.isFile()) return;
+    if (stat.uid !== expectedOwnerUid) throw new Error("WORKER_CHECKOUT_OWNER_NOT_ALLOWED");
+
+    if (stat.isDirectory()) {
+      const desiredMode = (stat.mode & 0o7777) | 0o700;
+      if ((stat.mode & 0o7777) !== desiredMode) chmodSync(candidate, desiredMode);
+      for (const entry of readdirSync(candidate)) {
+        if (isRoot && entry === ".git") continue;
+        visit(path.join(candidate, entry), false);
+      }
+      return;
+    }
+
+    const desiredMode = (stat.mode & 0o7777) | 0o600;
+    if ((stat.mode & 0o7777) !== desiredMode) chmodSync(candidate, desiredMode);
+  };
+  visit(root, true);
+}
+
+export function validateSingleUidWorkspaceLayout(root: string, expectedOwnerUid?: number): string {
+  if (!path.isAbsolute(root) || root === path.parse(root).root) throw new Error("INVALID_SOURCE_PATH");
+  const gitPath = path.join(root, ".git");
+  let stat;
+  try {
+    stat = lstatSync(gitPath);
+  } catch {
+    throw new Error("WORKSPACE_GIT_LAYOUT_UNSUPPORTED");
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("WORKSPACE_GIT_LAYOUT_UNSUPPORTED");
+  if (
+    expectedOwnerUid !== undefined &&
+    (!Number.isSafeInteger(expectedOwnerUid) || expectedOwnerUid <= 0 || stat.uid !== expectedOwnerUid)
+  ) {
+    throw new Error("WORKSPACE_GIT_METADATA_OWNERSHIP_INVALID");
+  }
+  const realRoot = realpathSync(root);
+  const realGit = realpathSync(gitPath);
+  if (path.dirname(realGit) !== realRoot || path.basename(realGit) !== ".git") {
+    throw new Error("WORKSPACE_GIT_LAYOUT_UNSUPPORTED");
+  }
+
+  const assertNoNestedGitMetadata = (candidate: string, isRoot: boolean): void => {
+    for (const entry of readdirSync(candidate, { withFileTypes: true })) {
+      if (isRoot && entry.name === ".git") continue;
+      if (entry.name === ".git") throw new Error("WORKSPACE_GIT_LAYOUT_UNSUPPORTED");
+      if (entry.isDirectory()) assertNoNestedGitMetadata(path.join(candidate, entry.name), false);
+    }
+  };
+  assertNoNestedGitMetadata(root, true);
+  return gitPath;
+}
+
 export async function prepareRepositoryWorkspace(
   input: PrepareRepositoryInput,
 ): Promise<{ path: string; commitSha: string }> {
@@ -231,7 +299,17 @@ export async function prepareRepositoryWorkspace(
     }
     mkdirSync(workspaceRoot, { recursive: true });
     const destination = path.join(workspaceRoot, input.id);
-    let existingWorkspace = existsSync(path.join(destination, ".git"));
+    const existingGitPath = path.join(destination, ".git");
+    if (input.workspacePermissionModel === "single-uid-v2" && existsSync(destination)) {
+      if (!Number.isSafeInteger(input.workspaceOwnerUid) || Number(input.workspaceOwnerUid) <= 0) {
+        throw new Error("INVALID_WORKSPACE_OWNER_IDENTITY");
+      }
+      ensureSingleUidWorkspaceOwnerAccess(destination, Number(input.workspaceOwnerUid));
+      if (existsSync(existingGitPath)) {
+        validateSingleUidWorkspaceLayout(destination, Number(input.workspaceOwnerUid));
+      }
+    }
+    let existingWorkspace = existsSync(existingGitPath);
     const checkoutMarker = input.workspaceKey
       ? path.join(destination, ".git", "team-skill-hub-workspace-ready")
       : undefined;
@@ -295,7 +373,15 @@ export async function prepareRepositoryWorkspace(
       );
     });
     if (!/^[a-f0-9]{40,64}$/i.test(origin)) throw new Error("SOURCE_REPOSITORY_COMMIT_UNAVAILABLE");
-    grantExecutionContainerAccess(destination, input.workspaceAccess ?? "read-only");
+    if (input.workspacePermissionModel === "single-uid-v2") {
+      if (!Number.isSafeInteger(input.workspaceOwnerUid) || Number(input.workspaceOwnerUid) <= 0) {
+        throw new Error("INVALID_WORKSPACE_OWNER_IDENTITY");
+      }
+      ensureSingleUidWorkspaceOwnerAccess(destination, Number(input.workspaceOwnerUid));
+      validateSingleUidWorkspaceLayout(destination, Number(input.workspaceOwnerUid));
+    } else {
+      grantExecutionContainerAccess(destination, input.workspaceAccess ?? "read-only");
+    }
     if (checkoutMarker) {
       if (existingWorkspace) {
         const recordedRevision = readFileSync(checkoutMarker, "utf8").trim();

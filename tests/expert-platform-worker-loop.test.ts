@@ -297,6 +297,10 @@ test("worker forwards only known deterministic workspace error codes, never exce
     "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
     "WORKSPACE_PREPARATION_INCOMPLETE",
     "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+    "WORKSPACE_IDENTITY_MISMATCH",
+    "INVALID_WORKSPACE_OWNER_IDENTITY",
+    "WORKSPACE_GIT_LAYOUT_UNSUPPORTED",
+    "WORKSPACE_GIT_METADATA_OWNERSHIP_INVALID",
   ]) {
     const client = new FakeClient(claim);
     assert.equal(

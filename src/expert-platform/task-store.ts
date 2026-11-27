@@ -52,6 +52,7 @@ export type DeploymentTaskSnapshot = {
 
 export type TaskExecutionKind = "agent" | "verification";
 export type TaskWorkspaceAccess = "read-only" | "read-write";
+export type TaskWorkspacePermissionModel = "shared-gid-v1" | "single-uid-v2";
 
 export type Submission = {
   principalId: string;
@@ -73,6 +74,9 @@ export type Submission = {
   workflowId?: string;
   workflowVersion?: number;
   workspaceKey?: string;
+  workspacePermissionModel?: TaskWorkspacePermissionModel;
+  workspaceOwnerUid?: number;
+  workspaceOwnerGid?: number;
   validationSnapshot?: VerificationPolicyStep[];
   executionKind?: TaskExecutionKind;
   executionWorkspaceAccess?: TaskWorkspaceAccess;
@@ -103,6 +107,9 @@ export type TaskRecord = {
   workflowId: string | null;
   workflowVersion: number | null;
   workspaceKey: string | null;
+  workspacePermissionModel: TaskWorkspacePermissionModel | null;
+  workspaceOwnerUid: number | null;
+  workspaceOwnerGid: number | null;
   validationSnapshot: VerificationPolicyStep[];
   verificationResults: VerificationEvidenceResult[];
   workspaceChangeSummary: WorkspaceChangeSummary | null;
@@ -149,6 +156,9 @@ export type Claim = {
   modelConfig?: ExpertModelConfig;
   deploymentSnapshot?: DeploymentTaskSnapshot;
   workspaceKey?: string | null;
+  workspacePermissionModel?: TaskWorkspacePermissionModel | null;
+  workspaceOwnerUid?: number | null;
+  workspaceOwnerGid?: number | null;
   validationSnapshot?: VerificationPolicyStep[];
   runtimeSessionId?: string | null;
 };
@@ -257,6 +267,23 @@ export class ExpertTaskStore {
     this.ensureTaskColumn("workflow_id", "TEXT");
     this.ensureTaskColumn("workflow_version", "INTEGER");
     this.ensureTaskColumn("workspace_key", "TEXT");
+    const taskColumnsBeforeWorkspacePermission = new Set(
+      (this.db.prepare("PRAGMA table_info(expert_tasks)").all() as Array<{ name: string }>).map(
+        (column) => column.name,
+      ),
+    );
+    const hadWorkspacePermissionModel = taskColumnsBeforeWorkspacePermission.has("workspace_permission_model");
+    this.ensureTaskColumn(
+      "workspace_permission_model",
+      "TEXT CHECK (workspace_permission_model IN ('shared-gid-v1','single-uid-v2') OR workspace_permission_model IS NULL)",
+    );
+    if (!hadWorkspacePermissionModel) {
+      this.db.exec(
+        "UPDATE expert_tasks SET workspace_permission_model='shared-gid-v1' WHERE workspace_key IS NOT NULL AND workspace_permission_model IS NULL",
+      );
+    }
+    this.ensureTaskColumn("workspace_owner_uid", "INTEGER");
+    this.ensureTaskColumn("workspace_owner_gid", "INTEGER");
     this.ensureTaskColumn("validation_snapshot_json", "TEXT");
     this.ensureTaskColumn("verification_results_json", "TEXT");
     this.ensureTaskColumn("workspace_change_summary_json", "TEXT");
@@ -406,6 +433,24 @@ export class ExpertTaskStore {
     if (input.workspaceKey !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(input.workspaceKey)) {
       throw new Error("INVALID_WORKSPACE_KEY");
     }
+    const workspacePermissionModel = input.workspacePermissionModel ?? null;
+    const workspaceOwnerUid = input.workspaceOwnerUid ?? null;
+    const workspaceOwnerGid = input.workspaceOwnerGid ?? null;
+    if (
+      (workspacePermissionModel !== null &&
+        workspacePermissionModel !== "shared-gid-v1" &&
+        workspacePermissionModel !== "single-uid-v2") ||
+      (workspacePermissionModel === null && (workspaceOwnerUid !== null || workspaceOwnerGid !== null)) ||
+      (workspacePermissionModel === "shared-gid-v1" && (workspaceOwnerUid !== null || workspaceOwnerGid !== null)) ||
+      (workspacePermissionModel === "single-uid-v2" &&
+        (!Number.isSafeInteger(workspaceOwnerUid) ||
+          !Number.isSafeInteger(workspaceOwnerGid) ||
+          Number(workspaceOwnerUid) <= 0 ||
+          Number(workspaceOwnerGid) <= 0)) ||
+      (workspacePermissionModel !== null && !input.workspaceKey)
+    ) {
+      throw new Error("INVALID_WORKSPACE_IDENTITY");
+    }
     const validationSnapshot = normalizeVerificationPolicy(input.validationSnapshot);
     if (
       workLinkValues.some((value) => value !== undefined) &&
@@ -432,6 +477,9 @@ export class ExpertTaskStore {
           workflowId: input.workflowId?.trim() || null,
           workflowVersion: input.workflowVersion ?? null,
           workspaceKey: input.workspaceKey?.trim() || null,
+          workspacePermissionModel,
+          workspaceOwnerUid,
+          workspaceOwnerGid,
           validationSnapshot,
           ...(snapshot
             ? {
@@ -527,7 +575,7 @@ export class ExpertTaskStore {
       }
       this.db
         .prepare(
-          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,execution_kind,execution_workspace_access,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
+          "INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,execution_kind,execution_workspace_access,expert_id,repository_id,selection_mode,schema_version,source_session_id,source_client,source_request_id,source_request_slot,deployment_id,deployment_config_version,deployment_snapshot_json,work_item_id,work_attempt_id,workflow_id,workflow_version,workspace_key,workspace_permission_model,workspace_owner_uid,workspace_owner_gid,validation_snapshot_json,created_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')",
         )
         .run(
           taskId,
@@ -554,6 +602,9 @@ export class ExpertTaskStore {
           input.workflowId?.trim() || null,
           input.workflowVersion ?? null,
           input.workspaceKey?.trim() || null,
+          workspacePermissionModel,
+          workspaceOwnerUid,
+          workspaceOwnerGid,
           JSON.stringify(validationSnapshot),
           Date.now(),
         );
@@ -588,6 +639,9 @@ export class ExpertTaskStore {
         workflowId: input.workflowId?.trim() || null,
         workflowVersion: input.workflowVersion ?? null,
         workspaceKey: input.workspaceKey?.trim() || null,
+        workspacePermissionModel,
+        workspaceOwnerUid,
+        workspaceOwnerGid,
         validationSnapshot,
         verificationResults: [],
         workspaceChangeSummary: null,
@@ -612,7 +666,11 @@ export class ExpertTaskStore {
     now = Date.now(),
     leaseMs = 30_000,
     expertId?: string,
-    compatibility?: { backend?: "claude" | "codex"; runtimeProfiles: string[] },
+    compatibility?: {
+      backend?: "claude" | "codex";
+      runtimeProfiles: string[];
+      workspacePermissionModels?: string[];
+    },
   ): Claim | null {
     if (!workerId || !Number.isFinite(now) || leaseMs <= 0) throw new Error("INVALID_REQUEST");
     this.db.exec("BEGIN IMMEDIATE");
@@ -623,12 +681,17 @@ export class ExpertTaskStore {
         ["claude", "codex"].includes(compatibility.backend) &&
         profiles.length > 0 &&
         profiles.every((profile) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(profile));
-      const compatibilitySql = supportsV2
+      const schemaCompatibilitySql = supportsV2
         ? `AND (t.schema_version < 2 OR
             (t.schema_version = 2 AND
               json_extract(t.deployment_snapshot_json,'$.executor.backend') = ? AND
               json_extract(t.deployment_snapshot_json,'$.runtimeProfile') IN (${profiles.map(() => "?").join(",")})))`
         : "AND t.schema_version < 2";
+      const supportsSingleUidV2 = compatibility?.workspacePermissionModels?.includes("single-uid-v2") === true;
+      const workspaceCompatibilitySql = supportsSingleUidV2
+        ? "AND (t.workspace_permission_model IS NULL OR t.workspace_permission_model IN ('shared-gid-v1','single-uid-v2'))"
+        : "AND (t.workspace_permission_model IS NULL OR t.workspace_permission_model='shared-gid-v1')";
+      const compatibilitySql = schemaCompatibilitySql + "\n" + workspaceCompatibilitySql;
       const compatibilityArgs = supportsV2 ? [compatibility!.backend!, ...profiles] : [];
       const row = expertId
         ? (this.db
@@ -662,6 +725,18 @@ export class ExpertTaskStore {
         return null;
       }
       const taskId = String(row.task_id);
+      let workspacePermissionModel =
+        row.workspace_permission_model == null
+          ? null
+          : (String(row.workspace_permission_model) as TaskWorkspacePermissionModel);
+      if (row.workspace_key != null && workspacePermissionModel === null) {
+        workspacePermissionModel = supportsSingleUidV2 ? "single-uid-v2" : "shared-gid-v1";
+        this.db
+          .prepare(
+            "UPDATE expert_tasks SET workspace_permission_model=?,workspace_owner_uid=NULL,workspace_owner_gid=NULL WHERE task_id=? AND workspace_permission_model IS NULL",
+          )
+          .run(workspacePermissionModel, taskId);
+      }
       // A task may be reclaimed only after its lease expires. Close the previous
       // run in the same transaction so run history cannot leave it looking active.
       if (row.status === "running" && row.run_id != null) {
@@ -703,6 +778,9 @@ export class ExpertTaskStore {
             : (String(row.execution_workspace_access) as TaskWorkspaceAccess),
         repositoryId: row.repository_id == null ? null : String(row.repository_id),
         workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+        workspacePermissionModel,
+        workspaceOwnerUid: row.workspace_owner_uid == null ? null : Number(row.workspace_owner_uid),
+        workspaceOwnerGid: row.workspace_owner_gid == null ? null : Number(row.workspace_owner_gid),
         validationSnapshot: normalizeVerificationPolicy(
           row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
         ),
@@ -715,6 +793,77 @@ export class ExpertTaskStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  selectWorkspacePermissionModel(
+    taskId: string,
+    workspaceKey: string,
+    permissionModel: TaskWorkspacePermissionModel,
+  ): TaskRecord {
+    const key = workspaceKey.trim();
+    if (
+      !key ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(key) ||
+      (permissionModel !== "shared-gid-v1" && permissionModel !== "single-uid-v2")
+    ) {
+      throw new Error("INVALID_WORKSPACE_IDENTITY");
+    }
+    const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+    if (!row) throw new Error("TASK_NOT_FOUND");
+    if (String(row.workspace_key ?? "") !== key) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+    const currentModel = row.workspace_permission_model == null ? null : String(row.workspace_permission_model);
+    if (currentModel !== null && currentModel !== permissionModel) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+    if (currentModel === null) {
+      this.db
+        .prepare(
+          "UPDATE expert_tasks SET workspace_permission_model=?,workspace_owner_uid=NULL,workspace_owner_gid=NULL WHERE task_id=?",
+        )
+        .run(permissionModel, taskId);
+    }
+    const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+    return this.fromRow(updated);
+  }
+
+  bindWorkspaceIdentity(
+    taskId: string,
+    workspaceKey: string,
+    identity: { permissionModel: TaskWorkspacePermissionModel; ownerUid: number | null; ownerGid: number | null },
+  ): TaskRecord {
+    const key = workspaceKey.trim();
+    const ownerUid = identity.ownerUid;
+    const ownerGid = identity.ownerGid;
+    if (
+      !key ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(key) ||
+      (identity.permissionModel === "single-uid-v2" &&
+        (!Number.isSafeInteger(ownerUid) ||
+          !Number.isSafeInteger(ownerGid) ||
+          Number(ownerUid) <= 0 ||
+          Number(ownerGid) <= 0)) ||
+      (identity.permissionModel === "shared-gid-v1" && (ownerUid !== null || ownerGid !== null))
+    ) {
+      throw new Error("INVALID_WORKSPACE_IDENTITY");
+    }
+    const row = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row | undefined;
+    if (!row) throw new Error("TASK_NOT_FOUND");
+    if (String(row.workspace_key ?? "") !== key) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+    const currentModel = row.workspace_permission_model == null ? null : String(row.workspace_permission_model);
+    const currentUid = row.workspace_owner_uid == null ? null : Number(row.workspace_owner_uid);
+    const currentGid = row.workspace_owner_gid == null ? null : Number(row.workspace_owner_gid);
+    if (currentModel !== null && currentModel !== identity.permissionModel) {
+      throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+    }
+    if ((currentUid === null) !== (currentGid === null)) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+    if (currentUid !== null && (currentUid !== ownerUid || currentGid !== ownerGid)) {
+      throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+    }
+    this.db
+      .prepare(
+        "UPDATE expert_tasks SET workspace_permission_model=?,workspace_owner_uid=?,workspace_owner_gid=? WHERE task_id=?",
+      )
+      .run(identity.permissionModel, ownerUid, ownerGid, taskId);
+    const updated = this.db.prepare("SELECT * FROM expert_tasks WHERE task_id=?").get(taskId) as Row;
+    return this.fromRow(updated);
   }
 
   complete(
@@ -1681,6 +1830,12 @@ export class ExpertTaskStore {
       workflowId: row.workflow_id == null ? null : String(row.workflow_id),
       workflowVersion: row.workflow_version == null ? null : Number(row.workflow_version),
       workspaceKey: row.workspace_key == null ? null : String(row.workspace_key),
+      workspacePermissionModel:
+        row.workspace_permission_model == null
+          ? null
+          : (String(row.workspace_permission_model) as TaskWorkspacePermissionModel),
+      workspaceOwnerUid: row.workspace_owner_uid == null ? null : Number(row.workspace_owner_uid),
+      workspaceOwnerGid: row.workspace_owner_gid == null ? null : Number(row.workspace_owner_gid),
       validationSnapshot: normalizeVerificationPolicy(
         row.validation_snapshot_json ? JSON.parse(String(row.validation_snapshot_json)) : [],
       ),

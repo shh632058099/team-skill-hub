@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore } from "./task-store.js";
+import type { Claim, DeploymentTaskSnapshot, ExpertTaskStore, TaskWorkspacePermissionModel } from "./task-store.js";
 import { normalizeExecutorFailureDiagnostic, type ExecutorFailureDiagnostic } from "./executor-diagnostic.js";
 import type { PersistentWorkerRegistry } from "./persistent-worker-registry.js";
 import type { ExpertStore } from "./expert-store.js";
@@ -41,6 +41,7 @@ interface ClaimTaskRequest {
   expert_id: string;
   supported_backend?: string;
   supported_runtime_profiles?: string[];
+  supported_workspace_permission_models?: string[];
 }
 interface ClaimTaskResponse {
   has_task: boolean;
@@ -60,6 +61,9 @@ interface ClaimTaskResponse {
   runtime_session_id?: string;
   execution_kind?: string;
   execution_workspace_access?: string;
+  workspace_permission_model?: string;
+  workspace_owner_uid?: number;
+  workspace_owner_gid?: number;
 }
 interface LeaseRequest {
   worker_id: string;
@@ -103,6 +107,9 @@ interface WorkspaceCleanupClaimResponse {
   workspace_id?: string;
   workspace_key?: string;
   fencing?: string;
+  permission_model?: string;
+  owner_uid?: number;
+  owner_gid?: number;
 }
 interface WorkspaceCleanupCompleteRequest {
   worker_id: string;
@@ -359,6 +366,7 @@ export interface GrpcClientOptions {
   tls?: GrpcTlsClientConfig;
   supportedBackend?: "claude" | "codex";
   supportedRuntimeProfiles?: string[];
+  supportedWorkspacePermissionModels?: Array<"shared-gid-v1" | "single-uid-v2">;
 }
 
 export async function startExpertWorkerGrpcServer(
@@ -434,11 +442,20 @@ export async function startExpertWorkerGrpcServer(
           throw grpcError(grpc.status.PERMISSION_DENIED, "WORKER_EXPERT_CAPABILITY_MISMATCH");
         }
       }
-      const compatibility =
+      const advertisedWorkspacePermissionModels = call.request.supported_workspace_permission_models ?? [];
+      if (advertisedWorkspacePermissionModels.some((model) => model !== "shared-gid-v1" && model !== "single-uid-v2")) {
+        throw new Error("INVALID_WORKSPACE_PERMISSION_MODEL");
+      }
+      const supportedBackend =
         call.request.supported_backend === "claude" || call.request.supported_backend === "codex"
+          ? (call.request.supported_backend as "claude" | "codex")
+          : undefined;
+      const compatibility =
+        supportedBackend !== undefined || advertisedWorkspacePermissionModels.length > 0
           ? {
-              backend: call.request.supported_backend as "claude" | "codex",
+              ...(supportedBackend ? { backend: supportedBackend } : {}),
               runtimeProfiles: call.request.supported_runtime_profiles ?? [],
+              workspacePermissionModels: advertisedWorkspacePermissionModels,
             }
           : undefined;
       const claim = tasks.claim(call.request.worker_id, Date.now(), 30_000, call.request.expert_id, compatibility);
@@ -454,6 +471,46 @@ export async function startExpertWorkerGrpcServer(
                       .flatMap((deployment) => deployment.repositories ?? [])
                       .find((item) => item.id === claim.repositoryId)
                   : undefined);
+              let workspacePermissionModel = claim.workspacePermissionModel;
+              let workspaceOwnerUid = claim.workspaceOwnerUid;
+              let workspaceOwnerGid = claim.workspaceOwnerGid;
+              if (!workspacePermissionModel && claim.workspaceKey && options.workStore) {
+                const attempt = options.workStore.getAttemptByTask(claim.taskId);
+                if (attempt?.workspaceId) {
+                  const workspace = options.workStore.getWorkspace(attempt.workspaceId);
+                  if (workspace.workspaceKey !== claim.workspaceKey) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+                  if (workspace.state === "allocating") {
+                    workspacePermissionModel = advertisedWorkspacePermissionModels.includes("single-uid-v2")
+                      ? "single-uid-v2"
+                      : "shared-gid-v1";
+                    workspaceOwnerUid = null;
+                    workspaceOwnerGid = null;
+                    tasks.selectWorkspacePermissionModel(claim.taskId, claim.workspaceKey, workspacePermissionModel);
+                  } else {
+                    workspacePermissionModel = workspace.permissionModel;
+                    workspaceOwnerUid = workspace.ownerUid;
+                    workspaceOwnerGid = workspace.ownerGid;
+                    if (workspacePermissionModel === "single-uid-v2") {
+                      tasks.bindWorkspaceIdentity(claim.taskId, claim.workspaceKey, {
+                        permissionModel: workspacePermissionModel,
+                        ownerUid: workspaceOwnerUid,
+                        ownerGid: workspaceOwnerGid,
+                      });
+                      if (!advertisedWorkspacePermissionModels.includes("single-uid-v2")) {
+                        throw new Error("WORKSPACE_PERMISSION_MODEL_UNSUPPORTED");
+                      }
+                    } else {
+                      tasks.selectWorkspacePermissionModel(claim.taskId, claim.workspaceKey, workspacePermissionModel);
+                    }
+                  }
+                }
+              }
+              if (!workspacePermissionModel && claim.workspaceKey) {
+                workspacePermissionModel = "shared-gid-v1";
+                workspaceOwnerUid = null;
+                workspaceOwnerGid = null;
+                tasks.selectWorkspacePermissionModel(claim.taskId, claim.workspaceKey, workspacePermissionModel);
+              }
               return {
                 has_task: true,
                 task_id: claim.taskId,
@@ -474,6 +531,9 @@ export async function startExpertWorkerGrpcServer(
                 runtime_session_id: claim.runtimeSessionId ?? "",
                 execution_kind: claim.executionKind ?? "agent",
                 execution_workspace_access: claim.executionWorkspaceAccess ?? "",
+                workspace_permission_model: workspacePermissionModel ?? "",
+                workspace_owner_uid: workspaceOwnerUid ?? 0,
+                workspace_owner_gid: workspaceOwnerGid ?? 0,
               };
             })()
           : { has_task: false },
@@ -586,12 +646,22 @@ export async function startExpertWorkerGrpcServer(
       if (call.request.stage === "workspace.ready") {
         if (!options.workStore) throw new Error("WORKSPACE_REPORT_UNAVAILABLE");
         tasks.assertActiveClaim(claim);
-        let report: { workspaceKey?: unknown; path?: unknown; commitSha?: unknown };
+        let report: {
+          workspaceKey?: unknown;
+          path?: unknown;
+          commitSha?: unknown;
+          permissionModel?: unknown;
+          ownerUid?: unknown;
+          ownerGid?: unknown;
+        };
         try {
           report = JSON.parse(call.request.details || "{}") as {
             workspaceKey?: unknown;
             path?: unknown;
             commitSha?: unknown;
+            permissionModel?: unknown;
+            ownerUid?: unknown;
+            ownerGid?: unknown;
           };
         } catch {
           throw new Error("INVALID_WORKSPACE_REPORT");
@@ -607,16 +677,42 @@ export async function startExpertWorkerGrpcServer(
         ) {
           throw new Error("INVALID_WORKSPACE_REPORT");
         }
+        const permissionModel =
+          report.permissionModel === undefined
+            ? "shared-gid-v1"
+            : report.permissionModel === "shared-gid-v1" || report.permissionModel === "single-uid-v2"
+              ? report.permissionModel
+              : null;
+        const ownerUid = report.ownerUid === undefined ? null : report.ownerUid;
+        const ownerGid = report.ownerGid === undefined ? null : report.ownerGid;
+        if (
+          permissionModel === null ||
+          (permissionModel === "shared-gid-v1" && (ownerUid !== null || ownerGid !== null)) ||
+          (permissionModel === "single-uid-v2" &&
+            (!Number.isSafeInteger(ownerUid) ||
+              !Number.isSafeInteger(ownerGid) ||
+              Number(ownerUid) <= 0 ||
+              Number(ownerGid) <= 0))
+        ) {
+          throw new Error("INVALID_WORKSPACE_REPORT");
+        }
+        const identity = {
+          permissionModel: permissionModel as TaskWorkspacePermissionModel,
+          ownerUid: ownerUid === null ? null : Number(ownerUid),
+          ownerGid: ownerGid === null ? null : Number(ownerGid),
+        };
         const attempt = options.workStore.getAttemptByTask(claim.taskId);
         if (!attempt?.workspaceId) throw new Error("WORKSPACE_NOT_FOUND");
         const workspace = options.workStore.getWorkspace(attempt.workspaceId);
         if (workspace.workspaceKey !== report.workspaceKey) throw new Error("WORKSPACE_IDENTITY_CONFLICT");
+        tasks.bindWorkspaceIdentity(claim.taskId, report.workspaceKey, identity);
         options.workStore.assignWorkspaceOwner(
           workspace.workspaceId,
           claim.workerId,
           report.path,
           Date.now(),
           report.commitSha,
+          identity,
         );
         callback(null, {});
         return;
@@ -661,6 +757,9 @@ export async function startExpertWorkerGrpcServer(
               workspace_id: claim.workspaceId,
               workspace_key: claim.workspaceKey,
               fencing: String(claim.fencing),
+              permission_model: claim.permissionModel,
+              owner_uid: claim.ownerUid ?? 0,
+              owner_gid: claim.ownerGid ?? 0,
             }
           : { has_cleanup: false },
       );
@@ -1043,6 +1142,7 @@ export class ExpertWorkerClient {
   private readonly metadata: grpc.Metadata;
   private readonly supportedBackend?: "claude" | "codex";
   private readonly supportedRuntimeProfiles: string[];
+  private readonly supportedWorkspacePermissionModels: Array<"shared-gid-v1" | "single-uid-v2">;
 
   constructor(address: string, identity: { workerId: string; credential: string }, options: GrpcClientOptions = {}) {
     const proto = loadWorkerProto();
@@ -1058,6 +1158,7 @@ export class ExpertWorkerClient {
     this.metadata.set("authorization", `Bearer ${identity.credential}`);
     this.supportedBackend = options.supportedBackend;
     this.supportedRuntimeProfiles = options.supportedRuntimeProfiles ?? [];
+    this.supportedWorkspacePermissionModels = options.supportedWorkspacePermissionModels ?? [];
   }
 
   async claimTask(workerId: string, expertId: string, capability = expertId): Promise<Claim | null> {
@@ -1069,6 +1170,7 @@ export class ExpertWorkerClient {
           expert_id: expertId,
           supported_backend: this.supportedBackend,
           supported_runtime_profiles: this.supportedRuntimeProfiles,
+          supported_workspace_permission_models: this.supportedWorkspacePermissionModels,
         },
         this.metadata,
         callback,
@@ -1100,6 +1202,28 @@ export class ExpertWorkerClient {
         ? { deploymentSnapshot: parseClaimDeploymentSnapshot(response.deployment_snapshot_json) }
         : {}),
       ...(response.workspace_key ? { workspaceKey: response.workspace_key } : {}),
+      ...(response.workspace_permission_model === "shared-gid-v1"
+        ? { workspacePermissionModel: "shared-gid-v1" as const, workspaceOwnerUid: null, workspaceOwnerGid: null }
+        : response.workspace_permission_model === "single-uid-v2"
+          ? (() => {
+              const uid = Number(response.workspace_owner_uid);
+              const gid = Number(response.workspace_owner_gid);
+              if (uid === 0 && gid === 0) {
+                return {
+                  workspacePermissionModel: "single-uid-v2" as const,
+                  workspaceOwnerUid: null,
+                  workspaceOwnerGid: null,
+                };
+              }
+              if (!Number.isSafeInteger(uid) || uid <= 0 || !Number.isSafeInteger(gid) || gid <= 0)
+                throw new Error("INVALID_CLAIM_RESPONSE");
+              return {
+                workspacePermissionModel: "single-uid-v2" as const,
+                workspaceOwnerUid: uid,
+                workspaceOwnerGid: gid,
+              };
+            })()
+          : {}),
       ...(response.validation_snapshot_json
         ? { validationSnapshot: normalizeVerificationPolicy(JSON.parse(response.validation_snapshot_json)) }
         : {}),
@@ -1259,10 +1383,26 @@ export class ExpertWorkerClient {
     if (!response.workspace_id || !response.workspace_key || !Number.isSafeInteger(fencing) || fencing < 1) {
       throw new Error("INVALID_WORKSPACE_CLEANUP_RESPONSE");
     }
+    const permissionModel = response.permission_model || "shared-gid-v1";
+    const ownerUid = Number(response.owner_uid);
+    const ownerGid = Number(response.owner_gid);
+    if (
+      permissionModel !== "shared-gid-v1" &&
+      (permissionModel !== "single-uid-v2" ||
+        !Number.isSafeInteger(ownerUid) ||
+        ownerUid <= 0 ||
+        !Number.isSafeInteger(ownerGid) ||
+        ownerGid <= 0)
+    ) {
+      throw new Error("INVALID_WORKSPACE_CLEANUP_RESPONSE");
+    }
     return {
       workspaceId: response.workspace_id,
       workspaceKey: response.workspace_key,
       ownerWorkerId: workerId,
+      permissionModel,
+      ownerUid: permissionModel === "single-uid-v2" ? ownerUid : null,
+      ownerGid: permissionModel === "single-uid-v2" ? ownerGid : null,
       fencing,
     };
   }

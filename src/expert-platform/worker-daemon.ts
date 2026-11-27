@@ -14,6 +14,7 @@ import {
 } from "./git-publication-executor.js";
 import { createGitChangeRequestProvider } from "./git-change-request-provider.js";
 import type { ChangeRequestProvider } from "./change-request-provider.js";
+import { assertWorkspaceProcessIdentity, supportsSingleUidWorkspace } from "./workspace-process-identity.js";
 
 interface ClosableRemoteWorkerClient extends RemoteWorkerClient {
   close(): void;
@@ -28,12 +29,25 @@ export interface ExpertWorkerRuntimeDependencies {
     repositoryUrl: string,
     credentials: ExpertWorkerRuntimeConfig["gitCredentialConfigs"],
   ) => ChangeRequestProvider;
+  workerIdentity?: { uid: number; gid: number };
+}
+
+export function workspacePermissionModelsForWorkerIdentity(identity: {
+  uid: number;
+  gid: number;
+}): Array<"shared-gid-v1" | "single-uid-v2"> {
+  return supportsSingleUidWorkspace(identity) ? ["shared-gid-v1", "single-uid-v2"] : ["shared-gid-v1"];
 }
 
 export function createExpertWorkerRuntime(
   config: ExpertWorkerRuntimeConfig,
   dependencies: ExpertWorkerRuntimeDependencies = {},
 ): { runOnce(): Promise<boolean>; close(): void } {
+  const workerIdentity = dependencies.workerIdentity ?? {
+    uid: typeof process.getuid === "function" ? process.getuid() : 0,
+    gid: typeof process.getgid === "function" ? process.getgid() : 0,
+  };
+  const supportedWorkspacePermissionModels = workspacePermissionModelsForWorkerIdentity(workerIdentity);
   const tls =
     config.tlsCaPath && config.tlsCertPath && config.tlsKeyPath
       ? {
@@ -54,6 +68,7 @@ export function createExpertWorkerRuntime(
         ...(tls ? { tls } : {}),
         supportedBackend: config.executorBackend,
         supportedRuntimeProfiles: config.supportedRuntimeProfiles ?? [],
+        supportedWorkspacePermissionModels,
       },
     );
   let modelAttemptSequenceOffset = 0;
@@ -96,6 +111,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      workerIdentity,
       verificationTmpfsMb: config.verificationTmpfsMb ?? 1024,
       ...(config.taskIdleTimeoutMs !== undefined ? { idleTimeoutMs: config.taskIdleTimeoutMs } : {}),
       onActivity,
@@ -131,6 +147,7 @@ export function createExpertWorkerRuntime(
       ...(config.codexAuthFilePath ? { authFilePath: config.codexAuthFilePath } : {}),
       ...(config.codexConfigFilePath ? { configFilePath: config.codexConfigFilePath } : {}),
       timeoutMs: config.taskTimeoutMs,
+      workerIdentity,
       verificationTmpfsMb: config.verificationTmpfsMb ?? 1024,
       ...(config.taskIdleTimeoutMs !== undefined ? { idleTimeoutMs: config.taskIdleTimeoutMs } : {}),
       onActivity,
@@ -159,6 +176,14 @@ export function createExpertWorkerRuntime(
     try {
       const snapshot = claim.executionSnapshot;
       if (!snapshot) throw new Error("PUBLICATION_EXECUTION_SNAPSHOT_MISSING");
+      assertWorkspaceProcessIdentity(
+        {
+          permissionModel: snapshot.workspacePermissionModel,
+          ownerUid: snapshot.workspaceOwnerUid,
+          ownerGid: snapshot.workspaceOwnerGid,
+        },
+        workerIdentity,
+      );
       if (claim.operation === "prepare") {
         const prepared = await preparePublication({
           workspacePath: snapshot.workspacePath,
@@ -244,11 +269,21 @@ export function createExpertWorkerRuntime(
         const cleanup = await client.claimWorkspaceCleanup(config.workerId);
         if (cleanup) {
           try {
+            assertWorkspaceProcessIdentity(
+              {
+                permissionModel: cleanup.permissionModel,
+                ownerUid: cleanup.ownerUid,
+                ownerGid: cleanup.ownerGid,
+              },
+              workerIdentity,
+            );
             const workerGroupId =
               typeof process.getgid === "function" && process.getgid() > 0 ? process.getgid() : 10001;
             await removeWorkspaceDirectory(config.repositoryRoot, cleanup.workspaceKey, {
               image: config.dockerImage,
               workerGroupId,
+              permissionModel: cleanup.permissionModel,
+              workerUid: workerIdentity.uid,
             });
             await client.completeWorkspaceCleanup(cleanup, true);
           } catch (error) {

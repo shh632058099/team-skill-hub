@@ -263,6 +263,27 @@ test("worker runtime config rejects credential refs mapped to unapproved environ
   );
 });
 
+test("worker runtime rejects Git publication token envs from the Agent environment allowlist", () => {
+  assert.throws(
+    () =>
+      parseExpertWorkerConfig({
+        EXPERT_HUB_ADDRESS: "hub:7443",
+        EXPERT_WORKER_ID: "w",
+        EXPERT_WORKER_CREDENTIAL: "credential",
+        EXPERT_CAPABILITY: "ota",
+        EXPERT_REPOSITORY_ROOT: "/repo",
+        EXPERT_DOCKER_IMAGE: "worker",
+        EXPERT_EXECUTOR_BACKEND: "codex",
+        EXPERT_DOCKER_NETWORK: "expert-egress",
+        EXPERT_MODEL_ENV_NAMES: "OPENAI_API_KEY,GITHUB_TOKEN",
+        EXPERT_MODEL_CREDENTIAL_REFS_JSON: '{"router":"OPENAI_API_KEY"}',
+        EXPERT_GIT_CREDENTIALS_JSON:
+          '{"publish":{"type":"https-token","tokenEnv":"GITHUB_TOKEN","username":"x-access-token"}}',
+      }),
+    /INVALID_WORKER_CONFIG/,
+  );
+});
+
 test("different worker IDs receive independent clone roots even with the same configured base", () => {
   const base = {
     EXPERT_HUB_ADDRESS: "hub:7443",

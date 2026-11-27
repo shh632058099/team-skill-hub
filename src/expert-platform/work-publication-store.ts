@@ -9,6 +9,9 @@ export type WorkPublicationState =
 
 export interface PublicationExecutionSnapshot {
   workspacePath: string;
+  workspacePermissionModel?: "shared-gid-v1" | "single-uid-v2";
+  workspaceOwnerUid?: number | null;
+  workspaceOwnerGid?: number | null;
   repositoryUrl: string;
   defaultBranch: string;
   branchPrefix: string;

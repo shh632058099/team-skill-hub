@@ -43,6 +43,9 @@ export interface AgentDockerConfig {
   seccompProfile?: "default" | "unconfined";
   supplementalGroupId?: number;
   primaryGroupId?: number;
+  runAsUid?: number;
+  runAsGid?: number;
+  gitMetadataPath?: string;
   envNames: readonly string[];
   authFilePath?: string;
   configFilePath?: string;
@@ -90,6 +93,22 @@ export function buildAgentDockerArgs(config: AgentDockerConfig): string[] {
   ) {
     throw new Error("INVALID_PRIMARY_GROUP_ID");
   }
+  const hasRunAsIdentity = config.runAsUid !== undefined || config.runAsGid !== undefined;
+  if (
+    hasRunAsIdentity &&
+    (!Number.isSafeInteger(config.runAsUid) ||
+      !Number.isSafeInteger(config.runAsGid) ||
+      Number(config.runAsUid) <= 0 ||
+      Number(config.runAsGid) <= 0)
+  ) {
+    throw new Error("INVALID_RUN_AS_IDENTITY");
+  }
+  if (config.gitMetadataPath !== undefined) {
+    const expected = path.join(path.resolve(config.sourcePath), ".git");
+    if (!path.isAbsolute(config.gitMetadataPath) || path.resolve(config.gitMetadataPath) !== expected) {
+      throw new Error("INVALID_GIT_METADATA_PATH");
+    }
+  }
   if (config.authFilePath && (!path.isAbsolute(config.authFilePath) || config.authFilePath === "/")) {
     throw new Error("INVALID_AUTH_FILE_PATH");
   }
@@ -118,6 +137,9 @@ export function buildAgentDockerArgs(config: AgentDockerConfig): string[] {
     throw new Error("INVALID_COMMAND");
   }
 
+  const runUid = hasRunAsIdentity ? Number(config.runAsUid) : 10001;
+  const runGid = hasRunAsIdentity ? Number(config.runAsGid) : (config.primaryGroupId ?? 10001);
+
   const args = [
     "run",
     "--rm",
@@ -138,8 +160,14 @@ export function buildAgentDockerArgs(config: AgentDockerConfig): string[] {
     "--network",
     config.network,
     "--read-only",
-    ...(config.primaryGroupId !== undefined ? ["--user", `10001:${config.primaryGroupId}`] : []),
-    ...(config.supplementalGroupId !== undefined && config.supplementalGroupId !== config.primaryGroupId
+    ...(hasRunAsIdentity
+      ? ["--user", `${runUid}:${runGid}`]
+      : config.primaryGroupId !== undefined
+        ? ["--user", `10001:${config.primaryGroupId}`]
+        : []),
+    ...(!hasRunAsIdentity &&
+    config.supplementalGroupId !== undefined &&
+    config.supplementalGroupId !== config.primaryGroupId
       ? ["--group-add", String(config.supplementalGroupId)]
       : []),
     "--cap-drop",
@@ -154,10 +182,13 @@ export function buildAgentDockerArgs(config: AgentDockerConfig): string[] {
     "2",
     "--mount",
     `type=bind,src=${config.sourcePath},dst=/workspace${config.workspaceAccess === "read-write" ? "" : ",readonly"}`,
-    "--mount",
-    "type=tmpfs,dst=/tmp,tmpfs-size=33554432",
+    ...(config.workspaceAccess === "read-write" && config.gitMetadataPath
+      ? ["--mount", `type=bind,src=${config.gitMetadataPath},dst=/workspace/.git,readonly`]
+      : []),
     "--tmpfs",
-    `/home/expert:rw,uid=10001,gid=${config.primaryGroupId ?? 10001},size=64m`,
+    `/tmp:rw,exec,uid=${runUid},gid=${runGid},size=32m`,
+    "--tmpfs",
+    `/home/expert:rw,uid=${runUid},gid=${runGid},size=64m`,
     ...(config.runtimeStatePath && config.runtimeStateTarget
       ? ["--mount", `type=bind,src=${config.runtimeStatePath},dst=${config.runtimeStateTarget}`]
       : []),
@@ -165,6 +196,8 @@ export function buildAgentDockerArgs(config: AgentDockerConfig): string[] {
     "HOME=/home/expert",
     "--env",
     "CODEX_HOME=/home/expert/.codex",
+    "--env",
+    "GIT_OPTIONAL_LOCKS=0",
     "--workdir",
     "/workspace",
   ];

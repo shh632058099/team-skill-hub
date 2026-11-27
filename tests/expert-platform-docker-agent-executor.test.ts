@@ -155,6 +155,147 @@ test("Docker Codex executor runs codex JSONL through docker with read-only sourc
   assert.equal(seen?.signal, signal);
 });
 
+test("new workspace on a non-root v2 Worker runs Agent as Worker uid with git metadata read-only", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "single-uid-executor-"));
+  const repo = path.join(root, "repo");
+  const checkouts = path.join(root, "checkouts");
+  let previousGitConfigGlobal: string | undefined;
+  try {
+    execFileSync("git", ["init", "-b", "main", repo]);
+    writeFileSync(path.join(repo, "README.md"), "base\n");
+    execFileSync("git", ["-C", repo, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      repo,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    ]);
+    const commitSha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      execFileSync("chown", ["-R", "999:988", repo]);
+      const safeConfig = path.join(root, "git-safe-config");
+      writeFileSync(safeConfig, `[safe]\n\tdirectory = ${repo}\n`);
+      previousGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
+      process.env.GIT_CONFIG_GLOBAL = safeConfig;
+    }
+    const modelConfig = {
+      providerId: "router",
+      model: "test-model",
+      baseUrl: "https://router.example/v1",
+      wireApi: "responses" as const,
+      allowedEnvNames: [] as string[],
+    };
+    const stages: Array<{ stage: string; details: string }> = [];
+    let args: readonly string[] = [];
+    const executor = createDockerAgentExecutor({
+      backend: "codex",
+      image: "expert-worker",
+      sourcePath: repo,
+      repositoryRoot: checkouts,
+      network: "bridge",
+      envNames: [],
+      timeoutMs: 1000,
+      workerIdentity: { uid: 999, gid: 988 },
+      prepareRepositoryWorkspace: async () => ({ path: repo, commitSha }),
+      onStage: async (_claim: Claim, stage: string, details = "") => stages.push({ stage, details }),
+      runProcess: async (options: { args: readonly string[] }) => {
+        args = options.args;
+        const changedPath = path.join(repo, "README.md");
+        writeFileSync(changedPath, "changed\n");
+        if (typeof process.getuid === "function" && process.getuid() === 0) {
+          execFileSync("chown", ["999:988", changedPath]);
+        }
+        return "changed";
+      },
+    } as any);
+    const result = await executor(
+      {
+        ...claim,
+        repositoryId: "repo-single-uid",
+        repositoryUrl: repo,
+        repositoryBranch: "main",
+        workspaceKey: "work-single-uid-a1",
+        workspacePermissionModel: "single-uid-v2",
+        workspaceOwnerUid: null,
+        workspaceOwnerGid: null,
+        executionWorkspaceAccess: "read-write",
+        modelConfig,
+        deploymentSnapshot: {
+          deploymentId: "write",
+          configVersion: 1,
+          runtimeProfile: "codex-workspace-write",
+          repository: { id: "repo-single-uid", url: repo, branch: "main" },
+          executor: { backend: "codex", modelConfig },
+        },
+      },
+      new AbortController().signal,
+    );
+    assert.equal(typeof result, "object");
+    assert.ok(args.some((arg, index) => arg === "--user" && args[index + 1] === "999:988"));
+    assert.ok(args.includes("type=bind,src=" + repo + ",dst=/workspace"));
+    assert.ok(args.includes("type=bind,src=" + path.join(repo, ".git") + ",dst=/workspace/.git,readonly"));
+    assert.ok(!args.includes("--group-add"));
+    const ready = stages.find((item) => item.stage === "workspace.ready");
+    assert.ok(ready);
+    assert.deepEqual(JSON.parse(ready!.details), {
+      workspaceKey: "work-single-uid-a1",
+      path: repo,
+      commitSha,
+      permissionModel: "single-uid-v2",
+      ownerUid: 999,
+      ownerGid: 988,
+    });
+  } finally {
+    if (previousGitConfigGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGitConfigGlobal;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted v2 workspace rejects Worker uid drift before repository execution", async () => {
+  let prepared = false;
+  const executor = createDockerAgentExecutor({
+    backend: "codex",
+    image: "expert-worker",
+    sourcePath: "/work/repo",
+    network: "bridge",
+    envNames: [],
+    timeoutMs: 1000,
+    workerIdentity: { uid: 1000, gid: 988 },
+    prepareRepositoryWorkspace: async () => {
+      prepared = true;
+      return { path: "/work/repo", commitSha: "a".repeat(40) };
+    },
+    runProcess: async () => "unused",
+  } as any);
+  await assert.rejects(
+    executor(
+      {
+        ...claim,
+        repositoryId: "repo",
+        repositoryUrl: "https://example.test/repo.git",
+        repositoryBranch: "main",
+        workspaceKey: "work-v2",
+        workspacePermissionModel: "single-uid-v2",
+        workspaceOwnerUid: 999,
+        workspaceOwnerGid: 988,
+      },
+      new AbortController().signal,
+    ),
+    /WORKSPACE_IDENTITY_MISMATCH/,
+  );
+  assert.equal(prepared, false);
+});
+
 test("Dynamic DAG agent outcome protocol is parsed and stripped before Worker completion", async () => {
   const executor = createDockerAgentExecutor({
     backend: "codex",
@@ -904,6 +1045,94 @@ test("workspace-write executor captures deterministic change summary before veri
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test(
+  "workspace-write executor can reuse container-owned 0644 files on a later repair turn",
+  { skip: typeof process.getuid !== "function" || process.getuid() !== 0 },
+  async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { chmodSync, chownSync, mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { EXECUTION_CONTAINER_UID } = await import("../src/expert-platform/repository-workspace.js");
+    const root = mkdtempSync(path.join(os.tmpdir(), "expert-write-reuse-"));
+    const origin = path.join(root, "origin");
+    const checkouts = path.join(root, "checkouts");
+    try {
+      execFileSync("git", ["init", "-b", "main", origin]);
+      writeFileSync(path.join(origin, "fixture.txt"), "before\n");
+      execFileSync("git", ["-C", origin, "add", "."]);
+      execFileSync("git", [
+        "-C",
+        origin,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "base",
+      ]);
+      const modelConfig = {
+        providerId: "router",
+        model: "test-model",
+        baseUrl: "https://router.example/v1",
+        wireApi: "responses" as const,
+        allowedEnvNames: [] as string[],
+      };
+      let turns = 0;
+      const sharedGid = process.getgid!() > 0 ? process.getgid!() : 10001;
+      const executor = createDockerAgentExecutor({
+        backend: "codex",
+        image: "expert-worker",
+        sourcePath: origin,
+        repositoryRoot: checkouts,
+        network: "bridge",
+        envNames: [],
+        timeoutMs: 1000,
+        onStage: async () => undefined,
+        runProcess: async (options) => {
+          turns++;
+          const mount = options.args.find((arg) => arg.startsWith("type=bind,src=") && arg.includes(",dst=/workspace"));
+          assert.ok(mount);
+          const source = mount!.slice("type=bind,src=".length).split(",dst=/workspace")[0]!;
+          const generated = path.join(source, "generated.txt");
+          if (turns === 1) {
+            writeFileSync(generated, "first\n", { mode: 0o644 });
+            chownSync(generated, EXECUTION_CONTAINER_UID, sharedGid);
+            chmodSync(generated, 0o644);
+          } else {
+            writeFileSync(generated, "second\n");
+          }
+          return "changed";
+        },
+      });
+      const deploymentSnapshot = {
+        deploymentId: "write",
+        configVersion: 1,
+        runtimeProfile: "codex-workspace-write",
+        repository: { id: "repo-write-reuse", url: origin, branch: "main" },
+        executor: { backend: "codex" as const, modelConfig },
+      };
+      const common = {
+        ...claim,
+        repositoryId: "repo-write-reuse",
+        repositoryUrl: origin,
+        repositoryBranch: "main",
+        workspaceKey: "work-write-reuse-a1",
+        executionWorkspaceAccess: "read-write" as const,
+        modelConfig,
+        deploymentSnapshot,
+      };
+
+      await executor({ ...common, taskId: "repair-1", runId: "run-1" }, new AbortController().signal);
+      await executor({ ...common, taskId: "repair-2", runId: "run-2" }, new AbortController().signal);
+      assert.equal(turns, 2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("workspace-write verification observes mutated content and binds evidence to workspace revision", async () => {
   const { execFileSync } = await import("node:child_process");

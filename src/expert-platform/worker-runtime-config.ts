@@ -191,6 +191,17 @@ export function parseExpertWorkerConfig(env: Record<string, string | undefined>)
     .map((value) => value.trim())
     .filter(Boolean);
 
+  const gitCredentialTokenEnvNames = new Set(
+    Object.values(gitCredentialConfigs)
+      .filter(
+        (credential): credential is Extract<GitCredentialConfig, { type: "https-token" }> =>
+          credential.type === "https-token",
+      )
+      .map((credential) => credential.tokenEnv),
+  );
+  if (modelEnvNames.some((name) => gitCredentialTokenEnvNames.has(name))) {
+    throw new Error("INVALID_WORKER_CONFIG");
+  }
   const modelCredentialEnvNames = parseModelCredentialEnvNames(env.EXPERT_MODEL_CREDENTIAL_REFS_JSON, modelEnvNames);
   const mcpCredentialFiles = parseMcpCredentialFiles(env.EXPERT_MCP_CREDENTIAL_FILES_JSON);
   const mcpDefaultUrl = env.EXPERT_MCP_URL?.trim() || undefined;

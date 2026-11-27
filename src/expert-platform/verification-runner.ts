@@ -20,6 +20,8 @@ export interface VerificationContainerOptions {
   containerNamePrefix: string;
   supplementalGroupId?: number;
   primaryGroupId?: number;
+  runAsUid?: number;
+  runAsGid?: number;
   tmpfsSizeMb?: number;
   runDocker?: VerificationDockerRunner;
 }
@@ -100,6 +102,18 @@ function buildVerificationDockerArgs(
   ) {
     throw new Error("INVALID_VERIFICATION_GROUP");
   }
+  const hasRunAsIdentity = options.runAsUid !== undefined || options.runAsGid !== undefined;
+  if (
+    hasRunAsIdentity &&
+    (!Number.isSafeInteger(options.runAsUid) ||
+      !Number.isSafeInteger(options.runAsGid) ||
+      Number(options.runAsUid) <= 0 ||
+      Number(options.runAsGid) <= 0)
+  ) {
+    throw new Error("INVALID_VERIFICATION_IDENTITY");
+  }
+  const runUid = hasRunAsIdentity ? Number(options.runAsUid) : 10001;
+  const runGid = hasRunAsIdentity ? Number(options.runAsGid) : (options.primaryGroupId ?? 10001);
   const tmpfsSizeMb = options.tmpfsSizeMb ?? 1024;
   if (!Number.isSafeInteger(tmpfsSizeMb) || tmpfsSizeMb < 64 || tmpfsSizeMb > 4096) {
     throw new Error("INVALID_VERIFICATION_TMPFS_SIZE");
@@ -118,8 +132,14 @@ function buildVerificationDockerArgs(
     "--network",
     "none",
     "--read-only",
-    ...(options.primaryGroupId !== undefined ? ["--user", `10001:${options.primaryGroupId}`] : []),
-    ...(options.supplementalGroupId !== undefined && options.supplementalGroupId !== options.primaryGroupId
+    ...(hasRunAsIdentity
+      ? ["--user", `${runUid}:${runGid}`]
+      : options.primaryGroupId !== undefined
+        ? ["--user", `10001:${options.primaryGroupId}`]
+        : []),
+    ...(!hasRunAsIdentity &&
+    options.supplementalGroupId !== undefined &&
+    options.supplementalGroupId !== options.primaryGroupId
       ? ["--group-add", String(options.supplementalGroupId)]
       : []),
     "--cap-drop",
@@ -135,9 +155,9 @@ function buildVerificationDockerArgs(
     "--mount",
     `type=bind,src=${workspacePath},dst=/workspace,readonly`,
     "--tmpfs",
-    `/tmp:rw,exec,uid=10001,gid=${options.primaryGroupId ?? 10001},size=${tmpfsSizeMb}m`,
+    `/tmp:rw,exec,uid=${runUid},gid=${runGid},size=${tmpfsSizeMb}m`,
     "--tmpfs",
-    `/home/expert:rw,uid=10001,gid=${options.primaryGroupId ?? 10001},size=64m`,
+    `/home/expert:rw,uid=${runUid},gid=${runGid},size=64m`,
     "--env",
     "HOME=/home/expert",
     "--env",

@@ -34,6 +34,7 @@ message ClaimTaskRequest {
   string expert_id = 3;
   string supported_backend = 4;
   repeated string supported_runtime_profiles = 5;
+  repeated string supported_workspace_permission_models = 6;
 }
 message ClaimTaskResponse {
   bool has_task = 1;
@@ -53,6 +54,9 @@ message ClaimTaskResponse {
   string runtime_session_id = 15;
   string execution_kind = 16;
   string execution_workspace_access = 17;
+  string workspace_permission_model = 18;
+  uint32 workspace_owner_uid = 19;
+  uint32 workspace_owner_gid = 20;
 }
 
 message LeaseRequest {
@@ -101,6 +105,9 @@ message WorkspaceCleanupClaimResponse {
   string workspace_id = 2;
   string workspace_key = 3;
   uint64 fencing = 4;
+  string permission_model = 5;
+  uint32 owner_uid = 6;
+  uint32 owner_gid = 7;
 }
 
 message WorkspaceCleanupCompleteRequest {

@@ -30,6 +30,58 @@ test("idempotent submissions preserve task identity and reject changed input", (
   }
 });
 
+test("workspace permission model selection is durable before owner identity is bound", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-workspace-model-"));
+  try {
+    const store = new ExpertTaskStore(path.join(dir, "runtime.db"));
+    const task = store.submit({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-model",
+      problem: "modify",
+      workspaceKey: "work-model-a1",
+    });
+    const v2Claim = store.claim("v2-worker", 100, 10, undefined, {
+      runtimeProfiles: [],
+      workspacePermissionModels: ["shared-gid-v1", "single-uid-v2"],
+    });
+    assert.equal(v2Claim?.taskId, task.taskId);
+    assert.equal((v2Claim as any)?.workspacePermissionModel, "single-uid-v2");
+    assert.equal((v2Claim as any)?.workspaceOwnerUid, null);
+    assert.equal((v2Claim as any)?.workspaceOwnerGid, null);
+
+    let selected = store.getByIdempotency("alice", "team-a", "workspace-model")!;
+    assert.equal((selected as any).workspacePermissionModel, "single-uid-v2");
+    assert.equal((selected as any).workspaceOwnerUid, null);
+    assert.equal((selected as any).workspaceOwnerGid, null);
+
+    assert.equal(
+      store.claim("legacy-worker", 111, 10, undefined, {
+        runtimeProfiles: [],
+        workspacePermissionModels: ["shared-gid-v1"],
+      }),
+      null,
+    );
+    const reclaimed = store.claim("v2-worker", 111, 10, undefined, {
+      runtimeProfiles: [],
+      workspacePermissionModels: ["shared-gid-v1", "single-uid-v2"],
+    });
+    assert.equal(reclaimed?.taskId, task.taskId);
+
+    store.bindWorkspaceIdentity(task.taskId, "work-model-a1", {
+      permissionModel: "single-uid-v2",
+      ownerUid: 999,
+      ownerGid: 988,
+    });
+    selected = store.getByIdempotency("alice", "team-a", "workspace-model")!;
+    assert.equal((selected as any).workspaceOwnerUid, 999);
+    assert.equal((selected as any).workspaceOwnerGid, 988);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("task execution kind defaults to agent and verification kind is durable through claim", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "expert-task-kind-"));
   try {
@@ -193,10 +245,13 @@ test("opening a legacy task database migrates expert routing columns in place", 
         worker_id TEXT,
         lease_until INTEGER,
         fencing INTEGER NOT NULL DEFAULT 0,
+        workspace_key TEXT,
         UNIQUE(principal_id, scope, idempotency_key)
       );
-      INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,status)
-        VALUES('legacy-task','legacy-user','org','legacy-key','digest','legacy task','queued');
+      INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,status,workspace_key)
+        VALUES('legacy-task','legacy-user','org','legacy-key','digest','legacy task','queued','legacy-work-a1');
+      INSERT INTO expert_tasks(task_id,principal_id,scope,idempotency_key,request_digest,problem,status,workspace_key)
+        VALUES('legacy-readonly','legacy-user','org','legacy-readonly-key','digest-2','legacy readonly task','queued',NULL);
       CREATE TABLE expert_events (
         event_id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL,
@@ -211,6 +266,14 @@ test("opening a legacy task database migrates expert routing columns in place", 
 
     const store = new ExpertTaskStore(file);
     assert.equal((store.adminTasks({ q: "legacy-task" }).tasks[0] as any).created_at, 123456789);
+    const migratedLegacy = store.getByIdempotency("legacy-user", "org", "legacy-key")!;
+    assert.equal((migratedLegacy as any).workspacePermissionModel, "shared-gid-v1");
+    assert.equal((migratedLegacy as any).workspaceOwnerUid, null);
+    assert.equal((migratedLegacy as any).workspaceOwnerGid, null);
+    const migratedReadonly = store.getByIdempotency("legacy-user", "org", "legacy-readonly-key")!;
+    assert.equal((migratedReadonly as any).workspacePermissionModel, null);
+    assert.equal((migratedReadonly as any).workspaceOwnerUid, null);
+    assert.equal((migratedReadonly as any).workspaceOwnerGid, null);
     const task = store.submit({
       principalId: "alice",
       scope: "org",

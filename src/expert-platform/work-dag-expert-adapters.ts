@@ -409,6 +409,14 @@ class ExpertTaskDagAdapterBase {
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
+        ...(workspace.ownerWorkerId
+          ? {
+              workspacePermissionModel: workspace.permissionModel,
+              ...(workspace.permissionModel === "single-uid-v2"
+                ? { workspaceOwnerUid: workspace.ownerUid!, workspaceOwnerGid: workspace.ownerGid! }
+                : {}),
+            }
+          : {}),
         validationSnapshot,
         executionKind,
         executionWorkspaceAccess: nodeWorkspaceAccess(context),
@@ -918,6 +926,14 @@ class ReviewDagAdapter extends ExpertTaskDagAdapterBase implements WorkDagExecut
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
+        ...(workspace.ownerWorkerId
+          ? {
+              workspacePermissionModel: workspace.permissionModel,
+              ...(workspace.permissionModel === "single-uid-v2"
+                ? { workspaceOwnerUid: workspace.ownerUid!, workspaceOwnerGid: workspace.ownerGid! }
+                : {}),
+            }
+          : {}),
         validationSnapshot: [],
         executionKind: "agent",
         executionWorkspaceAccess: "read-only",

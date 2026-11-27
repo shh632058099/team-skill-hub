@@ -13,7 +13,23 @@ const TRANSIENT_EXECUTOR_FAILURES = new Set([
 
 const TIMEOUT_EXECUTOR_FAILURES = new Set(["EXECUTOR_TIMEOUT", "EXECUTOR_IDLE_TIMEOUT"]);
 
+const DETERMINISTIC_WORKSPACE_FAILURES = new Set([
+  "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
+  "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
+  "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
+  "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
+  "WORKER_RUNTIME_STATE_OWNER_INVALID",
+  "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
+  "WORKSPACE_PREPARATION_INCOMPLETE",
+  "WORKSPACE_PREPARATION_REVISION_MISMATCH",
+  "WORKSPACE_IDENTITY_MISMATCH",
+  "INVALID_WORKSPACE_OWNER_IDENTITY",
+  "WORKSPACE_GIT_LAYOUT_UNSUPPORTED",
+  "WORKSPACE_GIT_METADATA_OWNERSHIP_INVALID",
+]);
+
 const NON_RETRYABLE_EXECUTOR_FAILURES = new Set([
+  ...DETERMINISTIC_WORKSPACE_FAILURES,
   "EXECUTOR_OUTPUT_LIMIT",
   "AUTHENTICATION_FAILED",
   "MODEL_ACCESS_DENIED",
@@ -55,6 +71,11 @@ function firstCode(value: string): string {
 export function safeExecutorFailureCode(value: string): string | null {
   const code = firstCode(value);
   return SAFE_EXECUTOR_FAILURES.has(code) ? code : null;
+}
+
+export function deterministicWorkspaceFailureCode(value: string): string | null {
+  const code = firstCode(value);
+  return DETERMINISTIC_WORKSPACE_FAILURES.has(code) ? code : null;
 }
 
 export function executorFailureDisposition(value: string): ExecutorFailureDisposition | null {

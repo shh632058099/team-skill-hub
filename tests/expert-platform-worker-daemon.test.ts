@@ -215,7 +215,15 @@ test("daemon processes owner workspace cleanup before claiming another task", as
       createClient: () => ({
         claimWorkspaceCleanup: async () => {
           calls.push("cleanup-claim");
-          return { workspaceId: "workspace-1", workspaceKey, ownerWorkerId: "ota-worker-01", fencing: 1 };
+          return {
+            workspaceId: "workspace-1",
+            workspaceKey,
+            ownerWorkerId: "ota-worker-01",
+            permissionModel: "shared-gid-v1" as const,
+            ownerUid: null,
+            ownerGid: null,
+            fencing: 1,
+          };
         },
         completeWorkspaceCleanup: async (_claim, success) => {
           calls.push("cleanup-complete:" + String(success));
@@ -237,6 +245,75 @@ test("daemon processes owner workspace cleanup before claiming another task", as
   await assert.rejects(stat(path.join(root, workspaceKey)));
   assert.deepEqual(calls, ["cleanup-claim", "cleanup-complete:true"]);
   runtime.close();
+});
+
+test("daemon rejects v2 cleanup on Worker uid drift before deleting workspace", async () => {
+  const { mkdtemp, mkdir, stat } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = await mkdtemp(path.join(os.tmpdir(), "worker-cleanup-identity-"));
+  const workspaceKey = "work-v2-cleanup-a1";
+  const target = path.join(root, workspaceKey);
+  await mkdir(target);
+  let completed: unknown;
+  const runtime = createExpertWorkerRuntime(
+    {
+      hubAddress: "hub:7443",
+      workerId: "ota-worker-01",
+      workerCredential: "ewc_test",
+      capability: "ota",
+      sourcePath: "/srv/ota",
+      repositoryRoot: root,
+      sharedTempRoot: path.join(root, ".runtime-tmp"),
+      gitCredentialConfigs: {},
+      dockerImage: "expert-worker",
+      dockerNetwork: "expert-egress",
+      dockerSeccompProfile: "default",
+      modelEnvNames: [],
+      modelCredentialEnvNames: {},
+      heartbeatMs: 1000,
+      pollMs: 50,
+      taskTimeoutMs: 60_000,
+    },
+    {
+      workerIdentity: { uid: 1000, gid: 988 },
+      createClient: () => ({
+        claimWorkspaceCleanup: async () => ({
+          workspaceId: "workspace-v2",
+          workspaceKey,
+          ownerWorkerId: "ota-worker-01",
+          permissionModel: "single-uid-v2" as const,
+          ownerUid: 999,
+          ownerGid: 988,
+          fencing: 1,
+        }),
+        completeWorkspaceCleanup: async (_claim, success, errorCode) => {
+          completed = { success, errorCode };
+        },
+        claimTask: async () => null,
+        renewLease: async () => undefined,
+        completeTask: async () => undefined,
+        failTask: async () => undefined,
+        close: () => undefined,
+      }),
+      createExecutor: () => async () => "unused",
+    },
+  );
+
+  assert.equal(await runtime.runOnce(), true);
+  assert.ok(await stat(target), "identity mismatch must not touch the workspace");
+  assert.deepEqual(completed, { success: false, errorCode: "WORKSPACE_IDENTITY_MISMATCH" });
+  runtime.close();
+});
+
+test("workspace permission capability advertises v2 only for non-root Worker identity", async () => {
+  const daemon = await import("../src/expert-platform/worker-daemon.js");
+  const models = (daemon as any).workspacePermissionModelsForWorkerIdentity as
+    ((identity: { uid: number; gid: number }) => string[]) | undefined;
+  assert.equal(typeof models, "function");
+  assert.deepEqual(models!({ uid: 999, gid: 988 }), ["shared-gid-v1", "single-uid-v2"]);
+  assert.deepEqual(models!({ uid: 0, gid: 988 }), ["shared-gid-v1"]);
+  assert.deepEqual(models!({ uid: 999, gid: 0 }), ["shared-gid-v1"]);
 });
 
 test("daemon forwards runtime configuration to Docker executor factory", () => {
@@ -264,6 +341,7 @@ test("daemon forwards runtime configuration to Docker executor factory", () => {
       verificationTmpfsMb: 2048,
     },
     {
+      workerIdentity: { uid: 999, gid: 988 },
       createClient: () => ({
         claimTask: async () => null,
         renewLease: async () => undefined,
@@ -292,6 +370,7 @@ test("daemon forwards runtime configuration to Docker executor factory", () => {
     authFilePath: "/etc/expert/auth.json",
     configFilePath: "/etc/expert/provider.toml",
     timeoutMs: 90_000,
+    workerIdentity: { uid: 999, gid: 988 },
     verificationTmpfsMb: 2048,
   });
   runtime.close();
@@ -392,6 +471,93 @@ test("daemon processes owner publication operation before claiming another task"
   });
   runtime.close();
 });
+test("daemon rejects v2 publication on Worker uid drift before git access", async () => {
+  let prepared = false;
+  let completed: unknown;
+  const lease = {
+    publicationId: "pub-v2-drift",
+    ownerWorkerId: "ota-worker-01",
+    operation: "prepare" as const,
+    fencing: 1,
+    workspaceId: "workspace-v2",
+    branchName: "skillhub/work/v2",
+    sourceSubjectRevision: "workspace:" + "a".repeat(64),
+    baseCommit: "b".repeat(40),
+    commitSha: null,
+    treeSha: null,
+    artifactRef: null,
+    pushRefspec: null,
+    commitTimestamp: 1_800_000_000_000,
+    commitAuthorName: "Team Skill Hub",
+    commitAuthorEmail: "team-skill-hub@local.invalid",
+    commitMessage: "Fix\n",
+    executionSnapshot: {
+      workspacePath: "/srv/workspaces/work-v2",
+      workspacePermissionModel: "single-uid-v2" as const,
+      workspaceOwnerUid: 999,
+      workspaceOwnerGid: 988,
+      repositoryUrl: "/srv/remotes/ota.git",
+      defaultBranch: "main",
+      branchPrefix: "skillhub/work/",
+      protectedBranches: ["main"],
+      allowedPushRemote: "origin" as const,
+      expectedContentRevision: "a".repeat(64),
+      approvedChangeSummary: {
+        baseCommit: "b".repeat(40),
+        changedFiles: ["README.md"],
+        addedFiles: [],
+        deletedFiles: [],
+        diffStat: { filesChanged: 1, insertions: 1, deletions: 0 },
+        contentRevision: "a".repeat(64),
+      },
+    },
+  };
+  const runtime = createExpertWorkerRuntime(
+    {
+      hubAddress: "hub:7443",
+      workerId: "ota-worker-01",
+      workerCredential: "ewc_test",
+      capability: "ota",
+      sourcePath: "/srv/ota",
+      repositoryRoot: "/srv/expert-repositories",
+      sharedTempRoot: "/srv/expert-repositories/ota-worker-01/.runtime-tmp",
+      gitCredentialConfigs: {},
+      dockerImage: "expert-worker",
+      dockerNetwork: "expert-egress",
+      dockerSeccompProfile: "default",
+      modelEnvNames: [],
+      modelCredentialEnvNames: {},
+      heartbeatMs: 1000,
+      pollMs: 50,
+      taskTimeoutMs: 60_000,
+    },
+    {
+      workerIdentity: { uid: 1000, gid: 988 },
+      createClient: () => ({
+        claimPublicationOperation: async () => lease,
+        completePublicationOperation: async (_claim: any, result: any) => {
+          completed = result;
+        },
+        claimTask: async () => null,
+        renewLease: async () => undefined,
+        completeTask: async () => undefined,
+        failTask: async () => undefined,
+        close: () => undefined,
+      }),
+      createExecutor: () => async () => "unused",
+      preparePublication: async () => {
+        prepared = true;
+        throw new Error("must not run");
+      },
+    } as any,
+  );
+
+  assert.equal(await runtime.runOnce(), true);
+  assert.equal(prepared, false);
+  assert.deepEqual(completed, { success: false, errorCode: "WORKSPACE_IDENTITY_MISMATCH" });
+  runtime.close();
+});
+
 test("daemon creates a change request on the host before claiming another task", async () => {
   const calls: string[] = [];
   let completed: unknown;

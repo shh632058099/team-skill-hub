@@ -662,6 +662,36 @@ test("review executor failure blocks after retry exhaustion instead of being rep
   }
 });
 
+test("deterministic workspace failure blocks once instead of retrying the agent node", async () => {
+  const f = fixture(["expert_result"]);
+  try {
+    let calls = 0;
+    const adapter: WorkDagExecutorAdapter = {
+      kind: "agent",
+      async execute() {
+        calls++;
+        return { status: "failed", summary: "WORKER_CHECKOUT_PERMISSION_NOT_SHARED" };
+      },
+    };
+    const runtime = new WorkDagRuntime(
+      f.store,
+      new WorkDagPlannerCoordinator(f.store, new WorkDagSeedPlanner()),
+      new WorkDagScheduler(f.store, [adapter]),
+    );
+
+    await drive(runtime, f.workId, 10);
+    const work = f.store.getWorkInternal(f.workId);
+    assert.equal(work.status, "blocked");
+    assert.equal(work.blockedReason, "WORKER_CHECKOUT_PERMISSION_NOT_SHARED");
+    assert.match(work.blockedContext ?? "", /WORKER_CHECKOUT_PERMISSION_NOT_SHARED/);
+    assert.equal(calls, 1);
+    assert.equal(f.store.listDagExecutions(f.workId).length, 1);
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("deterministic publication stale failure blocks once instead of consuming re-plan budget", async () => {
   const f = fixture(["expert_result"]);
   try {

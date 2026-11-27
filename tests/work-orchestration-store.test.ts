@@ -441,12 +441,75 @@ test("workspace identity is deterministic and records owner affinity", () => {
     assert.equal(again.workspaceKey, first.workspaceKey);
     assert.match(first.workspaceKey, /^work-[a-f0-9-]+-a1$/);
     assert.equal(first.state, "allocating");
+    assert.equal((first as any).permissionModel, "shared-gid-v1");
+    assert.equal((first as any).ownerUid, null);
+    assert.equal((first as any).ownerGid, null);
 
     const assigned = store.assignWorkspaceOwner(first.workspaceId, "worker-a", "/srv/work/a");
     assert.equal(assigned.ownerWorkerId, "worker-a");
+    assert.equal((assigned as any).permissionModel, "shared-gid-v1");
+    assert.equal((assigned as any).ownerUid, null);
+    assert.equal((assigned as any).ownerGid, null);
     assert.equal(assigned.path, "/srv/work/a");
     assert.equal(assigned.state, "ready");
     assert.equal(store.getWorkAttempt(attempt.workAttemptId).workspaceId, first.workspaceId);
+  });
+});
+
+test("single-uid-v2 workspace owner identity is persisted and immutable", () => {
+  withStore((store) => {
+    const work = store.createOrReuseWork({
+      principalId: "alice",
+      scope: "team-a",
+      idempotencyKey: "workspace-v2-owner",
+      sourceType: "mcp",
+      title: "Workspace v2",
+      description: "persist filesystem identity",
+    });
+    const attempt = store.createWorkAttempt(work.workItemId, "alice", "team-a", work.stateRevision, {
+      reason: "initial",
+      expertId: "ota",
+      deploymentId: "ota-default",
+      deploymentConfigVersion: 1,
+    });
+    const workspace = store.ensureWorkspace(work.workItemId, attempt.workAttemptId, {});
+    const assign = (
+      workspaceId: string,
+      workerId: string,
+      workspacePath: string,
+      now: number,
+      baseCommit: string,
+      identity: { permissionModel: "single-uid-v2"; ownerUid: number; ownerGid: number },
+    ) =>
+      (
+        store.assignWorkspaceOwner as unknown as (
+          workspaceId: string,
+          workerId: string,
+          workspacePath: string,
+          now: number,
+          baseCommit: string,
+          identity: { permissionModel: "single-uid-v2"; ownerUid: number; ownerGid: number },
+        ) => ReturnType<typeof store.getWorkspace>
+      )(workspaceId, workerId, workspacePath, now, baseCommit, identity);
+
+    const assigned = assign(workspace.workspaceId, "worker-a", "/srv/work/v2", 100, "a".repeat(40), {
+      permissionModel: "single-uid-v2",
+      ownerUid: 999,
+      ownerGid: 988,
+    });
+    assert.equal((assigned as any).permissionModel, "single-uid-v2");
+    assert.equal((assigned as any).ownerUid, 999);
+    assert.equal((assigned as any).ownerGid, 988);
+
+    assert.throws(
+      () =>
+        assign(workspace.workspaceId, "worker-a", "/srv/work/v2", 101, "a".repeat(40), {
+          permissionModel: "single-uid-v2",
+          ownerUid: 1000,
+          ownerGid: 988,
+        }),
+      /WORKSPACE_IDENTITY_CONFLICT/,
+    );
   });
 });
 
@@ -583,13 +646,20 @@ test("terminal workspace cleanup is durable, owner-scoped and fenced", () => {
       branch: "main",
       cleanupPolicy: "on_terminal",
     });
-    store.assignWorkspaceOwner(
-      workspace.workspaceId,
-      "worker-a",
-      "/srv/workspaces/" + workspace.workspaceKey,
-      100,
-      "a".repeat(40),
-    );
+    (
+      store.assignWorkspaceOwner as unknown as (
+        workspaceId: string,
+        workerId: string,
+        workspacePath: string,
+        now: number,
+        baseCommit: string,
+        identity: { permissionModel: "single-uid-v2"; ownerUid: number; ownerGid: number },
+      ) => ReturnType<typeof store.getWorkspace>
+    )(workspace.workspaceId, "worker-a", "/srv/workspaces/" + workspace.workspaceKey, 100, "a".repeat(40), {
+      permissionModel: "single-uid-v2",
+      ownerUid: 999,
+      ownerGid: 988,
+    });
 
     store.requestTerminalWorkspaceCleanup(work.workItemId, 200);
     assert.equal(store.getWorkspace(workspace.workspaceId).state, "cleaning");
@@ -597,6 +667,9 @@ test("terminal workspace cleanup is durable, owner-scoped and fenced", () => {
     const cleanup = store.claimWorkspaceCleanup("worker-a", 300, 30_000)!;
     assert.equal(cleanup.workspaceId, workspace.workspaceId);
     assert.equal(cleanup.workspaceKey, workspace.workspaceKey);
+    assert.equal((cleanup as any).permissionModel, "single-uid-v2");
+    assert.equal((cleanup as any).ownerUid, 999);
+    assert.equal((cleanup as any).ownerGid, 988);
     assert.equal(cleanup.fencing, 1);
 
     store.completeWorkspaceCleanup(cleanup.workspaceId, "worker-a", cleanup.fencing, true, null, 400);
@@ -901,6 +974,9 @@ test("migrated default workspace inherits Work repository identity when re-ensur
     assert.equal(restored.workspaceId, "legacy-workspace");
     assert.equal(restored.resourceKey, "workspace");
     assert.equal(restored.repositoryId, "repo-primary");
+    assert.equal((restored as any).permissionModel, "shared-gid-v1");
+    assert.equal((restored as any).ownerUid, null);
+    assert.equal((restored as any).ownerGid, null);
     migrated.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

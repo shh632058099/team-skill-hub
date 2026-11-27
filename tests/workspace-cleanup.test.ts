@@ -54,6 +54,45 @@ test("workspace cleanup repairs only execution-container-owned permissions after
   assert.match(args.at(-1)!, /find \/workspace -xdev -uid 10001 -exec chmod g\+rwX/);
 });
 
+test("single-uid-v2 cleanup repairs same-owner permissions without Docker helper", async () => {
+  const { chmod, chown } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(os.tmpdir(), "workspace-cleanup-v2-"));
+  const key = "work-v2-a1";
+  const target = path.join(root, key);
+  const nested = path.join(target, "nested");
+  await mkdir(nested, { recursive: true });
+  await writeFile(path.join(nested, "private"), "x");
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    await chown(target, 999, 988);
+    await chown(nested, 999, 988);
+    await chown(path.join(nested, "private"), 999, 988);
+  }
+  await chmod(target, 0o000);
+  let removals = 0;
+  let dockerCalls = 0;
+
+  const removed = await removeWorkspaceDirectory(root, key, {
+    image: "expert-worker:test",
+    workerGroupId: 988,
+    permissionModel: "single-uid-v2",
+    workerUid: typeof process.getuid === "function" && process.getuid() === 0 ? 999 : process.getuid!(),
+    removeDirectory: async (candidate: string) => {
+      removals++;
+      if (removals === 1) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      await import("node:fs/promises").then(({ rm }) => rm(candidate, { recursive: true, force: true }));
+    },
+    runDocker: async () => {
+      dockerCalls++;
+      return 0;
+    },
+  } as any);
+
+  assert.equal(removed, target);
+  assert.equal(removals, 2);
+  assert.equal(dockerCalls, 0);
+  await assert.rejects(stat(target));
+});
+
 test("workspace cleanup repair invocation validates image and shared group", () => {
   assert.throws(
     () => buildWorkspaceCleanupRepairDockerArgs("/srv/workspaces/work-a", "-bad", 988),

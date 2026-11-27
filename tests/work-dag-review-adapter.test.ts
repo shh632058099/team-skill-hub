@@ -752,7 +752,11 @@ test("agent review task is not reused across repository resources in one WorkAtt
       },
       35,
     );
-    f.works.assignWorkspaceOwner(workspaceB.workspaceId, "worker-2", "/tmp/dag-review-repo-b", 36, "b".repeat(40));
+    f.works.assignWorkspaceOwner(workspaceB.workspaceId, "worker-2", "/tmp/dag-review-repo-b", 36, "b".repeat(40), {
+      permissionModel: "single-uid-v2",
+      ownerUid: 999,
+      ownerGid: 988,
+    });
     installReview(f.works, f.workId, "subject-b", "repo:repo-b", "review-b");
 
     assert.equal(await scheduler.runOne(f.workId, "alice", "team", "hub", 40), true);
@@ -763,6 +767,9 @@ test("agent review task is not reused across repository resources in one WorkAtt
     assert.equal(secondTask.repositoryId, "repo-b");
     assert.equal(secondTask.workspaceKey, workspaceB.workspaceKey);
     assert.equal(secondTask.requiredWorkerId, "worker-2");
+    assert.equal((secondTask as any).workspacePermissionModel, "single-uid-v2");
+    assert.equal((secondTask as any).workspaceOwnerUid, 999);
+    assert.equal((secondTask as any).workspaceOwnerGid, 988);
     assert.equal(secondExecution.state, "running");
     assert.equal(f.works.getActiveAttempt(f.workId)?.reviewTaskId, firstTask.taskId);
   } finally {

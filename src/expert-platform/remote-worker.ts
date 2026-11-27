@@ -24,6 +24,9 @@ export type WorkspaceCleanupLease = {
   workspaceId: string;
   workspaceKey: string;
   ownerWorkerId: string;
+  permissionModel: "shared-gid-v1" | "single-uid-v2";
+  ownerUid: number | null;
+  ownerGid: number | null;
   fencing: number;
 };
 
@@ -73,17 +76,6 @@ async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void>
   });
 }
 
-// Only these fixed, non-secret codes may cross the Worker -> Hub failure boundary.
-const DETERMINISTIC_WORKSPACE_ERRORS = new Set([
-  "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
-  "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
-  "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
-  "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
-  "WORKER_RUNTIME_STATE_OWNER_INVALID",
-  "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
-  "WORKSPACE_PREPARATION_INCOMPLETE",
-  "WORKSPACE_PREPARATION_REVISION_MISMATCH",
-]);
 export async function runRemoteWorkerOnce(
   client: RemoteWorkerClient,
   workerId: string,
@@ -179,9 +171,7 @@ export async function runRemoteWorkerOnce(
           const message = error instanceof Error ? error.message : "UNKNOWN_ERROR";
           const errorCode = message.split(/[:\s]/, 1)[0] ?? "UNKNOWN_ERROR";
           const safeExecutorCode = safeExecutorFailureCode(message);
-          const forwardedCode = DETERMINISTIC_WORKSPACE_ERRORS.has(errorCode)
-            ? errorCode
-            : (safeExecutorCode ?? "EXECUTION_FAILED");
+          const forwardedCode = safeExecutorCode ?? "EXECUTION_FAILED";
           const diagnostic = executorFailureDiagnostic(error);
           const finalDiagnostic = diagnostic
             ? {

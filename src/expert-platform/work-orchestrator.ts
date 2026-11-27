@@ -24,6 +24,7 @@ import { normalizeVerificationPolicy, type VerificationPolicyStep } from "./veri
 import { WorkDagShadowProjector } from "./work-dag-shadow-projector.js";
 import type { WorkDagDeliveryTarget } from "./work-dag-delivery-adapters.js";
 import { subjectForResource } from "./work-dag.js";
+import { deterministicWorkspaceFailureCode } from "./executor-failure.js";
 
 export interface SubmitWorkInput extends WorkSubmission {
   sourceSessionId?: string;
@@ -135,19 +136,9 @@ export interface WorkApprovalActor {
 
 const TERMINAL_WORK = new Set(["completed", "failed", "cancelled"]);
 
-const DETERMINISTIC_WORKSPACE_ERRORS = new Set([
-  "WORKER_CHECKOUT_OWNER_NOT_ALLOWED",
-  "WORKER_GIT_METADATA_OWNERSHIP_INVALID",
-  "WORKER_CHECKOUT_GROUP_NOT_CONFIGURED",
-  "WORKER_CHECKOUT_PERMISSION_NOT_SHARED",
-  "WORKER_RUNTIME_STATE_OWNER_INVALID",
-  "WORKER_RUNTIME_STATE_GROUP_NOT_CONFIGURED",
-  "WORKSPACE_PREPARATION_INCOMPLETE",
-  "WORKSPACE_PREPARATION_REVISION_MISMATCH",
-]);
 function isBlocker(reason: string): string | null {
   const normalized = reason.trim().toUpperCase();
-  if (DETERMINISTIC_WORKSPACE_ERRORS.has(normalized)) return "policy_blocked";
+  if (deterministicWorkspaceFailureCode(normalized)) return "policy_blocked";
   if (normalized.includes("MISSING_PERMISSION") || normalized.includes("PERMISSION_DENIED"))
     return "missing_permission";
   if (normalized.includes("MISSING_SECRET") || normalized.includes("SECRET_REQUIRED")) return "missing_secret";
@@ -1211,6 +1202,9 @@ export class WorkOrchestrator {
           commitMessage: commitMetadata.message,
           executionSnapshot: {
             workspacePath: workspace.path,
+            workspacePermissionModel: workspace.permissionModel,
+            workspaceOwnerUid: workspace.ownerUid,
+            workspaceOwnerGid: workspace.ownerGid,
             repositoryUrl: repository.url,
             defaultBranch: repository.branch,
             branchPrefix: policy.branchPrefix,
@@ -1313,6 +1307,9 @@ export class WorkOrchestrator {
         commitMessage: commitMetadata.message,
         executionSnapshot: {
           workspacePath: workspace.path,
+          workspacePermissionModel: workspace.permissionModel,
+          workspaceOwnerUid: workspace.ownerUid,
+          workspaceOwnerGid: workspace.ownerGid,
           repositoryUrl: repository.url,
           defaultBranch: repository.branch,
           branchPrefix: policy.branchPrefix,
@@ -1707,6 +1704,14 @@ export class WorkOrchestrator {
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
+        ...(workspace.ownerWorkerId
+          ? {
+              workspacePermissionModel: workspace.permissionModel,
+              ...(workspace.permissionModel === "single-uid-v2"
+                ? { workspaceOwnerUid: workspace.ownerUid!, workspaceOwnerGid: workspace.ownerGid! }
+                : {}),
+            }
+          : {}),
         validationSnapshot,
         executionWorkspaceAccess: requiredWorkspaceAccessForWorkflow(workflow),
       },
@@ -1757,6 +1762,14 @@ export class WorkOrchestrator {
         workflowId: attempt.workflowId,
         workflowVersion: attempt.workflowVersion,
         workspaceKey: workspace.workspaceKey,
+        ...(workspace.ownerWorkerId
+          ? {
+              workspacePermissionModel: workspace.permissionModel,
+              ...(workspace.permissionModel === "single-uid-v2"
+                ? { workspaceOwnerUid: workspace.ownerUid!, workspaceOwnerGid: workspace.ownerGid! }
+                : {}),
+            }
+          : {}),
         validationSnapshot: [],
         executionWorkspaceAccess: "read-only",
       },

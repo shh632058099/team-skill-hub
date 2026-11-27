@@ -87,6 +87,61 @@ test("verification runner executes steps only through an isolated read-only Dock
   }
 });
 
+test("single-uid-v2 verification uses Worker uid/gid without supplemental groups", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "verification-single-uid-"));
+  try {
+    let seen: readonly string[] = [];
+    await runVerificationPolicy(
+      root,
+      [{ id: "test", type: "command", argv: ["true"], timeoutMs: 2000, evidenceType: "unit_test" }],
+      new AbortController().signal,
+      {
+        image: "expert-worker:test",
+        containerNamePrefix: "verify-single-uid",
+        runAsUid: 999,
+        runAsGid: 988,
+        supplementalGroupId: 1234,
+        primaryGroupId: 988,
+        runDocker: async (args: readonly string[]) => {
+          seen = args;
+          return { exitCode: 0, timedOut: false };
+        },
+      } as any,
+    );
+    assert.ok(seen.some((arg, index) => arg === "--user" && seen[index + 1] === "999:988"));
+    assert.ok(!seen.includes("--group-add"));
+    assert.ok(seen.includes("/tmp:rw,exec,uid=999,gid=988,size=1024m"));
+    assert.ok(seen.includes("/home/expert:rw,uid=999,gid=988,size=64m"));
+    const mount = seen[seen.indexOf("--mount") + 1]!;
+    assert.match(mount, /dst=\/workspace,readonly$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("single-uid-v2 verification rejects root identity", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "verification-root-"));
+  try {
+    await assert.rejects(
+      runVerificationPolicy(
+        root,
+        [{ id: "test", type: "command", argv: ["true"], timeoutMs: 2000, evidenceType: "unit_test" }],
+        new AbortController().signal,
+        {
+          image: "expert-worker:test",
+          containerNamePrefix: "verify-root",
+          runAsUid: 0,
+          runAsGid: 988,
+          runDocker: async () => ({ exitCode: 0, timedOut: false }),
+        } as any,
+      ),
+      /INVALID_VERIFICATION_IDENTITY/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("verification runner rejects unsafe scratch tmpfs sizes", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "verification-scratch-"));
   try {
